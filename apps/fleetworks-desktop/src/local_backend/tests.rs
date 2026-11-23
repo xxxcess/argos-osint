@@ -298,7 +298,6 @@ async fn local_ipc_handshake_capabilities_missing_optional_nlp_and_classifier() 
     assert!(process.client().is_local_ipc());
     let assessment = assess_local_capabilities(process.capabilities());
     assert!(!assessment.nlp_available);
-    assert!(!assessment.classifier_available);
     assert!(assessment.warnings.len() >= 2);
 
     let mut state = State::fixture();
@@ -306,14 +305,10 @@ async fn local_ipc_handshake_capabilities_missing_optional_nlp_and_classifier() 
     assert!(state
         .maintenance_disabled_reason(MaintenanceOperation::SeedActors)
         .is_none());
-    let train_reason = state
-        .maintenance_disabled_reason(MaintenanceOperation::TrainClassifier)
-        .expect("missing classifier capability disables training");
-    assert!(train_reason.contains("classifier"));
-    let activate_reason = state
-        .activation_disabled_reason()
-        .expect("missing classifier capability disables activation");
-    assert!(activate_reason.contains("classifier"));
+    assert_eq!(
+        state.maintenance_preflight(MaintenanceOperation::TrainClassifier),
+        crate::maintenance::MaintenancePreflight::UnsupportedOperation
+    );
 }
 
 #[tokio::test]

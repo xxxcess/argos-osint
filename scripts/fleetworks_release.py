@@ -224,6 +224,8 @@ def plan_release(root, *, event, ref, head, base, scope):
     result.update(selected, scope=scope, release_base=release_base)
     if not any(selected[key] for key in ("native", "backend", "web", "bert")):
         return result
+    if branch == "nightly" and selected["native"] and (root / "tools/assistant-bert/Cargo.toml").is_file():
+        result["inbox_qa"] = True
     count = int(git(root, "rev-list", "--count", head))
     exact = [entry for entry in published if entry[1] == head and entry[3] == branch]
     if len(exact) > 1:

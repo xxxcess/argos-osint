@@ -1893,7 +1893,7 @@ pub fn authorize_activation(
     }
 }
 
-fn sigmoid(value: f64) -> f64 {
+pub(super) fn sigmoid(value: f64) -> f64 {
     if value >= 0.0 {
         1.0 / (1.0 + (-value).exp())
     } else {

@@ -24,23 +24,18 @@ describe("Frame (real @argos/ui component)", () => {
     expect(paint(frame, "backgroundColor")).toBe(colors.glass.toLowerCase());
     expect(sheetProp(frame, "borderTopWidth")).toBe("2px"); // accent top rule
     expect(paint(frame, "borderTopColor")).toBe(toneColor.accent.toLowerCase());
-    expect(paint(frame, "borderLeftColor")).toBe(colors.cardEdge);
+    expect(paint(frame, "borderLeftColor")).toBe(colors.border.toLowerCase());
     expect(sheetProp(frame, "padding")).toBe("16px");
     expect(sheetProp(frame, "gap")).toBe("12px");
   });
 
-  it("does not apply backdrop blur to the opaque matte card", () => {
+  it("exposes the frame material to the document stylesheet", () => {
     const { container } = render(
       <Frame>
         <Copy>x</Copy>
       </Frame>,
     );
-    const frame = container.firstElementChild as HTMLElement;
-    // Frame uses glass spread but backdrop-filter is dropped by react-native-web
-    // from runtime style arrays; jsdom also doesn't support backdrop-filter.
-    // The style prop returns empty string because it's not in atomic classes
-    // and not in inline style.
-    expect(sheetProp(frame, "backdropFilter")).toBe("");
+    expect(container.firstElementChild).toHaveAttribute("data-glass", "frame");
   });
 
   it("tints the top rule per tone token", () => {

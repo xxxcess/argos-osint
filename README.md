@@ -1,7 +1,7 @@
 # Fleetworks
 
 <p align="center">
-  <img src="assets/brand/source/fleetworks-liquid-metal-glass.png" alt="Fleetworks symbol: molten glass core, obsidian crescent and five glass satellites" width="560">
+  <img src="assets/brand/fleetworks-mark.svg" alt="Fleetworks symbol with a warm glass core and obsidian crescent" width="208">
 </p>
 
 Fleetworks collects public-source intelligence, connects evidence to actors and articles, and prepares cited Focus Briefs. Fleetworks Desktop is a native Rune control hub for macOS and Linux x86_64. It can start an Embedded companion or connect to a Distributed gateway. Intel Web provides the browser desktop. Distributed services are deployed directly with Docker Compose.
@@ -10,7 +10,7 @@ Fleetworks collects public-source intelligence, connects evidence to actors and 
 
 ## Approved visual direction
 
-The [matte canvas design reference](docs/design/matte-canvas/README.md) defines the approved native/shared-web target, exact reproduction recipes, symbol-only branding, continuous-scroll and stable-loading behavior. It includes four reviewed concept mockups and the [selected Quiet Orbit animation](assets/brand/reference/fleetworks-quiet-orbit.gif). The docs and source assets are available; native/web runtime adoption and verification remain implementation work.
+The [matte canvas design reference](docs/design/matte-canvas/README.md) defines the approved native/shared-web target, exact reproduction recipes, symbol-only branding, continuous-scroll and stable-loading behavior. It includes four reviewed concept mockups and the [Quiet Orbit motion contract](docs/design/matte-canvas/motion.md).
 
 ## Quick start
 
@@ -76,7 +76,7 @@ Provision provider credentials, the Atlas worker, private NLP and a Rust-BERT mo
 
 | Area | What you can do |
 | --- | --- |
-| DB Seed & Train | Trigger configured actor seed, search-index build and Natural candidate training; acceptance is distinct from completion. |
+| DB Setup | Confirm actor seeding and search-index build. Follow the job through reader-visible completion. |
 | News Cycles and Brain Search | Queue cycles, inspect workstation cycle history, discover actors and read dossiers. |
 | OSINT Tools and Model Assignments | Read service/provider cards, provision keys and edit supported model routing with confirmed revisions. |
 | Workstation Status and Setup Gateway | Inspect identity, readiness and backend resources. Start Embedded or pair and reconnect to Distributed. |

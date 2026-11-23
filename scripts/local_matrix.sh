@@ -3,8 +3,8 @@
 #
 #   scripts/local_matrix.sh --storage embedded|server [--surreal-bin PATH]
 #
-# embedded: explicit `embedded,nlp,classifier` features for clippy and tests,
-#   then `test_surreal.py --mode embedded`.
+# embedded: explicit `embedded,nlp,classifier` features for clippy and workspace
+#   tests (including service-host help), then `test_surreal.py --mode embedded`.
 # server (opt-in): `--no-default-features --features server,nlp,classifier`
 #   clippy for core and service host, then the storage contract tests against a local
 #   SurrealDB 3.3.4 server (`test_surreal.py --mode server`, using --surreal-bin or
@@ -43,9 +43,6 @@ case "$storage" in
     # Collect independent runtime failures after the compile/lint preflight.
     step "${cargo[@]}" test --workspace --locked --no-fail-fast \
       --no-default-features --features embedded,nlp,classifier
-    # The retained service host must expose its actual role/bootstrap interface.
-    step "${cargo[@]}" run -p argos-api-host --locked \
-      --no-default-features --features embedded,nlp,classifier -- --help
     step python3 scripts/test_surreal.py --mode embedded --no-fail-fast
     ;;
   server)

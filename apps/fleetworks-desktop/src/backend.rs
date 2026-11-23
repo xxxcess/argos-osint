@@ -452,6 +452,12 @@ impl State {
             Page::Atlas => {
                 self.backend_read(ReadRequest::Models);
                 self.refresh_cycles();
+                if self.atlas_advertised()
+                    && self.permission(Permission::ReadBackend)
+                    && !self.readiness_pending()
+                {
+                    self.refresh_readiness();
+                }
             }
             Page::Seed => {
                 self.refresh_readiness();
@@ -710,7 +716,6 @@ impl State {
             Err(error) => self.backend.failed_refresh(kind, error, authority_rejected),
         }
         if self.configuration_revision() != previous_configuration_revision {
-            self.classifier_activation.invalidate_confirmation();
             self.submissions.invalidate_confirmations();
             if self
                 .maintenance

@@ -32,7 +32,11 @@ tracing.workspace = true
 sha2.workspace = true
 subtle = "2.6"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
+argos-osint-core = { path = "../argos-osint-core", default-features = false, features = ["legacy-natural-fixtures"] }
 surrealdb.workspace = true
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }

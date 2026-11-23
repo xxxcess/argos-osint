@@ -8,8 +8,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use argos_osint_core::atlas::AtlasProvider;
+use argos_osint_core::classifier::readiness::ClassifierHome;
+use argos_osint_core::classifier::remote::PinIdentity;
+use argos_osint_core::classifier::Provenance;
+use argos_osint_core::provider::SettingsFile;
 use argos_osint_core::storage::actor_search_outbox;
-use argos_osint_core::storage::classifier_activation;
+use argos_osint_core::storage::job_dispatch;
+use argos_osint_core::storage::job_dispatch::AtlasWorkerAvailability;
 use argos_osint_core::storage::setup_jobs;
 use axum::extract::State;
 use axum::http::header;
@@ -27,6 +33,9 @@ use fleetworks_contracts::actor_index::ACTOR_INDEX_SCHEMA;
 use fleetworks_contracts::connect::RegistrationReceipt;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::context::RegisteredContext;
+use fleetworks_contracts::readiness::AtlasCyclePreflight;
+use fleetworks_contracts::readiness::AtlasKeyPresence;
+use fleetworks_contracts::readiness::DeclaredAtlasBertCandidate;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use fleetworks_contracts::readiness::ReadinessAction;
 use fleetworks_contracts::readiness::ReadinessActionId;
@@ -93,8 +102,10 @@ impl ReadinessProbe {
         Ok(Self { id, http, url })
     }
 
-    async fn observe(&self, at: &str) -> Vec<ReadinessCheck> {
+    async fn observe(&self, at: &str) -> (Vec<ReadinessCheck>, Option<AtlasCheckpoint>) {
         let response = self.fetch().await;
+        let checkpoint = (self.id == ReadinessCheckId::Classifier)
+            .then(|| AtlasCheckpoint::from_service(response.as_ref().ok()));
         let mut checks = vec![match &response {
             Ok(ready) if ready.ready => check(
                 self.id,
@@ -145,7 +156,7 @@ impl ReadinessProbe {
                 ),
             });
         }
-        checks
+        (checks, checkpoint)
     }
 
     async fn fetch(&self) -> Result<ProcessReady, ()> {
@@ -182,13 +193,102 @@ struct ProcessReady {
     api_version: u16,
     ready: bool,
     model_state: Option<String>,
+    atlas_checkpoint_state: Option<String>,
+    declared_model: Option<serde_json::Value>,
+}
+
+#[derive(Clone)]
+struct AtlasCheckpoint {
+    state: ReadinessState,
+    verified: bool,
+    declared_candidate: Option<DeclaredAtlasBertCandidate>,
+}
+
+#[derive(Default)]
+struct AtlasKeys {
+    gnews: AtlasKeyPresence,
+    newsdata: AtlasKeyPresence,
+    newsapi: AtlasKeyPresence,
+    currents: AtlasKeyPresence,
+}
+
+impl AtlasKeys {
+    fn from_settings(settings: &SettingsFile) -> Self {
+        let presence = |provider: AtlasProvider| {
+            let id = provider.id();
+            if settings.saved_key(id).trim().is_empty()
+                && settings.saved_fallback_key(id).trim().is_empty()
+            {
+                AtlasKeyPresence::Missing
+            } else {
+                AtlasKeyPresence::Saved
+            }
+        };
+        Self {
+            gnews: presence(AtlasProvider::GNews),
+            newsdata: presence(AtlasProvider::NewsData),
+            newsapi: presence(AtlasProvider::NewsApi),
+            currents: presence(AtlasProvider::Currents),
+        }
+    }
+}
+
+async fn atlas_worker_availability(state: &ApiState) -> Option<AtlasWorkerAvailability> {
+    let repo = state.repo.clone();
+    crate::run_shielded_timeout(DEADLINE, async move {
+        job_dispatch::atlas_worker_availability(repo.db(), Utc::now()).await
+    })
+    .await
+    .and_then(Result::ok)
+}
+
+impl AtlasCheckpoint {
+    fn from_service(service: Option<&ProcessReady>) -> Self {
+        let verified = service.is_some_and(|service| {
+            service.ready && service.model_state.as_deref() == Some("verified")
+        });
+        let state = match service {
+            Some(service) if !service.ready => ReadinessState::NotReady,
+            Some(service) => match service.atlas_checkpoint_state.as_deref() {
+                Some("available") => ReadinessState::Ready,
+                Some("unavailable") => ReadinessState::NotReady,
+                _ if verified => ReadinessState::Ready,
+                _ => ReadinessState::Unknown,
+            },
+            None => ReadinessState::Unavailable,
+        };
+        let declared_candidate = service
+            .filter(|service| service.ready)
+            .and_then(|service| service.declared_model.as_ref())
+            .and_then(|value| PinIdentity::deserialize(value).ok())
+            .and_then(declared_candidate);
+        Self {
+            state,
+            verified: verified && state == ReadinessState::Ready,
+            declared_candidate,
+        }
+    }
+}
+
+fn declared_candidate(identity: PinIdentity) -> Option<DeclaredAtlasBertCandidate> {
+    if !matches!(
+        identity.snapshot.provenance,
+        Provenance::FineTunedAtlasBert { .. }
+    ) {
+        return None;
+    }
+    let revision = identity.activation_revision().ok()?;
+    Some(DeclaredAtlasBertCandidate::new(
+        identity.snapshot.model_id,
+        revision,
+    ))
 }
 
 struct Observations {
     captured: Instant,
     at: String,
     checks: Vec<ReadinessCheck>,
-    natural: Option<classifier_activation::NaturalResourceObservation>,
+    atlas_checkpoint: AtlasCheckpoint,
 }
 
 /// One coalesced cache for safe backend observations, independent of user actions.
@@ -198,6 +298,7 @@ pub struct ReadinessOwners {
     platform_display_name: Option<String>,
     probes: Vec<ReadinessProbe>,
     local_nlp: Option<bool>,
+    local_classifier: Option<ClassifierHome>,
     configured_inputs: Vec<fleetworks_contracts::readiness::ConfiguredMaintenanceInput>,
     cache: Arc<Mutex<Option<Observations>>>,
 }
@@ -223,15 +324,24 @@ impl ReadinessOwners {
             platform_display_name: None,
             probes,
             local_nlp: None,
+            local_classifier: None,
             configured_inputs: Vec::new(),
             cache: Arc::new(Mutex::new(None)),
         })
     }
+
     /// Record the in-process Compromise startup probe, not an HTTP service or model inference.
     pub fn with_local_nlp(mut self, ready: bool) -> Self {
         self.local_nlp = Some(ready);
         self
     }
+    /// Read the Embedded workspace's declared BERT candidate without starting inference.
+    #[must_use]
+    pub fn with_local_classifier(mut self, home: ClassifierHome) -> Self {
+        self.local_classifier = Some(home);
+        self
+    }
+
     /// Set the operator-chosen backend label read from deployment metadata at startup.
     /// An invalid stored label is an error, so a corrupt value is never shown.
     pub fn with_platform_display_name(mut self, name: Option<String>) -> anyhow::Result<Self> {
@@ -568,10 +678,23 @@ async fn collect(
 ) -> Observations {
     let at = Utc::now().to_rfc3339();
     let database_repo = state.repo.clone();
-    let database = crate::run_shielded_timeout(DEADLINE, async move {
-        database_repo.db().query("RETURN 1").await?.check()
-    })
-    .await;
+    let local_classifier = async {
+        let home = owners.local_classifier.as_ref()?;
+        tokio::time::timeout(DEADLINE, home.check_local_atlas_checkpoint())
+            .await
+            .ok()?
+            .ok()?
+            .and_then(declared_candidate)
+    };
+    let (database, catalog, search, services, local_candidate) = tokio::join!(
+        crate::run_shielded_timeout(DEADLINE, async move {
+            database_repo.db().query("RETURN 1").await?.check()
+        }),
+        catalog(state, &at),
+        search(state, owners, client, &at),
+        join_all(owners.probes.iter().map(|probe| probe.observe(&at))),
+        local_classifier,
+    );
     let mut checks = vec![
         check(
             ReadinessCheckId::Gateway,
@@ -598,19 +721,16 @@ async fn collect(
             )
         },
     ];
-    let natural_repo = state.repo.clone();
-    let (catalog, search, services, natural) = tokio::join!(
-        catalog(state, &at),
-        search(state, owners, client, &at),
-        join_all(owners.probes.iter().map(|probe| probe.observe(&at))),
-        crate::run_shielded_timeout(DEADLINE, async move {
-            classifier_activation::observation(&natural_repo).await
-        })
-    );
-    let natural = natural.and_then(Result::ok);
     checks.push(catalog);
-    for service in services {
+    let mut atlas_checkpoint = AtlasCheckpoint::from_service(None);
+    for (service, checkpoint) in services {
         checks.extend(service);
+        if let Some(checkpoint) = checkpoint {
+            atlas_checkpoint = checkpoint;
+        }
+    }
+    if owners.local_classifier.is_some() {
+        atlas_checkpoint.declared_candidate = local_candidate;
     }
     if let Some(ready) = owners.local_nlp {
         checks.retain(|check| check.id != ReadinessCheckId::Nlp);
@@ -652,25 +772,13 @@ async fn collect(
         checks.push(unavailable(ReadinessCheckId::ClassifierInference, &at));
     }
     checks.push(search);
-    let training = match natural.as_ref() {
-        Some(resource) if resource.effect_uncertain => check(
-            ReadinessCheckId::ClassifierTraining, ReadinessState::Degraded,
-            "natural_activation_reconciliation_required",
-            "An activation effect needs reconciliation; training and activation remain blocked", &at,
-        ),
-        Some(resource) if resource.blocked => check(
-            ReadinessCheckId::ClassifierTraining, ReadinessState::Running,
-            "natural_resource_busy",
-            "The shared Natural resource has unfinished work; no candidate or active-model success is inferred", &at,
-        ),
-        Some(_) => check(
-            ReadinessCheckId::ClassifierTraining, ReadinessState::Unknown,
-            "natural_resource_idle",
-            "No unfinished Natural resource work is observed; select an authorized training job for candidate evidence", &at,
-        ),
-        None => unavailable(ReadinessCheckId::ClassifierTraining, &at),
-    };
-    checks.push(training);
+    checks.push(check(
+        ReadinessCheckId::ClassifierTraining,
+        ReadinessState::NotApplicable,
+        "legacy_classifier_retired",
+        "Atlas BERT candidates are evaluated and activated by the backend operator.",
+        &at,
+    ));
     checks.push(check(
         ReadinessCheckId::Registration,
         ReadinessState::Unknown,
@@ -682,7 +790,7 @@ async fn collect(
         captured: Instant::now(),
         at,
         checks,
-        natural,
+        atlas_checkpoint,
     }
 }
 
@@ -760,11 +868,135 @@ pub(crate) async fn read(
         &owners,
         search.as_ref().map(|Extension(client)| client),
         context.map(|Extension(context)| context),
+        false,
     )
     .await
     {
         Ok(value) => reply(StatusCode::OK, value),
         Err((status, message)) => reply(status, json!({"error":message})),
+    }
+}
+
+/// Shared backend health facts safe to disclose to a credential-free model process.
+pub(crate) async fn qa_snapshot(
+    state: &ApiState,
+    owners: &ReadinessOwners,
+    search: Option<&SearchClient>,
+    observed_after_ms: i64,
+    _embedded: bool,
+) -> Option<(chrono::DateTime<Utc>, Vec<QaReadinessFact>)> {
+    // The protocol persists millisecond boundaries, so every independent check
+    // must start strictly after the last terminal boundary.
+    if Utc::now().timestamp_millis() <= observed_after_ms {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        if Utc::now().timestamp_millis() <= observed_after_ms {
+            return None;
+        }
+    }
+    let projection = async {
+        let mut cache = owners.cache.lock().await;
+        if cache.as_ref().is_none_or(|cached| {
+            cached.captured.elapsed() >= CACHE_AGE
+                || sample_time(cached).is_none_or(|at| at.timestamp_millis() <= observed_after_ms)
+        }) {
+            *cache = Some(collect(state, owners, search).await);
+        }
+        let observations = cache.as_ref()?;
+        let at =
+            sample_time(observations).filter(|at| at.timestamp_millis() > observed_after_ms)?;
+        if observations.captured.elapsed() >= CACHE_AGE {
+            return None;
+        }
+        Some((at, observations.checks.clone()))
+    };
+    let (at, checks) = projection.await?;
+    Some((at, checks.iter().filter_map(qa_fact).collect()))
+}
+
+fn sample_time(observations: &Observations) -> Option<chrono::DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(&observations.at)
+        .ok()
+        .map(|at| at.with_timezone(&Utc))
+}
+
+pub(crate) type QaReadinessFact = (&'static str, &'static str, &'static str, &'static str);
+
+fn qa_fact(check: &ReadinessCheck) -> Option<QaReadinessFact> {
+    let id = check.id.as_str();
+    let label = qa_readiness_label(id)?;
+    let status = match check.state {
+        ReadinessState::NotReady => "not ready",
+        ReadinessState::NotApplicable => "not applicable",
+        state => state.as_str(),
+    };
+    Some((id, label, status, qa_readiness_reason(check)))
+}
+
+pub(crate) fn qa_readiness_label(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "gateway" => "Gateway",
+        "datastore" => "Datastore",
+        "jobs" => "Jobs service",
+        "brain" => "Brain service",
+        "control" => "Control service",
+        "nlp" => "Natural language processing",
+        "classifier" => "Classifier service",
+        "actor_catalog" => "Actor catalog",
+        "actor_search" => "Actor search",
+        "classifier_inference" => "Atlas Rust-BERT inference",
+        "classifier_training" => "Legacy Natural training",
+        _ => return None,
+    })
+}
+
+fn qa_readiness_reason(check: &ReadinessCheck) -> &'static str {
+    // Private probe diagnostics may include paths or endpoints. Translate only
+    // recognized outcomes to fixed public explanations.
+    match (check.state, check.reason_code.as_str()) {
+        (ReadinessState::Ready, "gateway_reachable") => {
+            "An authenticated gateway request succeeded."
+        }
+        (ReadinessState::Ready, "datastore_reachable") => "A bounded datastore read succeeded.",
+        (ReadinessState::Unavailable, "datastore_unavailable") => {
+            "The bounded datastore read did not complete successfully."
+        }
+        (ReadinessState::Unavailable, "owner_unavailable" | "inference_owner_unavailable") => {
+            "The configured status probe did not answer successfully."
+        }
+        (ReadinessState::Unknown, "owner_not_configured") => "No status owner is configured.",
+        (ReadinessState::Ready, "database_seeded") => {
+            "A completed seed and canonical actor records were observed."
+        }
+        (ReadinessState::NotReady, "database_catalog_empty") => {
+            "The completed seed has no canonical actor records."
+        }
+        (ReadinessState::NotReady, "database_seed_incomplete") => {
+            "No completed seed was verified, and existing records may remain."
+        }
+        (ReadinessState::Running, "database_seed_running") => {
+            "The accepted seed has not yet completed."
+        }
+        (ReadinessState::Unavailable, "seed_receipt_unavailable") => {
+            "The seed receipt and canonical records could not be checked."
+        }
+        (ReadinessState::Ready, "index_reader_visible") => {
+            "The index is visible through the observed source checkpoint."
+        }
+        (ReadinessState::Running, "index_building" | "index_catching_up") => {
+            "Index visibility is incomplete."
+        }
+        (ReadinessState::NotReady, "index_not_built" | "index_source_not_started") => {
+            "No serving index was observed."
+        }
+        (ReadinessState::Degraded, "index_ingest_paused") => "Index ingestion is paused.",
+        (ReadinessState::Unknown, "model_unverified") => {
+            "Service reachability alone does not verify inference."
+        }
+        (ReadinessState::Ready, "model_verified") => "The active model was verified.",
+        (ReadinessState::NotApplicable, "legacy_classifier_retired") => {
+            "Legacy Natural training has been retired."
+        }
+        _ => "",
     }
 }
 
@@ -774,6 +1006,7 @@ pub(crate) async fn read_value(
     owners: &ReadinessOwners,
     search: Option<&SearchClient>,
     context: Option<RegisteredContext>,
+    embedded_setup: bool,
 ) -> Result<serde_json::Value, (StatusCode, &'static str)> {
     if !principal.permits(Permission::ReadBackend) {
         return Err((
@@ -796,7 +1029,7 @@ pub(crate) async fn read_value(
     };
     let mut checks = observations.checks.clone();
     let observed_at = observations.at.clone();
-    let natural = observations.natural.clone();
+    let atlas_checkpoint = observations.atlas_checkpoint.clone();
     drop(cache);
     let permitted = principal.permits(Permission::MaintainBackend);
     let context = context.filter(|context| {
@@ -804,16 +1037,53 @@ pub(crate) async fn read_value(
             && context.access_epoch == principal.access_epoch()
     });
     let registered = context.is_some();
+    let registered_native = registered
+        && principal.purpose() == fleetworks_contracts::context::CredentialPurpose::Native;
+    let include_atlas =
+        !embedded_setup && registered_native && principal.permits(Permission::SubmitInteractive);
+    if embedded_setup
+        && registered
+        && permitted
+        && principal.purpose() == fleetworks_contracts::context::CredentialPurpose::Native
+    {
+        let repo = state.repo.clone();
+        if let Some(Ok(setup)) = crate::run_shielded_timeout(DEADLINE, async move {
+            setup_jobs::embedded_setup_observation(&repo).await
+        })
+        .await
+        {
+            if let Some(hash) = setup.catalog_sha256 {
+                if let Some(catalog) = checks.iter_mut().find(|check| {
+                    check.id == ReadinessCheckId::ActorCatalog
+                        && check.state == ReadinessState::Ready
+                }) {
+                    catalog
+                        .artifact_ids
+                        .push(format!("actor-catalog-sha256:{hash}"));
+                }
+            }
+        }
+    }
+
     let state_for_read = state.clone();
-    let revision = tokio::task::spawn_blocking(move || {
+    let config = tokio::task::spawn_blocking(move || {
         let root = crate::configuration::workspace_for(&state_for_read)?;
         let lock = argos_osint_core::config_commit::ConfigLock::acquire_at(&root)
             .map_err(|_| crate::internal("configuration unavailable"))?;
-        crate::configuration::read_locked(&root, &lock).map(|snapshot| snapshot.revision)
-    })
-    .await
-    .ok()
-    .and_then(Result::ok);
+        crate::configuration::read_locked(&root, &lock).map(|snapshot| {
+            let keys = include_atlas.then(|| AtlasKeys::from_settings(&snapshot.settings));
+            (snapshot.revision, keys)
+        })
+    });
+    let (config, atlas_worker) = tokio::join!(config, async {
+        if include_atlas {
+            atlas_worker_availability(state).await
+        } else {
+            None
+        }
+    });
+    let config = config.ok().and_then(Result::ok);
+    let revision = config.as_ref().map(|(revision, _)| *revision);
     let authority = argos_osint_core::storage::connect_registry::RegistryAuthority::new(
         principal.scope_id(),
         principal.credential_id(),
@@ -822,7 +1092,9 @@ pub(crate) async fn read_value(
     .ok();
     let mut configured_inputs = Vec::new();
     for input in &owners.configured_inputs {
-        if Some(input.configuration_revision) != revision {
+        if input.operation == MaintenanceOperation::TrainClassifier
+            || Some(input.configuration_revision) != revision
+        {
             continue;
         }
         let usable = if let Some(dataset) = &input.dataset {
@@ -858,11 +1130,6 @@ pub(crate) async fn read_value(
             ReadinessActionId::SeedActors,
         ),
         (
-            ReadinessCheckId::ClassifierTraining,
-            MaintenanceOperation::TrainClassifier,
-            ReadinessActionId::TrainClassifier,
-        ),
-        (
             ReadinessCheckId::ActorSearch,
             MaintenanceOperation::ReindexActors,
             ReadinessActionId::RebuildActorIndex,
@@ -886,49 +1153,31 @@ pub(crate) async fn read_value(
             ));
         }
     }
-    if let Some(check) = checks
-        .iter_mut()
-        .find(|check| check.id == ReadinessCheckId::ClassifierTraining)
-    {
-        let native = principal.purpose()
-            == fleetworks_contracts::context::CredentialPurpose::Native
-            && principal.permits(Permission::ReadWorkstationActivity);
-        let enabled = natural
-            .as_ref()
-            .is_some_and(|resource| resource.consumer_enabled && !resource.blocked);
-        let mut activation = action(
-            ReadinessActionId::ActivateClassifier,
-            enabled,
-            permitted && native,
-            registered,
-        );
-        activation.preconditions = vec![
-            "registered_origin".into(),
-            "configuration_revision".into(),
-            "authorized_completed_training_job".into(),
-            "exact_candidate_hashes".into(),
-            "expected_prior_activation".into(),
-            "explicit_synthetic_baseline_consent".into(),
-        ];
-        if permitted
-            && native
-            && registered
-            && natural.as_ref().is_some_and(|resource| resource.blocked)
-        {
-            activation.disabled_reason = Some("natural_resource_busy_or_uncertain".into());
-        }
-        check.actions.push(activation);
-        if natural.as_ref().is_some_and(|resource| resource.blocked) {
-            for action in &mut check.actions {
-                if action.id == ReadinessActionId::TrainClassifier {
-                    action.allowed = false;
-                    action.disabled_reason = Some("natural_resource_busy_or_uncertain".into());
-                }
-            }
-        }
-    }
     let mut response = WorkstationReadiness::new(owners.deployment_id.clone(), observed_at, checks);
     response.configured_inputs = configured_inputs;
+    if registered_native {
+        response.declared_atlas_bert_candidate = atlas_checkpoint.declared_candidate;
+    }
+    if include_atlas {
+        let worker = match atlas_worker {
+            Some(AtlasWorkerAvailability::Ready) => ReadinessState::Ready,
+            Some(AtlasWorkerAvailability::Disabled) => ReadinessState::NotApplicable,
+            Some(AtlasWorkerAvailability::AwaitingWorker) => ReadinessState::NotReady,
+            _ => ReadinessState::Unavailable,
+        };
+        let keys = config.and_then(|(_, keys)| keys).unwrap_or_default();
+        let mut preflight = AtlasCyclePreflight::new(
+            worker,
+            atlas_checkpoint.state,
+            keys.gnews,
+            keys.newsdata,
+            keys.newsapi,
+            keys.currents,
+        );
+        preflight.configuration_revision = revision;
+        preflight.rust_bert_verified = atlas_checkpoint.verified;
+        response.atlas_preflight = Some(preflight);
+    }
     if let Some(name) = &owners.platform_display_name {
         response = response.with_platform_identity(name.clone());
     }
@@ -970,6 +1219,92 @@ fn reply(status: StatusCode, value: serde_json::Value) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inbox_readiness_keeps_observed_reasons_without_private_probe_details() {
+        const AT: &str = "2026-11-21T03:17:00Z";
+        let datastore = check(
+            ReadinessCheckId::Datastore,
+            ReadinessState::Unavailable,
+            "datastore_unavailable",
+            "Private host or socket detail",
+            AT,
+        );
+        assert_eq!(
+            qa_fact(&datastore),
+            Some((
+                "datastore",
+                "Datastore",
+                "unavailable",
+                "The bounded datastore read did not complete successfully.",
+            )),
+        );
+        let incomplete_catalog = catalog_observation(None, true, false, AT);
+        assert_eq!(
+            qa_fact(&incomplete_catalog),
+            Some((
+                "actor_catalog",
+                "Actor catalog",
+                "not ready",
+                "No completed seed was verified, and existing records may remain.",
+            )),
+        );
+        let classifier = check(
+            ReadinessCheckId::Classifier,
+            ReadinessState::NotReady,
+            "process_not_ready",
+            "Private diagnostic detail",
+            AT,
+        );
+        assert_eq!(
+            qa_fact(&classifier),
+            Some(("classifier", "Classifier service", "not ready", "")),
+        );
+    }
+
+    #[test]
+    fn atlas_checkpoint_presence_and_verified_inference_are_distinct() {
+        let mut owner: ProcessReady = serde_json::from_value(json!({
+            "api_version": 1,
+            "ready": true,
+            "model_state": "unverified",
+            "atlas_checkpoint_state": "available"
+        }))
+        .unwrap();
+        let available = AtlasCheckpoint::from_service(Some(&owner));
+        assert_eq!(available.state, ReadinessState::Ready);
+        assert!(!available.verified);
+
+        owner.model_state = Some("verified".into());
+        assert!(AtlasCheckpoint::from_service(Some(&owner)).verified);
+        owner.atlas_checkpoint_state = Some("unavailable".into());
+        let missing = AtlasCheckpoint::from_service(Some(&owner));
+        assert_eq!(missing.state, ReadinessState::NotReady);
+        assert!(!missing.verified);
+
+        owner.model_state = Some("unverified".into());
+        owner.atlas_checkpoint_state = None;
+        assert_eq!(
+            AtlasCheckpoint::from_service(Some(&owner)).state,
+            ReadinessState::Unknown
+        );
+        assert_eq!(
+            AtlasCheckpoint::from_service(None).state,
+            ReadinessState::Unavailable
+        );
+
+        let keys = AtlasKeys::from_settings(&SettingsFile {
+            newsapi_api_key: "fixture-primary".into(),
+            currents_api_key_fallback: "fixture-fallback".into(),
+            gnews_api_key: "  ".into(),
+            ..SettingsFile::default()
+        });
+        assert_eq!(keys.gnews, AtlasKeyPresence::Missing);
+        assert_eq!(keys.newsdata, AtlasKeyPresence::Missing);
+        assert_eq!(keys.newsapi, AtlasKeyPresence::Saved);
+        assert_eq!(keys.currents, AtlasKeyPresence::Saved);
+        assert_eq!(AtlasKeys::default().currents, AtlasKeyPresence::Unchecked);
+    }
 
     #[test]
     fn catalog_requires_completed_nonempty_seed_and_settled_work() {

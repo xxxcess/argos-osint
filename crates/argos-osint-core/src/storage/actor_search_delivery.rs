@@ -14,6 +14,7 @@ use fleetworks_contracts::actor_index::ACTOR_INDEX_PROTOCOL;
 use super::backfill_in;
 use super::canonical_many_in;
 use super::control_in;
+use super::event_records;
 use super::finish_causes_in;
 use super::guard;
 use super::hash;
@@ -32,11 +33,14 @@ use super::Repository;
 use super::RetryPolicy;
 use super::TxError;
 
+const EMBEDDED_RETIRE_PAGE: i64 = 16;
+
 pub(super) async fn prepare(
     repo: &Repository,
     owner: &str,
     status: &ActorIndexStatus,
     now: DateTime<Utc>,
+    embedded: bool,
 ) -> Result<Preparation, TxError> {
     if !valid(owner) || status.protocol != ACTOR_INDEX_PROTOCOL {
         return Err(invalid("actor_index_worker_contract"));
@@ -74,7 +78,7 @@ pub(super) async fn prepare(
                 "SELECT VALUE instance_id FROM ONLY storage_meta:identity;
                  RETURN (SELECT VALUE status FROM ONLY brain_actor_seed:catalog) = 'complete';
                  RETURN array::len((SELECT VALUE id FROM actor_search_cause WHERE done = false AND closed = true AND required_sequence <= $ack LIMIT 1)) > 0;
-                 RETURN array::len((SELECT VALUE id FROM actor_search_event WHERE sequence <= $ack LIMIT 1)) > 0;",
+                 RETURN array::len((SELECT VALUE id FROM actor_search_event WITH INDEX actor_search_event_sequence WHERE sequence <= $ack LIMIT 1)) > 0;",
             )
             .bind(("ack", current.acknowledged_sequence))
             .await?
@@ -91,16 +95,31 @@ pub(super) async fn prepare(
             return Ok(Preparation::Waiting);
         }
     }
-    // Bound decoded alias provenance separately from serialized batch bytes.
-    // Never fetch a speculative second source page while preparing this one.
-    let page = usize::from(status.limits.batch_documents).min(super::BACKFILL_PAGE);
+    let initial_catch_up = embedded && !active.source_complete;
+    let configured_page = usize::from(status.limits.batch_documents);
+    let page = if initial_catch_up {
+        configured_page
+    } else {
+        configured_page.min(super::BACKFILL_PAGE)
+    };
     Ok(run_tx(repo.db(),RetryPolicy::default(),|tx| {let owner=owner.clone();let active=active.clone();let limits_json=limits_json.clone();async move {
         guard(&tx).await?;
         let mut response=jobs::run(&tx,tx.query("SELECT VALUE instance_id FROM ONLY storage_meta:identity")).await?;
         if jobs::take::<Option<String>>(&mut response,0)?.as_deref()!=Some(status.deployment_id.as_str()) {return Err(invalid("actor_index_deployment_mismatch"));}
         let mut control=control_in(&tx).await?;
         finish_causes_in(&tx,control.acknowledged_sequence as u64,now).await?;
-        resources::prune_in(&tx,control.acknowledged_sequence).await?;
+        // Drain acknowledged events only when they cannot compete with initial delivery.
+        let has_work = !control.backfill_complete
+            || control.acknowledged_sequence < control.next_sequence
+            || !control.pending_json.is_empty();
+        if embedded {
+            if (!initial_catch_up || !has_work) && control.acknowledged_sequence > 0 {
+                resources::prune_in_bounded(&tx, control.acknowledged_sequence, EMBEDDED_RETIRE_PAGE)
+                    .await?;
+            }
+        } else {
+            resources::prune_in(&tx, control.acknowledged_sequence).await?;
+        }
         if control.deployment_id.is_empty() {
             jobs::run(&tx,tx.query("UPDATE actor_search_control:catalog SET deployment_id=$deployment,source_epoch=$source,index_generation=$generation RETURN NONE")
                 .bind(("deployment",status.deployment_id.clone())).bind(("source",status.source_epoch.clone())).bind(("generation",active.generation.clone()))).await?;
@@ -128,9 +147,25 @@ pub(super) async fn prepare(
         } else {
             if active.visible_checkpoint!=control.acknowledged_sequence as u64 {return Err(invalid("actor_index_unknown_remote_checkpoint"));}
             backfill_in(&tx,&control,now).await?;control=control_in(&tx).await?;
-            let mut response=jobs::run(&tx,tx.query("SELECT sequence,actor_id,cause_job FROM actor_search_event WITH INDEX actor_search_event_sequence WHERE sequence>$after ORDER BY sequence LIMIT $limit")
-                .bind(("after",control.acknowledged_sequence)).bind(("limit",page as i64))).await?;
-            let events:Vec<Event>=jobs::take(&mut response,0)?;
+            let through = control.acknowledged_sequence.saturating_add(page as i64).min(control.next_sequence);
+            let records = event_records(control.acknowledged_sequence, through)?;
+            let events = if records.is_empty() {
+                Vec::new()
+            } else {
+                let mut response = jobs::run(
+                    &tx,
+                    tx.query("SELECT sequence,actor_id,cause_job FROM $events ORDER BY sequence")
+                        .bind(("events", records)),
+                ).await?;
+                let events: Vec<Event> = jobs::take(&mut response, 0)?;
+                if events.len() as i64 != through - control.acknowledged_sequence
+                    || events.iter().zip(control.acknowledged_sequence + 1..=through)
+                        .any(|(event, expected)| event.sequence != expected)
+                {
+                    return Err(invalid("actor_index_outbox_gap"));
+                }
+                events
+            };
             let mut seed=jobs::run(&tx,tx.query("RETURN (SELECT VALUE status FROM ONLY brain_actor_seed:catalog)='complete'")).await?;
             let caught_up=events.last().map(|event|event.sequence).unwrap_or(control.acknowledged_sequence)==control.next_sequence;
             let source_complete=control.backfill_complete&&caught_up&&jobs::take::<Option<bool>>(&mut seed,0)?==Some(true);
@@ -144,25 +179,69 @@ pub(super) async fn prepare(
                 }
                 if now<instant(&control.tail_since)?+Duration::milliseconds(i64::from(status.limits.partial_tail_ms)) {return Ok(Preparation::Waiting);}
             }
-            let ids:Vec<String>=events.iter().map(|event|event.actor_id.clone()).collect::<BTreeSet<_>>().into_iter().collect();
-            let canonical=canonical_many_in(&tx,&ids).await?.into_iter().map(|row|(row.actor_id.clone(),row)).collect::<BTreeMap<_,_>>();
             let mut candidate=ActorIndexBatch {protocol:ACTOR_INDEX_PROTOCOL,deployment_id:status.deployment_id.clone(),source_epoch:status.source_epoch.clone(),index_generation:active.generation.clone(),
                 batch_id:String::new(),writer_epoch:epoch as u64,from_checkpoint:control.acknowledged_sequence as u64,through_checkpoint:control.acknowledged_sequence as u64,source_complete:false,mutations:Vec::new()};
-            let mut counts=BTreeMap::<String,u64>::new();let mut seen=BTreeSet::new();
-            for (offset,event) in events.into_iter().enumerate() {
-                if event.sequence!=control.acknowledged_sequence+offset as i64+1 {return Err(invalid("actor_index_outbox_gap"));}
-                let mut next=candidate.clone();
-                if seen.insert(event.actor_id.clone()) {
-                    let row=canonical.get(&event.actor_id).ok_or_else(||invalid("actor_projection_missing"))?;
-                    next.mutations.push(ActorIndexMutation::new(row.actor_id.clone(),row.revision,row.projection.clone()).map_err(|_|invalid("actor_projection_invalid"))?);
+            let mut counts = BTreeMap::<String, u64>::new();
+            let mut seen = BTreeSet::new();
+            let source_hash = hash(&[&status.source_epoch]);
+            // Keep the serialized envelope empty while accumulating individual
+            // mutation lengths. JSON array separators are the only extra bytes.
+            let mut envelope = candidate.clone();
+            let mut mutation_bytes = 0;
+            // Each projection query materializes bounded alias provenance. Keep
+            // only the current subpage and the already accepted mutations alive.
+            'subpages: for subpage in events.chunks(super::BACKFILL_PAGE) {
+                let ids: Vec<String> = subpage.iter()
+                    .filter(|event| !seen.contains(&event.actor_id))
+                    .map(|event| event.actor_id.clone())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                let mut canonical = if ids.is_empty() {
+                    BTreeMap::new()
+                } else {
+                    canonical_many_in(&tx, &ids).await?.into_iter()
+                        .map(|row| (row.actor_id.clone(), row))
+                        .collect::<BTreeMap<_, _>>()
+                };
+                for event in subpage {
+                    let mutation = if seen.insert(event.actor_id.clone()) {
+                        let row = canonical
+                            .remove(&event.actor_id)
+                            .ok_or_else(|| invalid("actor_projection_missing"))?;
+                        Some(ActorIndexMutation::new(row.actor_id, row.revision, row.projection)
+                            .map_err(|_| invalid("actor_projection_invalid"))?)
+                    } else {
+                        None
+                    };
+                    let added_bytes = match mutation.as_ref() {
+                        Some(mutation) => serde_json::to_vec(mutation)
+                            .map_err(|_| invalid("actor_index_encoding"))?
+                            .len() + usize::from(!candidate.mutations.is_empty()),
+                        None => 0,
+                    };
+                    envelope.through_checkpoint = event.sequence as u64;
+                    envelope.batch_id = format!("actor-{source_hash}-{}-{}", envelope.from_checkpoint, envelope.through_checkpoint);
+                    envelope.source_complete = source_complete && event.sequence == control.next_sequence;
+                    let envelope_bytes = serde_json::to_vec(&envelope)
+                        .map_err(|_| invalid("actor_index_encoding"))?
+                        .len();
+                    if envelope_bytes + mutation_bytes + added_bytes > status.limits.batch_bytes as usize {
+                        if candidate.mutations.is_empty() {
+                            return Err(invalid("actor_projection_oversize"));
+                        }
+                        break 'subpages;
+                    }
+                    mutation_bytes += added_bytes;
+                    if let Some(mutation) = mutation {
+                        candidate.mutations.push(mutation);
+                    }
+                    if let Some(cause) = &event.cause_job {
+                        *counts.entry(cause.clone()).or_default() += 1;
+                    }
+                    candidate.through_checkpoint = envelope.through_checkpoint;
+                    candidate.batch_id = std::mem::take(&mut envelope.batch_id);
                 }
-                next.through_checkpoint=event.sequence as u64;
-                next.batch_id=format!("actor-{}-{}-{}",hash(&[&status.source_epoch]),next.from_checkpoint,next.through_checkpoint);
-                if serde_json::to_vec(&next).map_err(|_|invalid("actor_index_encoding"))?.len()>status.limits.batch_bytes as usize {
-                    if candidate.mutations.is_empty() {return Err(invalid("actor_projection_oversize"));}break;
-                }
-                if let Some(cause)=event.cause_job {*counts.entry(cause).or_default()+=1;}
-                candidate=next;
             }
             candidate.source_complete=source_complete&&candidate.through_checkpoint==control.next_sequence as u64;
             if candidate.through_checkpoint==candidate.from_checkpoint {candidate.batch_id=format!("actor-barrier-{}-{}",hash(&[&status.source_epoch]),candidate.through_checkpoint);}

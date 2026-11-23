@@ -211,6 +211,15 @@ impl Default for Configuration {
 }
 
 impl State {
+    pub(crate) fn clear_tool_credential_draft(&mut self) {
+        self.configuration.tool_primary.replace_text("");
+        self.configuration.tool_primary.set_secure(true);
+        self.configuration.tool_fallback.replace_text("");
+        self.configuration.tool_fallback.set_secure(true);
+        self.configuration.clear_tool_primary = false;
+        self.configuration.clear_tool_fallback = false;
+    }
+
     pub fn configuration_edited(&mut self) {
         self.configuration.confirmation = None;
         self.configuration.draft_revision = self.configuration.draft_revision.wrapping_add(1);
@@ -629,10 +638,10 @@ impl State {
                             self.configuration.account_api_key.set_secure(true);
                         }
                         ConfigurationAction::ToolCredentials => {
-                            self.configuration.tool_primary.replace_text("");
-                            self.configuration.tool_primary.set_secure(true);
-                            self.configuration.tool_fallback.replace_text("");
-                            self.configuration.tool_fallback.set_secure(true);
+                            self.clear_tool_credential_draft();
+                            if self.page == crate::app::Page::Atlas && self.tool_key_dialog {
+                                self.configuration.tool_provider.replace_text("");
+                            }
                         }
                         _ => {}
                     }
@@ -640,7 +649,6 @@ impl State {
                 self.configuration.message = None;
                 self.maintenance.confirmation = None;
                 self.submissions.invalidate_confirmations();
-                self.classifier_activation.invalidate_confirmation();
                 Load::Ready(saved)
             }
             Ok(_) => {
@@ -671,6 +679,14 @@ impl State {
             return;
         }
         if conflict || matches!(self.configuration.result, Load::Ready(_)) {
+            if action == ConfigurationAction::ToolCredentials
+                && self.page == crate::app::Page::Atlas
+                && !self.setup_gateway
+                && self.atlas_advertised()
+            {
+                self.readiness_received_at = None;
+                self.refresh_readiness();
+            }
             self.backend_read(ReadRequest::Profile);
             self.backend_read(ReadRequest::Models);
         }

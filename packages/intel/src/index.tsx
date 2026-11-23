@@ -1,7 +1,6 @@
 "use client";
 import React, {
   useEffect,
-  useCallback,
   useRef,
   useState,
   useSyncExternalStore,
@@ -77,17 +76,17 @@ export function IntelApp({
     navigator.getServerSnapshot,
   );
   const b = useBackend();
-  const [introComplete, setIntroComplete] = useState(false);
-  const completeIntro = useCallback(() => setIntroComplete(true), []);
-  if (route.screen !== "home" && !introComplete) setIntroComplete(true);
-  const playLanding = route.screen === "home" && !introComplete;
+  const [introDismissed, setIntroDismissed] = useState(false);
+  // The orbit is only an initial waiting view. Readiness owns admission.
+  if (!introDismissed && (b.connected || route.screen !== "home"))
+    setIntroDismissed(true);
+  const playLanding =
+    route.screen === "home" && !introDismissed && !b.connected;
   return (
     <View style={s.shell}>
-      <ScreenTransition fill screen={playLanding ? "connection" : "home"}>
+      <ScreenTransition fill fade screen={playLanding ? "connection" : "home"}>
         {playLanding ? (
           <OrbitScene
-            onComplete={completeIntro}
-            ready={b.connected}
             health={b.health}
             connecting={b.connecting}
             error={b.connectionError}
@@ -140,8 +139,7 @@ function WorkspaceStatusBar(
       ? {
           updatedAt: metrics.dataUpdatedAt || b.lastSyncedAt,
           reason:
-            metrics.error?.message ||
-            (b.stale ? b.connectionError : undefined),
+            metrics.error?.message || (b.stale ? b.connectionError : undefined),
         }
       : undefined;
   const [clock, setClock] = useState("");
@@ -337,7 +335,11 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
   }
   return (
     <>
-      <View nativeID="intel-content-frame" style={s.contentFrame}>
+      <View
+        nativeID="intel-content-frame"
+        testID={screen === "bulletin" ? "intel-bulletin-frame" : undefined}
+        style={s.contentFrame}
+      >
         {resolveTopology.isPending ? (
           <LoadingState label="Finding retained Brain memory…" compact />
         ) : null}
@@ -385,7 +387,14 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
                       : "Return to Bulletin"}
                 </Button>
                 <View
-                  style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}
+                  style={{
+                    flexDirection: "row",
+                    flexWrap: "wrap",
+                    flexShrink: 1,
+                    minWidth: 0,
+                    maxWidth: "100%",
+                    gap: 8,
+                  }}
                 >
                   {(
                     [

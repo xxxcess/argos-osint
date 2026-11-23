@@ -57,6 +57,41 @@ class PublicationTests(unittest.TestCase):
             }
             (evidence_dir / "evidence.json").write_text(json.dumps(evidence))
 
+    def qa_pack_pairs(self, directory, plan):
+        for target in release.INBOX_QA_TARGETS:
+            target_dir = directory / target
+            target_dir.mkdir()
+            native_digest = "f" * 64
+            if target.endswith("-apple-darwin"):
+                native = target_dir / f"Fleetworks-{target}.zip"
+                native.write_bytes(f"native archive {target}".encode())
+                native_digest = release.sha256(native)
+                native.with_name(native.name + ".sha256").write_text(f"{native_digest}  {native.name}\n")
+                (target_dir / "Fleetworks.app.manifest.json").write_text(json.dumps({
+                    "revision": plan["head"], "version": plan["version"], "dirty": False,
+                    "profile": "release", "target": target,
+                }))
+            archive = target_dir / f"Fleetworks-Inbox-QA-Pack-{target}.tar.gz"
+            archive.write_bytes(f"QA archive {target}".encode())
+            receipt = archive.with_name(archive.name + ".digests.json")
+            receipt.write_text(json.dumps({
+                "target": target, "source_sha": plan["head"], "version": plan["version"],
+                "model_revision": release.MODEL_REVISION, "archive": archive.name,
+                "archive_sha256": release.sha256(archive), "manifest_sha256": "e" * 64,
+                "status": "passed", "runtime": "embedded-unix-socket", "native_archive_sha256": native_digest,
+                "transport_attestation": {
+                    "transport": "embedded-unix-socket",
+                    "socket_family": "unix",
+                    "socket_type": "stream",
+                    "protocol_version": 2,
+                    "min_protocol_version": 2,
+                    "dataset_upload_chunk_bytes": 262144,
+                    "dataset_upload_window": 4,
+                },
+                "terminal_state": "answered", "terminal_events": 1, "model_pid_count": 1,
+                "cancelled_terminal_state": "canceled", "cancelled_terminal_events": 1,
+            }))
+
     def test_failed_or_untrusted_plan_cannot_call_publish_tools(self):
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(release, "run") as run:
             plan = self.plan()
@@ -153,7 +188,8 @@ class PublicationTests(unittest.TestCase):
                 original[base + ".zip"] = b"original immutable archive"
                 original[base + ".zip.sha256"] = (release.hashlib.sha256(original[base + ".zip"]).hexdigest() + "  " + base + ".zip\n").encode()
                 original[base + ".manifest.json"] = json.dumps({"revision": plan["head"], "version": plan["version"], "dirty": False, "profile": "release", "target": target}).encode()
-            inventory = {"format": 2, "plan": plan, "assets": {name: release.hashlib.sha256(value).hexdigest() for name, value in original.items()}}
+            inventory = {"format": 2, "plan": plan.copy(), "assets": {name: release.hashlib.sha256(value).hexdigest() for name, value in original.items()}}
+            plan["inbox_qa"] = False  # Old inventories omit this unselected optional field.
             original["release.json"] = json.dumps(inventory).encode()
             info = {"isDraft": False, "assets": [{"name": name} for name in original]}
             calls = []
@@ -255,6 +291,93 @@ class PublicationTests(unittest.TestCase):
                 self.assertIn(f"atlas-bert-linux-{arch}.tar.gz", inventory["assets"])
                 self.assertIn(f"atlas-bert-linux-{arch}.tar.gz.sha256", inventory["assets"])
                 self.assertIn(f"atlas-bert-evidence-{arch}.json", inventory["assets"])
+
+    def test_publish_includes_three_smoke_verified_inbox_qa_pack_pairs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            plan = self.plan()
+            plan.update(channel="nightly", native=True, inbox_qa=True, image_targets=[],
+                        event="push", ref="refs/heads/nightly")
+            self.qa_pack_pairs(directory, plan)
+            with mock.patch.object(release, "run") as run, \
+                 mock.patch.object(release, "lookup_release", return_value=None), \
+                 mock.patch.object(release, "lookup_channel", return_value=None):
+                release.publish(plan, directory)
+
+            inventory = json.loads((directory / "assets/release.json").read_text())
+            self.assertIs(inventory["plan"]["inbox_qa"], True)
+            payload_calls = [call.args for call in run.call_args_list
+                             if call.args[:3] == ("gh", "release", "upload") and len(call.args) > 5]
+            self.assertEqual(len(payload_calls), 1)
+            for target in release.INBOX_QA_TARGETS:
+                archive = f"Fleetworks-Inbox-QA-Pack-{target}.tar.gz"
+                for name in (archive, archive + ".digests.json"):
+                    asset = directory / "assets" / name
+                    self.assertEqual(inventory["assets"][name], release.sha256(asset))
+                    self.assertIn(str(asset), payload_calls[0])
+
+    def test_invalid_inbox_qa_pairs_stop_publication(self):
+        for fault in ("missing", "archive", "source", "wrong_native", "untrusted",
+                      "stdio", "missing_handshake", "wrong_family", "wrong_window",
+                      "missing_cancel", "duplicate_cancel", "boolean_count"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                plan = self.plan()
+                plan.update(channel="nightly", native=True, inbox_qa=True, image_targets=[],
+                            event="push", ref="refs/heads/nightly")
+                self.qa_pack_pairs(directory, plan)
+                target = "aarch64-apple-darwin"
+                archive = directory / target / f"Fleetworks-Inbox-QA-Pack-{target}.tar.gz"
+                receipt = archive.with_name(archive.name + ".digests.json")
+                if fault == "missing":
+                    receipt.unlink()
+                elif fault == "archive":
+                    archive.write_bytes(b"different pack")
+                elif fault == "untrusted":
+                    plan["event"] = "workflow_dispatch"
+                else:
+                    evidence = json.loads(receipt.read_text())
+                    if fault == "source":
+                        evidence["source_sha"] = "b" * 64
+                    elif fault == "wrong_native":
+                        evidence["native_archive_sha256"] = "b" * 64
+                    elif fault == "stdio":
+                        evidence["runtime"] = "embedded-stdio"
+                    elif fault == "missing_handshake":
+                        del evidence["transport_attestation"]
+                    elif fault == "wrong_family":
+                        evidence["transport_attestation"]["socket_family"] = "inet"
+                    elif fault == "wrong_window":
+                        evidence["transport_attestation"]["dataset_upload_window"] = 8
+                    elif fault == "missing_cancel":
+                        del evidence["cancelled_terminal_events"]
+                    elif fault == "duplicate_cancel":
+                        evidence["cancelled_terminal_events"] = 2
+                    elif fault == "boolean_count":
+                        evidence["terminal_events"] = True
+                    receipt.write_text(json.dumps(evidence))
+
+                with mock.patch.object(release, "run") as run, \
+                     mock.patch.object(release, "lookup_release", return_value=None):
+                    with self.assertRaisesRegex(ValueError, "Inbox QA"):
+                        release.publish(plan, directory)
+                    run.assert_not_called()
+
+    def test_graphical_receipt_requires_visible_citation_and_stop(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            plan = self.plan()
+            self.qa_pack_pairs(directory, plan)
+            target = "x86_64-unknown-linux-gnu"
+            receipt = next((directory / target).glob("*.digests.json"))
+            evidence = json.loads(receipt.read_text())
+            del evidence["model_pid_count"]
+            evidence.update(graphical="x11", first_citation_while_running=True, stop_while_running=True)
+            release.require_embedded_smoke(evidence, target=target, head=plan["head"], graphical=True)
+            for field in ("first_citation_while_running", "stop_while_running"):
+                with self.subTest(field=field), self.assertRaisesRegex(ValueError, "Inbox QA window"):
+                    release.require_embedded_smoke({**evidence, field: False}, target=target,
+                                                   head=plan["head"], graphical=True)
 
 
 if __name__ == "__main__":

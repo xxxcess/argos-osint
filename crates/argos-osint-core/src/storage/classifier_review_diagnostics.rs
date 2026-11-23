@@ -357,11 +357,10 @@ async fn duplicate_leads(
                 continue;
             };
             let observation: crate::classifier::ProviderObservation = serde_json::from_str(json)?;
-            let exact = signature.content_sha256 == candidate.content_sha256
-                || signature
-                    .url_sha256
-                    .as_ref()
-                    .is_some_and(|hash| Some(hash) == candidate.url_sha256.as_ref());
+            let exact_match = exact(&candidate);
+            if !exact_match && !crate::classifier::LEGACY_RUNTIME_AVAILABLE {
+                continue;
+            }
             let index = leads.len();
             leads.push(DuplicateLead {
                 observation_id: item.observation.observation_id.clone(),
@@ -369,7 +368,7 @@ async fn duplicate_leads(
                 source_family_id: item.family_id.to_string(),
                 candidate_payload_sha256: crate::classifier::artifact::sha256_hex(json.as_bytes()),
                 cross_partition: item.split.as_str() != candidate.split,
-                method: if exact {
+                method: if exact_match {
                     "exact_url_or_content"
                 } else {
                     "natural_dice_jaro_winkler"
@@ -379,7 +378,7 @@ async fn duplicate_leads(
                 jaro_winkler: None,
                 decision: "independent_review_required; permanent partitions unchanged".into(),
             });
-            if !exact {
+            if !exact_match {
                 pairs.push(crate::classifier::similarity::Pair {
                     left: excerpt(&item.observation),
                     right: excerpt(&observation),

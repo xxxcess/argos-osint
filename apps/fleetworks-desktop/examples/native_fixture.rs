@@ -2,7 +2,6 @@
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod native {
-    mod activation_scenes;
     mod appearance_scenes;
     mod connection_profile_scenes;
     mod job_action_scenes;
@@ -12,9 +11,20 @@ mod native {
     mod overhaul_scenes;
     mod readiness_scenes;
     mod redesign_scenes;
+    mod startup_data_scenes;
     mod submission_scenes;
 
     use fleetworks_contracts::capabilities::Capabilities;
+    use fleetworks_contracts::chat::ChatSourceKind;
+    use fleetworks_contracts::chat::ChatSourceReference;
+    use fleetworks_contracts::chat::QaAvailabilityReason;
+    use fleetworks_contracts::chat::QaFinding;
+    use fleetworks_contracts::chat::QaMeasurement;
+    use fleetworks_contracts::chat::QaMeasurementUnit;
+    use fleetworks_contracts::chat::QaPhase;
+    use fleetworks_contracts::chat::QaSettings;
+    use fleetworks_contracts::chat::QaTurn;
+    use fleetworks_contracts::chat::QaTurnState;
     use fleetworks_contracts::connect::RegistrationReceipt;
     use fleetworks_contracts::context::JobOrigin;
     use fleetworks_contracts::context::OriginSource;
@@ -34,6 +44,7 @@ mod native {
     use fleetworks_contracts::search::ActorSearchResponse;
     use fleetworks_contracts::search::IndexState;
     use fleetworks_contracts::search::IndexStatus;
+    use fleetworks_desktop::accessibility::FixtureAccessibility;
     use fleetworks_desktop::app;
     use fleetworks_desktop::app::Intent;
     use fleetworks_desktop::app::Load;
@@ -52,6 +63,7 @@ mod native {
     use fleetworks_desktop::brain::ActorDossier;
     use fleetworks_desktop::configuration::ConfigurationSaved;
     use fleetworks_desktop::connection::ConnectionStatus;
+    use fleetworks_desktop::local_backend::BinaryDiscoveryStatus;
     use fleetworks_desktop::registration::InterfaceSnapshot;
     use fleetworks_desktop::registration::NativeInterface;
     use fleetworks_desktop::transfer::TransferConfirmation;
@@ -60,12 +72,16 @@ mod native {
     use fleetworks_desktop::workspaces::WorkspaceSnapshot;
     use fleetworks_desktop::Page;
     use fleetworks_desktop::State;
+    use fleetworks_workstation::native::BackendKind;
     use fleetworks_workstation::native::WorkspaceState;
     use rune::AppSpec;
     use rune::TextEdit;
 
     fn init() -> State {
-        State::fixture()
+        let mut state = State::fixture();
+        state.local_backend.binary_status =
+            BinaryDiscoveryStatus::Ready("/fixture/bundle/argos-api-host".into());
+        state
     }
 
     fn connected(state: &mut State) {
@@ -402,9 +418,6 @@ mod native {
         if connection_profile_scenes::reply(state, intent) {
             return;
         }
-        if activation_scenes::reply(state, intent) {
-            return;
-        }
         if lifecycle_scenes::reply(state, intent) {
             return;
         }
@@ -519,14 +532,14 @@ mod native {
                     false,
                 ));
             }
-            Intent::UploadDataset { kind } => {
+            Intent::UploadDataset { kind } | Intent::DownloadGithubDataset { kind } => {
                 let dataset =
                     DatasetRef::new("synthetic-dataset".into(), *kind, "a".repeat(64), 1024)
                         .expect("synthetic dataset");
                 state.maintenance.selected_dataset = Some(dataset.clone());
                 state.maintenance.upload = Load::Ready(
                     serde_json::from_value(
-                        serde_json::json!({"dataset":dataset,"expires_in_seconds":86400}),
+                        serde_json::json!({"dataset":dataset,"expires_in_seconds":86400,"row_count":3}),
                     )
                     .expect("synthetic upload receipt"),
                 );
@@ -570,6 +583,139 @@ mod native {
         }
     }
 
+    fn setup_connected_embedded(state: &mut State) {
+        setup_connected_distributed(state);
+        state.backend_kind = BackendKind::Local;
+        state.connection.origin = TextEdit::new("local://embedded");
+    }
+
+    fn setup_connected_distributed(state: &mut State) {
+        readiness_scenes::mixed_status_checks(state);
+        state.setup_gateway = true;
+        state.setup_advanced_open = true;
+    }
+
+    fn inbox(state: &mut State) {
+        registered(state);
+        state.seed_inbox_drawer_fixture();
+    }
+
+    fn inbox_qa_off(state: &mut State, kind: BackendKind) {
+        registered(state);
+        state.seed_inbox_qa_drawer_fixture();
+        state.backend_kind = kind;
+        let can_manage = kind == BackendKind::Local;
+        if can_manage {
+            state.connection.origin = TextEdit::new("local://embedded");
+        }
+        state.seed_inbox_qa_fixture(QaSettings::new(false, QaPhase::Off, 1, 1, can_manage), None);
+    }
+
+    fn inbox_qa_unavailable(state: &mut State, reason: QaAvailabilityReason) {
+        registered(state);
+        state.seed_inbox_qa_drawer_fixture();
+        state.backend_kind = BackendKind::Local;
+        state.connection.origin = TextEdit::new("local://embedded");
+        let mut settings = QaSettings::new(true, QaPhase::Unavailable, 2, 1, true);
+        settings.availability_reason = Some(reason);
+        state.seed_inbox_qa_fixture(settings, None);
+    }
+
+    fn inbox_qa_turn(state: &mut State, stage: QaTurnState) {
+        registered(state);
+        state.seed_inbox_qa_drawer_fixture();
+        let question = if stage == QaTurnState::Answered {
+            "What is the current memory usage?"
+        } else {
+            "Is actor search ready?"
+        };
+        let mut turn = QaTurn::queued(
+            "fixture-turn-1".into(),
+            "fixture-request-1".into(),
+            question.into(),
+        );
+        turn.state = stage;
+        turn.cursor = 1;
+        if stage == QaTurnState::Answered {
+            let answer = "The connected gateway host memory usage is 42.5%.";
+            let mut finding = QaFinding::new(
+                ChatSourceReference::new(ChatSourceKind::HostMetric, "memory".into())
+                    .expect("fixture host metric source"),
+                "Connected gateway host memory usage".into(),
+                answer.into(),
+                0,
+                answer.len() as u32,
+                "2026-01-01T00:00:00Z".into(),
+            );
+            finding.measurement = Some(QaMeasurement::new(
+                425,
+                QaMeasurementUnit::PercentTenths,
+                "connected gateway host".into(),
+            ));
+            turn.findings.push(finding);
+            turn.cursor = 2;
+        } else if stage == QaTurnState::Canceled {
+            let answer = "Actor search is ready.";
+            turn.findings.push(QaFinding::new(
+                ChatSourceReference::new(ChatSourceKind::Readiness, "actor-search".into())
+                    .expect("fixture search readiness source"),
+                "Actor search".into(),
+                answer.into(),
+                0,
+                answer.len() as u32,
+                "2026-01-01T00:00:00Z".into(),
+            ));
+            turn.cursor = 3;
+        }
+        state.seed_inbox_qa_fixture(
+            QaSettings::new(true, QaPhase::Ready, 2, 1, true),
+            Some(turn),
+        );
+    }
+
+    fn workstation_status(state: &mut State) {
+        readiness_scenes::mixed_status_checks(state);
+        state.backend_kind = BackendKind::Local;
+        state.connection.origin = TextEdit::new("local://embedded");
+        state.host_metrics = Load::Ready(fleetworks_desktop::workstation_dashboard::HostMetrics {
+            cpu_percent: Some(18.0),
+            memory_percent: Some(0.0),
+            disk_percent: None,
+            ..Default::default()
+        });
+        jobs_scenes::install(state, Vec::new());
+        state.workstation_status_checks_open = true;
+    }
+
+    fn workstation_settings(state: &mut State) {
+        registered(state);
+        state.fixture_show_workstation_settings();
+    }
+
+    fn toolbar_telemetry_populated(state: &mut State) {
+        workstation_status(state);
+        state.host_metrics = Load::Ready(fleetworks_desktop::workstation_dashboard::HostMetrics {
+            cpu_percent: Some(100.0),
+            memory_percent: Some(89.0),
+            disk_percent: Some(73.0),
+            ..Default::default()
+        });
+    }
+
+    enum ReviewAppearance {
+        Matte,
+        ReducedMotion,
+    }
+
+    fn review_appearance(state: &mut State, setup: fn(&mut State), appearance: ReviewAppearance) {
+        setup(state);
+        state.accessibility.fixture_override = Some(FixtureAccessibility {
+            reduced_motion: matches!(appearance, ReviewAppearance::ReducedMotion),
+            reduced_transparency: matches!(appearance, ReviewAppearance::Matte),
+            ..FixtureAccessibility::default()
+        });
+    }
+
     pub fn run() {
         rune::run(AppSpec {
             init,
@@ -577,6 +723,13 @@ mod native {
                 ("backend-choice", State::fixture_show_backend_choice),
                 ("backend-choice-opening", |state| {
                     state.startup = fleetworks_desktop::startup::Startup::cold_launch();
+                }),
+                ("backend-choice-matte", |state| {
+                    review_appearance(
+                        state,
+                        State::fixture_show_backend_choice,
+                        ReviewAppearance::Matte,
+                    );
                 }),
                 ("backend-choice-reduced-motion", |state| {
                     state.fixture_show_backend_choice();
@@ -586,6 +739,28 @@ mod native {
                             ..Default::default()
                         });
                 }),
+                ("startup-embedded-registered", |state| {
+                    startup_data_scenes::ready(state, false);
+                }),
+                ("startup-embedded-registered-reduced-motion", |state| {
+                    startup_data_scenes::ready(state, true);
+                }),
+                ("startup-data-seed", startup_data_scenes::seed),
+                ("startup-data-index", startup_data_scenes::index),
+                (
+                    "startup-data-index-queued",
+                    startup_data_scenes::index_queued,
+                ),
+                // Stable scenario key used by the Linux capture workflow.
+                ("startup-data-train", startup_data_scenes::index),
+                (
+                    "startup-health-checks-mixed",
+                    startup_data_scenes::mixed_checks,
+                ),
+                (
+                    "startup-data-checks-unavailable",
+                    startup_data_scenes::checks_unavailable,
+                ),
                 ("redesign-status", redesign_scenes::status),
                 ("redesign-seed", redesign_scenes::seed),
                 ("redesign-seed-ready", redesign_scenes::seed_ready),
@@ -648,15 +823,6 @@ mod native {
                     "connection-profile-switch-confirm",
                     connection_profile_scenes::dirty_switch,
                 ),
-                ("activation-candidate-preview", activation_scenes::preview),
-                ("activation-confirmation", activation_scenes::confirmation),
-                ("activation-accepted", activation_scenes::accepted),
-                ("activation-effect-uncertain", activation_scenes::uncertain),
-                ("activation-completed", activation_scenes::completed),
-                (
-                    "activation-acceptance-unknown",
-                    activation_scenes::acceptance_unknown,
-                ),
                 ("catalog", overhaul_scenes::catalog),
                 ("catalog-opaque", overhaul_scenes::catalog_opaque),
                 ("assistant-open", overhaul_scenes::assistant_open),
@@ -673,6 +839,108 @@ mod native {
                     appearance_scenes::reduced_motion,
                 ),
                 ("appearance-material-fallback", appearance_scenes::fallback),
+                ("setup-connected-embedded", setup_connected_embedded),
+                ("setup-connected-distributed", setup_connected_distributed),
+                ("inbox-drawer", inbox),
+                ("inbox-qa-off-embedded", |state| {
+                    inbox_qa_off(state, BackendKind::Local);
+                }),
+                ("inbox-qa-off-distributed", |state| {
+                    inbox_qa_off(state, BackendKind::Remote);
+                }),
+                ("inbox-qa-pending", |state| {
+                    inbox_qa_turn(state, QaTurnState::Running);
+                }),
+                ("inbox-qa-answered", |state| {
+                    inbox_qa_turn(state, QaTurnState::Answered);
+                }),
+                ("inbox-qa-stopped", |state| {
+                    inbox_qa_turn(state, QaTurnState::Canceled);
+                }),
+                ("inbox-qa-pack-missing", |state| {
+                    inbox_qa_unavailable(state, QaAvailabilityReason::PackMissing);
+                }),
+                ("inbox-qa-pack-invalid", |state| {
+                    inbox_qa_unavailable(state, QaAvailabilityReason::PackInvalid);
+                }),
+                ("inbox-qa-sandbox-unsupported", |state| {
+                    inbox_qa_unavailable(state, QaAvailabilityReason::SandboxUnsupported);
+                }),
+                ("inbox-qa-worker-start-failed", |state| {
+                    inbox_qa_unavailable(state, QaAvailabilityReason::WorkerStartFailed);
+                }),
+                ("gateway-qa-sandbox-unsupported", |state| {
+                    inbox_qa_unavailable(state, QaAvailabilityReason::SandboxUnsupported);
+                    state.fixture_show_gateway_qa_details();
+                }),
+                ("workstation-status-checks-mixed", workstation_status),
+                ("workstation-settings", workstation_settings),
+                ("toolbar-telemetry-populated", toolbar_telemetry_populated),
+                ("tools-catalog-ready-matte", |state| {
+                    review_appearance(state, tools_ready, ReviewAppearance::Matte);
+                }),
+                ("models-ready-matte", |state| {
+                    review_appearance(state, models_ready, ReviewAppearance::Matte);
+                }),
+                ("workstation-status-checks-mixed-matte", |state| {
+                    review_appearance(state, workstation_status, ReviewAppearance::Matte);
+                }),
+                ("workstation-status-checks-mixed-reduced-motion", |state| {
+                    review_appearance(state, workstation_status, ReviewAppearance::ReducedMotion);
+                }),
+                ("inbox-drawer-matte", |state| {
+                    review_appearance(state, inbox, ReviewAppearance::Matte);
+                }),
+                ("inbox-drawer-reduced-motion", |state| {
+                    review_appearance(state, inbox, ReviewAppearance::ReducedMotion);
+                }),
+                ("command-panel-reduced-motion", |state| {
+                    review_appearance(
+                        state,
+                        overhaul_scenes::command_panel,
+                        ReviewAppearance::ReducedMotion,
+                    );
+                }),
+                ("setup-connected-embedded-matte", |state| {
+                    review_appearance(state, setup_connected_embedded, ReviewAppearance::Matte);
+                }),
+                ("setup-connected-embedded-reduced-motion", |state| {
+                    review_appearance(
+                        state,
+                        setup_connected_embedded,
+                        ReviewAppearance::ReducedMotion,
+                    );
+                }),
+                ("setup-connected-distributed-matte", |state| {
+                    review_appearance(state, setup_connected_distributed, ReviewAppearance::Matte);
+                }),
+                ("setup-connected-distributed-reduced-motion", |state| {
+                    review_appearance(
+                        state,
+                        setup_connected_distributed,
+                        ReviewAppearance::ReducedMotion,
+                    );
+                }),
+                ("atlas-provider-keys-matte", |state| {
+                    review_appearance(
+                        state,
+                        submission_scenes::atlas_provider_keys,
+                        ReviewAppearance::Matte,
+                    );
+                }),
+                ("atlas-provider-keys-reduced-motion", |state| {
+                    review_appearance(
+                        state,
+                        submission_scenes::atlas_provider_keys,
+                        ReviewAppearance::ReducedMotion,
+                    );
+                }),
+                ("workstation-settings-matte", |state| {
+                    review_appearance(state, workstation_settings, ReviewAppearance::Matte);
+                }),
+                ("workstation-settings-reduced-motion", |state| {
+                    review_appearance(state, workstation_settings, ReviewAppearance::ReducedMotion);
+                }),
                 ("workstation-observed", readiness_scenes::observed),
                 ("workstation-connecting", readiness_scenes::connecting),
                 ("workstation-unsupported", readiness_scenes::unsupported),
@@ -687,7 +955,10 @@ mod native {
                     "maintenance-partial-seed-progress",
                     readiness_scenes::partial_seed_progress,
                 ),
-                ("workstation-training", readiness_scenes::training),
+                (
+                    "workstation-bert-verified",
+                    readiness_scenes::inference_verified,
+                ),
                 (
                     "workstation-inference-unverified",
                     readiness_scenes::inference_unverified,
@@ -701,6 +972,14 @@ mod native {
                 }),
                 ("atlas-offline", |state| state.page = Page::Atlas),
                 ("atlas-articles-ready", atlas_ready),
+                (
+                    "atlas-prerequisites",
+                    submission_scenes::atlas_prerequisites,
+                ),
+                (
+                    "atlas-provider-keys",
+                    submission_scenes::atlas_provider_keys,
+                ),
                 ("atlas-submit-preview", submission_scenes::atlas_preview),
                 ("atlas-submit-accepted", submission_scenes::atlas_accepted),
                 ("atlas-submit-uncertain", submission_scenes::atlas_uncertain),
@@ -773,8 +1052,8 @@ mod native {
                 ),
                 ("workspace-trash-recovery", lifecycle_scenes::trash_recovery),
                 (
-                    "maintenance-training-result",
-                    lifecycle_scenes::training_result,
+                    "jobs-legacy-classifier-result",
+                    lifecycle_scenes::legacy_classifier_result,
                 ),
                 ("maintenance-seed-result", lifecycle_scenes::seed_result),
                 ("jobs-shared-status", |state| {

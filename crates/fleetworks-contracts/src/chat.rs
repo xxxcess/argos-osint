@@ -10,6 +10,10 @@
 //! Permissions (the server rechecks them): reads need `ReadWorkstationActivity` and a
 //! registration; submit needs `SubmitInteractive` and a registration.
 
+mod qa;
+
+pub use qa::*;
+
 use std::fmt;
 
 use serde::Deserialize;
@@ -151,6 +155,10 @@ pub enum ChatSourceKind {
     Job,
     Cycle,
     Readiness,
+    /// A sample from the selected backend's host metrics feed.
+    HostMetric,
+    /// A count from the registered workstation's activity scope.
+    JobCount,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

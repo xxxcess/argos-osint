@@ -12,7 +12,18 @@ on:
       profile:
         required: true
         type: string
+      capture-ui:
+        type: boolean
+        default: true
       release-version:
+        required: false
+        type: string
+        default: ""
+      pilot-cache-key:
+        required: false
+        type: string
+        default: ""
+      pilot-cache-phase:
         required: false
         type: string
         default: ""
@@ -30,18 +41,22 @@ on:
         required: false
         type: string
         default: debug
+      capture-ui:
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
 env:
+  FLEETWORKS_HEAD: ${{ inputs.expected-head }}
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
 
 concurrency:
-  group: fleetworks-native-linux-${{ github.workflow }}-${{ github.ref }}
+  group: fleetworks-native-linux-${{ github.workflow }}-${{ github.ref }}${{ inputs.mode == 'pilot-baseline' && '-pilot-baseline' || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -90,11 +105,70 @@ jobs:
           python3 scripts/fleetworks_verify.py platform --format json
 
       - uses: Swatinem/rust-cache@v2
+        if: inputs.pilot-cache-key == '' && inputs.pilot-cache-phase == ''
         with:
           key: linux-native-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'apps/fleetworks-desktop/Cargo.toml', 'services/api-host/Cargo.toml', 'services/search-index/Cargo.toml', 'rust-toolchain.toml') }}
           workspaces: . -> target/agents
           cache-on-failure: true
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+
+      - name: Isolate the pilot Cargo cache
+        if: inputs.pilot-cache-key != '' || inputs.pilot-cache-phase != ''
+        env:
+          CACHE_KEY: ${{ inputs.pilot-cache-key }}
+          CACHE_PHASE: ${{ inputs.pilot-cache-phase }}
+          EXPECTED_HEAD: ${{ inputs.expected-head }}
+        shell: bash
+        run: |
+          if [[ ! "$CACHE_KEY" =~ ^linux-native-pilot-v1-[0-9]+-[0-9]+-${EXPECTED_HEAD}$ ]] ||
+             [[ "$CACHE_PHASE" != cold && "$CACHE_PHASE" != warm ]]; then
+            echo '::error::The cache key and phase must identify this pilot run and revision'
+            exit 1
+          fi
+          if [[ -e target/agents ]]; then
+            echo '::error::The pilot requires a fresh Cargo build directory before restore'
+            exit 1
+          fi
+          mkdir -p target/agents/.pilot-cargo
+          printf 'CARGO_HOME=%s/target/agents/.pilot-cargo\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+
+      - name: Restore the exact pilot Cargo cache
+        if: inputs.pilot-cache-key != ''
+        id: pilot_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/agents
+          key: ${{ inputs.pilot-cache-key }}
+
+      - name: Verify the pilot cache state
+        if: inputs.pilot-cache-key != ''
+        env:
+          CACHE_HIT: ${{ steps.pilot_cache.outputs.cache-hit }}
+          CACHE_MATCHED_KEY: ${{ steps.pilot_cache.outputs.cache-matched-key }}
+          CACHE_PHASE: ${{ inputs.pilot-cache-phase }}
+          LINUX_TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          case "$CACHE_PHASE:${CACHE_HIT:-false}" in
+            cold:false)
+              if [[ -n "$CACHE_MATCHED_KEY" ]]; then
+                echo '::error::The cold pilot restored a partial Cargo cache match'
+                exit 1
+              fi
+              result=miss ;;
+            warm:true)
+              if [[ ! -d "target/agents/$LINUX_TARGET/debug" || ! -d "$CARGO_HOME/registry" ]]; then
+                echo '::error::The restored pilot cache has no Cargo build graph or registry'
+                exit 1
+              fi
+              result=hit ;;
+            *)
+              echo "::error::Unexpected Cargo cache state for the $CACHE_PHASE pilot (cache-hit=${CACHE_HIT:-unset})"
+              exit 1 ;;
+          esac
+          mkdir -p "$RUNNER_TEMP/linux-native-evidence"
+          printf '%s: Cargo cache %s\n' "$CACHE_PHASE" "$result" \
+            | tee "$RUNNER_TEMP/linux-native-evidence/pilot-cache-state.txt"
 
       - name: Verify Linux packaging and scope scripts offline
         run: |
@@ -109,12 +183,15 @@ jobs:
           set -euo pipefail
           mkdir -p "${{ runner.temp }}/linux-native-evidence"
           cargo fmt -p fleetworks-desktop -p fleetworks-workstation -p fleetworks-contracts -- --check
-          python3 scripts/agent_cargo.py test --locked --target ${{ matrix.target }} -p fleetworks-contracts -p fleetworks-workstation -p fleetworks-desktop -- --test-threads=1 \
+          python3 scripts/fleetworks_verify.py timed --phase linux-native-unit-tests -- \
+            python3 scripts/agent_cargo.py test --locked --target ${{ matrix.target }} -p fleetworks-contracts -p fleetworks-workstation -p fleetworks-desktop -- --test-threads=1 \
             | tee "${{ runner.temp }}/linux-native-evidence/unit-tests.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "${{ runner.temp }}/linux-native-evidence/unit-tests.log"
           ! grep -Eq 'test result: FAILED\.' "${{ runner.temp }}/linux-native-evidence/unit-tests.log"
 
       - name: Render headless Linux native UI fixture captures (Lavapipe)
+        if: inputs.capture-ui
+        id: native_ui
         shell: bash
         run: |
           set -euo pipefail
@@ -125,27 +202,151 @@ jobs:
           if [[ -n "$icd" ]]; then
             export VK_ICD_FILENAMES="$icd"
             export VK_DRIVER_FILES="$icd"
+            printf 'icd=%s\n' "$icd" >> "$GITHUB_OUTPUT"
           fi
           vulkaninfo --summary | tee "${{ runner.temp }}/linux-native-evidence/vulkaninfo-summary.txt"
-          python3 scripts/fleetworks_verify.py native-ui --agent --require-clean \
+          python3 scripts/fleetworks_verify.py timed --phase linux-native-ui-fixtures -- \
+            python3 scripts/fleetworks_verify.py native-ui --agent --require-clean \
             --target ${{ matrix.target }} \
             --revision "${{ inputs.expected-head }}" \
             --output "${{ runner.temp }}/linux-native-evidence/ui" \
             --scene backend-choice \
+            --scene backend-choice-matte \
             --scene redesign-setup \
+            --scene setup-connected-embedded \
+            --scene setup-connected-distributed \
             --scene registration-ready \
             --scene workstation-partial-seed \
+            --scene workstation-status-checks-mixed \
+            --scene workstation-offline \
+            --scene atlas-prerequisites \
+            --scene atlas-provider-keys \
             --scene pairing-waiting \
             --scene pairing-keychain-denied \
             --scene assistant-open \
+            --scene inbox-drawer \
             --scene command-panel \
             --scene catalog \
+            --scene workstation-status-checks-mixed-matte \
+            --scene workstation-status-checks-mixed-reduced-motion \
+            --scene setup-connected-embedded-matte \
+            --scene setup-connected-embedded-reduced-motion \
+            --scene setup-connected-distributed-matte \
+            --scene setup-connected-distributed-reduced-motion \
+            --scene atlas-provider-keys-matte \
+            --scene atlas-provider-keys-reduced-motion \
+            --scene inbox-drawer-matte \
+            --scene inbox-drawer-reduced-motion \
+            --scene inbox-qa-off-embedded \
+            --scene inbox-qa-off-distributed \
+            --scene inbox-qa-pending \
+            --scene inbox-qa-answered \
+            --scene inbox-qa-stopped \
+            --scene inbox-qa-pack-missing \
+            --scene inbox-qa-pack-invalid \
+            --scene inbox-qa-sandbox-unsupported \
+            --scene inbox-qa-worker-start-failed \
+            --scene gateway-qa-sandbox-unsupported \
+            --scene command-panel-opaque \
+            --scene command-panel-reduced-motion \
+            --scene workstation-settings \
+            --scene workstation-settings-matte \
+            --scene workstation-settings-reduced-motion \
+            --scene tools-catalog-ready \
+            --scene tools-catalog-ready-matte \
+            --scene models-ready \
+            --scene models-ready-matte \
             --size 1280x800 --size 640x480 --scale 1
 
+      - name: Capture startup motion and reduced-motion transitions (Lavapipe)
+        if: inputs.capture-ui && inputs.profile == 'debug'
+        env:
+          LAVAPIPE_ICD: ${{ steps.native_ui.outputs.icd }}
+          EXPECTED_HEAD: ${{ inputs.expected-head }}
+          LINUX_TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          python3 scripts/fleetworks_verify.py timed --phase linux-native-startup-motion -- bash -s <<'FLEETWORKS_MOTION'
+          set -euo pipefail
+          if [[ -n "$LAVAPIPE_ICD" ]]; then
+            export VK_ICD_FILENAMES="$LAVAPIPE_ICD"
+            export VK_DRIVER_FILES="$LAVAPIPE_ICD"
+          fi
+          evidence="$RUNNER_TEMP/linux-native-evidence/ui"
+          scripts=apps/fleetworks-desktop/tests/fixtures/scripts
+          wizard_settled_at=1.0
+          capture=(python3 scripts/fleetworks_verify.py native-ui --agent --require-clean
+            --target "$LINUX_TARGET" --revision "$EXPECTED_HEAD" --size 640x480 --size 1280x800 --scale 1 --at 0)
+          chooser=(--scene backend-choice-opening --scene backend-choice-reduced-motion)
+
+          "${capture[@]}" "${chooser[@]}" --output "$evidence/startup-dock" --script-at 0.20 \
+            --script "backend-choice-opening=$scripts/startup-dock.json" \
+            --script "backend-choice-reduced-motion=$scripts/startup-dock.json" \
+            --script-expect-key backend-choice-opening=startup-orbit-flight \
+            --script-expect-key backend-choice-reduced-motion=startup-setup-mark
+
+          "${capture[@]}" "${chooser[@]}" --output "$evidence/startup-back" --script-at 0.65 \
+            --script "backend-choice-opening=$scripts/startup-dock-back.json" \
+            --script "backend-choice-reduced-motion=$scripts/startup-dock-back.json" \
+            --script-expect-key backend-choice-opening=startup-choose \
+            --script-expect-key backend-choice-reduced-motion=startup-choose
+
+          "${capture[@]}" --output "$evidence/startup-done" --script-at "$wizard_settled_at" \
+            --scene startup-embedded-registered --scene startup-embedded-registered-reduced-motion \
+            --script "startup-embedded-registered=$scripts/startup-done.json" \
+            --script "startup-embedded-registered-reduced-motion=$scripts/startup-done.json" \
+            --script-expect-key startup-embedded-registered=startup-data-reset-seed \
+            --script-expect-key startup-embedded-registered-reduced-motion=startup-data-reset-seed
+
+          "${capture[@]}" --output "$evidence/startup-finish" --script-at 0.45 \
+            --scene startup-embedded-registered --scene startup-embedded-registered-reduced-motion \
+            --script "startup-embedded-registered=$scripts/startup-data-finish.json" \
+            --script "startup-embedded-registered-reduced-motion=$scripts/startup-data-finish.json" \
+            --script-expect-key startup-embedded-registered=screen-workstation \
+            --script-expect-key startup-embedded-registered-reduced-motion=screen-workstation
+
+          "${capture[@]}" --scene startup-embedded-registered --output "$evidence/startup-data-reset" --script-at "$wizard_settled_at" \
+            --script "startup-embedded-registered=$scripts/startup-data-reset-seed.json" \
+            --script-expect-key startup-embedded-registered=startup-data-primary
+
+          wizard=()
+          for scene in startup-data-seed startup-data-index startup-data-index-queued startup-data-train startup-data-checks-unavailable; do
+            wizard+=(--scene "$scene" --script "$scene=$scripts/startup-done.json"
+              --script-expect-key "$scene=startup-data-setup")
+          done
+          "${capture[@]}" "${wizard[@]}" --output "$evidence/startup-data" --script-at "$wizard_settled_at"
+
+          "${capture[@]}" --scene startup-data-train --output "$evidence/startup-data-skip" --script-at "$wizard_settled_at" \
+            --script "startup-data-train=$scripts/startup-data-skip-training.json" \
+            --script-expect-key startup-data-train=startup-data-checklist
+
+          "${capture[@]}" --scene startup-health-checks-mixed --output "$evidence/startup-health-checks" --script-at "$wizard_settled_at" \
+            --script "startup-health-checks-mixed=$scripts/startup-done.json" \
+            --script-expect-key startup-health-checks-mixed=startup-data-checklist
+          FLEETWORKS_MOTION
+
+      - name: Capture the connected toolbar with populated telemetry
+        if: inputs.capture-ui && inputs.profile == 'debug'
+        env:
+          LAVAPIPE_ICD: ${{ steps.native_ui.outputs.icd }}
+          EXPECTED_HEAD: ${{ inputs.expected-head }}
+          LINUX_TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          if [[ -n "$LAVAPIPE_ICD" ]]; then
+            export VK_ICD_FILENAMES="$LAVAPIPE_ICD"
+            export VK_DRIVER_FILES="$LAVAPIPE_ICD"
+          fi
+          python3 scripts/fleetworks_verify.py native-ui --agent --require-clean \
+            --target "$LINUX_TARGET" --revision "$EXPECTED_HEAD" \
+            --scene toolbar-telemetry-populated --size 1180x812 --scale 1 \
+            --output "$RUNNER_TEMP/linux-native-evidence/ui/toolbar-telemetry"
+
       - name: Publish Linux UI captures for early review
+        if: inputs.capture-ui
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: Fleetworks-linux-ui-${{ matrix.target }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          name: Fleetworks-Linux-Desktop-UI-Captures-x86_64-${{ inputs.profile }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}${{ inputs.pilot-cache-phase && format('-{0}', inputs.pilot-cache-phase) || '' }}
           path: ${{ runner.temp }}/linux-native-evidence/ui/
           if-no-files-found: error
           retention-days: 7
@@ -158,6 +359,7 @@ jobs:
           LINUX_PROFILE: ${{ inputs.profile }}
           RELEASE_VERSION: ${{ inputs.release-version }}
         run: |
+          python3 scripts/fleetworks_verify.py timed --phase linux-native-package-verification -- bash -s <<'FLEETWORKS_PACKAGE'
           set -euo pipefail
           dist="${{ runner.temp }}/linux-native-dist"
           extracted="${{ runner.temp }}/linux-native-extract"
@@ -232,11 +434,12 @@ jobs:
           python3 scripts/fleetworks_local_backend_smoke.py \
             --app "$extracted/Fleetworks-linux-x86_64" \
             --output "${{ runner.temp }}/linux-native-evidence/local-backend-smoke-$LINUX_TARGET.json"
+          FLEETWORKS_PACKAGE
 
       - name: Upload Linux native candidate archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: Fleetworks-linux-app-${{ matrix.target }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          name: Fleetworks-Linux-Desktop-App-x86_64-${{ inputs.profile }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}${{ inputs.pilot-cache-phase && format('-{0}', inputs.pilot-cache-phase) || '' }}
           path: |
             ${{ runner.temp }}/linux-native-dist/Fleetworks-*.tar.gz
             ${{ runner.temp }}/linux-native-dist/Fleetworks-*.tar.gz.sha256
@@ -253,14 +456,29 @@ jobs:
           FLEETWORKS_PARITY_COMPANION_PATH: ${{ runner.temp }}/linux-native-extract/Fleetworks-linux-x86_64/bin/argos-api-host
           FLEETWORKS_PARITY_REPORT_PATH: ${{ runner.temp }}/linux-native-evidence/http-ipc-parity-${{ matrix.target }}.json
         run: |
-          python3 scripts/agent_cargo.py test --locked --target ${{ matrix.target }} \
-            -p argos-api-host --features embedded --test http_ipc_parity -- --nocapture --test-threads=1
+          python3 scripts/fleetworks_verify.py timed --phase linux-native-http-ipc-parity -- \
+            python3 scripts/agent_cargo.py test --locked --target ${{ matrix.target }} \
+              -p argos-api-host --features embedded --test http_ipc_parity -- --nocapture --test-threads=1
 
-      - name: Upload Linux native headless fixture evidence
+      - name: Include phase timings in Linux native evidence
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/fleetworks-timings.jsonl" ]]; then
+            cp "$RUNNER_TEMP/fleetworks-timings.jsonl" "$RUNNER_TEMP/linux-native-evidence/"
+          fi
+
+      - name: Upload Linux native verification evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: Fleetworks-linux-evidence-${{ matrix.target }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          name: Fleetworks-Linux-Desktop-Verification-x86_64-${{ inputs.profile }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}${{ inputs.pilot-cache-phase && format('-{0}', inputs.pilot-cache-phase) || '' }}
           path: ${{ runner.temp }}/linux-native-evidence/**
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Save the cold run's exact pilot Cargo cache
+        if: inputs.pilot-cache-phase == 'cold'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/agents
+          key: ${{ inputs.pilot-cache-key }}

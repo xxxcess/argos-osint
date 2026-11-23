@@ -7,9 +7,15 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+from fleetworks_qa_pack import MAX_COMPRESSED, MAX_MANIFEST, MODEL_REVISION
+from inbox_qa_smoke_receipt import require_embedded_smoke
+
 IDENTITY_FIELDS = ("head", "version", "tag", "channel", "prerelease", "native", "backend", "web", "bert", "image_tag", "image_targets")
+INBOX_QA_TARGETS = ("x86_64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin")
 
 
 def run(*command, capture=False):
@@ -122,8 +128,45 @@ def prepare_bert(plan, directory, assets):
         shutil.copy2(evidence_path, assets / f"atlas-bert-evidence-{arch}.json")
 
 
+def inbox_qa_payload(plan, directory, native_digests):
+    archives = list(directory.rglob("Fleetworks-Inbox-QA-Pack-*.tar.gz"))
+    receipts = list(directory.rglob("Fleetworks-Inbox-QA-Pack-*.tar.gz.digests.json"))
+    if not plan.get("inbox_qa", False):
+        if archives or receipts:
+            raise ValueError("Unexpected Inbox QA assets for an unselected release")
+        return []
+
+    expected = {f"Fleetworks-Inbox-QA-Pack-{target}.tar.gz": target for target in INBOX_QA_TARGETS}
+    if (len(archives) != len(expected) or {archive.name for archive in archives} != expected.keys()
+            or len(receipts) != len(expected)
+            or {receipt.name for receipt in receipts} != {name + ".digests.json" for name in expected}):
+        raise ValueError("Exactly three smoke-verified Inbox QA pack pairs are required")
+    for archive in archives:
+        receipt = archive.with_name(archive.name + ".digests.json")
+        if (receipt not in receipts or archive.is_symlink() or receipt.is_symlink()
+                or not archive.is_file() or not receipt.is_file()
+                or not 0 < archive.stat().st_size <= MAX_COMPRESSED
+                or not 0 < receipt.stat().st_size <= MAX_MANIFEST):
+            raise ValueError("Inbox QA pack pair is missing or exceeds its bounds")
+        target = expected[archive.name]
+        evidence = json.loads(receipt.read_text())
+        if (not isinstance(evidence, dict) or evidence.get("archive") != archive.name
+                or evidence.get("target") != target or evidence.get("source_sha") != plan["head"]
+                or evidence.get("version") != plan["version"] or evidence.get("model_revision") != MODEL_REVISION
+                or evidence.get("status") != "passed"
+                or any(not isinstance(evidence.get(key), str) or not re.fullmatch(r"[0-9a-f]{64}", evidence[key])
+                       for key in ("archive_sha256", "manifest_sha256", "native_archive_sha256"))
+                or sha256(archive) != evidence["archive_sha256"]):
+            raise ValueError("Inbox QA pack digest or packaged smoke provenance differs from the release plan")
+        require_embedded_smoke(evidence, target=target, head=plan["head"])
+        if target.endswith("-apple-darwin") and evidence["native_archive_sha256"] != native_digests.get(target):
+            raise ValueError("Inbox QA smoke used a different macOS archive from the release payload")
+    return [*archives, *receipts]
+
+
 def prepare_current(plan, directory, assets, image_paths):
     native = []
+    native_digests = {}
     for manifest_path in directory.rglob("Fleetworks.app.manifest.json"):
         manifest = json.loads(manifest_path.read_text())
         if (manifest["revision"] != plan["head"] or manifest["version"] != plan["version"]
@@ -135,14 +178,16 @@ def prepare_current(plan, directory, assets, image_paths):
             raise ValueError("One app ZIP per architecture required")
         archive = archives[0]
         checksum = archive.with_name(archive.name + ".sha256")
-        if checksum.read_text().split()[0] != sha256(archive):
+        digest = sha256(archive)
+        if checksum.read_text().split()[0] != digest:
             raise ValueError("Downloaded app ZIP checksum mismatch")
+        native_digests[manifest["target"]] = digest
         shutil.copy2(archive, assets / archive.name)
         shutil.copy2(checksum, assets / checksum.name)
         shutil.copy2(manifest_path, assets / f"{archive.stem}.manifest.json")
     if (plan["native"] and sorted(native) != ["aarch64-apple-darwin", "x86_64-apple-darwin"]) or (not plan["native"] and native):
         raise ValueError("Native artifact selection incomplete or unexpected")
-    for path in image_paths:
+    for path in [*image_paths, *inbox_qa_payload(plan, directory, native_digests)]:
         shutil.copy2(path, assets / path.name)
     prepare_bert(plan, directory, assets)
     return {"format": 2, "plan": plan,
@@ -167,7 +212,9 @@ def load_existing(plan, info, assets):
         raise ValueError("Existing release has no immutable completion inventory")
     run("gh", "release", "download", plan["tag"], "--pattern", "release.json", "--dir", str(assets))
     inventory = json.loads((assets / "release.json").read_text())
-    if inventory.get("format") != 2 or any(inventory["plan"].get(key) != plan.get(key) for key in IDENTITY_FIELDS):
+    if (inventory.get("format") != 2
+            or any(inventory["plan"].get(key) != plan.get(key) for key in IDENTITY_FIELDS)
+            or inventory["plan"].get("inbox_qa", False) is not plan.get("inbox_qa", False)):
         raise ValueError("Existing release inventory identifies another source or selection")
     hashes = inventory["assets"]
     if (not isinstance(hashes, dict) or len(hashes) > 32
@@ -221,6 +268,7 @@ def validate_payload_inventory(plan, assets, hashes):
                 raise ValueError("Original Atlas BERT inventory provenance differs")
             known.update((evidence_path.name, archive_path.name, checksum_path.name))
     native = []
+    native_digests = {}
     for path in assets.glob("Fleetworks-*.manifest.json"):
         manifest = json.loads(path.read_text())
         if (manifest.get("revision") != plan["head"] or manifest.get("version") != plan["version"]
@@ -229,11 +277,16 @@ def validate_payload_inventory(plan, assets, hashes):
         native.append(manifest["target"])
         archive = path.with_name(path.name.removesuffix(".manifest.json") + ".zip")
         checksum = archive.with_name(archive.name + ".sha256")
-        if not archive.is_file() or not checksum.is_file() or checksum.read_text().split()[0] != sha256(archive):
+        if not archive.is_file() or not checksum.is_file():
             raise ValueError("Original native inventory bytes are incomplete")
+        digest = sha256(archive)
+        if checksum.read_text().split()[0] != digest:
+            raise ValueError("Original native archive checksum differs")
+        native_digests[manifest["target"]] = digest
         known.update((path.name, archive.name, checksum.name))
     if (plan["native"] and sorted(native) != ["aarch64-apple-darwin", "x86_64-apple-darwin"]) or (not plan["native"] and native):
         raise ValueError("Original native architecture inventory differs")
+    known.update(path.name for path in inbox_qa_payload(plan, assets, native_digests))
     if set(hashes) != known or any(sha256(assets / name) != digest for name, digest in hashes.items()):
         raise ValueError("Original payload inventory differs")
 
@@ -295,6 +348,12 @@ def advance_channel(plan, *, update=True):
 def publish(plan, directory):
     if not plan["publish"] or plan["channel"] not in {"stable", "nightly"} or not re.fullmatch(r"[0-9a-f]{40}", plan["head"]):
         raise ValueError("Trusted exact-source publish plan required")
+    ship_qa = plan.get("inbox_qa", False)
+    if type(ship_qa) is not bool or (ship_qa and (
+        plan["channel"] != "nightly" or plan.get("native") is not True
+        or plan.get("event") != "push" or plan.get("ref") != "refs/heads/nightly"
+    )):
+        raise ValueError("Inbox QA assets require a trusted nightly native release plan")
     image_paths, by_arch = validate_images(plan, directory)
     info = lookup_release(plan["tag"])
     assets = directory / "assets"

@@ -5,6 +5,9 @@ use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
 use fleetworks_contracts::readiness::WorkstationReadiness;
 use rune::Env;
+use rune::Key;
+use rune::KeyEvent;
+use rune::Mods;
 use rune::Runtime;
 
 use crate::accessibility::FixtureAccessibility;
@@ -94,11 +97,13 @@ fn material_and_matte_keep_actual_toolbar_and_navigation_hit_bounds_on_all_pages
         );
         satin.frame(0.0);
         matte.frame(0.0);
-        for key in [
-            "connection-editor".to_owned(),
-            "nav-workstation".to_owned(),
-            format!("nav-{}", page.key()),
-        ] {
+        assert!(satin.find("nav-seed").is_none());
+        assert!(matte.find("nav-seed").is_none());
+        let page_tab = (page != Page::Seed).then(|| format!("nav-{}", page.key()));
+        for key in ["connection-editor".to_owned(), "nav-workstation".to_owned()]
+            .into_iter()
+            .chain(page_tab)
+        {
             let satin_box = satin
                 .presented(&key)
                 .expect("production control in satin mode");
@@ -177,13 +182,42 @@ fn actual_readiness_view_distinguishes_stale_ready_and_unverified_inference() {
     ));
     runtime.state.readiness_received_at = Some(0.0);
     runtime.frame(0.0);
+    let collapsed = runtime.accessibility_json().to_string();
+    assert!(collapsed.contains("Status checks · 2 unresolved"));
+    assert!(!collapsed.contains("passed"));
+    assert!(runtime.find("readiness-trigger-gateway").is_none());
+    assert!(runtime
+        .find("readiness-trigger-classifier_inference")
+        .is_none());
+
+    runtime.update(|_, tx| tx.focus("status-checks-toggle", true));
+    runtime.frame(1.0 / 60.0);
+    assert!(runtime.elements().iter().any(|element| {
+        element.focused && element.path.ends_with("/status-checks-toggle/trigger")
+    }));
+    runtime.key(KeyEvent {
+        key: Key::Text(" ".into()),
+        mods: Mods::default(),
+    });
+    runtime.frame(2.0 / 60.0);
+
     let tree = runtime.accessibility_json().to_string();
-    assert!(tree.contains("Gateway: Ready · stale observation"));
-    assert!(tree.contains("Classifier inference: Unknown"));
-    assert!(!tree.contains("Classifier inference: Ready"));
+    let unsynced_glyph = runtime
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some("readiness-unsynced-gateway"))
+        .expect("unsynced glyph for the last gateway observation");
+    assert!(unsynced_glyph.visible[2] > 0.0 && unsynced_glyph.visible[3] > 0.0);
+    assert!(tree.contains("Gateway: Last ready"));
+    assert!(tree.contains("Gateway observation unsynced."));
+    assert!(!tree.contains("Gateway: Ready"));
+    assert!(!tree.contains("Synthetic previous gateway check"));
+    assert!(tree.contains("Atlas BERT inference: Unknown"));
+    assert!(!tree.contains("Atlas BERT inference: Ready"));
+    assert!(!tree.contains("Atlas BERT inference: Passed"));
     assert!(
         runtime.state.intents.is_empty(),
-        "rendering status never starts maintenance or inference"
+        "opening status never starts maintenance or inference"
     );
 }
 
@@ -215,7 +249,6 @@ fn material_and_matte_preserve_interactive_hit_bounds_and_a11y_on_status_and_see
                 "maintenance-refresh",
                 "maintenance-seed",
                 "maintenance-reindex",
-                "maintenance-train",
             ],
         ),
     ] {

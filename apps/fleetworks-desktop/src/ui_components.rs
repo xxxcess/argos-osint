@@ -1,5 +1,7 @@
 //! Shared workstation UI components built atop Rune and `rune_kit`.
 
+use std::rc::Rc;
+
 use rune::col;
 use rune::el;
 use rune::icon;
@@ -11,12 +13,14 @@ use rune::Icon;
 use rune::Live;
 use rune::Shadow;
 use rune::TextStyle;
+use rune::Transition;
 use rune::Tx;
 use rune_kit::Dialog;
+use rune_kit::IconButton;
+use rune_kit::IconButtonVariant;
 use rune_kit::Kit;
 use rune_kit::Progress;
 use rune_kit::ProgressCircle;
-use rune_kit::RollingText;
 use rune_kit::Spinner;
 use rune_kit::Switch;
 
@@ -222,7 +226,7 @@ pub(crate) fn status_pill(
         .h(22.0)
         .px(8.0)
         .radius(999.0)
-        .fill(tone.bg())
+        .fill(tone.bg().alpha(kit.c.bg_button_neutral.a))
         .border(1.0, tone.border());
     if let Some(glyph) = glyph {
         badge = badge.child(icon(glyph, 12.0).color(fg).a11y_hidden());
@@ -269,119 +273,181 @@ pub(crate) fn async_status_strip(
     let title = title.into();
     let detail = detail.into();
     let key = key.into();
-    let mut header = row().gap(8.0).center_y();
+    let mut header = row().w_full().min_w(0.0).gap(8.0).center_y();
     if busy {
         header = header.child(Spinner::new().size(15.0).color(tone.fg()).build(kit));
     } else {
         header = header.child(status_dot(tone, preferences));
     }
-    header = header
-        .child(text(title.clone()).font(kit.ty.ui_medium).color(tone.fg()))
-        .child(text(detail).font(kit.ty.small).color(kit.c.text_muted));
+    header = header.child(
+        text(title)
+            .grow(1.0)
+            .min_w(0.0)
+            .font(kit.ty.ui_medium)
+            .color(tone.fg())
+            .wrap(),
+    );
 
     let mut strip = col()
         .key(key)
         .w_full()
+        .min_w(0.0)
         .gap(6.0)
         .padding(10.0)
         .radius(8.0)
         .fill(tone.bg())
         .border(1.0, tone.border())
         .child(header);
+    if !detail.is_empty() {
+        strip = strip.child(
+            text(detail)
+                .key("async-status-detail")
+                .w_full()
+                .min_w(0.0)
+                .font(kit.ty.small)
+                .color(kit.c.text_muted)
+                .wrap_anywhere(),
+        );
+    }
     if busy {
         strip = strip.child(Progress::new(None).build(kit));
     }
     strip
 }
 
-/// Interactive visual telemetry tile using `ProgressCircle`, `RollingText` and pointer-reactive glow.
+/// Floating dialog with a dimmed backdrop and Rune-managed focus and dismissal.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn glass_dialog<S: 'static>(
+    key: &str,
+    title: &str,
+    width: f32,
+    body: El,
+    dismiss_outside: bool,
+    close: impl Fn(&mut S) + Clone + 'static,
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> [El; 2] {
+    let scrim = el()
+        .key(format!("{key}-scrim"))
+        .absolute(0.0, 0.0)
+        .w_full()
+        .h_full()
+        .fill(theme::hex(theme::BACKGROUND).alpha(0.86))
+        .a11y_hidden();
+    let dismiss = IconButton::new(kit.glyph.close)
+        .variant(IconButtonVariant::Ghost)
+        .label("Close")
+        .on_press(close.clone())
+        .build(kit)
+        .key("close");
+    let panel = col()
+        .key(format!("{key}-dialog"))
+        .role("dialog")
+        .label(title)
+        .w_full()
+        .max_w(width)
+        .radius(10.0)
+        .child(
+            row()
+                .key("header")
+                .w_full()
+                .px(16.0)
+                .py(10.0)
+                .gap(12.0)
+                .center_y()
+                .border_sides([0.0, 0.0, 1.0, 0.0], theme::hex(theme::BORDER_SUBTLE))
+                .child(
+                    text(title)
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .font(kit.ty.ui_medium)
+                        .color(kit.c.text_base)
+                        .wrap(),
+                )
+                .child(dismiss),
+        )
+        .child(col().key("body").w_full().child(body))
+        .modal(true, close)
+        .modal_click_outside(dismiss_outside);
+    let panel = material::glass(panel, material::GlassSurface::Overlay, preferences);
+    let (scrim, panel) = if preferences.reduced_motion {
+        (scrim, panel)
+    } else {
+        (
+            scrim.transition(Transition::opacity()),
+            panel.transition(Transition::opacity()),
+        )
+    };
+    [
+        scrim,
+        el().key(format!("{key}-layer"))
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .padding(16.0)
+            .center()
+            .child(panel),
+    ]
+}
+
+/// Compact, interactive 0–100% telemetry dial.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn metric_ring_tile(
-    key: impl Into<String>,
-    label: impl Into<String>,
-    value_text: impl Into<String>,
-    numeric_value: Option<f64>,
-    fraction: Option<f32>,
-    subtitle: impl Into<String>,
+    key: &str,
+    label: &str,
+    reading: Option<f64>,
     glyph: &'static Icon,
     tone: StatusTone,
     active: bool,
     preferences: ViewPreferences,
     kit: &Kit,
-    pointer_offset: Option<&Live<[f32; 2]>>,
-    shadow_offset: Option<&Live<[f32; 2]>>,
 ) -> El {
-    let key = key.into();
-    let label = label.into();
-    let value_text = value_text.into();
-    let subtitle = subtitle.into();
-    let fg = tone.fg();
-
-    let ring = match fraction {
-        Some(value) => ProgressCircle::new(value.clamp(0.0, 1.0))
-            .size(34.0)
-            .label(label.clone())
+    let value = reading.map(|value| format!("{value:.1}%"));
+    let accessible_label = format!("{label}: {}", value.as_deref().unwrap_or("Unavailable"));
+    let ring = match reading {
+        Some(value) => ProgressCircle::new((value / 100.0) as f32)
+            .size(26.0)
             .build(kit),
         None => el()
-            .size(34.0, 34.0)
+            .size(26.0, 26.0)
             .radius(999.0)
             .fill(tone.bg())
             .border(1.0, tone.border())
             .center()
-            .child(icon(glyph, 16.0).color(fg).a11y_hidden()),
+            .child(icon(glyph, 14.0).color(tone.fg())),
     };
-
-    let mut rolling = RollingText::new(format!("{key}-value"), value_text.clone())
-        .font(TextStyle {
-            size: 18.0,
-            line_height: 22.0,
-            ..kit.ty.ui_medium
-        })
-        .color(theme::hex(theme::TEXT_PRIMARY));
-    if let Some(num) = numeric_value {
-        rolling = rolling.value(num);
-    }
-
-    let body = col()
+    let body = row()
         .w_full()
-        .padding(12.0)
-        .gap(8.0)
+        .min_w(0.0)
+        .padding(7.0)
+        .gap(6.0)
+        .center_y()
+        .child(ring.a11y_hidden())
         .child(
-            row()
-                .w_full()
-                .center_y()
-                .gap(8.0)
-                .child(icon(glyph, 14.0).color(fg).a11y_hidden())
+            col()
+                .min_w(0.0)
+                .grow(1.0)
+                .gap(1.0)
                 .child(
-                    text(label.clone())
-                        .font(kit.ty.small_medium)
-                        .color(kit.c.text_muted),
+                    text(label)
+                        .font(kit.ty.small)
+                        .color(kit.c.text_muted)
+                        .wrap(),
                 )
-                .child(spacer())
-                .child(status_dot(tone, preferences)),
-        )
-        .child(
-            row().w_full().center_y().gap(10.0).child(ring).child(
-                col()
-                    .gap(2.0)
-                    .child(rolling.build(kit))
-                    .child(text(subtitle).font(kit.ty.small).color(kit.c.text_faint)),
-            ),
+                .child(
+                    text(value.unwrap_or_else(|| "—".to_owned()))
+                        .font(kit.ty.body_medium)
+                        .color(kit.c.text_base),
+                )
+                .a11y_hidden(),
         );
 
-    material::interactive_tile(
-        body,
-        active,
-        tone,
-        preferences,
-        pointer_offset,
-        shadow_offset,
-    )
-    .key(key)
-    .role("button")
-    .label(format!("{label}: {value_text}"))
-    .focusable(true)
-    .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT))
+    material::canvas_tile(body, active, preferences)
+        .key(key)
+        .role("button")
+        .label(accessible_label)
+        .focusable(true)
+        .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT))
 }
 
 /// Inline configuration toggle row backed by `rune_kit::Switch`.
@@ -394,30 +460,69 @@ pub(crate) fn inline_toggle_row<S: 'static>(
     kit: &Kit,
     on_toggle: impl Fn(&mut S) + 'static,
 ) -> El {
-    let mut sw = Switch::new(checked)
-        .label(label)
+    let key = key.into();
+    let label = label.into();
+    let on_toggle = Rc::new(on_toggle);
+    let toggle_switch = Rc::clone(&on_toggle);
+    // The kit's inline label and description have intrinsic widths. Lay out the
+    // copy separately so it can shrink and wrap while the switch keeps its hit area.
+    let mut switch = Switch::new(checked)
+        .label(label.clone())
+        .hide_label()
         .standard()
         .disabled(disabled)
-        .on_toggle(on_toggle);
+        .on_toggle(move |state| toggle_switch(state))
+        .build(kit)
+        .key("switch")
+        .min_w(44.0)
+        .min_h(32.0)
+        .center();
+
+    let mut copy = col().key("copy").grow(1.0).min_w(0.0).gap(2.0).child(
+        text(label)
+            .key("label")
+            .font(kit.ty.text_small)
+            .color(kit.c.std_text)
+            .wrap()
+            .a11y_hidden(),
+    );
     if let Some(desc) = description {
-        sw = sw.description(desc);
+        copy = copy.child(
+            text(desc)
+                .key("description")
+                .font(kit.ty.text_xsmall)
+                .color(kit.c.std_text)
+                .wrap()
+                .a11y_hidden(),
+        );
+        switch = switch.description(desc);
     }
-    row()
+
+    let focus_key = key.clone();
+    let control = row()
         .key(key)
         .w_full()
+        .min_w(0.0)
         .padding(10.0)
+        .gap(8.0)
         .radius(8.0)
-        .fill(theme::hex(theme::SURFACE_RAISED))
-        .border(
-            1.0,
-            if checked {
-                theme::hex(theme::ACCENT_DEEP)
-            } else {
-                theme::hex(theme::BORDER_SUBTLE)
-            },
-        )
+        .fill(kit.c.bg_button_neutral)
         .center_y()
-        .child(sw.build(kit))
+        .child(copy)
+        .child(switch);
+    let control = kit
+        .shadow_layers(&kit.elevation.button_neutral)
+        .fold(control, El::box_shadow);
+    if disabled {
+        control
+    } else {
+        control
+            .on_press_tx(move |state, tx| {
+                on_toggle(state);
+                tx.focus(&focus_key, false);
+            })
+            .role("group")
+    }
 }
 
 /// Horizontal workflow stage stepper showing progress and current active step.
@@ -577,90 +682,6 @@ fn skeleton_card_shell(body: El, tone: StatusTone, preferences: ViewPreferences,
         tone.border().alpha(0.50)
     };
     body.w_full().fill(fill).border(1.0, border).radius(10.0)
-}
-
-/// 3-column Workstation host telemetry skeleton mirroring `metric_ring_tile`.
-pub(crate) fn skeleton_metric_tiles(preferences: ViewPreferences, kit: &Kit) -> El {
-    let mut tiles = row()
-        .key("host-metrics-loading")
-        .role("status")
-        .label("Reading API host resources")
-        .w_full()
-        .gap(10.0);
-    for tone in [StatusTone::Ok, StatusTone::Info, StatusTone::Accent] {
-        let tile = col()
-            .w_full()
-            .padding(12.0)
-            .gap(8.0)
-            .child(
-                row()
-                    .w_full()
-                    .center_y()
-                    .gap(8.0)
-                    .child(material::skeleton_block(
-                        None,
-                        Some(14.0),
-                        14.0,
-                        4.0,
-                        tone,
-                        preferences,
-                    ))
-                    .child(material::skeleton_block(
-                        None,
-                        Some(54.0),
-                        12.0,
-                        4.0,
-                        StatusTone::Neutral,
-                        preferences,
-                    ))
-                    .child(spacer())
-                    .child(material::skeleton_block(
-                        None,
-                        Some(7.0),
-                        7.0,
-                        999.0,
-                        tone,
-                        preferences,
-                    )),
-            )
-            .child(
-                row()
-                    .w_full()
-                    .center_y()
-                    .gap(10.0)
-                    .child(material::skeleton_block(
-                        None,
-                        Some(34.0),
-                        34.0,
-                        999.0,
-                        tone,
-                        preferences,
-                    ))
-                    .child(
-                        col()
-                            .grow(1.0)
-                            .gap(4.0)
-                            .child(material::skeleton_block(
-                                None,
-                                Some(64.0),
-                                18.0,
-                                5.0,
-                                StatusTone::Neutral,
-                                preferences,
-                            ))
-                            .child(material::skeleton_block(
-                                None,
-                                Some(84.0),
-                                11.0,
-                                4.0,
-                                StatusTone::Neutral,
-                                preferences,
-                            )),
-                    ),
-            );
-        tiles = tiles.child(skeleton_card_shell(tile, tone, preferences, kit).grow(1.0));
-    }
-    tiles
 }
 
 /// Readiness check list skeleton mirroring gateway readiness rows.

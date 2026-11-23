@@ -122,7 +122,7 @@ fn citations(list: &[Citation], kit: &Kit) -> Option<El> {
                 .key(format!("chat-citation-{index}"))
                 .font(kit.ty.small)
                 .color(theme::hex(theme::TEXT_SECONDARY))
-                .wrap(),
+                .wrap_anywhere(),
         );
     }
     Some(column)
@@ -147,7 +147,7 @@ pub(crate) fn bubble(message: &ChatMessage, kit: &Kit) -> El {
             rune::text(message.text.clone())
                 .font(kit.ty.small)
                 .color(theme::hex(theme::TEXT_PRIMARY))
-                .wrap(),
+                .wrap_anywhere(),
         );
     }
     if let Some((label, chip_tone)) = message.state.chip() {

@@ -1,4 +1,8 @@
-//! Local Rust-BERT worker and immutable Atlas zero-shot model identity.
+//! Local Rust-BERT worker and immutable Atlas checkpoint identity.
+
+mod candidate;
+pub(crate) mod cycle_metrics;
+pub(super) mod reviewed;
 use std::fs::File;
 use std::future::Future;
 use std::io::{self, Read};
@@ -11,6 +15,9 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::runtime::Handle;
+
+pub(super) use self::candidate::ATLAS_BERT_ACTIVE_FILE;
+pub use self::candidate::{verify_atlas_bert_candidate, AtlasBertActive};
 
 use super::{
     artifact, calibration, ClassificationReceipt, ClassifierError, ClassifierService,
@@ -38,17 +45,8 @@ fn default_threshold() -> f64 {
     0.8
 }
 
-pub(super) struct Bundle {
-    config: Config,
-    pub(super) snapshot: ModelSnapshot,
-    pub(super) manifest_sha256: String,
-}
-
-impl Bundle {
-    pub(super) fn load(
-        home: &Path,
-        requested: Option<ModelSnapshot>,
-    ) -> Result<Self, ClassifierError> {
+impl Config {
+    fn load(home: &Path) -> Result<Self, ClassifierError> {
         let path = artifact::root_for(home)?.join("zero-shot.json");
         let file = File::open(&path).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
@@ -66,7 +64,7 @@ impl Bundle {
                 "zero-shot config exceeds 16 KiB".into(),
             ));
         }
-        let config: Config = serde_json::from_slice(&bytes).map_err(|error| {
+        let config: Self = serde_json::from_slice(&bytes).map_err(|error| {
             ClassifierError::InvalidArtifact(format!("zero-shot config: {error}"))
         })?;
         if !config.worker_path.is_absolute()
@@ -77,29 +75,146 @@ impl Bundle {
                 "zero-shot config requires absolute paths and a threshold in [0.5, 1)".into(),
             ));
         }
+        Ok(config)
+    }
+}
+
+/// Check the worker executable and model inputs without initializing inference.
+pub(super) fn check_configured_assets(
+    home: &Path,
+) -> Result<Option<AtlasBertActive>, ClassifierError> {
+    let mut config = Config::load(home)?;
+    let active = candidate::read_active(home)?;
+    if let Some(active) = &active {
+        if let Provenance::FineTunedAtlasBert { frozen_sha256, .. } = &active.snapshot.provenance {
+            config.model_dir = candidate::directory(home, frozen_sha256)?;
+        } else {
+            return Err(candidate::invalid(
+                "active pointer requires a fine-tuned checkpoint",
+            ));
+        }
+    }
+    let worker = asset_metadata(&config.worker_path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if worker.permissions().mode() & 0o111 == 0 {
+            return Err(ClassifierError::InvalidArtifact(
+                "configured Atlas worker is not executable".into(),
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = worker;
+    for file in MODEL_FILES {
+        asset_metadata(&config.model_dir.join(file))?;
+    }
+    Ok(active)
+}
+
+pub(super) struct Bundle {
+    config: Config,
+    pub(super) snapshot: ModelSnapshot,
+    pub(super) manifest_sha256: String,
+    reviewed_calibration: Option<reviewed::RecordedCalibration>,
+}
+
+impl Bundle {
+    pub(super) fn load(
+        home: &Path,
+        requested: Option<ModelSnapshot>,
+    ) -> Result<Self, ClassifierError> {
+        match requested {
+            Some(snapshot) => Self::load_exact(home, snapshot),
+            None => match candidate::read_active(home)? {
+                Some(active) => Self::load_active(home, active),
+                None => Self::load_baseline(Config::load(home)?),
+            },
+        }
+    }
+
+    fn load_active(home: &Path, active: AtlasBertActive) -> Result<Self, ClassifierError> {
+        if !matches!(
+            active.snapshot.provenance,
+            Provenance::FineTunedAtlasBert { .. }
+        ) {
+            return Err(candidate::invalid(
+                "active pointer requires a fine-tuned checkpoint",
+            ));
+        }
+        let bundle = Self::load_exact(home, active.snapshot)?;
+        if bundle.manifest_sha256 != active.manifest_sha256 {
+            return Err(candidate::invalid(
+                "active checkpoint manifest hash mismatch",
+            ));
+        }
+        Ok(bundle)
+    }
+
+    fn load_baseline(config: Config) -> Result<Self, ClassifierError> {
         let (artifact_sha256, manifest_sha256) = bundle_hashes(&config)?;
+        Ok(Self::new(
+            config,
+            artifact_sha256,
+            manifest_sha256,
+            Provenance::ZeroShot,
+        ))
+    }
+
+    fn load_exact(home: &Path, requested: ModelSnapshot) -> Result<Self, ClassifierError> {
+        let mut bundle = match &requested.provenance {
+            Provenance::ZeroShot => Self::load_baseline(Config::load(home)?)?,
+            Provenance::FineTunedAtlasBert {
+                frozen_sha256,
+                evaluation_sha256,
+                reviewed_calibration_sha256,
+                ..
+            } => candidate::load(
+                home,
+                frozen_sha256,
+                evaluation_sha256,
+                reviewed_calibration_sha256.as_deref(),
+                candidate::BaselineCheck::PinnedReplay,
+            )?,
+            _ => {
+                return Err(ClassifierError::Incompatible(
+                    "expected an Atlas BERT checkpoint".into(),
+                ))
+            }
+        };
+        bundle
+            .snapshot
+            .activated_at
+            .clone_from(&requested.activated_at);
+        if bundle.snapshot != requested
+            || chrono::DateTime::parse_from_rfc3339(&requested.activated_at).is_err()
+        {
+            return Err(ClassifierError::Incompatible(
+                "saved Atlas BERT pin requires the original worker, model files and threshold"
+                    .into(),
+            ));
+        }
+        Ok(bundle)
+    }
+
+    fn new(
+        config: Config,
+        artifact_sha256: String,
+        manifest_sha256: String,
+        provenance: Provenance,
+    ) -> Self {
         let mut snapshot = ModelSnapshot::new(
             format!("bert-{}", &manifest_sha256[..59]),
             artifact_sha256,
-            Provenance::ZeroShot,
+            provenance,
         );
         snapshot.algorithm_version = super::ZERO_SHOT_ALGORITHM_VERSION.into();
-        if let Some(requested) = requested {
-            snapshot.activated_at.clone_from(&requested.activated_at);
-            if snapshot != requested
-                || chrono::DateTime::parse_from_rfc3339(&requested.activated_at).is_err()
-            {
-                return Err(ClassifierError::Incompatible(
-                    "saved zero-shot pin requires the original worker, model files and threshold"
-                        .into(),
-                ));
-            }
-        }
-        Ok(Self {
+        Self {
             config,
             snapshot,
             manifest_sha256,
-        })
+            reviewed_calibration: None,
+        }
     }
 
     pub(super) fn start(
@@ -134,22 +249,51 @@ impl Bundle {
     }
 }
 
+pub(super) fn active_atlas_bert_revision(home: &Path) -> Result<String, ClassifierError> {
+    let active = Bundle::load(home, None)?;
+    AtlasBertActive {
+        snapshot: active.snapshot,
+        manifest_sha256: active.manifest_sha256,
+    }
+    .activation_revision()
+}
+
+pub(super) fn validate_atlas_bert_identity(
+    home: &Path,
+    identity: &AtlasBertActive,
+) -> Result<(), ClassifierError> {
+    identity.validate()?;
+    let bundle = Bundle::load(home, Some(identity.snapshot.clone()))?;
+    if bundle.manifest_sha256 != identity.manifest_sha256 {
+        return Err(candidate::invalid(
+            "staged checkpoint manifest hash mismatch",
+        ));
+    }
+    Ok(())
+}
+
 fn file_error(path: &Path, error: io::Error) -> ClassifierError {
     ClassifierError::Io(format!("{}: {error}", path.display()))
 }
 
-fn file_sha256(path: &Path) -> Result<String, ClassifierError> {
-    const MAX_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_ASSET_BYTES: u64 = 1024 * 1024 * 1024;
+
+fn asset_metadata(path: &Path) -> Result<std::fs::Metadata, ClassifierError> {
     let metadata = std::fs::metadata(path).map_err(|error| file_error(path, error))?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_BYTES {
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_ASSET_BYTES {
         return Err(ClassifierError::InvalidArtifact(format!(
             "zero-shot asset must be a nonempty file at most 1 GiB: {}",
             path.display()
         )));
     }
+    Ok(metadata)
+}
+
+fn file_sha256(path: &Path) -> Result<String, ClassifierError> {
+    let metadata = asset_metadata(path)?;
     let mut file = File::open(path)
         .map_err(|error| file_error(path, error))?
-        .take(MAX_BYTES + 1);
+        .take(MAX_ASSET_BYTES + 1);
     let mut hash = Sha256::new();
     let bytes = io::copy(&mut file, &mut hash).map_err(|error| file_error(path, error))?;
     if bytes != metadata.len() {
@@ -166,7 +310,12 @@ fn bundle_hashes(config: &Config) -> Result<(String, String), ClassifierError> {
         assets.push_str(&file_sha256(&config.model_dir.join(file))?);
     }
     let artifact_sha256 = artifact::sha256_hex(assets.as_bytes());
-    let manifest_sha256 = artifact::sha256_hex(
+    let manifest_sha256 = bundle_manifest_hash(config, &artifact_sha256)?;
+    Ok((artifact_sha256, manifest_sha256))
+}
+
+fn bundle_manifest_hash(config: &Config, artifact_sha256: &str) -> Result<String, ClassifierError> {
+    Ok(artifact::sha256_hex(
         format!(
             "{PROTOCOL}\n{}\n{}\n{}\n{}\n{artifact_sha256}\n{}\n{:016x}",
             super::ZERO_SHOT_ALGORITHM_VERSION,
@@ -177,8 +326,7 @@ fn bundle_hashes(config: &Config) -> Result<(String, String), ClassifierError> {
             config.threshold.to_bits()
         )
         .as_bytes(),
-    );
-    Ok((artifact_sha256, manifest_sha256))
+    ))
 }
 
 struct Worker {
@@ -213,7 +361,16 @@ fn protocol_error(code: &str) -> ClassifierError {
 
 impl Worker {
     async fn start(config: &Config) -> Result<Self, ClassifierError> {
-        let mut child = Command::new(&config.worker_path)
+        let mut command = Command::new(&config.worker_path);
+        // The score worker only needs executable and dynamic library discovery.
+        // Gateway and service credentials stay in the supervising process.
+        command.env_clear();
+        for name in ["PATH", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        let mut child = command
             .arg("serve")
             .arg(&config.model_dir)
             .stdin(Stdio::piped())
@@ -334,6 +491,28 @@ impl Engine {
     ) -> Result<Vec<[f64; 6]>, ClassifierError> {
         if self.worker.is_none() {
             let (artifact, manifest) = bundle_hashes(&self.bundle.config)?;
+            let manifest = match &self.bundle.snapshot.provenance {
+                Provenance::FineTunedAtlasBert {
+                    frozen_sha256,
+                    evaluation_sha256,
+                    reviewed_calibration_sha256,
+                    ..
+                } => {
+                    candidate::validate_evidence_hashes(
+                        &self.bundle.config.model_dir,
+                        frozen_sha256,
+                        evaluation_sha256,
+                        reviewed_calibration_sha256.as_deref(),
+                    )?;
+                    candidate::manifest_hash(
+                        &manifest,
+                        frozen_sha256,
+                        evaluation_sha256,
+                        reviewed_calibration_sha256.as_deref(),
+                    )
+                }
+                _ => manifest,
+            };
             if artifact != self.bundle.snapshot.artifact_sha256
                 || manifest != self.bundle.manifest_sha256
             {
@@ -360,6 +539,12 @@ impl Engine {
     }
 }
 
+fn worker_text(input: &ClassifyInput) -> Option<String> {
+    calibration::input_rejection(input)
+        .is_none()
+        .then(|| format!("{}\n{}", input.title, input.description))
+}
+
 impl InferenceEngine for Engine {
     fn classify_batch(
         &mut self,
@@ -379,11 +564,9 @@ impl InferenceEngine for Engine {
             let mut texts = Vec::new();
             let mut score_input = Vec::with_capacity(batch.len());
             for input in batch {
-                let usable = calibration::input_rejection(input).is_none();
-                if usable {
-                    texts.push(format!("{}\n{}", input.title, input.description));
-                }
-                score_input.push(usable);
+                let text = worker_text(input);
+                score_input.push(text.is_some());
+                texts.extend(text);
             }
             let scores = if texts.is_empty() {
                 Vec::new()

@@ -181,7 +181,9 @@ fn maintenance_result_shows_safe_candidate_but_never_raw_report_or_shared_detail
     );
     runtime.frame(0.0);
     let tree = runtime.accessibility_json().to_string();
-    assert!(tree.contains("synthetic-candidate") && tree.contains("activation is a separate"));
+    assert!(
+        tree.contains("synthetic-candidate") && tree.contains("Historical Natural training result")
+    );
     assert!(!tree.contains("synthetic-private-report") && !tree.contains("/synthetic/server-path"));
     // Match the production AppHandle update path: a frame alone advances time
     // and does not commit state mutated outside a handler.

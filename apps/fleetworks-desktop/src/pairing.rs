@@ -76,6 +76,7 @@ pub struct Pairing {
     pub(crate) request: Option<RequestTask>,
     pub(crate) startup_loaded: bool,
     pub(crate) paused: bool,
+    saved_startup_origin: Option<(String, bool)>,
     local_review_announced: VecDeque<String>,
 }
 impl Pairing {
@@ -101,6 +102,9 @@ impl Pairing {
         ) && !self.paused
     }
     pub(crate) fn cancel(&mut self) {
+        if self.request.is_some() && self.stage == PairingStage::Idle {
+            self.startup_loaded = false;
+        }
         self.request = None;
         self.paused = false;
         self.stage = PairingStage::Idle;
@@ -377,26 +381,43 @@ impl State {
         );
     }
 
+    pub(crate) fn prefill_startup_pairing_origin(&mut self) {
+        if self.connection.origin.text != fleetworks_contracts::DEFAULT_API_ORIGIN {
+            return;
+        }
+        if let Some((origin, session_ended)) = &self.pairing.saved_startup_origin {
+            self.connection.origin = rune::TextEdit::new(origin);
+            if *session_ended {
+                self.pairing.stage = PairingStage::Failed(PairingFailure::SessionEnded);
+            }
+        } else {
+            self.initialize_pairing_connection();
+        }
+    }
+
     fn restored_pairing(&mut self, epoch: u64, result: Result<RestoreOutcome, PairingFailure>) {
         if self.connection.epoch != epoch {
             return;
         }
         self.pairing.request = None;
-        let is_remote = self.backend_kind == fleetworks_workstation::native::BackendKind::Remote;
-        match result {
-            Ok(RestoreOutcome::DurableOrPending(origin)) => {
-                if is_remote {
-                    self.connection.origin = rune::TextEdit::new(origin);
-                }
+        let (origin, session_ended) = match result {
+            Ok(RestoreOutcome::DurableOrPending(origin)) => (origin, false),
+            Ok(RestoreOutcome::SessionEnded(origin)) => (origin, true),
+            Ok(RestoreOutcome::None) => return,
+            Err(error) => {
+                self.pairing.stage = PairingStage::Failed(error);
+                return;
             }
-            Ok(RestoreOutcome::SessionEnded(origin)) => {
-                if is_remote {
-                    self.connection.origin = rune::TextEdit::new(origin);
-                    self.pairing.stage = PairingStage::Failed(PairingFailure::SessionEnded);
-                }
+        };
+        self.pairing.saved_startup_origin = Some((origin.clone(), session_ended));
+        if self.backend_kind == fleetworks_workstation::native::BackendKind::Remote
+            && (self.connection.origin.text == fleetworks_contracts::DEFAULT_API_ORIGIN
+                || Client::canonical_origin(&self.connection.origin.text).as_ref() == Ok(&origin))
+        {
+            self.connection.origin = rune::TextEdit::new(origin);
+            if session_ended {
+                self.pairing.stage = PairingStage::Failed(PairingFailure::SessionEnded);
             }
-            Ok(RestoreOutcome::None) => {}
-            Err(error) => self.pairing.stage = PairingStage::Failed(error),
         }
     }
 
@@ -812,5 +833,31 @@ mod restore_tests {
         );
         assert_eq!(state.connection.origin.text, "local://embedded");
         assert!(state.intents.is_empty());
+    }
+
+    #[test]
+    fn choosing_distributed_after_embedded_restores_the_saved_url() {
+        let mut state = State::fixture();
+        state.startup = crate::startup::Startup::cold_launch();
+        state.backend_kind = BackendKind::Local;
+        state.connection.origin = rune::TextEdit::new("local://embedded");
+        state.restored_pairing(
+            state.connection.epoch,
+            Ok(RestoreOutcome::DurableOrPending(
+                "https://gateway.example.test/".into(),
+            )),
+        );
+
+        state.choose_startup_destination(BackendKind::Remote);
+
+        assert_eq!(
+            state.connection.origin.text,
+            "https://gateway.example.test/"
+        );
+        assert_eq!(state.connection.status, ConnectionStatus::Disconnected);
+        assert!(!state
+            .intents
+            .iter()
+            .any(|intent| matches!(intent, Intent::Connect | Intent::PairingConnect)));
     }
 }

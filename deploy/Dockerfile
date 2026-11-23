@@ -67,6 +67,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+COPY patches/surrealdb-kvs-any ./patches/surrealdb-kvs-any
 COPY crates ./crates
 COPY services ./services
 # Resolve the Mac workspace member without copying view sources into this
@@ -104,6 +105,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+COPY patches/surrealdb-kvs-any ./patches/surrealdb-kvs-any
 COPY crates/argos-osint-core/Cargo.toml ./crates/argos-osint-core/Cargo.toml
 COPY crates/argos-osint-api/Cargo.toml ./crates/argos-osint-api/Cargo.toml
 COPY crates/fleetworks-workstation/Cargo.toml ./crates/fleetworks-workstation/Cargo.toml

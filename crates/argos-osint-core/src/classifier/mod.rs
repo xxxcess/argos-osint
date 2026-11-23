@@ -29,35 +29,44 @@
 pub mod artifact;
 #[cfg(feature = "classifier")]
 pub(crate) mod bert;
+#[cfg(feature = "classifier")]
+pub mod bert_activation;
+#[cfg(feature = "classifier")]
+pub use bert::{verify_atlas_bert_candidate, AtlasBertActive};
 pub mod calibration;
 pub mod candidate_activation;
 pub mod dataset;
-#[cfg(feature = "classifier")]
+#[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
 pub(crate) mod engine;
 pub mod feature_policy;
 pub mod learning;
-#[cfg(feature = "classifier")]
+#[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
 pub(crate) mod promotion;
 pub mod provider_capture;
 pub mod provider_labels;
 pub mod readiness;
 pub mod remote;
 pub mod review;
-#[cfg(feature = "classifier")]
+#[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
 pub(crate) mod runtime_proof;
 pub mod similarity;
 pub mod training;
 
+pub(crate) const LEGACY_RUNTIME_AVAILABLE: bool = cfg!(all(
+    feature = "classifier",
+    feature = "legacy-natural-fixtures"
+));
+
 /// Validate the optional Natural runtime without fitting data or loading/activating a model.
 /// Rust-BERT inference readiness is separate from this training-runtime check.
 pub fn training_runtime_ready() -> Result<(), ClassifierError> {
-    #[cfg(feature = "classifier")]
+    #[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
     {
         let model_id = ModelId::parse("local-runtime-probe").ok_or(ClassifierError::Unavailable)?;
         let _engine = engine::QuickJsEngine::new(model_id, None)?;
         Ok(())
     }
-    #[cfg(not(feature = "classifier"))]
+    #[cfg(not(all(feature = "classifier", feature = "legacy-natural-fixtures")))]
     {
         Err(ClassifierError::Unavailable)
     }
@@ -89,7 +98,7 @@ pub const INFERENCE_BATCH_SIZE: usize = 64;
 
 // One gate for every real classifier runtime fixture in this lib-test process.
 // Integration binaries have independent process-local ledgers and their own gates.
-#[cfg(all(test, feature = "classifier"))]
+#[cfg(all(test, feature = "classifier", feature = "legacy-natural-fixtures"))]
 pub(crate) static TEST_RUNTIME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Maximum title and description bytes accepted for one inference input.
@@ -804,6 +813,15 @@ pub fn decode_receipt(json: &str) -> Result<DecodedReceipt, ClassifierError> {
 pub enum Provenance {
     /// Externally pretrained NLI weights with no Atlas fitting or calibration.
     ZeroShot,
+    /// Atlas DistilBERT fine-tuned and evaluated on the frozen synthetic corpus.
+    FineTunedAtlasBert {
+        dataset_sha256: String,
+        frozen_sha256: String,
+        evaluation_sha256: String,
+        /// Immutable threshold and reviewed news-cycle evidence, when present.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reviewed_calibration_sha256: Option<String>,
+    },
     SyntheticBaseline {
         dataset_version: String,
         dataset_sha256: String,
@@ -863,6 +881,7 @@ impl Provenance {
     pub fn label(&self) -> &'static str {
         match self {
             Provenance::ZeroShot => "Rust-BERT zero-shot (unfitted thresholds)",
+            Provenance::FineTunedAtlasBert { .. } => "Atlas BERT fine-tuned on synthetic data",
             Provenance::SyntheticBaseline { .. } => "Synthetic baseline",
             Provenance::ReviewedReal { .. } => "Reviewed real",
             Provenance::ApprovedProvider { .. } => "Approved weak provider labels",
@@ -1038,11 +1057,11 @@ impl ClassifierService {
         artifact: ValidatedArtifact,
         policy: Box<dyn ReceiptPolicy>,
     ) -> Result<Self, ClassifierError> {
-        #[cfg(feature = "classifier")]
+        #[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
         {
             engine::from_snapshot(snapshot, artifact, policy)
         }
-        #[cfg(not(feature = "classifier"))]
+        #[cfg(not(all(feature = "classifier", feature = "legacy-natural-fixtures")))]
         {
             let _ = (snapshot, artifact, policy);
             Err(ClassifierError::Unavailable)
@@ -1366,11 +1385,11 @@ pub fn start_candidate_worker(
     lease: std::sync::Arc<WriterLease>,
     control: &WorkControl,
 ) -> Result<Box<dyn ClassifierWorker>, ClassifierError> {
-    #[cfg(feature = "classifier")]
+    #[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
     {
         engine::start_candidate_worker(model_id, lease, control)
     }
-    #[cfg(not(feature = "classifier"))]
+    #[cfg(not(all(feature = "classifier", feature = "legacy-natural-fixtures")))]
     {
         let _ = (model_id, lease, control);
         Err(ClassifierError::Unavailable)
@@ -1389,12 +1408,17 @@ pub struct CompiledIdentity {
     pub apparatus_version: String,
 }
 
-/// Returns the trusted compiled identity of the classifier assets embedded
-/// in this binary.
+/// Returns the pinned identity used by historical Natural artifact validation.
+///
+/// Development tests also validate the archived runtime bytes against this identity.
 pub fn compiled_identity() -> Result<CompiledIdentity, ClassifierError> {
-    #[cfg(feature = "classifier")]
+    #[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
     {
         engine::compiled_identity()
+    }
+    #[cfg(all(feature = "classifier", not(feature = "legacy-natural-fixtures")))]
+    {
+        Ok(artifact::archived_identity())
     }
     #[cfg(not(feature = "classifier"))]
     {

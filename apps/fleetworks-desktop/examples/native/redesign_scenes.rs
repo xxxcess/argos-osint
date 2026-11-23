@@ -110,16 +110,12 @@ pub fn seed(state: &mut State) {
             ReadinessCheckId::ActorSearch,
             ReadinessActionId::RebuildActorIndex,
         ),
-        (
-            ReadinessCheckId::ClassifierTraining,
-            ReadinessActionId::TrainClassifier,
-        ),
     ] {
         let mut check = ReadinessCheck::new(
             id,
             ReadinessState::NotReady,
             "synthetic_unseeded".into(),
-            "No completed seed or trained candidate is present.".into(),
+            "Actor maintenance has not completed.".into(),
             OBSERVED.into(),
         );
         check.fresh_for_ms = 30_000;

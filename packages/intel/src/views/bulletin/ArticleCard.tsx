@@ -2,6 +2,7 @@
 import React, { useState } from "react";
 import { View, Text, Image, Pressable, StyleSheet } from "react-native";
 import type { Article } from "@argos/api-client";
+import { glassProps } from "@argos/ui";
 import { articleDomainLabel } from "../article-domain-label";
 import { intelColors as c, intelRadius } from "../../shell/intel-theme";
 import { intelFonts } from "../../shell/intel-fonts";
@@ -38,6 +39,7 @@ export function ArticleCard({
     source && a.author ? `${source} · ${a.author}` : source || a.author;
   return (
     <Pressable
+      {...glassProps.card}
       testID={`article-card-${a.id}`}
       accessibilityRole="button"
       accessibilityLabel={`Open Focus Brief: ${a.title}`}
@@ -48,9 +50,9 @@ export function ArticleCard({
       onHoverOut={() => setHovered(false)}
       style={({ pressed }) => [
         s.card,
+        thumbnail && s.withThumbnail,
         (hovered || focused || pressed) && {
           borderColor: c.accent,
-          backgroundColor: c.panelRaised,
         },
       ]}
     >
@@ -84,7 +86,6 @@ export function ArticleCard({
 }
 const s = StyleSheet.create({
   card: {
-    minHeight: bulletinCardMinHeight,
     flexDirection: "row",
     alignItems: "stretch",
     gap: 12,
@@ -95,6 +96,7 @@ const s = StyleSheet.create({
     backgroundColor: c.panel,
     minWidth: 0,
   },
+  withThumbnail: { minHeight: bulletinCardMinHeight },
   thumb: {
     width: bulletinThumb,
     height: bulletinThumb,

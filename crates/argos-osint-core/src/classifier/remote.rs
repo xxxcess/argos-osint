@@ -47,6 +47,27 @@ impl PinIdentity {
         Ok(())
     }
 
+    /// Returns the workspace compare-and-swap revision for this declared pin.
+    ///
+    /// The baseline's revision is its manifest hash. A candidate revision also
+    /// binds its activation time so reactivating the same bytes changes it.
+    ///
+    /// # Errors
+    /// Returns a classifier error for an invalid pin identity.
+    pub fn activation_revision(&self) -> Result<String, ClassifierError> {
+        self.validate()?;
+        Ok(match self.snapshot.provenance {
+            Provenance::ZeroShot => self.manifest_sha256.clone(),
+            _ => super::artifact::sha256_hex(
+                format!(
+                    "atlas-bert-active-revision-v1\n{}\n{}",
+                    self.manifest_sha256, self.snapshot.activated_at,
+                )
+                .as_bytes(),
+            ),
+        })
+    }
+
     /// Activation timestamps are preserved in receipts' owning cycle snapshot.
     /// They do not change which worker can serve the immutable bundle.
     pub fn matches_bundle(&self, pin: &PinnedClassifier) -> bool {
@@ -184,12 +205,30 @@ fn validate_snapshot(snapshot: &ModelSnapshot) -> Result<(), ClassifierError> {
         || snapshot.algorithm_version != ZERO_SHOT_ALGORITHM_VERSION
         || snapshot.preprocessing_version != PREPROCESSING_VERSION
         || snapshot.policy_version != ADMISSION_POLICY_VERSION
-        || snapshot.provenance != Provenance::ZeroShot
+        || !valid_bert_provenance(&snapshot.provenance)
         || chrono::DateTime::parse_from_rfc3339(&snapshot.activated_at).is_err()
     {
         return Err(protocol_error("invalid_snapshot"));
     }
     Ok(())
+}
+
+fn valid_bert_provenance(provenance: &Provenance) -> bool {
+    match provenance {
+        Provenance::ZeroShot => true,
+        Provenance::FineTunedAtlasBert {
+            dataset_sha256,
+            frozen_sha256,
+            evaluation_sha256,
+            reviewed_calibration_sha256,
+        } => {
+            [dataset_sha256, frozen_sha256, evaluation_sha256]
+                .into_iter()
+                .all(|digest| is_sha256(digest))
+                && reviewed_calibration_sha256.as_deref().is_none_or(is_sha256)
+        }
+        _ => false,
+    }
 }
 
 fn is_sha256(value: &str) -> bool {

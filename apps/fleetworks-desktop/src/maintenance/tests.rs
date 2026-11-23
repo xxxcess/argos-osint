@@ -125,31 +125,35 @@ fn uploaded(kind: DatasetKind) -> DatasetUpload {
 }
 
 #[test]
-fn actor_and_training_buttons_choose_their_own_csv_source_without_submitting_jobs() {
-    for (key, kind) in [
-        ("maintenance-seed", DatasetKind::ActorCatalog),
-        ("maintenance-train", DatasetKind::ClassifierTraining),
-    ] {
-        let mut runtime = runtime(state(false));
-        let mut clock = 0.0;
-        click(&mut runtime, key, &mut clock);
-        if cfg!(target_os = "linux") {
-            assert_eq!(
-                runtime
-                    .state
-                    .maintenance
-                    .csv_path_prompt
-                    .as_ref()
-                    .map(|prompt| prompt.kind),
-                Some(kind),
-                "the primary action must reveal typed input before opening a file chooser"
-            );
-            assert!(runtime.state.intents.is_empty());
-            click(&mut runtime, "maintenance-csv-path-browse", &mut clock);
-        }
-        assert_eq!(runtime.state.intents, vec![Intent::ChooseDataset { kind }]);
-        assert!(runtime.state.maintenance.confirmation.is_none());
+fn actor_seed_button_chooses_csv_without_submitting_a_job() {
+    let key = "maintenance-seed";
+    let kind = DatasetKind::ActorCatalog;
+    let mut runtime = runtime(state(false));
+    let mut clock = 0.0;
+    click(&mut runtime, key, &mut clock);
+    if cfg!(target_os = "linux") {
+        assert_eq!(
+            runtime
+                .state
+                .maintenance
+                .csv_path_prompt
+                .as_ref()
+                .map(|prompt| prompt.kind),
+            Some(kind),
+            "the primary action must reveal typed input before opening a file chooser"
+        );
+        assert!(runtime.state.intents.is_empty());
+        click(&mut runtime, "maintenance-csv-path-browse", &mut clock);
     }
+    assert_eq!(runtime.state.intents, vec![Intent::ChooseDataset { kind }]);
+    assert!(runtime.state.maintenance.confirmation.is_none());
+    assert!(runtime.find("maintenance-train").is_none());
+    assert_eq!(
+        runtime
+            .state
+            .maintenance_preflight(MaintenanceOperation::TrainClassifier),
+        MaintenancePreflight::UnsupportedOperation
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -161,87 +165,80 @@ fn opening_csv_entry_accepts_immediate_typing_and_cancel_restores_focus() {
             mods: rune::Mods::default(),
         });
     };
-    for opener in ["maintenance-seed", "maintenance-train"] {
-        let mut runtime = runtime(state(false));
-        runtime.update(|_, tx| {
-            tx.scroll_into_view(opener);
-            tx.focus(opener, true);
-        });
-        runtime.frame(1.0 / 60.0);
-        assert!(runtime
-            .elements()
-            .iter()
-            .any(|element| { element.focused && element.key.as_deref() == Some(opener) }));
+    let opener = "maintenance-seed";
+    let mut runtime = runtime(state(false));
+    runtime.update(|_, tx| {
+        tx.scroll_into_view(opener);
+        tx.focus(opener, true);
+    });
+    runtime.frame(1.0 / 60.0);
+    assert!(runtime
+        .elements()
+        .iter()
+        .any(|element| { element.focused && element.key.as_deref() == Some(opener) }));
 
-        press(&mut runtime, rune::Key::Text(" ".into()));
-        runtime.frame(1.0 / 60.0);
-        assert!(
-            runtime.elements().iter().any(|element| {
-                element.focused
-                    && element.key.as_deref() == Some("input")
-                    && element.path.contains("maintenance-csv-path")
-            }),
-            "the CSV editor has focus on its first rendered frame"
-        );
+    press(&mut runtime, rune::Key::Text(" ".into()));
+    runtime.frame(1.0 / 60.0);
+    assert!(
+        runtime.elements().iter().any(|element| {
+            element.focused
+                && element.key.as_deref() == Some("input")
+                && element.path.contains("maintenance-csv-path")
+        }),
+        "the CSV editor has focus on its first rendered frame"
+    );
 
-        press(&mut runtime, rune::Key::Text("/".into()));
-        runtime.frame(1.0 / 60.0);
-        let prompt = runtime
-            .state
-            .maintenance
-            .csv_path_prompt
-            .as_ref()
-            .expect("path prompt");
-        assert_eq!(
-            prompt.input.text, "/",
-            "the first key reaches the CSV editor"
-        );
-        assert!(prompt.input.focused);
+    press(&mut runtime, rune::Key::Text("/".into()));
+    runtime.frame(1.0 / 60.0);
+    let prompt = runtime
+        .state
+        .maintenance
+        .csv_path_prompt
+        .as_ref()
+        .expect("path prompt");
+    assert_eq!(
+        prompt.input.text, "/",
+        "the first key reaches the CSV editor"
+    );
+    assert!(prompt.input.focused);
 
-        let mut clock = 3.0 / 60.0;
-        click(&mut runtime, "maintenance-csv-path-cancel", &mut clock);
-        assert!(runtime.state.maintenance.csv_path_prompt.is_none());
-        assert!(runtime
-            .elements()
-            .iter()
-            .any(|element| { element.focused && element.key.as_deref() == Some(opener) }));
-        assert!(runtime.state.intents.is_empty());
-    }
+    let mut clock = 3.0 / 60.0;
+    click(&mut runtime, "maintenance-csv-path-cancel", &mut clock);
+    assert!(runtime.state.maintenance.csv_path_prompt.is_none());
+    assert!(runtime
+        .elements()
+        .iter()
+        .any(|element| { element.focused && element.key.as_deref() == Some(opener) }));
+    assert!(runtime.state.intents.is_empty());
 }
 
 #[test]
 fn uploaded_csv_requires_confirmation_and_keeps_initial_configuration_revision() {
-    for (kind, operation) in [
-        (DatasetKind::ActorCatalog, MaintenanceOperation::SeedActors),
-        (
-            DatasetKind::ClassifierTraining,
-            MaintenanceOperation::TrainClassifier,
-        ),
-    ] {
-        let mut runtime = runtime(state(false));
-        let mut clock = 0.0;
-        let epoch = runtime.state.connection.epoch;
-        let origin = runtime.state.origin_revision;
-        runtime.update(|state, _| {
-            state.complete_dataset_upload(epoch, 0, origin, kind, Ok(uploaded(kind)))
-        });
-        clock += 1.0 / 60.0;
-        runtime.frame(clock);
-        let confirmation = runtime.state.maintenance.confirmation.as_ref().unwrap();
-        assert_eq!(confirmation.operation, operation);
-        assert_eq!(confirmation.configuration_revision, 0);
-        assert_eq!(confirmation.dataset.as_ref().unwrap().kind, kind);
-        assert!(!runtime
-            .state
-            .intents
-            .iter()
-            .any(|intent| matches!(intent, Intent::Maintenance { .. })));
-        click(&mut runtime, "maintenance-confirm", &mut clock);
-        assert!(runtime
-            .state
-            .intents
-            .contains(&Intent::Maintenance { operation }));
-    }
+    let kind = DatasetKind::ActorCatalog;
+    let operation = MaintenanceOperation::SeedActors;
+    let mut runtime = runtime(state(false));
+    let mut clock = 0.0;
+    let epoch = runtime.state.connection.epoch;
+    let origin = runtime.state.origin_revision;
+    runtime.update(|state, _| {
+        state.complete_dataset_upload(epoch, 0, origin, kind, Ok(uploaded(kind)))
+    });
+    clock += 1.0 / 60.0;
+    runtime.frame(clock);
+    let confirmation = runtime.state.maintenance.confirmation.as_ref().unwrap();
+    assert_eq!(confirmation.operation, operation);
+    assert_eq!(confirmation.configuration_revision, 0);
+    assert_eq!(confirmation.dataset.as_ref().unwrap().kind, kind);
+    assert!(!runtime
+        .state
+        .intents
+        .iter()
+        .any(|intent| matches!(intent, Intent::Maintenance { .. })));
+    click(&mut runtime, "maintenance-confirm", &mut clock);
+    assert!(runtime
+        .state
+        .intents
+        .contains(&Intent::Maintenance { operation }));
 }
 
 #[test]
@@ -251,12 +248,6 @@ fn keyboard_dismissal_restores_each_maintenance_opener_without_admitting_work() 
             Page::Seed,
             Some(DatasetKind::ActorCatalog),
             SEED_ACTION_KEY,
-            "seed-body",
-        ),
-        (
-            Page::Seed,
-            Some(DatasetKind::ClassifierTraining),
-            TRAIN_ACTION_KEY,
             "seed-body",
         ),
         (Page::Seed, None, REINDEX_ACTION_KEY, "seed-body"),
@@ -357,9 +348,9 @@ fn keyboard_dismissal_restores_each_maintenance_opener_without_admitting_work() 
 }
 
 #[test]
-fn expired_training_review_survives_refresh_and_requires_explicit_confirmation() {
-    let kind = DatasetKind::ClassifierTraining;
-    let operation = MaintenanceOperation::TrainClassifier;
+fn expired_seed_review_survives_refresh_and_requires_explicit_confirmation() {
+    let kind = DatasetKind::ActorCatalog;
+    let operation = MaintenanceOperation::SeedActors;
     let upload = uploaded(kind);
     let mut state = state(false);
     let Load::Ready(readiness) = state.readiness.clone() else {
@@ -416,9 +407,9 @@ fn expired_training_review_survives_refresh_and_requires_explicit_confirmation()
 }
 
 #[test]
-fn changed_configuration_requires_a_new_training_review() {
-    let kind = DatasetKind::ClassifierTraining;
-    let operation = MaintenanceOperation::TrainClassifier;
+fn changed_configuration_requires_a_new_seed_review() {
+    let kind = DatasetKind::ActorCatalog;
+    let operation = MaintenanceOperation::SeedActors;
     let mut state = state(false);
     state.complete_dataset_upload(
         state.connection.epoch,
@@ -692,21 +683,29 @@ fn accepted_reseed_cannot_use_a_cached_ready_catalog_to_enable_index() {
 async fn invalid_csv_columns_fail_locally_before_any_upload_link_or_stream_request() {
     use std::io::ErrorKind;
     let directory = tempfile::tempdir().expect("isolated selected CSV");
-    for (kind, content) in [
-        (DatasetKind::ActorCatalog, "sample_id,title\nfixture,Example\n"),
-        (DatasetKind::ClassifierTraining, "actor_id,actor_name,actor_type,aliases,name_normalized\nfixture,Example,group,[],example\n"),
-    ] {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let client = Client::new(&format!("http://{}", listener.local_addr().unwrap()), None).unwrap();
-        let path = directory.path().join("selected.csv");
-        std::fs::write(&path, content).unwrap();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(5), upload(&client, LocalDataset { path, kind }))
-            .await.expect("invalid columns must fail locally without waiting for HTTP");
-        assert!(result.as_ref().is_err_and(|error| error.to_ascii_lowercase().contains("column")), "a file for the other purpose must report a local column error");
-        assert!(matches!(listener.accept(), Err(error) if error.kind() == ErrorKind::WouldBlock),
-            "header validation must finish before requesting an upload URL or sending bytes");
-    }
+    let kind = DatasetKind::ActorCatalog;
+    let content = "sample_id,title\nfixture,Example\n";
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let client = Client::new(&format!("http://{}", listener.local_addr().unwrap()), None).unwrap();
+    let path = directory.path().join("selected.csv");
+    std::fs::write(&path, content).unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        upload(&client, LocalDataset { path, kind }, None),
+    )
+    .await
+    .expect("invalid columns must fail locally without waiting for HTTP");
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.to_ascii_lowercase().contains("column")),
+        "a file for the other purpose must report a local column error"
+    );
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == ErrorKind::WouldBlock),
+        "header validation must finish before requesting an upload URL or sending bytes"
+    );
 }
 
 #[test]
@@ -1805,10 +1804,11 @@ mod csv_path_fallback {
         state.open_csv_path_prompt(DatasetKind::ActorCatalog, &mut Tx::default());
         assert!(state
             .maintenance
-            .message
-            .as_deref()
+            .csv_path_prompt
+            .as_ref()
+            .and_then(|prompt| prompt.error.as_deref())
             .is_some_and(|m| m.contains("could not open")));
-        assert!(state.maintenance.csv_path_prompt.is_some());
+        assert!(state.maintenance.message.is_none());
 
         // A bad path keeps the prompt open with the reason and starts nothing.
         state
@@ -1896,9 +1896,10 @@ mod csv_path_fallback {
     #[test]
     fn cancel_and_origin_change_close_the_prompt() {
         let mut state = crate::tests::registered_fixture();
-        state.open_csv_path_prompt(DatasetKind::ClassifierTraining, &mut Tx::default());
+        state.open_csv_path_prompt(DatasetKind::ActorCatalog, &mut Tx::default());
         state.cancel_csv_path_prompt(&mut Tx::default());
         assert!(state.maintenance.csv_path_prompt.is_none());
+        assert!(state.maintenance.message.is_none());
 
         state.open_csv_path_prompt(DatasetKind::ActorCatalog, &mut Tx::default());
         state.maintenance.invalidate_origin();
@@ -2147,113 +2148,7 @@ async fn seed_card_refresh_reconciles_the_registered_job_and_keeps_the_terminal_
 }
 
 #[test]
-fn per_operation_receipt_retention_keeps_training_result_when_seed_or_reindex_starts() {
-    let mut state = state(true);
-    let epoch = state.connection.epoch;
-    let origin = state.origin_revision;
-
-    state.maintenance.set_operation_job(
-        MaintenanceOperation::TrainClassifier,
-        "job-train-1".into(),
-        false,
-    );
-    let train_rev = state.maintenance.receipt_poll_revisions[2];
-    state.complete_maintenance_job_detail(
-        epoch,
-        origin,
-        MaintenanceOperation::TrainClassifier,
-        train_rev,
-        "job-train-1",
-        Ok(synthetic_job_detail(
-            "job-train-1",
-            "classifier_train",
-            "completed",
-            "done",
-            Some(serde_json::json!({
-                "operation": "classifier_train",
-                "engine": "natural",
-                "candidate_model_id": "cand-001"
-            })),
-        )),
-    );
-
-    // Starting Seed and Reindex must not erase the completed TrainClassifier result.
-    state.maintenance.set_operation_job(
-        MaintenanceOperation::SeedActors,
-        "job-seed-1".into(),
-        false,
-    );
-    state.maintenance.set_operation_job(
-        MaintenanceOperation::ReindexActors,
-        "job-reindex-1".into(),
-        false,
-    );
-    let seed_rev = state.maintenance.receipt_poll_revisions[0];
-    state.complete_maintenance_job_detail(
-        epoch,
-        origin,
-        MaintenanceOperation::SeedActors,
-        seed_rev,
-        "job-seed-1",
-        Ok(synthetic_job_detail(
-            "job-seed-1",
-            "actor_seed",
-            "completed",
-            "done",
-            Some(serde_json::json!({
-                "operation": "actor_seed",
-                "processed": 42,
-                "total": 42,
-                "database_seeded": true
-            })),
-        )),
-    );
-
-    assert_eq!(
-        state
-            .maintenance
-            .operation_job(MaintenanceOperation::TrainClassifier)
-            .map(|r| r.job_id.as_str()),
-        Some("job-train-1")
-    );
-    assert_eq!(
-        state
-            .maintenance
-            .operation_job(MaintenanceOperation::SeedActors)
-            .map(|r| r.job_id.as_str()),
-        Some("job-seed-1")
-    );
-    assert_eq!(
-        state
-            .maintenance
-            .operation_job(MaintenanceOperation::ReindexActors)
-            .map(|r| r.job_id.as_str()),
-        Some("job-reindex-1")
-    );
-
-    let runtime = runtime(state);
-    let elements = runtime.elements();
-    let texts: Vec<&str> = elements
-        .iter()
-        .filter_map(|el| el.text.as_deref())
-        .collect();
-    assert!(
-        texts
-            .iter()
-            .any(|t| t.contains("Candidate trained · Not activated")),
-        "training card must keep its candidate-not-activated result: {texts:?}"
-    );
-    assert!(
-        texts.iter().any(|t| t.contains("Actors seeded")),
-        "seed card must distinguish Actors seeded from search index ready: {texts:?}"
-    );
-    assert!(runtime.find("maintenance-op-job-train").is_some());
-    assert!(runtime.find("maintenance-op-job-seed").is_some());
-    assert!(runtime.find("maintenance-op-job-reindex").is_some());
-}
-
-#[test]
-fn seed_and_train_active_job_polling_is_independent_of_jobs_filter_and_selection() {
+fn seed_and_index_active_jobs_poll_independently_of_jobs_filter_and_selection() {
     let mut state = state(true);
     state
         .connection
@@ -2262,18 +2157,16 @@ fn seed_and_train_active_job_polling_is_independent_of_jobs_filter_and_selection
         .expect("capabilities")
         .permissions
         .push(Permission::ReadWorkstationActivity);
-    // Jobs page is filtered to Failed and has an unrelated job selected.
     state.scoped_jobs.draft.status = crate::jobs_query::JobsStatusFilter::Failed;
     state.backend.selected_job = Some("unrelated-job-99".into());
-
     state.maintenance.set_operation_job(
         MaintenanceOperation::SeedActors,
         "job-seed-live".into(),
         false,
     );
     state.maintenance.set_operation_job(
-        MaintenanceOperation::TrainClassifier,
-        "job-train-live".into(),
+        MaintenanceOperation::ReindexActors,
+        "job-reindex-live".into(),
         false,
     );
 
@@ -2283,10 +2176,9 @@ fn seed_and_train_active_job_polling_is_independent_of_jobs_filter_and_selection
     assert_eq!(
         state.backend.selected_job.as_deref(),
         Some("unrelated-job-99"),
-        "polling Seed & Train receipts must not disturb Jobs selection"
+        "polling actor maintenance receipts must not disturb Jobs selection"
     );
 
-    // Completing SeedActors removes it from active_receipt_jobs while TrainClassifier stays active.
     let epoch = state.connection.epoch;
     let origin = state.origin_revision;
     let seed_rev = state.maintenance.receipt_poll_revisions[0];
@@ -2308,8 +2200,8 @@ fn seed_and_train_active_job_polling_is_independent_of_jobs_filter_and_selection
     assert_eq!(
         remaining,
         vec![(
-            MaintenanceOperation::TrainClassifier,
-            "job-train-live".to_owned()
+            MaintenanceOperation::ReindexActors,
+            "job-reindex-live".to_owned()
         )]
     );
 }

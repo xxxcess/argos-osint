@@ -397,6 +397,7 @@ dependencies = [
  "chrono",
  "fleetworks-contracts",
  "futures-util",
+ "libc",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -419,6 +420,7 @@ version = "0.2.1"
 dependencies = [
  "aho-corasick",
  "anyhow",
+ "argos-osint-core",
  "chrono",
  "csv",
  "dirs",
@@ -2546,6 +2548,7 @@ version = "0.2.1"
 dependencies = [
  "csv",
  "futures-util",
+ "libc",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -2569,6 +2572,7 @@ dependencies = [
  "libc",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "reqwest 0.12.28",
  "rune",
  "rune-kit",
  "serde",
@@ -8256,8 +8260,6 @@ dependencies = [
 [[package]]
 name = "surrealdb-kvs-any"
 version = "3.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1257ac3abc1bbd19de387ed8322566833611134fcfb97bb7e1a3473517d23536"
 dependencies = [
  "surrealdb-cnf",
  "surrealdb-kvs",

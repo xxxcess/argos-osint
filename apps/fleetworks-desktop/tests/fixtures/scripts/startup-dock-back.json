@@ -1,0 +1,6 @@
+{
+  "events": [
+    { "t": 0.1, "type": "click", "key": "startup-local" },
+    { "t": 0.5, "type": "click", "key": "startup-back" }
+  ]
+}

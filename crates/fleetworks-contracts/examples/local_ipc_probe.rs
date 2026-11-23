@@ -62,9 +62,9 @@ fn build_command(args: &ProbeArgs) -> tokio::process::Command {
 }
 
 async fn run_probe(args: ProbeArgs) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let mut cmd = build_command(&args);
+    let cmd = build_command(&args);
     let ipc = Arc::new(
-        LocalIpcClient::spawn_command(&mut cmd, "fleetworks-rust-probe", env!("CARGO_PKG_VERSION"))
+        LocalIpcClient::spawn_command(cmd, "fleetworks-rust-probe", env!("CARGO_PKG_VERSION"))
             .await?,
     );
     let hello_caps = ipc

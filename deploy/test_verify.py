@@ -234,6 +234,14 @@ class StandaloneDeliveryTests(unittest.TestCase):
                 "docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}",
             ])
 
+    def test_development_web_requires_explicit_tags_and_ids_for_preloaded_images(self):
+        with patch.dict(verify.os.environ, {}, clear=True), \
+             patch.object(verify, "fixture_ports") as fixture_ports:
+            with self.assertRaisesRegex(ValueError, "requires explicit tags and exact Compose image IDs"):
+                verify.verify("fixture", "linux/amd64", web=True, dev=True, no_build=True,
+                              image_ids={"web": "sha256:" + "b" * 64})
+            fixture_ports.assert_not_called()
+
     def test_start_failure_stops_only_the_fresh_project_and_preserves_owned_files(self):
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary)

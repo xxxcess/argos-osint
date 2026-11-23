@@ -16,6 +16,7 @@ use super::instant;
 use super::invalid;
 use super::jobs;
 use super::run_tx;
+use super::Control;
 use super::Lease;
 use super::Repository;
 use super::RetryPolicy;
@@ -52,8 +53,6 @@ pub async fn observe_resources(
         }
         _ => "resource_measurement_unavailable".into(),
     };
-    let pressure_json = serde_json::to_string(&status.pressure)
-        .map_err(|_| invalid("actor_index_pressure_encoding"))?;
     #[derive(SurrealValue)]
     struct ObservedControl {
         deployment_id: String,
@@ -62,14 +61,13 @@ pub async fn observe_resources(
         lease_epoch: i64,
         lease_until: String,
         effective_limits_json: String,
-        pressure_json: String,
         pressure_paused: bool,
         pressure_reason: String,
         pressure_observed_at: String,
     }
     let mut current = repo
         .db()
-        .query("SELECT deployment_id, source_epoch, lease_owner, lease_epoch, <string>lease_until AS lease_until, effective_limits_json, pressure_json, pressure_paused, pressure_reason, pressure_observed_at FROM ONLY actor_search_control:catalog")
+        .query("SELECT deployment_id, source_epoch, lease_owner, lease_epoch, <string>lease_until AS lease_until, effective_limits_json, pressure_paused, pressure_reason, pressure_observed_at FROM ONLY actor_search_control:catalog")
         .await?
         .check()?;
     if let Some(observed) = current.take::<Option<ObservedControl>>(0)? {
@@ -80,11 +78,13 @@ pub async fn observe_resources(
                 || (observed.deployment_id == status.deployment_id
                     && observed.source_epoch == status.source_epoch))
             && observed.effective_limits_json == limits
-            && observed.pressure_json == pressure_json
             && observed.pressure_paused == !reason.is_empty()
             && observed.pressure_reason == reason
             && !observed.pressure_observed_at.is_empty()
         {
+            // Coalesce samples with the same admission decision. Changing
+            // timestamps and numeric readings do not require another write
+            // under the source's coordinator guard within this window.
             if let Ok(observed_at) = instant(&observed.pressure_observed_at) {
                 let age = now - observed_at;
                 if age >= Duration::zero() && age < Duration::seconds(10) {
@@ -93,6 +93,8 @@ pub async fn observe_resources(
             }
         }
     }
+    let pressure_json = serde_json::to_string(&status.pressure)
+        .map_err(|_| invalid("actor_index_pressure_encoding"))?;
     run_tx(repo.db(), RetryPolicy::default(), |tx| {
         let limits=limits.clone();let reason=reason.clone();let pressure_json=pressure_json.clone();
         async move {
@@ -118,6 +120,60 @@ pub(super) fn limits(control: &super::Control) -> Result<ActorIndexLimits, TxErr
         .validate()
         .map_err(|_| invalid("actor_index_limits_invalid"))?;
     Ok(limits)
+}
+
+fn bulk_pause_reason(control: &Control, now: DateTime<Utc>) -> Result<(&str, bool), TxError> {
+    let limits = limits(control)?;
+    let backlog = (control.next_sequence - control.acknowledged_sequence) as u64;
+    let backlog_paused = if control.backlog_paused {
+        backlog > limits.backlog_resume_events
+    } else {
+        backlog >= limits.backlog_pause_events
+    };
+    let stale = !control.pressure_observed_at.is_empty()
+        && (now - instant(&control.pressure_observed_at)?).num_seconds() > 30;
+    let reason = if backlog_paused {
+        "actor_index_backlog"
+    } else if stale {
+        "actor_index_pressure_stale"
+    } else if control.pressure_paused {
+        &control.pressure_reason
+    } else {
+        ""
+    };
+    Ok((reason, backlog_paused))
+}
+
+/// Check source capacity under the guard held through the chunk's outbox write.
+/// The successful chunk renews the source lease with its committed checkpoint.
+pub(crate) async fn check_bulk_capacity_in(
+    tx: &Tx,
+    owner: &str,
+    now: DateTime<Utc>,
+) -> Result<bool, TxError> {
+    guard(tx).await?;
+    let control = control_in(tx).await?;
+    let (reason, backlog_paused) = bulk_pause_reason(&control, now)?;
+    if !reason.is_empty() || backlog_paused != control.backlog_paused {
+        jobs::run(
+            tx,
+            tx.query(
+                "IF $reason != '' {
+                    IF (SELECT VALUE owner FROM ONLY brain_actor_seed:catalog) != $owner OR (SELECT VALUE status FROM ONLY brain_actor_seed:catalog) != 'running' { THROW 'actor seed lease changed'; };
+                    UPDATE brain_actor_seed:catalog SET index_pause_reason=$reason,lease_until=$until,updated_at=$now RETURN NONE;
+                };
+                IF $changed { UPDATE actor_search_control:catalog SET backlog_paused=$backlog RETURN NONE; };",
+            )
+            .bind(("owner", owner.to_owned()))
+            .bind(("reason", reason.to_owned()))
+            .bind(("until", (now + Duration::minutes(5)).to_rfc3339()))
+            .bind(("now", now.to_rfc3339()))
+            .bind(("changed", backlog_paused != control.backlog_paused))
+            .bind(("backlog", backlog_paused)),
+        )
+        .await?;
+    }
+    Ok(reason.is_empty())
 }
 
 /// Wait only at a committed seed chunk boundary. Keep the existing source
@@ -152,11 +208,8 @@ async fn await_bulk_capacity_in(
         let now = Utc::now();
         let waiting=run_tx(repo.db(),RetryPolicy::default(),|tx|async move {
             if let Some(execution)=execution {execution.check_in(&tx,cancel).await?;}
-            guard(&tx).await?;let control=control_in(&tx).await?;let limits=limits(&control)?;
-            let backlog=(control.next_sequence-control.acknowledged_sequence) as u64;
-            let backlog_paused=if control.backlog_paused {backlog>limits.backlog_resume_events} else {backlog>=limits.backlog_pause_events};
-            let stale=!control.pressure_observed_at.is_empty()&&(now-instant(&control.pressure_observed_at)?).num_seconds()>30;
-            let reason=if backlog_paused {"actor_index_backlog"} else if stale {"actor_index_pressure_stale"} else if control.pressure_paused {&control.pressure_reason} else {""};
+            guard(&tx).await?;let control=control_in(&tx).await?;
+            let (reason, backlog_paused)=bulk_pause_reason(&control,now)?;
             jobs::run(&tx,tx.query("IF (SELECT VALUE owner FROM ONLY brain_actor_seed:catalog)!=$owner OR (SELECT VALUE status FROM ONLY brain_actor_seed:catalog)!='running' {THROW 'actor seed lease changed';};
                 UPDATE brain_actor_seed:catalog SET index_pause_reason=$reason,lease_until=$until,updated_at=$now RETURN NONE;
                 UPDATE actor_search_control:catalog SET backlog_paused=$backlog RETURN NONE")
@@ -174,7 +227,11 @@ async fn await_bulk_capacity_in(
 /// A shadow promotion may acknowledge millions of rows at once. Delete at most
 /// one bounded keyset page per coordinator turn, never an unbounded range.
 pub(super) async fn prune_in(tx: &Tx, through: i64) -> Result<(), TxError> {
-    jobs::run(tx,tx.query("LET $expired=(SELECT VALUE id FROM actor_search_event WITH INDEX actor_search_event_sequence WHERE sequence<=$through ORDER BY sequence LIMIT 500); DELETE $expired RETURN NONE;")
-        .bind(("through",through))).await?;
+    prune_in_bounded(tx, through, 500).await
+}
+
+pub(super) async fn prune_in_bounded(tx: &Tx, through: i64, limit: i64) -> Result<(), TxError> {
+    jobs::run(tx,tx.query("LET $expired=(SELECT VALUE id FROM actor_search_event WITH INDEX actor_search_event_sequence WHERE sequence<=$through ORDER BY sequence LIMIT $limit); DELETE $expired RETURN NONE;")
+        .bind(("through",through)).bind(("limit",limit))).await?;
     Ok(())
 }

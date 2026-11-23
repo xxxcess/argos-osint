@@ -64,6 +64,7 @@ class PathScopesTests(unittest.TestCase):
             "services/search-index/tests/index_contract.rs": {"server", "local_backend", "images"},
             "crates/argos-osint-api/src/lib.rs": {"server", "queue", "local_backend", "images"},
             "crates/fleetworks-jobs/src/queue.rs": {"server", "storage", "queue", "local_backend", "images"},
+            "crates/fleetworks-broker/src/lib.rs": {"server", "queue", "images"},
             "scripts/fleetworks_atlas_smoke.py": {"server", "queue"},
             "services/api-host/src/classifier_service.rs": {"server", "queue", "bert", "local_backend", "images"},
             "crates/argos-osint-core/src/classifier/model.rs": {"server", "queue", "bert", "local_backend", "images"},

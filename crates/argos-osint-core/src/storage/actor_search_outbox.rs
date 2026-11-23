@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::future::Future;
 
 use chrono::DateTime;
 use chrono::Duration;
@@ -21,6 +22,8 @@ use fleetworks_contracts::actor_index::ActorProjection;
 use fleetworks_contracts::actor_index::MAX_BATCH_DOCUMENTS;
 use serde::Deserialize;
 use serde::Serialize;
+use surrealdb::types::Datetime;
+use surrealdb::types::RecordId;
 use surrealdb::types::SurrealValue;
 
 use super::jobs;
@@ -53,6 +56,7 @@ pub use rebuild::RebuildProgress;
 pub use resource_policy::resource_limits;
 pub use resources::await_bulk_capacity;
 pub(crate) use resources::await_bulk_capacity_claimed;
+pub(super) use resources::check_bulk_capacity_in;
 pub use resources::observe_resources;
 
 pub const SCHEMA: &str = concat!(
@@ -61,6 +65,8 @@ pub const SCHEMA: &str = concat!(
     include_str!("schema/actor_search_rebuild.surql")
 );
 const BACKFILL_PAGE: usize = 128;
+const INITIAL_RETIREMENT_LIMIT: i64 = 100_000;
+const INITIAL_RETIREMENT_MIN_CATALOG: i64 = 4_096;
 
 /// Actual server-side execution identity, never supplied by a UI context field.
 #[derive(Clone)]
@@ -117,7 +123,7 @@ async fn root_guard_in(tx: &Tx, job: &str) -> Result<(), TxError> {
     jobs::bump(tx, "job_guard", &root).await
 }
 
-async fn guard(tx: &Tx) -> Result<(), TxError> {
+pub(super) async fn guard(tx: &Tx) -> Result<(), TxError> {
     jobs::bump(tx, "job_guard", "actor-search-coordinator").await?;
     jobs::run(
         tx,
@@ -170,13 +176,52 @@ async fn ensure_child_in(
     Ok(child)
 }
 
+#[derive(SurrealValue)]
+struct HeadWrite {
+    id: RecordId,
+    actor_id: String,
+    revision: i64,
+    updated_at: Datetime,
+}
+
+#[derive(SurrealValue)]
+struct EventWrite {
+    id: RecordId,
+    sequence: i64,
+    actor_id: String,
+    revision: i64,
+    cause_job: Option<String>,
+    created_at: Datetime,
+}
+
 /// Join the actual source transaction after actor/alias/lifecycle writes. A
 /// rollback cannot leave index intent. Even no-op seed retries reconcile work.
-pub async fn enqueue_actors_in(
+pub fn enqueue_actors_in<'a>(
+    tx: &'a Tx,
+    actors: &'a [String],
+    cause: Option<&'a SourceCause>,
+    now: DateTime<Utc>,
+) -> impl Future<Output = Result<(), TxError>> + Send + 'a {
+    // Seed, lifecycle, and index backfill all nest this transaction operation.
+    Box::pin(enqueue_actor_events_in(tx, actors, cause, now, true))
+}
+
+/// Append from a seed transaction that already holds the coordinator guard.
+pub(super) fn enqueue_actors_under_guard_in<'a>(
+    tx: &'a Tx,
+    actors: &'a [String],
+    cause: Option<&'a SourceCause>,
+    now: DateTime<Utc>,
+) -> impl Future<Output = Result<(), TxError>> + Send + 'a {
+    Box::pin(enqueue_actor_events_in(tx, actors, cause, now, false))
+}
+
+async fn enqueue_actor_events_in(
     tx: &Tx,
     actors: &[String],
     cause: Option<&SourceCause>,
     now: DateTime<Utc>,
+    acquire_guard: bool,
 ) -> Result<(), TxError> {
     if actors.is_empty() {
         return Ok(());
@@ -184,7 +229,9 @@ pub async fn enqueue_actors_in(
     if actors.len() > MAX_BATCH_DOCUMENTS || actors.iter().any(|actor| !valid(actor)) {
         return Err(invalid("actor_index_source_bound"));
     }
-    guard(tx).await?;
+    if acquire_guard {
+        guard(tx).await?;
+    }
     let actors: Vec<String> = actors
         .iter()
         .cloned()
@@ -196,18 +243,71 @@ pub async fn enqueue_actors_in(
     } else {
         None
     };
-    jobs::run(tx, tx.query("FOR $actor IN $actors {
-        UPDATE actor_search_control:catalog SET next_sequence+=1 RETURN NONE;
-        LET $sequence=(SELECT VALUE next_sequence FROM ONLY actor_search_control:catalog);
-        LET $head=type::record('actor_search_head',$actor);
-        UPSERT $head SET actor_id=$actor,revision=(revision ?? 0)+1,updated_at=<datetime>$now RETURN NONE;
-        LET $revision=(SELECT VALUE revision FROM ONLY $head);
-        CREATE type::record('actor_search_event',$sequence) SET sequence=$sequence,actor_id=$actor,revision=$revision,cause_job=$cause,created_at=<datetime>$now RETURN NONE;
-    }; IF $cause != NONE {
-        UPDATE type::record('actor_search_cause',$cause) SET required_sequence=(SELECT VALUE next_sequence FROM ONLY actor_search_control:catalog),total_events+=array::len($actors),closed=false RETURN NONE;
-        UPDATE type::record('job',$cause) SET progress_total=(SELECT VALUE total_events FROM ONLY type::record('actor_search_cause',$cause)) RETURN NONE;
-    };")
-        .bind(("actors",actors)).bind(("cause",child)).bind(("now",now.to_rfc3339()))).await?;
+    // The coordinator guard protects this whole consecutive sequence range.
+    // One control write suffices for the sorted, distinct actor IDs.
+    let count = actors.len() as i64;
+    let heads: Vec<_> = actors
+        .iter()
+        .map(|actor| HeadWrite {
+            id: jobs::rid("actor_search_head", actor),
+            actor_id: actor.clone(),
+            revision: 1,
+            updated_at: now.into(),
+        })
+        .collect();
+    let mut response = jobs::run(
+        tx,
+        tx.query(
+            "UPDATE actor_search_control:catalog SET next_sequence += $count RETURN NONE;
+             SELECT VALUE next_sequence FROM ONLY actor_search_control:catalog;
+             INSERT INTO actor_search_head $heads ON DUPLICATE KEY UPDATE
+                 actor_id=$input.actor_id,revision=(revision ?? 0)+1,
+                 updated_at=$input.updated_at RETURN AFTER;",
+        )
+        .bind(("count", count))
+        .bind(("heads", heads)),
+    )
+    .await?;
+    let end = jobs::take::<Option<i64>>(&mut response, 1)?
+        .filter(|end| *end >= count)
+        .ok_or_else(|| invalid("actor_index_sequence_invalid"))?;
+    let revisions: BTreeMap<_, _> = jobs::take::<Vec<HeadRow>>(&mut response, 2)?
+        .into_iter()
+        .map(|head| (head.actor_id, head.revision))
+        .collect();
+    let events = (end - count + 1..=end)
+        .zip(actors)
+        .map(|(sequence, actor_id)| {
+            let revision = *revisions
+                .get(&actor_id)
+                .ok_or_else(|| invalid("actor_index_revision_missing"))?;
+            Ok(EventWrite {
+                id: RecordId::new("actor_search_event", sequence),
+                sequence,
+                actor_id,
+                revision,
+                cause_job: child.clone(),
+                created_at: now.into(),
+            })
+        })
+        .collect::<Result<Vec<_>, TxError>>()?;
+    jobs::run(
+        tx,
+        tx.query(
+            "INSERT INTO actor_search_event $events RETURN NONE;
+             IF $cause != NONE {
+                 UPDATE type::record('actor_search_cause',$cause)
+                     SET required_sequence=$end,total_events+=$count,closed=false RETURN NONE;
+                 UPDATE type::record('job',$cause)
+                     SET progress_total=(SELECT VALUE total_events FROM ONLY type::record('actor_search_cause',$cause)) RETURN NONE;
+             };",
+        )
+        .bind(("events", events))
+        .bind(("cause", child))
+        .bind(("end", end))
+        .bind(("count", count)),
+    )
+    .await?;
     Ok(())
 }
 
@@ -393,6 +493,32 @@ pub async fn observe(repo: &Repository) -> Result<Option<Observation>, TxError> 
         ((SELECT VALUE status FROM ONLY brain_actor_seed:catalog)='complete') ?? false AS seed_complete,
         ((SELECT VALUE reason_code FROM ONLY actor_search_rebuild:catalog) ?? '') AS rebuild_reason_code FROM ONLY actor_search_control:catalog").await?.check()?;
     Ok(response.take(0)?)
+}
+
+/// Check whether indexing can wait for a local initial seed. The source can
+/// still commit while the backlog has headroom. Prepared work must reconcile.
+pub async fn defer_initial_seed_index(
+    repo: &Repository,
+    backlog_resume_events: u64,
+) -> Result<bool, TxError> {
+    let mut response = repo
+        .db()
+        .query(
+            "SELECT VALUE (backfill_complete AND pending_json = '' AND !backlog_paused
+                AND next_sequence - acknowledged_sequence < $limit)
+             FROM ONLY actor_search_control:catalog;
+             SELECT VALUE IF job_id != '' {
+                 type::record('job',job_id).state IN ['queued','running','waiting','reconciling']
+             } ELSE { false } FROM ONLY setup_resource:actor_catalog;",
+        )
+        .bind((
+            "limit",
+            i64::try_from(backlog_resume_events).unwrap_or(i64::MAX),
+        ))
+        .await?
+        .check()?;
+    Ok(response.take::<Option<bool>>(0)? == Some(true)
+        && response.take::<Option<bool>>(1)? == Some(true))
 }
 
 #[derive(Clone, SurrealValue)]
@@ -592,6 +718,18 @@ async fn backfill_in(tx: &Tx, control: &Control, now: DateTime<Utc>) -> Result<(
     Ok(())
 }
 
+/// Live outbox event IDs are their numeric sequence. Reserve and address a
+/// bounded consecutive range without scanning the rest of the backlog.
+fn event_records(after: i64, through: i64) -> Result<Vec<RecordId>, TxError> {
+    let count = through
+        .checked_sub(after)
+        .filter(|count| (0..=MAX_BATCH_DOCUMENTS as i64).contains(count))
+        .ok_or_else(|| invalid("actor_index_event_range"))?;
+    Ok((1..=count)
+        .map(|offset| RecordId::new("actor_search_event", after + offset))
+        .collect())
+}
+
 /// Prepare one bounded live source page under the shared lease/rate fence.
 pub async fn prepare(
     repo: &Repository,
@@ -599,16 +737,38 @@ pub async fn prepare(
     status: &ActorIndexStatus,
     now: DateTime<Utc>,
 ) -> Result<Preparation, TxError> {
-    delivery::prepare(repo, owner, status, now).await
+    prepare_with_embedded_policy(repo, owner, status, now, false).await
 }
 
-/// Acknowledge only the exact persisted batch's reader-visible receipt. Outbox
-/// deletion, progress and genuine causal-job completion share this transaction.
+/// Embedded catch-up uses the configured writer batch with bounded source reads.
+pub async fn prepare_with_embedded_policy(
+    repo: &Repository,
+    owner: &str,
+    status: &ActorIndexStatus,
+    now: DateTime<Utc>,
+    embedded: bool,
+) -> Result<Preparation, TxError> {
+    delivery::prepare(repo, owner, status, now, embedded).await
+}
+
+/// Acknowledge only the exact persisted batch's reader-visible receipt.
 pub async fn acknowledge(
     repo: &Repository,
     lease: &Lease,
     receipt: &ActorIndexReceipt,
     now: DateTime<Utc>,
+) -> Result<(), TxError> {
+    acknowledge_with_retirement(repo, lease, receipt, now, false).await
+}
+
+/// Retire a verified batch logically with its durable cursor. During an initial
+/// Embedded import a bounded number of retired rows can be deleted later.
+pub async fn acknowledge_with_retirement(
+    repo: &Repository,
+    lease: &Lease,
+    receipt: &ActorIndexReceipt,
+    now: DateTime<Utc>,
+    embedded_catch_up: bool,
 ) -> Result<(), TxError> {
     let lease = lease.clone();
     let receipt = receipt.clone();
@@ -619,9 +779,20 @@ pub async fn acknowledge(
         if prepared.batch.batch_id!=receipt.batch_id || prepared.batch.content_checksum().map_err(|_|invalid("actor_index_checksum"))?!=receipt.checksum
             || prepared.batch.index_generation!=receipt.index_generation || receipt.visible_checkpoint!=prepared.batch.through_checkpoint
             || receipt.committed_checkpoint!=receipt.visible_checkpoint || receipt.writer_epoch!=lease.epoch {return Err(invalid("actor_index_receipt_mismatch"));}
+        let from = i64::try_from(prepared.batch.from_checkpoint).map_err(|_| invalid("actor_index_event_range"))?;
+        let through = i64::try_from(receipt.visible_checkpoint).map_err(|_| invalid("actor_index_event_range"))?;
+        let mut events = event_records(from, through)?;
+        if embedded_catch_up
+            && control.next_sequence > INITIAL_RETIREMENT_MIN_CATALOG
+            && through <= INITIAL_RETIREMENT_LIMIT
+        {
+            // The persisted cursor excludes retired events from delivery, even
+            // after restart. Keep synchronous deletion out of the import path.
+            events.clear();
+        }
         jobs::run(&tx,tx.query("UPDATE actor_search_control:catalog SET acknowledged_sequence=$through,pending_json='',failures=0,last_error='',retry_at=<datetime>$now RETURN NONE;
-            DELETE actor_search_event WHERE sequence>$from AND sequence<=$through RETURN NONE;")
-            .bind(("through",receipt.visible_checkpoint as i64)).bind(("from",prepared.batch.from_checkpoint as i64)).bind(("now",now.to_rfc3339()))).await?;
+            IF array::len($events)>0 { DELETE $events RETURN NONE; };")
+            .bind(("through",through)).bind(("events",events)).bind(("now",now.to_rfc3339()))).await?;
         for (cause,count) in prepared.cause_counts {
             root_guard_in(&tx,&cause).await?;
             jobs::run(&tx,tx.query("UPDATE $cause SET acknowledged_events+=$count RETURN NONE;

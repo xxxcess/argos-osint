@@ -1,0 +1,25 @@
+[package]
+name = "surrealdb-kvs-any"
+version = "3.3.4"
+edition = "2024"
+publish = false
+license-file = "LICENSE"
+repository = "https://github.com/surrealdb/surrealdb"
+
+[features]
+kv-indxdb = ["dep:surrealdb-kvs-indxdb"]
+kv-mem = ["dep:surrealdb-kvs-mem"]
+kv-rocksdb = ["dep:surrealdb-kvs-rocksdb"]
+kv-surrealkv = ["dep:surrealdb-kvs-surrealkv"]
+kv-tikv = ["dep:surrealdb-kvs-tikv"]
+
+[dependencies]
+surrealdb-cnf = "3.3.4"
+surrealdb-kvs = "3.3.4"
+surrealdb-kvs-indxdb = { version = "3.3.4", optional = true }
+surrealdb-kvs-mem = { version = "3.3.4", optional = true }
+surrealdb-kvs-rocksdb = { version = "3.3.4", optional = true }
+surrealdb-kvs-surrealkv = { version = "3.3.4", optional = true }
+surrealdb-kvs-tikv = { version = "3.3.4", optional = true }
+tokio-util = "0.7.18"
+tracing = { version = "0.1.44", features = ["release_max_level_debug"] }

@@ -10,6 +10,7 @@ DEFINE FIELD IF NOT EXISTS created_at ON setup_dataset TYPE datetime;
 DEFINE FIELD IF NOT EXISTS expires_at ON setup_dataset TYPE datetime;
 DEFINE INDEX IF NOT EXISTS setup_dataset_scope ON setup_dataset FIELDS scope_id, created_at;
 DEFINE INDEX IF NOT EXISTS setup_dataset_expiry ON setup_dataset FIELDS expires_at;
+DEFINE INDEX IF NOT EXISTS setup_dataset_content ON setup_dataset FIELDS kind, sha256;
 
 DEFINE TABLE IF NOT EXISTS setup_dataset_pin SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS dataset_id ON setup_dataset_pin TYPE string;
@@ -31,7 +32,9 @@ DEFINE FIELD IF NOT EXISTS payload_json ON setup_operation TYPE string;
 DEFINE FIELD IF NOT EXISTS payload_hash ON setup_operation TYPE string;
 DEFINE FIELD IF NOT EXISTS scope_id ON setup_operation TYPE string;
 DEFINE FIELD IF NOT EXISTS result_json ON setup_operation TYPE string DEFAULT '';
+DEFINE FIELD IF NOT EXISTS content_reuse ON setup_operation TYPE option<bool>;
 DEFINE FIELD IF NOT EXISTS updated_at ON setup_operation TYPE datetime;
+DEFINE INDEX IF NOT EXISTS setup_operation_kind ON setup_operation FIELDS operation;
 
 DEFINE TABLE IF NOT EXISTS setup_request SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS payload_hash ON setup_request TYPE string;
@@ -45,3 +48,9 @@ DEFINE FIELD IF NOT EXISTS scope_id ON setup_resource TYPE string DEFAULT '';
 
 DEFINE TABLE IF NOT EXISTS setup_dispatch SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS enabled ON setup_dispatch TYPE bool DEFAULT false;
+
+-- Retained independently of staging and Jobs history. The ID is the operation and input digest.
+DEFINE TABLE IF NOT EXISTS setup_completed_input SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS completed ON setup_completed_input TYPE bool;
+DEFINE FIELD IF NOT EXISTS operation ON setup_completed_input TYPE string;
+DEFINE INDEX IF NOT EXISTS setup_completed_input_kind ON setup_completed_input FIELDS operation;

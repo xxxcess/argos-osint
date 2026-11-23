@@ -22,7 +22,6 @@ use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
 use fleetworks_contracts::readiness::ACTOR_REINDEX_OPERATION;
 use fleetworks_contracts::readiness::ACTOR_SEED_PATH;
-use fleetworks_contracts::readiness::CLASSIFIER_TRAIN_PATH;
 use fleetworks_contracts::search::ACTOR_REINDEX_PATH;
 use fleetworks_contracts::Client;
 use fleetworks_contracts::ClientError;
@@ -43,6 +42,8 @@ use crate::app::Page;
 use crate::app::State;
 use crate::backend;
 use crate::backend::JobDetail;
+use crate::bundled_datasets;
+use crate::bundled_datasets::DatasetPin;
 use crate::connection::GatewayEffects;
 use crate::connection::RequestTask;
 use crate::platform;
@@ -83,7 +84,6 @@ pub enum MaintenancePreflight {
     Ready,
     Uploading,
     RequestPending,
-    LocalClassifierUnavailable,
     PermissionRequired,
     RegistrationRequired,
     ReadinessUnobserved,
@@ -103,9 +103,6 @@ impl MaintenancePreflight {
     pub fn disabled_reason(&self) -> Option<String> {
         match self {
             Self::Ready => None,
-            Self::LocalClassifierUnavailable => {
-                Some("Natural classifier training is unavailable on this embedded backend.".into())
-            }
             Self::PermissionRequired => Some("Backend maintenance permission required".into()),
             Self::RegistrationRequired => Some("Register this workstation first".into()),
             Self::ReadinessUnobserved => {
@@ -148,7 +145,6 @@ impl MaintenancePreflight {
             Self::Ready => ("Ready", StatusTone::Ok),
             Self::Uploading => ("Upload active", StatusTone::Info),
             Self::RequestPending => ("Request active", StatusTone::Info),
-            Self::LocalClassifierUnavailable => ("Unavailable", StatusTone::Neutral),
             Self::PermissionRequired => ("No permission", StatusTone::Err),
             Self::RegistrationRequired => ("Register first", StatusTone::Warn),
             Self::ReadinessUnobserved | Self::RegistrationContextMismatch | Self::ChecksStale => {
@@ -175,9 +171,8 @@ pub struct OperationJobRecord {
     pub poll_error: Option<String>,
 }
 
-const OPERATION_SLOTS: usize = 3;
+const OPERATION_SLOTS: usize = 2;
 pub(crate) const SEED_ACTION_KEY: &str = "maintenance-seed";
-pub(crate) const TRAIN_ACTION_KEY: &str = "maintenance-train";
 pub(crate) const REINDEX_ACTION_KEY: &str = "maintenance-reindex";
 pub(crate) const WORKSTATION_REINDEX_ACTION_KEY: &str = "workstation-build-actor-index";
 pub(crate) const CSV_PATH_KEY: &str = "maintenance-csv-path";
@@ -186,7 +181,6 @@ fn operation_slot(operation: MaintenanceOperation) -> Option<usize> {
     match operation {
         MaintenanceOperation::SeedActors => Some(0),
         MaintenanceOperation::ReindexActors => Some(1),
-        MaintenanceOperation::TrainClassifier => Some(2),
         _ => None,
     }
 }
@@ -196,6 +190,7 @@ pub struct Maintenance {
     pub local_dataset: Option<LocalDataset>,
     pub datasets: Load<DatasetList>,
     pub upload: Load<DatasetUpload>,
+    pub(crate) github_downloading: bool,
     pub selected_dataset: Option<DatasetRef>,
     pub confirmation: Option<MaintenanceConfirmation>,
     pub receipt: Load<MaintenanceReceipt>,
@@ -228,10 +223,11 @@ impl Default for Maintenance {
             local_dataset: None,
             datasets: Load::Idle,
             upload: Load::Idle,
+            github_downloading: false,
             selected_dataset: None,
             confirmation: None,
             receipt: Load::Idle,
-            operation_jobs: [None, None, None],
+            operation_jobs: [None, None],
             message: None,
             active_operation: None,
             pending_preview: None,
@@ -248,7 +244,7 @@ impl Default for Maintenance {
             upload_request: None,
             datasets_request: None,
             operation_request: None,
-            receipt_poll_requests: [None, None, None],
+            receipt_poll_requests: [None, None],
             reindex_journal_request: None,
             reindex_reconcile_request: None,
         }
@@ -333,12 +329,22 @@ impl Maintenance {
             || self.operation_request.is_some()
             || self.reindex_reconcile_request.is_some()
     }
+    pub(crate) fn discard_csv_draft(&mut self) {
+        self.csv_path_prompt = None;
+        self.pending_preview = None;
+        self.upload_request = None;
+        self.upload_revision = self.upload_revision.wrapping_add(1);
+        self.upload = Load::Idle;
+        self.github_downloading = false;
+    }
+
     pub(crate) fn invalidate_origin(&mut self) {
         self.csv_path_prompt = None;
         self.local_dataset = None;
         self.selected_dataset = None;
         self.datasets = Load::Idle;
         self.upload = Load::Idle;
+        self.github_downloading = false;
         self.upload_request = None;
         self.datasets_request = None;
         self.datasets_revision = self.datasets_revision.wrapping_add(1);
@@ -352,7 +358,7 @@ impl Maintenance {
         self.reindex_association = None;
         self.reindex_details_open = false;
         self.operation_request = None;
-        self.receipt_poll_requests = [None, None, None];
+        self.receipt_poll_requests = [None, None];
         for revision in &mut self.receipt_poll_revisions {
             *revision = revision.wrapping_add(1);
         }
@@ -360,13 +366,14 @@ impl Maintenance {
         self.reindex_reconcile_request = None;
         self.operation_revision = self.operation_revision.wrapping_add(1);
         self.receipt = Load::Idle;
-        self.operation_jobs = [None, None, None];
+        self.operation_jobs = [None, None];
     }
     pub(crate) fn cancel_requests(&mut self) {
         self.upload_request = None;
+        self.github_downloading = false;
         self.datasets_request = None;
         self.operation_request = None;
-        self.receipt_poll_requests = [None, None, None];
+        self.receipt_poll_requests = [None, None];
         self.reindex_journal_request = None;
         self.reindex_reconcile_request = None;
     }
@@ -380,6 +387,9 @@ impl State {
     }
 
     fn prepare_csv_path_prompt(&mut self, kind: DatasetKind) {
+        if kind != DatasetKind::ActorCatalog {
+            return;
+        }
         if self
             .maintenance
             .csv_path_prompt
@@ -395,10 +405,8 @@ impl State {
     }
 
     pub fn choose_dataset(&mut self, kind: DatasetKind, tx: &mut Tx) {
-        let operation = match kind {
-            DatasetKind::ActorCatalog => MaintenanceOperation::SeedActors,
-            DatasetKind::ClassifierTraining => MaintenanceOperation::TrainClassifier,
-            _ => return,
+        let Some(operation) = dataset_operation(kind) else {
+            return;
         };
         if let Some(reason) = self.maintenance_disabled_reason(operation) {
             self.maintenance.message = Some(reason);
@@ -409,6 +417,8 @@ impl State {
             return;
         }
         let epoch = self.connection.epoch;
+        let origin_revision = self.origin_revision;
+        let upload_revision = self.maintenance.upload_revision;
         tx.open_file(
             FileDialogOptions {
                 title: format!("Select {} CSV", dataset_kind_label(kind)),
@@ -416,7 +426,10 @@ impl State {
             }
             .filter("CSV", &["csv"]),
             move |state: &mut State, result, tx| {
-                if state.connection.epoch != epoch {
+                if state.connection.epoch != epoch
+                    || state.origin_revision != origin_revision
+                    || state.maintenance.upload_revision != upload_revision
+                {
                     return;
                 }
                 match result {
@@ -434,11 +447,13 @@ impl State {
 
     /// The chooser is unavailable: let the operator type the path of a local CSV instead.
     pub(crate) fn open_csv_path_prompt(&mut self, kind: DatasetKind, tx: &mut Tx) {
-        self.maintenance.message = Some(
-            "The dataset chooser could not open a file. Enter the path of a local CSV instead."
-                .into(),
-        );
         self.enter_csv_path(kind, tx);
+        if let Some(prompt) = &mut self.maintenance.csv_path_prompt {
+            prompt.error = Some(
+                "The dataset chooser could not open a file. Enter the path of a local CSV instead."
+                    .into(),
+            );
+        }
     }
 
     pub(crate) fn cancel_csv_path_prompt(&mut self, tx: &mut Tx) {
@@ -447,8 +462,12 @@ impl State {
         };
         let opener = match prompt.kind {
             DatasetKind::ActorCatalog => SEED_ACTION_KEY,
-            DatasetKind::ClassifierTraining => TRAIN_ACTION_KEY,
             _ => return,
+        };
+        let opener = if self.startup.data_step.is_some() {
+            crate::startup_data::PRIMARY
+        } else {
+            opener
         };
         tx.focus(opener, tx.focus_visible());
         tx.scroll_into_view(opener);
@@ -460,10 +479,8 @@ impl State {
             return;
         };
         let kind = prompt.kind;
-        let operation = match kind {
-            DatasetKind::ActorCatalog => MaintenanceOperation::SeedActors,
-            DatasetKind::ClassifierTraining => MaintenanceOperation::TrainClassifier,
-            _ => return,
+        let Some(operation) = dataset_operation(kind) else {
+            return;
         };
         let path = parse_local_csv_path(&prompt.input.text, std::env::var_os("HOME").as_deref())
             .and_then(|path| match self.maintenance_disabled_reason(operation) {
@@ -493,43 +510,140 @@ impl State {
         self.maintenance.message = None;
     }
 
-    pub fn upload_selected_dataset(&mut self) {
-        if !self.permission(Permission::MaintainBackend)
-            || matches!(self.maintenance.upload, Load::Loading)
+    pub(crate) fn bundled_dataset_path(&self, kind: DatasetKind) -> Option<PathBuf> {
+        if self.fixture {
+            let pin = bundled_datasets::pin(kind)?;
+            return self
+                .fixture_bundled_csv
+                .then(|| PathBuf::from("/fixture/datasets").join(&pin.filename));
+        }
+        bundled_datasets::installed_path(kind)
+    }
+
+    pub(crate) fn stage_bundled_dataset(&mut self, kind: DatasetKind, path: PathBuf) -> bool {
+        if self
+            .startup
+            .data_step
+            .and_then(crate::startup_data::Step::dataset_kind)
+            != Some(kind)
+        {
+            return false;
+        }
+        let Some(pin) = bundled_datasets::pin(kind) else {
+            return false;
+        };
+        let Some(operation) = dataset_operation(kind) else {
+            return false;
+        };
+        if self.maintenance_disabled_reason(operation).is_some() {
+            return false;
+        }
+        self.select_local_dataset(path, kind);
+        self.request_dataset_upload(Some(pin))
+    }
+
+    pub(crate) fn download_github_dataset(&mut self, kind: DatasetKind, url: String) {
+        let Some(operation) = dataset_operation(kind) else {
+            return;
+        };
+        if self
+            .startup
+            .data_step
+            .and_then(crate::startup_data::Step::dataset_kind)
+            != Some(kind)
         {
             return;
         }
-        let Some(selection) = self.maintenance.local_dataset.clone() else {
+        if let Some(reason) = self.maintenance_disabled_reason(operation) {
+            self.maintenance.message = Some(reason);
             return;
-        };
-        self.record(Intent::UploadDataset {
-            kind: selection.kind,
-        });
+        }
+        self.maintenance.discard_csv_draft();
+        self.maintenance.local_dataset = None;
+        self.maintenance.selected_dataset = None;
+        self.maintenance.confirmation = None;
+        self.maintenance.message = None;
+        self.record(Intent::DownloadGithubDataset { kind });
         if self.fixture {
             return;
         }
-        let (Some(services), Some(client)) = (&self.services, &self.client) else {
+        let Some(client) = self.registered_dataset_client() else {
             return;
         };
-        let Some(context) = &self.registration.context else {
+        let Some(services) = self.services.as_ref() else {
             return;
         };
-        let client = match client.with_registered_context(context) {
-            Ok(client) => client,
+        self.maintenance.upload = Load::Loading;
+        self.maintenance.github_downloading = true;
+        self.maintenance.upload_request = services.download_dataset(
+            client,
+            kind,
+            url,
+            self.connection.epoch,
+            self.maintenance.upload_revision,
+            self.origin_revision,
+        );
+    }
+
+    fn registered_dataset_client(&mut self) -> Option<Client> {
+        let client = self.client.as_ref()?;
+        let context = self.registration.context.as_ref()?;
+        match client.with_registered_context(context) {
+            Ok(client) => Some(client),
             Err(error) => {
                 self.maintenance.message = Some(error.to_string());
-                return;
+                None
             }
+        }
+    }
+
+    pub fn upload_selected_dataset(&mut self) {
+        self.request_dataset_upload(None);
+    }
+
+    fn request_dataset_upload(&mut self, pin: Option<&'static DatasetPin>) -> bool {
+        if !self.permission(Permission::MaintainBackend)
+            || matches!(self.maintenance.upload, Load::Loading)
+        {
+            return false;
+        }
+        let Some(selection) = self
+            .maintenance
+            .local_dataset
+            .as_ref()
+            .filter(|selection| selection.kind == DatasetKind::ActorCatalog)
+            .cloned()
+        else {
+            return false;
+        };
+        let intent = Intent::UploadDataset {
+            kind: selection.kind,
+        };
+        if self.fixture {
+            if pin.is_some() {
+                self.maintenance.upload = Load::Loading;
+                self.maintenance.upload_revision = self.maintenance.upload_revision.wrapping_add(1);
+            }
+            self.record(intent);
+            return true;
+        }
+        let Some(client) = self.registered_dataset_client() else {
+            return false;
+        };
+        let Some(services) = self.services.as_ref() else {
+            return false;
         };
         self.maintenance.upload = Load::Loading;
         self.maintenance.upload_revision = self.maintenance.upload_revision.wrapping_add(1);
         self.maintenance.upload_request = services.upload_dataset(
             client,
             selection,
+            pin,
             self.connection.epoch,
             self.maintenance.upload_revision,
             self.origin_revision,
         );
+        true
     }
 
     pub fn refresh_datasets(&mut self) {
@@ -571,19 +685,9 @@ impl State {
 
     #[must_use]
     pub fn maintenance_preflight(&self, operation: MaintenanceOperation) -> MaintenancePreflight {
-        if operation == MaintenanceOperation::TrainClassifier
-            && self.is_local_backend()
-            && self
-                .connection
-                .capabilities
-                .as_ref()
-                .is_some_and(|capabilities| {
-                    !crate::local_backend::assess_local_capabilities(capabilities)
-                        .classifier_available
-                })
-        {
-            return MaintenancePreflight::LocalClassifierUnavailable;
-        }
+        let Some(action_id) = action_id(operation) else {
+            return MaintenancePreflight::UnsupportedOperation;
+        };
         if !self.permission(Permission::MaintainBackend) {
             return MaintenancePreflight::PermissionRequired;
         }
@@ -599,9 +703,6 @@ impl State {
         }) {
             return MaintenancePreflight::RegistrationContextMismatch;
         }
-        let Some(action_id) = action_id(operation) else {
-            return MaintenancePreflight::UnsupportedOperation;
-        };
         for check in &readiness.checks {
             if let Some(action) = check.actions.iter().find(|action| action.id == action_id) {
                 let fresh = self.readiness_check_fresh(check);
@@ -678,17 +779,24 @@ impl State {
         {
             return;
         }
+        let Some(operation) = dataset_operation(kind) else {
+            return;
+        };
         self.maintenance.upload_request = None;
+        self.maintenance.github_downloading = false;
         match result {
             Ok(upload) if upload.dataset.kind == kind && upload.dataset.validate().is_ok() => {
                 self.maintenance.selected_dataset = Some(upload.dataset.clone());
                 self.maintenance.upload = Load::Ready(upload);
                 self.maintenance.last_request = None;
-                self.maintenance.pending_preview = Some(match kind {
-                    DatasetKind::ActorCatalog => MaintenanceOperation::SeedActors,
-                    DatasetKind::ClassifierTraining => MaintenanceOperation::TrainClassifier,
-                    _ => return,
-                });
+                if self
+                    .startup
+                    .data_step
+                    .and_then(crate::startup_data::Step::dataset_kind)
+                    != Some(kind)
+                {
+                    self.maintenance.pending_preview = Some(operation);
+                }
                 self.refresh_readiness();
                 self.finish_dataset_preview();
             }
@@ -735,6 +843,7 @@ impl State {
             dataset,
         });
         if self.page == crate::app::Page::Workstation
+            && self.startup.data_step.is_none()
             && operation == MaintenanceOperation::ReindexActors
         {
             self.confirm_maintenance_dialog = true;
@@ -754,7 +863,6 @@ impl State {
             .as_ref()
             .and_then(|confirmation| match confirmation.operation {
                 MaintenanceOperation::SeedActors => Some(SEED_ACTION_KEY),
-                MaintenanceOperation::TrainClassifier => Some(TRAIN_ACTION_KEY),
                 MaintenanceOperation::ReindexActors if self.confirm_maintenance_dialog => {
                     Some(WORKSTATION_REINDEX_ACTION_KEY)
                 }
@@ -763,6 +871,11 @@ impl State {
             });
         self.cancel_maintenance_confirmation();
         if let Some(opener) = opener {
+            let opener = if self.startup.data_step.is_some() {
+                crate::startup_data::PRIMARY
+            } else {
+                opener
+            };
             tx.focus(opener, true);
             tx.scroll_into_view(opener);
         }
@@ -1217,10 +1330,49 @@ impl State {
 }
 
 impl GatewayEffects {
+    fn download_dataset(
+        &self,
+        client: Client,
+        kind: DatasetKind,
+        url: String,
+        epoch: u64,
+        revision: u64,
+        origin_revision: u64,
+    ) -> Option<RequestTask> {
+        let ui = self.ui.get()?.clone();
+        let task = self.runtime.spawn(async move {
+            let result = match crate::github_dataset::download(&url, kind).await {
+                Ok(file) => {
+                    ui.update(move |state, _| {
+                        if state.connection.epoch == epoch
+                            && state.origin_revision == origin_revision
+                            && state.maintenance.upload_revision == revision
+                        {
+                            state.maintenance.github_downloading = false;
+                        }
+                    });
+                    let selection = LocalDataset {
+                        path: file.path().to_owned(),
+                        kind,
+                    };
+                    let result = upload(&client, selection, None).await;
+                    drop(file);
+                    result
+                }
+                Err(error) => Err(error),
+            };
+            ui.update(move |state, _| {
+                state.complete_dataset_upload(epoch, revision, origin_revision, kind, result);
+            });
+        });
+        Some(RequestTask(task.abort_handle()))
+    }
+
     fn upload_dataset(
         &self,
         client: Client,
         selection: LocalDataset,
+        pin: Option<&'static DatasetPin>,
         epoch: u64,
         revision: u64,
         origin_revision: u64,
@@ -1228,7 +1380,7 @@ impl GatewayEffects {
         let ui = self.ui.get()?.clone();
         let task = self.runtime.spawn(async move {
             let kind = selection.kind;
-            let result = upload(&client, selection).await;
+            let result = upload(&client, selection, pin).await;
             ui.update(move |state, _| {
                 state.complete_dataset_upload(epoch, revision, origin_revision, kind, result);
             });
@@ -1341,7 +1493,7 @@ impl State {
         }
     }
 
-    /// Refresh the bounded set of active Seed & Train receipt job IDs independently of the Jobs
+    /// Refresh the bounded set of active actor maintenance receipt job IDs independently of the Jobs
     /// page filter or selection.
     pub(crate) fn poll_maintenance_receipt_jobs(&mut self) -> usize {
         if !self.connected() || !self.permission(Permission::ReadWorkstationActivity) {
@@ -1464,7 +1616,23 @@ impl State {
             self.maintenance.pending_reindex = admitted.pending_entry;
         }
         match admitted.outcome {
+            MaintenanceOutcome::Receipt(receipt) if receipt.already_completed => {
+                self.complete_startup_input(receipt.operation);
+                self.maintenance.message = Some(
+                    match receipt.operation {
+                        MaintenanceOperation::SeedActors => "This actor dataset is already seeded.",
+                        MaintenanceOperation::ReindexActors => {
+                            "The actor search index is already built."
+                        }
+                        _ => "This maintenance operation is already complete.",
+                    }
+                    .into(),
+                );
+                self.maintenance.receipt = Load::Ready(receipt);
+                self.refresh_readiness();
+            }
             MaintenanceOutcome::Receipt(receipt) => {
+                self.complete_startup_input(receipt.operation);
                 if receipt.operation == MaintenanceOperation::SeedActors {
                     self.maintenance.seed_accepted_at = Some(receipt.origin.submitted_at.clone());
                 }
@@ -1585,13 +1753,28 @@ async fn admit_maintenance_request(
     };
     let route = match confirmation.operation {
         MaintenanceOperation::SeedActors => ACTOR_SEED_PATH,
-        MaintenanceOperation::TrainClassifier => CLASSIFIER_TRAIN_PATH,
         MaintenanceOperation::ReindexActors => ACTOR_REINDEX_PATH,
         _ => return Err("Unsupported maintenance operation".into()),
     };
     let outcome = match client.post::<MaintenanceReceipt>(route, &request).await {
         Ok(receipt) if valid_receipt(&receipt, confirmation, &request) => {
-            if confirmation.operation == MaintenanceOperation::ReindexActors {
+            if confirmation.operation == MaintenanceOperation::ReindexActors
+                && receipt.already_completed
+            {
+                if let Some(container) = container.cloned() {
+                    let origin_for_clear = origin.to_owned();
+                    let req_for_clear = request.clone();
+                    if matches!(
+                        tokio::task::spawn_blocking(move || {
+                            container.complete_actor_reindex(&origin_for_clear, &req_for_clear)
+                        })
+                        .await,
+                        Ok(Ok(()))
+                    ) {
+                        pending_entry = None;
+                    }
+                }
+            } else if confirmation.operation == MaintenanceOperation::ReindexActors {
                 if let Some(container) = container.cloned() {
                     let origin_for_accept = origin.to_owned();
                     let req_for_accept = request.clone();
@@ -1775,15 +1958,6 @@ fn prepare_maintenance_attempt(
                 .ok_or_else(|| "Actor catalog dataset required".to_owned())?,
         )
         .map_err(|error| error.to_string())?,
-        MaintenanceOperation::TrainClassifier => MaintenanceRequest::for_training(
-            id,
-            context,
-            confirmation
-                .dataset
-                .clone()
-                .ok_or_else(|| "Training dataset required".to_owned())?,
-        )
-        .map_err(|error| error.to_string())?,
         _ => return Err("Unsupported maintenance operation".into()),
     };
     Ok(PreparedMaintenance {
@@ -1798,8 +1972,11 @@ fn valid_receipt(
     confirmation: &MaintenanceConfirmation,
     request: &MaintenanceRequest,
 ) -> bool {
-    !receipt.job_id.is_empty()
-        && receipt.operation == confirmation.operation
+    (if receipt.already_completed {
+        receipt.reused && receipt.job_id.is_empty()
+    } else {
+        !receipt.job_id.is_empty()
+    }) && receipt.operation == confirmation.operation
         && receipt.resource_scope == ResourceScope::Backend
         && receipt.dataset == request.dataset
         && receipt.origin.request_id == request.request_id
@@ -1875,7 +2052,11 @@ async fn reconcile_uncertain_reindex(
     ))
 }
 
-async fn upload(client: &Client, selection: LocalDataset) -> Result<DatasetUpload, String> {
+async fn upload(
+    client: &Client,
+    selection: LocalDataset,
+    pin: Option<&DatasetPin>,
+) -> Result<DatasetUpload, String> {
     let kind = selection.kind;
     let cancel = Arc::new(AtomicBool::new(false));
     let _cancel = CancelPreparation(Arc::clone(&cancel));
@@ -1890,6 +2071,12 @@ async fn upload(client: &Client, selection: LocalDataset) -> Result<DatasetUploa
     })
     .await
     .map_err(|_| "Dataset verification worker stopped".to_owned())??;
+    if pin.is_some_and(|expected| expected.sha256 != sha256 || expected.size_bytes != size) {
+        return Err(
+            "The bundled CSV failed its integrity check. Choose Local CSV or reinstall Fleetworks."
+                .into(),
+        );
+    }
     client
         .upload_dataset(kind, &sha256, tokio::fs::File::from_std(file), size)
         .await
@@ -2041,28 +2228,31 @@ pub(crate) fn parse_local_csv_path(
 pub fn dataset_kind_label(kind: DatasetKind) -> &'static str {
     match kind {
         DatasetKind::ActorCatalog => "actor catalog",
-        DatasetKind::ClassifierTraining => "Natural training corpus",
         _ => "unsupported dataset",
     }
 }
 pub fn dataset_limit(kind: DatasetKind) -> u64 {
     match kind {
         DatasetKind::ActorCatalog => 256 * 1024 * 1024,
-        DatasetKind::ClassifierTraining => 128 * 1024 * 1024,
         _ => 0,
     }
 }
 fn dataset_kind(operation: MaintenanceOperation) -> Option<DatasetKind> {
     match operation {
         MaintenanceOperation::SeedActors => Some(DatasetKind::ActorCatalog),
-        MaintenanceOperation::TrainClassifier => Some(DatasetKind::ClassifierTraining),
+        _ => None,
+    }
+}
+
+fn dataset_operation(kind: DatasetKind) -> Option<MaintenanceOperation> {
+    match kind {
+        DatasetKind::ActorCatalog => Some(MaintenanceOperation::SeedActors),
         _ => None,
     }
 }
 fn action_id(operation: MaintenanceOperation) -> Option<ReadinessActionId> {
     match operation {
         MaintenanceOperation::SeedActors => Some(ReadinessActionId::SeedActors),
-        MaintenanceOperation::TrainClassifier => Some(ReadinessActionId::TrainClassifier),
         MaintenanceOperation::ReindexActors => Some(ReadinessActionId::RebuildActorIndex),
         _ => None,
     }

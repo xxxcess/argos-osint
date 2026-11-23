@@ -1,17 +1,95 @@
-//! Embedded single-process local backend served strictly over stdio IPC frames.
+//! Embedded backend served over an inherited Unix socket pair.
 //!
 //! Binds zero network listeners, directs all logging to `stderr`, validates
 //! private state-directory ownership (`0o700`) and single-writer locking,
 //! bootstraps embedded SurrealDB, Jobs SQLite/RocksDB, and Tantivy search
 //! in-process, and cleanly relinquishes active worker leases on shutdown.
 
+#[cfg(unix)]
 use std::future::Future;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::path::PathBuf;
 
+#[cfg(unix)]
 use anyhow::Result;
 
-/// Entry point for `--role local-ipc`. Runs entirely over stdin/stdout IPC frames.
+/// Claim the child endpoint before initializing the runtime or spawning helpers.
+#[cfg(unix)]
+pub(crate) fn take_inherited_socket(descriptor: i32) -> Result<UnixStream> {
+    use std::os::fd::FromRawFd;
+
+    use anyhow::ensure;
+
+    ensure!(
+        descriptor >= 3,
+        "Embedded socket must be a private inherited descriptor"
+    );
+    // SAFETY: fcntl checks the passed descriptor without accessing process memory.
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: the descriptor is open and this is the first owner in the child.
+    // Take it before runtime or helper setup to avoid descriptor reuse or inheritance.
+    let socket = unsafe { UnixStream::from_raw_fd(descriptor) };
+    // SAFETY: the owned descriptor stays open throughout this call.
+    if unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let mut socket_type: libc::c_int = 0;
+    let mut size = std::mem::size_of_val(&socket_type) as libc::socklen_t;
+    // SAFETY: the output pointers refer to initialized values of the supplied size.
+    let result = unsafe {
+        libc::getsockopt(
+            descriptor,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            std::ptr::from_mut(&mut socket_type).cast(),
+            &mut size,
+        )
+    };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    ensure!(
+        socket_type == libc::SOCK_STREAM
+            && socket.local_addr()?.is_unnamed()
+            && socket.peer_addr()?.is_unnamed(),
+        "Embedded transport requires a connected unnamed Unix stream pair"
+    );
+    socket.set_nonblocking(true)?;
+    Ok(socket)
+}
+
+#[cfg(all(test, unix))]
+mod socket_tests {
+    use std::os::fd::{AsRawFd, IntoRawFd};
+
+    use super::*;
+
+    #[test]
+    fn only_claims_a_connected_unnamed_unix_stream() {
+        let (parent, child) = UnixStream::pair().unwrap();
+        let fd = child.into_raw_fd();
+        let adopted = take_inherited_socket(fd).unwrap();
+        assert_eq!(adopted.as_raw_fd(), fd);
+        assert!(parent.peer_addr().unwrap().is_unnamed());
+        // SAFETY: adopted keeps its descriptor live for this query.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+
+        let file = std::fs::File::open("/dev/null").unwrap();
+        assert!(take_inherited_socket(file.into_raw_fd()).is_err());
+        assert!(take_inherited_socket(2).is_err());
+    }
+}
+
+/// Serve the inherited endpoint for the lifetime of the Embedded companion.
+#[cfg(unix)]
 pub(crate) async fn run(
+    socket: UnixStream,
     state_dir: PathBuf,
     nlp_cmd: Option<PathBuf>,
     classifier_cmd: Option<PathBuf>,
@@ -19,17 +97,18 @@ pub(crate) async fn run(
 ) -> Result<()> {
     #[cfg(not(feature = "embedded"))]
     {
-        let _ = (state_dir, nlp_cmd, classifier_cmd, signal);
-        anyhow::bail!("--role local-ipc requires the `embedded` feature");
+        let _ = (socket, state_dir, nlp_cmd, classifier_cmd, signal);
+        anyhow::bail!("--role local-ipc requires the embedded feature");
     }
 
     #[cfg(feature = "embedded")]
     {
-        embedded::run_embedded(state_dir, nlp_cmd, classifier_cmd, signal).await
+        let socket = tokio::net::UnixStream::from_std(socket)?;
+        embedded::run_embedded(socket, state_dir, nlp_cmd, classifier_cmd, signal).await
     }
 }
 
-#[cfg(feature = "embedded")]
+#[cfg(all(unix, feature = "embedded"))]
 mod embedded {
     use std::fs;
     use std::fs::File;
@@ -73,6 +152,7 @@ mod embedded {
     use argos_osint_core::storage::server;
     use fleetworks_contracts::actor_index::ActorIndexLimits;
     use fleetworks_contracts::context::Permission;
+    use fleetworks_contracts::context::RegisteredContext;
     use fleetworks_contracts::ipc::read_frame;
     use fleetworks_contracts::ipc::write_frame;
     use fleetworks_contracts::ipc::IpcEnvelope;
@@ -83,12 +163,14 @@ mod embedded {
     use fleetworks_contracts::ipc::IpcOutcome;
     use fleetworks_contracts::ipc::IPC_MIN_PROTOCOL_VERSION;
     use fleetworks_contracts::ipc::IPC_PROTOCOL_VERSION;
+    use fleetworks_contracts::ipc::IPC_UPLOAD_WINDOW;
     use fleetworks_contracts::ipc::MAX_IPC_INFLIGHT;
     use fleetworks_contracts::ipc::MAX_IPC_QUEUE_DEPTH;
     use fleetworks_jobs::queue::Queue;
     use fleetworks_jobs::Store;
     use fleetworks_search_index::config::LocalEngineConfig;
     use fleetworks_search_index::engine::Engine;
+    use fleetworks_search_index::pressure::Meter;
     use fleetworks_search_index::service::EngineSlot;
     use fleetworks_search_index::service::SearchService;
     use tokio::io::AsyncRead;
@@ -111,6 +193,7 @@ mod embedded {
     const SOURCE_EPOCH_FILENAME: &str = "source-epoch";
     const NATIVE_QUEUE_NAME: &str = "fleetworks.native";
     const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    const SHUTDOWN_IO_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
     /// Advisory exclusive lock held for the lifetime of the local IPC backend.
     struct StateDirLock {
@@ -142,15 +225,21 @@ mod embedded {
     }
 
     pub(super) async fn run_embedded(
+        socket: tokio::net::UnixStream,
         state_dir: PathBuf,
         nlp_cmd: Option<PathBuf>,
         classifier_cmd: Option<PathBuf>,
         signal: impl Future<Output = ()>,
     ) -> Result<()> {
         let context = LocalBackendContext::open(state_dir, nlp_cmd, classifier_cmd, true).await?;
-        let stdin = tokio::io::stdin();
-        let stdout = tokio::io::stdout();
-        context.serve(stdin, stdout, signal).await
+        let (reader, writer) = socket.into_split();
+        let result = context.serve(reader, writer, signal).await;
+        report_shutdown_phase("context_released");
+        result
+    }
+
+    fn report_shutdown_phase(phase: &'static str) {
+        tracing::debug!(code = "embedded_backend_shutdown_phase", phase);
     }
 
     /// Fully initialized in-process backend ready to serve one IPC stream pair.
@@ -160,6 +249,7 @@ mod embedded {
         repo: Repository,
         state_root: PathBuf,
         worker_config: Option<LocalWorkerConfig>,
+        qa_broker: Client,
         helpers: Option<HelperChildren>,
         _jobs_store: Store,
         _search_service: Arc<SearchService>,
@@ -216,7 +306,13 @@ mod embedded {
             })
             .await??;
 
-            let limits = ActorIndexLimits::default();
+            let limits = ActorIndexLimits {
+                writer_memory_bytes: 32 * 1024 * 1024,
+                ..ActorIndexLimits::default()
+            };
+            let meter = Arc::new(
+                Meter::new(layout.search.clone(), limits.clone())?.with_unused_memory_reclaim(),
+            );
             let engine_config = LocalEngineConfig::for_identity(
                 layout.search.clone(),
                 deployment.deployment_id.clone(),
@@ -225,15 +321,18 @@ mod embedded {
             )?;
             let engine = tokio::task::spawn_blocking({
                 let config = engine_config.engine.clone();
-                move || Engine::open(config)
+                move || Engine::open_embedded(config)
             })
             .await??;
             let engine_slot = Arc::new(EngineSlot::new(Some(Arc::new(engine))));
-            let search_service = Arc::new(SearchService::new(
-                engine_config,
-                Arc::clone(&engine_slot),
-                "actor_index_unavailable",
-            )?);
+            let search_service = Arc::new(
+                SearchService::new(
+                    engine_config,
+                    Arc::clone(&engine_slot),
+                    "actor_index_unavailable",
+                )?
+                .with_meter(meter),
+            );
 
             let dataset_store = tokio::task::spawn_blocking({
                 let staged = layout.staged_datasets.clone();
@@ -246,11 +345,16 @@ mod embedded {
             })
             .await??;
 
-            let (nlp_enabled, classifier_enabled) = warm_local_engines().await;
+            let nlp_enabled = warm_local_nlp().await;
 
             let readiness = ReadinessOwners::new(deployment.deployment_id.clone(), Vec::new())?
                 .with_platform_display_name(deployment.platform_display_name.clone())?
-                .with_local_nlp(nlp_enabled);
+                .with_local_nlp(nlp_enabled)
+                .with_local_classifier(
+                    argos_osint_core::classifier::readiness::ClassifierHome::new(
+                        layout.root.clone(),
+                    ),
+                );
             let search_backend: Arc<dyn ActorSearchBackend> =
                 Arc::new(LocalActorSearchBackend(Arc::clone(&search_service)));
             let services = PrivateServices::default()
@@ -268,7 +372,7 @@ mod embedded {
 
             let capability_config = LocalCapabilityConfig {
                 nlp_enabled,
-                classifier_enabled,
+                classifier_enabled: false,
                 search_enabled: true,
                 jobs_enabled: true,
             };
@@ -285,18 +389,18 @@ mod embedded {
                 Arc::clone(&search_service),
                 format!("actor-index-{}", argos_osint_core::store::new_id()),
             )?;
+            let qa_broker =
+                Client::local(jobs_queue.clone(), crate::queue_client::QA_QUEUE.to_owned());
             let worker_config = LocalWorkerConfig {
                 broker: Client::local(jobs_queue, NATIVE_QUEUE_NAME.to_owned()),
                 store: dataset_store,
                 index: Some(index_worker),
                 relinquish_on_shutdown: true,
-                classifier_enabled,
             };
 
             tracing::info!(
                 role = "local-ipc",
                 nlp = nlp_enabled,
-                classifier = classifier_enabled,
                 search = true,
                 jobs = true,
                 "Fleetworks startup summary: embedded local-ipc backend ready"
@@ -308,6 +412,7 @@ mod embedded {
                 repo,
                 state_root: layout.root,
                 worker_config: Some(worker_config),
+                qa_broker,
                 helpers: Some(helpers),
                 _jobs_store: jobs_store,
                 _search_service: search_service,
@@ -330,6 +435,25 @@ mod embedded {
                 .worker_config
                 .take()
                 .ok_or_else(|| anyhow!("local worker configuration already consumed"))?;
+            let model =
+                crate::qa_worker::QaWorkerSupervisor::embedded_for_state(self.state_root.clone());
+            let health_stop = argos_osint_api::inbox_qa::CancellationToken::new();
+            let health_refresh = tokio::spawn({
+                let gateway = self.gateway.clone();
+                let stop = health_stop.clone();
+                async move { gateway.run_qa_health_refresh(&stop).await }
+            });
+            let (qa_stop, qa_signal) = oneshot::channel::<()>();
+            let qa_task = tokio::spawn(crate::inbox_qa_service::run(
+                self.repo.clone(),
+                self.qa_broker.clone(),
+                model,
+                "embedded".to_owned(),
+                Some(self.gateway.qa_runtime_availability()),
+                async move {
+                    let _ = qa_signal.await;
+                },
+            ));
             let result = serve_streams(
                 reader,
                 writer,
@@ -341,6 +465,15 @@ mod embedded {
                 signal,
             )
             .await;
+            report_shutdown_phase("ipc_drained");
+            health_stop.cancel();
+            let _ = health_refresh.await;
+            report_shutdown_phase("health_stopped");
+            let _ = qa_stop.send(());
+            if !matches!(qa_task.await, Ok(Ok(()))) {
+                tracing::warn!("Embedded Inbox QA executor shut down unexpectedly");
+            }
+            report_shutdown_phase("qa_stopped");
             if let Some(helpers) = self.helpers.take() {
                 helpers.shutdown().await;
             }
@@ -348,9 +481,8 @@ mod embedded {
         }
     }
 
-    /// Warm only optional in-process engines. Failure never prevents base IPC startup.
-    /// Helper process presence is not proof of either capability.
-    async fn warm_local_engines() -> (bool, bool) {
+    /// Warm optional in-process NLP. Engine availability cannot block IPC startup.
+    async fn warm_local_nlp() -> bool {
         let nlp = async {
             if !cfg!(feature = "nlp") {
                 return false;
@@ -377,33 +509,12 @@ mod embedded {
                 && result.validate(&source)
                 && !result.sentences.is_empty()
         };
-        let classifier = async {
-            if !cfg!(feature = "classifier") {
-                return false;
-            }
-            matches!(
-                tokio::task::spawn_blocking(argos_osint_core::classifier::training_runtime_ready,)
-                    .await,
-                Ok(Ok(()))
-            )
-        };
         let deadline = std::time::Duration::from_secs(10);
-        let (nlp, classifier) = tokio::join!(
-            tokio::time::timeout(deadline, nlp),
-            tokio::time::timeout(deadline, classifier),
-        );
-        let nlp = nlp.unwrap_or(false);
-        let classifier = classifier.unwrap_or(false);
-        if !nlp {
+        let ready = tokio::time::timeout(deadline, nlp).await.unwrap_or(false);
+        if !ready {
             tracing::warn!(component = "nlp", "Optional local NLP engine unavailable");
         }
-        if !classifier {
-            tracing::warn!(
-                component = "natural-training",
-                "Optional Natural training runtime unavailable"
-            );
-        }
-        (nlp, classifier)
+        ready
     }
 
     fn native_ipc_permissions() -> Vec<Permission> {
@@ -412,6 +523,7 @@ mod embedded {
             Permission::RegisterWorkstation,
             Permission::RebindWorkstation,
             Permission::ManageConfiguration,
+            Permission::ManageInboxQa,
             Permission::MaintainBackend,
             Permission::SubmitInteractive,
             Permission::ReadWorkstationActivity,
@@ -669,6 +781,12 @@ mod embedded {
         )
     }
 
+    struct UploadChunkRequest {
+        request_id: u64,
+        registration: Option<RegisteredContext>,
+        op: IpcOperation,
+    }
+
     /// Serve local IPC frames over an `AsyncRead + AsyncWrite` pair until EOF,
     /// explicit `Shutdown` frame, or external `signal`.
     #[allow(clippy::too_many_arguments)]
@@ -728,13 +846,13 @@ mod embedded {
         ));
 
         let (outbound_tx, mut outbound_rx) = mpsc::channel::<IpcEnvelope>(MAX_IPC_QUEUE_DEPTH);
-        let writer_task = tokio::spawn(async move {
+        let mut writer_task = tokio::spawn(async move {
             while let Some(frame) = outbound_rx.recv().await {
                 if write_frame(&mut writer, &frame).await.is_err() {
                     break;
                 }
             }
-            let _ = writer.flush().await;
+            let _ = writer.shutdown().await;
         });
 
         let (inbound_tx, mut inbound_rx) = mpsc::channel(MAX_IPC_QUEUE_DEPTH);
@@ -747,6 +865,32 @@ mod embedded {
                 }
             }
         });
+
+        // Pipelined upload commands must reach the staging file in frame order.
+        // Control requests use a separate queue and remain actionable mid-upload.
+        let (upload_tx, mut upload_rx) = mpsc::channel::<UploadChunkRequest>(IPC_UPLOAD_WINDOW);
+        let upload_task = {
+            let gateway = Arc::clone(&gateway);
+            let principal = principal.clone();
+            let outbound = outbound_tx.clone();
+            tokio::spawn(async move {
+                while let Some(chunk) = upload_rx.recv().await {
+                    let outcome = gateway
+                        .dispatch(&principal, chunk.registration.as_ref(), chunk.op)
+                        .await;
+                    if outbound
+                        .send(IpcEnvelope::Response {
+                            request_id: chunk.request_id,
+                            outcome,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+        };
 
         let inflight = Arc::new(Semaphore::new(MAX_IPC_INFLIGHT));
         let mut request_tasks: JoinSet<()> = JoinSet::new();
@@ -773,6 +917,21 @@ mod embedded {
                         break;
                     };
                     match frame {
+                        Ok(Some(IpcEnvelope::Request {
+                            request_id, registration, op: op @ IpcOperation::DatasetUploadChunk { .. },
+                        })) => {
+                            if upload_tx.try_send(UploadChunkRequest { request_id, registration, op }).is_err() {
+                                let _ = outbound_tx.try_send(IpcEnvelope::Response {
+                                    request_id,
+                                    outcome: IpcOutcome::Err {
+                                        status: 503,
+                                        code: "ipc_upload_window_full".into(),
+                                        message: "Embedded dataset upload window reached".into(),
+                                        retry_after_seconds: Some(1),
+                                    },
+                                });
+                            }
+                        }
                         Ok(Some(IpcEnvelope::Request { request_id, registration, op })) => {
                             match Arc::clone(&inflight).try_acquire_owned() {
                                 Ok(permit) => {
@@ -837,6 +996,13 @@ mod embedded {
         drop(inbound_rx);
         reader_task.abort();
         let _ = reader_task.await;
+        gateway.cancel_dataset_uploads().await;
+        drop(upload_tx);
+        upload_task.abort();
+        let _ = upload_task.await;
+        if stream_broken {
+            writer_task.abort();
+        }
 
         let _ = worker_stop_tx.send(());
         let relinquished_leases = match worker_result {
@@ -854,7 +1020,17 @@ mod embedded {
             },
         };
 
-        while request_tasks.join_next().await.is_some() {}
+        if tokio::time::timeout(SHUTDOWN_IO_GRACE, async {
+            while request_tasks.join_next().await.is_some() {}
+        })
+        .await
+        .is_err()
+        {
+            request_tasks.shutdown().await;
+        }
+        // An accepted upload start may have finished while shutdown drained
+        // the remaining control requests.
+        gateway.cancel_dataset_uploads().await;
 
         if !stream_broken {
             let _ = outbound_tx.try_send(IpcEnvelope::Event(IpcEvent::ShutdownNotice {
@@ -862,17 +1038,27 @@ mod embedded {
                 relinquished_leases,
             }));
             if shutdown_requested {
-                let _ = outbound_tx
-                    .send(IpcEnvelope::ShutdownAck {
-                        checkpointed: true,
-                        relinquished_leases,
-                    })
-                    .await;
+                let ack = IpcEnvelope::ShutdownAck {
+                    checkpointed: true,
+                    relinquished_leases,
+                };
+                if tokio::time::timeout(SHUTDOWN_IO_GRACE, outbound_tx.send(ack))
+                    .await
+                    .is_err()
+                {
+                    writer_task.abort();
+                }
             }
         }
 
         drop(outbound_tx);
-        let _ = writer_task.await;
+        if tokio::time::timeout(SHUTDOWN_IO_GRACE, &mut writer_task)
+            .await
+            .is_err()
+        {
+            writer_task.abort();
+            let _ = writer_task.await;
+        }
         Ok(())
     }
 
@@ -904,37 +1090,7 @@ mod embedded {
 
         #[tokio::test]
         async fn local_engines_warm_without_helpers_or_training() {
-            let (nlp, classifier) = warm_local_engines().await;
-            assert_eq!(nlp, cfg!(feature = "nlp"));
-            assert_eq!(classifier, cfg!(feature = "classifier"));
-        }
-
-        fn test_base64_encode(input: &[u8]) -> String {
-            const ALPHABET: &[u8; 64] =
-                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            if input.is_empty() {
-                return String::new();
-            }
-            let mut out = Vec::with_capacity(input.len().div_ceil(3) * 4);
-            for chunk in input.chunks(3) {
-                let b0 = chunk[0];
-                let b1 = if chunk.len() > 1 { chunk[1] } else { 0 };
-                let b2 = if chunk.len() > 2 { chunk[2] } else { 0 };
-                let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
-                out.push(ALPHABET[((n >> 18) & 0x3f) as usize]);
-                out.push(ALPHABET[((n >> 12) & 0x3f) as usize]);
-                out.push(if chunk.len() > 1 {
-                    ALPHABET[((n >> 6) & 0x3f) as usize]
-                } else {
-                    b'='
-                });
-                out.push(if chunk.len() > 2 {
-                    ALPHABET[(n & 0x3f) as usize]
-                } else {
-                    b'='
-                });
-            }
-            String::from_utf8(out).expect("base64 ASCII")
+            assert_eq!(warm_local_nlp().await, cfg!(feature = "nlp"));
         }
 
         #[cfg(unix)]
@@ -996,7 +1152,8 @@ mod embedded {
             let context1 = LocalBackendContext::open(state_dir.clone(), None, None, false)
                 .await
                 .expect("open context");
-            let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+            let (server_io, client_io) =
+                tokio::net::UnixStream::pair().expect("private socket pair");
             let (server_read, server_write) = tokio::io::split(server_io);
             let (mut client_read, mut client_write) = tokio::io::split(client_io);
             let (_sig_tx, sig_rx) = oneshot::channel::<()>();
@@ -1023,11 +1180,12 @@ mod embedded {
             }
             server_task.await.expect("join").expect("clean reject");
 
-            // Compatible handshake advertises warmed in-process engines without helper commands.
+            // Compatible handshake advertises warmed NLP and omits the retired classifier capability.
             let context2 = LocalBackendContext::open(state_dir, None, None, false)
                 .await
                 .expect("reopen context");
-            let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+            let (server_io, client_io) =
+                tokio::net::UnixStream::pair().expect("private socket pair");
             let (server_read, server_write) = tokio::io::split(server_io);
             let (client_read, client_write) = tokio::io::split(client_io);
             let (_sig2_tx, sig2_rx) = oneshot::channel::<()>();
@@ -1060,10 +1218,7 @@ mod embedded {
                 caps.features.iter().any(|feature| feature == "nlp"),
                 cfg!(feature = "nlp")
             );
-            assert_eq!(
-                caps.features.iter().any(|feature| feature == "classifier"),
-                cfg!(feature = "classifier")
-            );
+            assert!(!caps.features.iter().any(|feature| feature == "classifier"));
             assert!(!dir.path().join("state/classifier/active.json").exists());
             assert!(!dir.path().join("state/classifier/models").exists());
             assert!(caps.auth);
@@ -1087,7 +1242,8 @@ mod embedded {
             let context = LocalBackendContext::open(state_dir, None, None, false)
                 .await
                 .expect("open context");
-            let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+            let (server_io, client_io) =
+                tokio::net::UnixStream::pair().expect("private socket pair");
             let (server_read, server_write) = tokio::io::split(server_io);
             let (mut client_read, mut client_write) = tokio::io::split(client_io);
             let (_sig_tx, sig_rx) = oneshot::channel::<()>();
@@ -1195,6 +1351,60 @@ mod embedded {
         }
 
         #[cfg(feature = "embedded")]
+        async fn upload_actor_fixture(
+            client: &LocalIpcClient,
+            registered: &RegisteredContext,
+            csv: &[u8],
+        ) -> DatasetUpload {
+            let sha256 = format!("{:x}", sha2::Sha256::digest(csv));
+            let upload_ticket: DatasetUploadTicket = client
+                .request_json(
+                    Some(registered.clone()),
+                    IpcOperation::DatasetUploadStart(
+                        DatasetUploadRequest::new(
+                            DatasetKind::ActorCatalog,
+                            sha256,
+                            csv.len() as u64,
+                        )
+                        .expect("upload req"),
+                    ),
+                )
+                .await
+                .expect("start upload");
+            let upload_id = upload_ticket
+                .upload_path
+                .strip_prefix(DATASET_UPLOADS_PATH)
+                .and_then(|rest| rest.strip_prefix('/'))
+                .expect("upload id")
+                .to_owned();
+
+            let chunk = client
+                .request_payload(
+                    Some(registered.clone()),
+                    IpcOperation::DatasetUploadChunk {
+                        upload_id: upload_id.clone(),
+                        offset: 0,
+                        data: csv.to_vec(),
+                    },
+                )
+                .await
+                .expect("upload chunk");
+            assert!(
+                matches!(chunk, fleetworks_contracts::ipc::IpcPayload::DatasetUploadProgress {
+                received_bytes,
+            } if received_bytes == csv.len() as u64)
+            );
+            let uploaded: DatasetUpload = client
+                .request_json(
+                    Some(registered.clone()),
+                    IpcOperation::DatasetUploadFinish { upload_id },
+                )
+                .await
+                .expect("finish upload");
+            uploaded
+        }
+
+        #[cfg(feature = "embedded")]
         #[tokio::test]
         async fn ipc_lifecycle_registration_seed_and_restart_resume_preserves_job_without_duplicates(
         ) {
@@ -1206,7 +1416,8 @@ mod embedded {
             let context1 = LocalBackendContext::open(state_dir.clone(), None, None, false)
                 .await
                 .expect("open session 1");
-            let (server_io, client_io) = tokio::io::duplex(256 * 1024);
+            let (server_io, client_io) =
+                tokio::net::UnixStream::pair().expect("private socket pair");
             let (server_read, server_write) = tokio::io::split(server_io);
             let (client_read, client_write) = tokio::io::split(client_io);
             let (_sig1_tx, sig1_rx) = oneshot::channel::<()>();
@@ -1261,47 +1472,8 @@ mod embedded {
             assert_eq!(readiness.deployment_id, registered.deployment_id);
 
             let csv = b"actor_id,actor_name,actor_type,aliases,name_normalized\nactor-beacon-1,Harbor Beacon Collective,organization,[],harbor beacon collective\n";
-            let sha256 = format!("{:x}", sha2::Sha256::digest(csv));
-            let upload_ticket: DatasetUploadTicket = client1
-                .request_json(
-                    Some(registered.clone()),
-                    IpcOperation::DatasetUploadStart(
-                        DatasetUploadRequest::new(
-                            DatasetKind::ActorCatalog,
-                            sha256,
-                            csv.len() as u64,
-                        )
-                        .expect("upload req"),
-                    ),
-                )
-                .await
-                .expect("start upload");
-            let upload_id = upload_ticket
-                .upload_path
-                .strip_prefix(DATASET_UPLOADS_PATH)
-                .and_then(|rest| rest.strip_prefix('/'))
-                .expect("upload id")
-                .to_owned();
-
-            let _chunk_empty = client1
-                .request_payload(
-                    Some(registered.clone()),
-                    IpcOperation::DatasetUploadChunk {
-                        upload_id: upload_id.clone(),
-                        offset: 0,
-                        data_b64: test_base64_encode(csv),
-                    },
-                )
-                .await
-                .expect("upload chunk");
-            let uploaded: DatasetUpload = client1
-                .request_json(
-                    Some(registered.clone()),
-                    IpcOperation::DatasetUploadFinish { upload_id },
-                )
-                .await
-                .expect("finish upload");
-
+            let uploaded = upload_actor_fixture(&client1, &registered, csv).await;
+            let original_dataset = uploaded.dataset.clone();
             let seed_receipt: MaintenanceReceipt = client1
                 .request_json(
                     Some(registered.clone()),
@@ -1330,7 +1502,8 @@ mod embedded {
             let context2 = LocalBackendContext::open(state_dir, None, None, false)
                 .await
                 .expect("open session 2");
-            let (server2_io, client2_io) = tokio::io::duplex(256 * 1024);
+            let (server2_io, client2_io) =
+                tokio::net::UnixStream::pair().expect("private socket pair");
             let (server2_read, server2_write) = tokio::io::split(server2_io);
             let (client2_read, client2_write) = tokio::io::split(client2_io);
             let (_sig2_tx, sig2_rx) = oneshot::channel::<()>();
@@ -1374,42 +1547,74 @@ mod embedded {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
 
-            let reindex_receipt: MaintenanceReceipt = client2
+            let uploaded_again = upload_actor_fixture(&client2, &registered, csv).await;
+            assert_ne!(uploaded_again.dataset.id, original_dataset.id);
+            assert_eq!(uploaded_again.dataset.sha256, original_dataset.sha256);
+            let repeated_seed: MaintenanceReceipt = client2
                 .request_json(
                     Some(registered.clone()),
-                    IpcOperation::ReindexActors(
-                        MaintenanceRequest::for_reindex(
-                            "reindex-ipc-1".into(),
+                    IpcOperation::SeedActors(
+                        MaintenanceRequest::for_seed(
+                            "seed-ipc-same-bytes".into(),
                             MutationContext::new(&registered).with_configuration_revision(0),
+                            uploaded_again.dataset,
                         )
-                        .expect("reindex req"),
+                        .expect("new request for the same bytes"),
                     ),
                 )
                 .await
-                .expect("reindex actors submitted after seed");
+                .expect("repeat seed is a successful no-op after restart");
+            assert!(repeated_seed.already_completed && repeated_seed.reused);
+            assert!(repeated_seed.job_id.is_empty());
 
-            let search_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-            loop {
-                let jobs: Jobs = client2
-                    .request_json(
-                        Some(registered.clone()),
-                        IpcOperation::JobsList(Default::default()),
+            let client = &client2;
+            let context = &registered;
+            let admit_reindex = |key: &'static str| async move {
+                let search_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+                loop {
+                    let request = MaintenanceRequest::for_reindex(
+                        key.into(),
+                        MutationContext::new(context).with_configuration_revision(0),
                     )
-                    .await
-                    .expect("jobs list");
-                assert_eq!(
-                    jobs.rows
-                        .iter()
-                        .filter(|row| row.id == reindex_receipt.job_id)
-                        .count(),
-                    1,
-                    "reindex job must exist without duplicates"
-                );
-                let reindex_done = jobs
-                    .rows
-                    .iter()
-                    .find(|row| row.id == reindex_receipt.job_id)
-                    .is_some_and(|row| row.state == "completed");
+                    .expect("reindex request");
+                    match client
+                        .request_json(Some(context.clone()), IpcOperation::ReindexActors(request))
+                        .await
+                    {
+                        Ok(receipt) => return receipt,
+                        Err(fleetworks_contracts::ClientError::Status(422)) => {
+                            assert!(
+                                tokio::time::Instant::now() < search_deadline,
+                                "index owner never settled during normal catch-up"
+                            );
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                        Err(error) => panic!("reindex admission failed: {error}"),
+                    }
+                }
+            };
+            let reindex: MaintenanceReceipt = admit_reindex("reindex-ipc-1").await;
+            let search_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+            if reindex.already_completed {
+                assert!(reindex.job_id.is_empty());
+            } else {
+                assert!(!reindex.job_id.is_empty());
+            }
+            loop {
+                let reindex_done = if reindex.already_completed {
+                    true
+                } else {
+                    let jobs: Jobs = client2
+                        .request_json(
+                            Some(registered.clone()),
+                            IpcOperation::JobsList(Default::default()),
+                        )
+                        .await
+                        .expect("jobs list");
+                    let mut matching = jobs.rows.iter().filter(|row| row.id == reindex.job_id);
+                    assert_eq!(matching.clone().count(), 1, "single admitted reindex job");
+                    matching.any(|row| row.state == "completed")
+                };
                 if reindex_done {
                     let search: ActorSearchResponse = client2
                         .request_json(
@@ -1435,6 +1640,19 @@ mod embedded {
                 );
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
+            let same_index: MaintenanceReceipt = admit_reindex("reindex-ipc-repeat").await;
+            assert!(
+                same_index.already_completed && same_index.reused && same_index.job_id.is_empty()
+            );
+            let readiness: WorkstationReadiness = client2
+                .request_json(Some(registered.clone()), IpcOperation::WorkstationReadiness)
+                .await
+                .expect("readiness for the same registered Embedded backend");
+            let expected_hash = format!("actor-catalog-sha256:{}", original_dataset.sha256);
+            assert!(readiness
+                .checks
+                .iter()
+                .any(|check| check.artifact_ids.contains(&expected_hash)));
 
             let ack2 = client2.shutdown("finished").await.expect("shutdown 2");
             assert!(ack2.checkpointed);

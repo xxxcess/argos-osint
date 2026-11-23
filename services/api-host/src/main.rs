@@ -1,14 +1,16 @@
 mod actor_index_worker;
 mod actor_seed;
+mod atlas_bert_admin;
 mod atlas_worker;
 mod classifier_service;
-mod classifier_train;
 mod execution_service;
 mod fleetworks;
+mod inbox_qa_service;
 mod jobs_service;
 mod local_ipc;
 mod native_worker;
 mod nlp_service;
+mod qa_worker;
 mod queue_client;
 mod reset_services;
 mod setup_jobs;
@@ -35,17 +37,38 @@ struct Args {
     origins: Vec<String>,
     #[arg(long, value_enum, default_value_t = Role::Combined)]
     role: Role,
-    /// Private workspace CSV snapshot selected by Venture.
-    #[arg(long, required_if_eq_any([("role", "train-classifier"), ("role", "seed-actors")]))]
+    /// Private workspace actor CSV snapshot.
+    #[arg(long, required_if_eq("role", "seed-actors"))]
     file: Option<std::path::PathBuf>,
-    #[arg(long, required_if_eq_any([("role", "train-classifier"), ("role", "seed-actors")]))]
+    #[arg(long, required_if_eq("role", "seed-actors"))]
     expected_sha256: Option<String>,
-    /// Activate the synthetic Natural baseline after successful training.
-    #[arg(long)]
-    activate: bool,
+    /// Digest of the frozen Atlas BERT candidate in the classifier workspace.
+    #[arg(long, required_if_eq("role", "atlas-bert-activate"))]
+    candidate_sha256: Option<String>,
+    /// Digest of the candidate's qualified held-out evaluation.
+    #[arg(long, required_if_eq("role", "atlas-bert-activate"))]
+    evaluation_sha256: Option<String>,
+    /// Exact prior revision returned by --role atlas-bert-revision.
+    #[arg(long, required_if_eq("role", "atlas-bert-activate"))]
+    expected_bert_revision: Option<String>,
+    /// Digest returned by --role atlas-bert-provider-mapping after operator review.
+    #[arg(long, required_if_eq("role", "atlas-bert-recalibrate"))]
+    reviewed_mapping_sha256: Option<String>,
+    /// Completed Atlas cycle ID. Repeat to calibrate on several cycles.
+    #[arg(long = "review-cycle")]
+    review_cycles: Vec<String>,
+    /// Bounded JSON file from an Atlas BERT review export, labeled by a reviewer.
+    #[arg(long, required_if_eq("role", "atlas-bert-review-import"))]
+    review_file: Option<std::path::PathBuf>,
+    /// Trusted operator's external review reference.
+    #[arg(long, required_if_eq("role", "atlas-bert-review-import"))]
+    review_reference: Option<String>,
     /// Private state directory for `--role local-ipc` (enforced `0o700`).
     #[arg(long, required_if_eq("role", "local-ipc"))]
     state_dir: Option<std::path::PathBuf>,
+    /// Inherited child endpoint of the private Embedded Unix socket pair.
+    #[arg(long = "ipc-fd", required_if_eq("role", "local-ipc"))]
+    local_ipc_fd: Option<i32>,
     /// Optional canonical absolute path to a supervised NLP helper command.
     #[arg(long)]
     nlp_cmd: Option<std::path::PathBuf>,
@@ -62,7 +85,7 @@ struct Args {
 enum Role {
     /// Existing local API host with its background workers.
     Combined,
-    /// Run the single-process embedded backend over stdin/stdout IPC without listeners.
+    /// Run the Embedded companion over an inherited Unix socket without a listener.
     LocalIpc,
     /// Authenticated Fleetworks API process.
     Api,
@@ -82,14 +105,26 @@ enum Role {
     Execution,
     /// Claim and execute durable Atlas dispatches.
     AtlasWorker,
+    /// Execute private, durable Inbox QA work on the selected deployment.
+    AssistantQa,
     /// Consume registered setup/tools Jobs and pump the private actor index.
     NativeWorker,
     /// Warm, private Compromise inference without a database session.
     Nlp,
     /// Serve pinned Rust-BERT inference without a database session.
     Classifier,
-    /// Train the optional Natural classifier from a workspace dataset.
-    TrainClassifier,
+    /// Print the exact active revision from the Atlas classifier workspace.
+    AtlasBertRevision,
+    /// Explicitly activate a qualified, staged Atlas BERT candidate.
+    AtlasBertActivate,
+    /// Print the news-provider category mapping rules for operator review.
+    AtlasBertProviderMapping,
+    /// Export a completed Atlas cycle for independent human review.
+    AtlasBertReviewExport,
+    /// Import human labels for a completed Atlas cycle.
+    AtlasBertReviewImport,
+    /// Recalibrate the exact active Atlas BERT revision using reviewed provider mappings.
+    AtlasBertRecalibrate,
     /// Seed the Brain actor catalog from a pinned workspace CSV.
     SeedActors,
     /// Initialize storage and provision the runtime database account.
@@ -118,28 +153,118 @@ fn ensure_platform_name_is_bootstrap_only(args: &Args) -> Result<()> {
     Ok(())
 }
 
+fn configure_embedded_allocator() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // Share arenas across the short-lived import and search allocations.
+        // Keep large buffers separately mapped so dropping them returns their
+        // pages even when smaller, long-lived allocations share an arena.
+        const ARENA_LIMIT: libc::c_int = 2;
+        const MMAP_THRESHOLD_BYTES: libc::c_int = 128 * 1024;
+        // SAFETY: Called once on the main thread before the runtime starts any workers.
+        let (arenas, mappings) = unsafe {
+            (
+                libc::mallopt(libc::M_ARENA_MAX, ARENA_LIMIT),
+                libc::mallopt(libc::M_MMAP_THRESHOLD, MMAP_THRESHOLD_BYTES),
+            )
+        };
+        if arenas == 0 || mappings == 0 {
+            tracing::warn!(
+                code = "embedded_allocator_options_unavailable",
+                "Could not set every Embedded allocator option"
+            );
+        }
+    }
+}
+
 fn main() -> Result<()> {
     init_tracing();
     let args = Args::parse();
-    let runtime = tokio::runtime::Runtime::new()?;
-    ensure_platform_name_is_bootstrap_only(&args)?;
     if args.role == Role::LocalIpc {
-        ensure!(
-            args.file.is_none() && args.expected_sha256.is_none() && !args.activate,
-            "CSV worker options are incompatible with --role local-ipc"
-        );
-        let result = runtime.block_on(local_ipc::run(
-            args.state_dir.expect("required for local-ipc"),
-            args.nlp_cmd,
-            args.classifier_cmd,
-            shutdown_signal(),
-        ));
-        // `local_ipc::run` drops storage/index/lock/helpers before returning; bound teardown so
-        // an external parent that waits for child exit before closing stdin cannot hang on `read(0)`.
-        runtime.shutdown_timeout(Duration::from_millis(100));
-        return result;
+        configure_embedded_allocator();
     }
-    runtime.block_on(run_non_ipc(args))
+    ensure_platform_name_is_bootstrap_only(&args)?;
+    ensure!(
+        args.role == Role::AtlasBertActivate
+            || (args.candidate_sha256.is_none() && args.evaluation_sha256.is_none()),
+        "Atlas BERT activation flags require --role atlas-bert-activate"
+    );
+    ensure!(
+        matches!(
+            args.role,
+            Role::AtlasBertActivate | Role::AtlasBertRecalibrate
+        ) || args.expected_bert_revision.is_none(),
+        "--expected-bert-revision requires Atlas BERT activation or recalibration"
+    );
+    ensure!(
+        args.role == Role::AtlasBertReviewImport
+            || (args.review_file.is_none() && args.review_reference.is_none()),
+        "Review import flags require --role atlas-bert-review-import"
+    );
+    ensure!(
+        args.role == Role::AtlasBertRecalibrate || args.reviewed_mapping_sha256.is_none(),
+        "--reviewed-mapping-sha256 requires --role atlas-bert-recalibrate"
+    );
+    match args.role {
+        Role::AtlasBertReviewExport => {
+            ensure!(
+                args.review_cycles.len() == 1,
+                "Export requires exactly one --review-cycle"
+            );
+        }
+        Role::AtlasBertRecalibrate => {
+            ensure!(
+                !args.review_cycles.is_empty() && args.expected_bert_revision.is_some(),
+                "Recalibration requires --review-cycle and --expected-bert-revision"
+            );
+        }
+        _ => ensure!(
+            args.review_cycles.is_empty(),
+            "--review-cycle requires Atlas BERT review export or recalibration"
+        ),
+    }
+    ensure!(
+        args.role == Role::LocalIpc || args.local_ipc_fd.is_none(),
+        "--ipc-fd requires --role local-ipc"
+    );
+    if args.role == Role::LocalIpc {
+        #[cfg(not(unix))]
+        anyhow::bail!("the Embedded companion requires Unix sockets");
+
+        #[cfg(unix)]
+        {
+            ensure!(
+                args.file.is_none() && args.expected_sha256.is_none(),
+                "CSV worker options are incompatible with --role local-ipc"
+            );
+            let socket = local_ipc::take_inherited_socket(
+                args.local_ipc_fd.expect("required for local-ipc"),
+            )?;
+            let runtime = tokio::runtime::Runtime::new()?;
+            let result = runtime.block_on(local_ipc::run(
+                socket,
+                args.state_dir.expect("required for local-ipc"),
+                args.nlp_cmd,
+                args.classifier_cmd,
+                shutdown_signal(),
+            ));
+            // Resource owners drop before runtime teardown. Bound any remaining
+            // blocking work so an external parent can promptly reap the companion.
+            tracing::debug!(
+                target: "argos_api_host::local_ipc::embedded",
+                code = "embedded_backend_shutdown_phase",
+                phase = "runtime_shutdown_started",
+            );
+            runtime.shutdown_timeout(Duration::from_millis(100));
+            tracing::debug!(
+                target: "argos_api_host::local_ipc::embedded",
+                code = "embedded_backend_shutdown_phase",
+                phase = "runtime_shutdown_finished",
+            );
+            return result;
+        }
+    }
+    tokio::runtime::Runtime::new()?.block_on(run_non_ipc(args))
 }
 
 async fn run_non_ipc(args: Args) -> Result<()> {
@@ -149,8 +274,15 @@ async fn run_non_ipc(args: Args) -> Result<()> {
         origins,
         file,
         expected_sha256,
-        activate,
+        candidate_sha256,
+        evaluation_sha256,
+        expected_bert_revision,
+        reviewed_mapping_sha256,
+        review_cycles,
+        review_file,
+        review_reference,
         state_dir,
+        local_ipc_fd: _,
         nlp_cmd,
         classifier_cmd,
         platform_display_name,
@@ -159,18 +291,7 @@ async fn run_non_ipc(args: Args) -> Result<()> {
         state_dir.is_none() && nlp_cmd.is_none() && classifier_cmd.is_none(),
         "--state-dir, --nlp-cmd, and --classifier-cmd require --role local-ipc"
     );
-    if role == Role::TrainClassifier {
-        return classifier_train::run(
-            fleetworks::workspace_path()?,
-            file.expect("required for classifier training"),
-            expected_sha256.expect("required for classifier training"),
-            activate,
-            shutdown_signal(),
-        )
-        .await;
-    }
     if role == Role::SeedActors {
-        ensure!(!activate, "--activate requires --role train-classifier");
         return actor_seed::run(
             file.expect("required for actor catalog seeding"),
             expected_sha256.expect("required for actor catalog seeding"),
@@ -179,8 +300,44 @@ async fn run_non_ipc(args: Args) -> Result<()> {
         .await;
     }
     ensure!(
-        file.is_none() && expected_sha256.is_none() && !activate,
-        "CSV worker options require --role train-classifier or --role seed-actors"
+        file.is_none() && expected_sha256.is_none(),
+        "CSV worker options require --role seed-actors"
+    );
+    if matches!(role, Role::AtlasBertRevision | Role::AtlasBertActivate) {
+        let command = if role == Role::AtlasBertActivate {
+            atlas_bert_admin::Command::Activate {
+                frozen_sha256: candidate_sha256.expect("required for BERT activation"),
+                evaluation_sha256: evaluation_sha256.expect("required for BERT activation"),
+                expected_revision: expected_bert_revision.expect("required for BERT activation"),
+            }
+        } else {
+            atlas_bert_admin::Command::Revision
+        };
+        return atlas_bert_admin::run(fleetworks::workspace_path()?, command, shutdown_signal())
+            .await;
+    }
+    if role == Role::AtlasBertProviderMapping {
+        return atlas_bert_admin::report_provider_mapping();
+    }
+    let review_command = match role {
+        Role::AtlasBertReviewExport => Some(atlas_bert_admin::ReviewCommand::Export {
+            cycle: review_cycles.into_iter().next().expect("one export cycle"),
+        }),
+        Role::AtlasBertReviewImport => Some(atlas_bert_admin::ReviewCommand::Import {
+            file: review_file.expect("required for review import"),
+            reference: review_reference.expect("required for review import"),
+        }),
+        Role::AtlasBertRecalibrate => Some(atlas_bert_admin::ReviewCommand::Recalibrate {
+            cycles: review_cycles,
+            expected_revision: expected_bert_revision.expect("required for BERT recalibration"),
+            reviewed_mapping_sha256: reviewed_mapping_sha256
+                .expect("required for BERT recalibration"),
+        }),
+        _ => None,
+    };
+    ensure!(
+        review_command.is_none() || cfg!(feature = "classifier"),
+        "this build does not include Atlas BERT support"
     );
     if matches!(role, Role::Nlp | Role::Classifier) {
         let (bind, policy, router) = tokio::task::spawn_blocking(move || {
@@ -257,6 +414,17 @@ async fn run_non_ipc(args: Args) -> Result<()> {
         None
     };
     let repo = storage::runtime::repository().await?;
+    if let Some(command) = review_command {
+        let result = atlas_bert_admin::run_review(
+            fleetworks::workspace_path()?,
+            repo,
+            command,
+            shutdown_signal(),
+        )
+        .await;
+        drain_storage().await;
+        return result;
+    }
     if role == Role::Bootstrap {
         fleetworks::provision_user(
             &repo,
@@ -294,6 +462,12 @@ async fn run_non_ipc(args: Args) -> Result<()> {
             "Fleetworks startup summary: bootstrap complete"
         );
         return Ok(());
+    }
+    // QA owns a queue-only Jobs credential and has no shared Jobs client.
+    if role == Role::AssistantQa {
+        let result = inbox_qa_service::run_distributed(repo, shutdown_signal()).await;
+        drain_storage().await;
+        return result;
     }
     let jobs_store = if role == Role::Jobs {
         let workspace = fleetworks::workspace_path()?;
@@ -420,6 +594,14 @@ async fn run_non_ipc(args: Args) -> Result<()> {
             port,
             Arc::new(api.origins),
         );
+        let qa_stop = argos_osint_api::inbox_qa::CancellationToken::new();
+        let qa_refresh = (role == Role::Api).then(|| {
+            tokio::spawn(argos_osint_api::inbox_qa::run_health_refresh(
+                state.clone(),
+                services.clone(),
+                qa_stop.clone(),
+            ))
+        });
         let router = if let Some(policy) = api.policy {
             let reset = if role == Role::Api {
                 reset_services::gateway(&state, policy.clone()).await?
@@ -434,13 +616,27 @@ async fn run_non_ipc(args: Args) -> Result<()> {
                 Role::Control => argos_osint_api::control_router(state, policy),
                 Role::Jobs => {
                     let (store, queue) = jobs_store.expect("Jobs owns the operational datastores");
+                    let qa_queue = if let Some(qa_policy) =
+                        tokio::task::spawn_blocking(fleetworks::qa_jobs_access).await??
+                    {
+                        argos_osint_api::guard_network(
+                            jobs_service::qa_router(queue.clone()),
+                            qa_policy,
+                            Arc::new(Vec::new()),
+                            port,
+                        )
+                    } else {
+                        axum::Router::new()
+                    };
                     let internal = argos_osint_api::guard_network(
                         jobs_service::router(store, queue),
                         policy.clone(),
                         Arc::new(Vec::new()),
                         port,
                     );
-                    argos_osint_api::jobs_router(state, policy).merge(internal)
+                    argos_osint_api::jobs_router(state, policy)
+                        .merge(internal)
+                        .merge(qa_queue)
                 }
                 _ => argos_osint_api::network_router_with_private_services(state, policy, services),
             };
@@ -461,7 +657,7 @@ async fn run_non_ipc(args: Args) -> Result<()> {
             );
             argos_osint_api::router(state)
         };
-        Some((listener, router))
+        Some((listener, router, qa_stop, qa_refresh))
     } else {
         None
     };
@@ -470,7 +666,7 @@ async fn run_non_ipc(args: Args) -> Result<()> {
     } else {
         None
     };
-    let served = if let Some((listener, router)) = http {
+    let served = if let Some((listener, router, qa_stop, qa_refresh)) = http {
         let listen = listener.local_addr()?;
         tracing::info!(
             role = ?role,
@@ -478,13 +674,18 @@ async fn run_non_ipc(args: Args) -> Result<()> {
             storage = "connected",
             "Fleetworks startup summary: HTTP listener ready"
         );
-        serve_with_graceful_shutdown_timeout(
+        let served = serve_with_graceful_shutdown_timeout(
             listener,
             router,
             shutdown_signal(),
             Duration::from_secs(15),
         )
-        .await
+        .await;
+        qa_stop.cancel();
+        if let Some(refresh) = qa_refresh {
+            let _ = refresh.await;
+        }
+        served
     } else {
         shutdown_signal().await;
         Ok(())
@@ -607,6 +808,30 @@ mod tests {
     use super::*;
     use axum::routing::get;
 
+    #[test]
+    fn recalibration_requires_reviewed_provider_mapping_digest() {
+        let recalibration = [
+            "argos-api-host",
+            "--role",
+            "atlas-bert-recalibrate",
+            "--review-cycle",
+            "cycle-1",
+            "--expected-bert-revision",
+            "model-revision",
+        ];
+        assert!(Args::try_parse_from(recalibration).is_err());
+        let args = Args::try_parse_from(
+            recalibration
+                .into_iter()
+                .chain(["--reviewed-mapping-sha256", "reviewed-rules"]),
+        )
+        .unwrap();
+        assert_eq!(
+            args.reviewed_mapping_sha256.as_deref(),
+            Some("reviewed-rules")
+        );
+    }
+
     #[tokio::test]
     async fn chrono_id_is_non_zero() {
         assert!(chrono_id() > 0);
@@ -695,6 +920,8 @@ mod tests {
             "local-ipc",
             "--state-dir",
             "/tmp/fleetworks-state",
+            "--ipc-fd",
+            "3",
             "--nlp-cmd",
             "/usr/local/bin/nlp-helper",
             "--classifier-cmd",
@@ -702,6 +929,7 @@ mod tests {
         ])
         .expect("local-ipc CLI parses");
         assert_eq!(parsed.role, Role::LocalIpc);
+        assert_eq!(parsed.local_ipc_fd, Some(3));
         assert_eq!(
             parsed.state_dir,
             Some(std::path::PathBuf::from("/tmp/fleetworks-state"))
@@ -714,7 +942,14 @@ mod tests {
             parsed.classifier_cmd,
             Some(std::path::PathBuf::from("/usr/local/bin/classifier-helper"))
         );
-        assert!(Args::try_parse_from(["argos-api-host", "--role", "local-ipc"]).is_err());
+        assert!(Args::try_parse_from([
+            "argos-api-host",
+            "--role",
+            "local-ipc",
+            "--state-dir",
+            "/tmp/fleetworks-state",
+        ])
+        .is_err());
     }
 
     #[test]

@@ -28,30 +28,30 @@
 <text x="48" y="424" class="note">PR or trusted branch push</text>
 <text x="48" y="448" class="note">Dependencies select lanes</text>
 <rect x="368" y="88" width="512" height="108" rx="6" class="node"/>
-<text x="384" y="120" class="label">Native desktop</text>
+<text x="384" y="120" class="label">GSD Nightly: UI · Rune</text>
 <text x="384" y="148" class="note">First: Linux x86_64 debug app + Rune evidence</text>
 <text x="384" y="172" class="note">Second: affected Intel and Apple Silicon Mac apps</text>
 <rect x="368" y="220" width="512" height="108" rx="6" class="node"/>
-<text x="384" y="252" class="label">Linux backend + affected storage</text>
+<text x="384" y="252" class="label">GSD Nightly: Core · backend and storage</text>
 <text x="384" y="280" class="note">First: AMD64 · second: ARM64 when selected</text>
-<text x="384" y="304" class="note">Scoped Buildx or Depot build, then exact-image smoke</text>
+<text x="384" y="304" class="note">Linux companion parity + shared image smoke when selected</text>
 <rect x="368" y="352" width="512" height="108" rx="6" class="node"/>
-<text x="384" y="384" class="label">RN Web · web / web_dev</text>
+<text x="384" y="384" class="label">GSD Nightly: UI · React Native Web</text>
 <text x="384" y="412" class="note">Second: affected web checks and web image</text>
-<text x="384" y="436" class="note">Relay/config changes select dependency closure</text>
+<text x="384" y="436" class="note">Review layout, interaction and accessibility</text>
 <rect x="368" y="484" width="512" height="108" rx="6" class="node"/>
-<text x="384" y="516" class="label">Linux classifier · bert</text>
+<text x="384" y="516" class="label">GSD Nightly: Core · classifier</text>
 <text x="384" y="544" class="note">First: AMD64 · second: ARM64 when selected</text>
 <text x="384" y="568" class="note">Build / link / units / real checkpoint / bundle</text>
 <rect x="944" y="88" width="304" height="108" rx="6" class="node"/>
 <text x="960" y="120" class="label">Source checks</text>
-<text x="960" y="148" class="note">Every selected lane succeeds</text>
+<text x="960" y="148" class="note">Every selected Core and UI check succeeds</text>
 <text x="960" y="172" class="note">Missing/failed results block</text>
 <rect x="944" y="264" width="304" height="128" rx="6" class="node"/>
 <text x="960" y="296" class="label">Trusted image staging</text>
-<text x="960" y="324" class="note">Selected images only</text>
+<text x="960" y="324" class="note">Nightly images on protected Depot</text>
 <text x="960" y="348" class="note">Build → smoke → push + tar.gz</text>
-<text x="960" y="372" class="note">Native AMD64 + ARM64</text>
+<text x="960" y="372" class="note">AMD64 + ARM64 · stable uses Buildx</text>
 <rect x="944" y="440" width="304" height="152" rx="6" class="accent"/>
 <text x="960" y="472" class="label">Publish → required</text>
 <text x="960" y="500" class="note">Mac ZIPs + image/BERT bundles</text>

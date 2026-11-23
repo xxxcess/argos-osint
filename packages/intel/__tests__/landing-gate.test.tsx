@@ -1,25 +1,15 @@
 import React from "react";
 import { expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { BackendProvider } from "@argos/api-client";
 import { IntelApp } from "../src";
 import { http, HttpResponse } from "msw";
 import { mswServer, testBase } from "../../../vitest.setup";
+// This scene has no completion event. Home must mount once readiness succeeds.
 vi.mock("../src/landing/OrbitScene", () => ({
-  OrbitScene: ({
-    ready,
-    onComplete,
-  }: {
-    ready: boolean;
-    onComplete: () => void;
-  }) => (
-    <button onClick={onComplete}>
-      {ready ? "Green backend, orbit in progress" : "Connecting orbit"}
-    </button>
-  ),
+  OrbitScene: () => <div aria-label="Connecting orbit" />,
 }));
-it("holds the ready workspace until the landing sequence completes", async () => {
+it("admits the ready workspace independently of landing animation", async () => {
   mswServer.use(
     http.get(`${testBase}/api/v1/health/ready`, () =>
       HttpResponse.json({
@@ -43,11 +33,6 @@ it("holds the ready workspace until the landing sequence completes", async () =>
       <IntelApp />
     </BackendProvider>,
   );
-  const finish = await screen.findByRole("button", {
-    name: "Green backend, orbit in progress",
-  });
-  expect(screen.queryByRole("button", { name: "Open Intel" })).toBeNull();
-  await userEvent.click(finish);
   expect(
     await screen.findByRole("button", { name: "Open Intel" }),
   ).toBeVisible();

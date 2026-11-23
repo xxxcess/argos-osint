@@ -380,17 +380,10 @@ impl WorkerPool {
                             return Ok(0);
                         }
                         let monitored = crate::storage::classifier_calibration::drain_one(
-                            &repo,
-                            &home,
-                            &owner,
-                            cancel.clone(),
-                        )
-                        .await?;
-                        let learned = crate::storage::classifier_learning::drain_one(
                             &repo, &home, &owner, cancel,
                         )
                         .await?;
-                        Ok(monitored + learned)
+                        Ok(monitored)
                     });
                     let busy = matches!(result, Ok(count) if count > 0);
                     report_drainer(&db_path, "classifier-calibration", result);

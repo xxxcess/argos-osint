@@ -20,7 +20,7 @@ use fleetworks_contracts::context::RegisteredContext;
 use fleetworks_workstation::native::WorkspaceState;
 
 #[test]
-fn the_sidebar_header_shows_the_symbol_alone_and_the_compact_rail_keeps_none() {
+fn wide_and_compact_sidebar_headers_show_the_symbol_alone() {
     let env = Env {
         system_dark: true,
         scale: 1.0,
@@ -34,7 +34,7 @@ fn the_sidebar_header_shows_the_symbol_alone_and_the_compact_rail_keeps_none() {
     let mut narrow = Runtime::new(State::fixture(), app::view, (640.0, 480.0), env);
     narrow.frame(0.0);
     assert!(narrow.find("compact-icon-rail").is_some());
-    assert!(narrow.find("brand-mark").is_none());
+    assert!(narrow.find("brand-mark").is_some());
 }
 
 #[test]
@@ -135,7 +135,8 @@ fn real_shell_navigation_works_offline_without_boundary_effects() {
     assert!(!connected_tree.contains(&hidden_connect_id));
     assert!(connected.find("nav-workstation").is_some());
     assert!(connected.find("nav-setup").is_none());
-    for page in Page::ALL {
+    assert!(connected.find("nav-seed").is_none());
+    for page in Page::ALL.into_iter().filter(|page| *page != Page::Seed) {
         let key = format!("nav-{}", page.key());
         let (x, y) = connected
             .find(&key)
@@ -500,16 +501,18 @@ fn setup_advanced_toggle_switch_reveals_and_hides_readiness_checks() {
 
     let mut state = registered_fixture();
     state.setup_gateway = true;
+    let mut gateway = ReadinessCheck::new(
+        ReadinessCheckId::Gateway,
+        ReadinessState::Ready,
+        "ok".into(),
+        "Synthetic gateway probe".into(),
+        "2026-01-01T00:00:00Z".into(),
+    );
+    gateway.fresh_for_ms = 60_000;
     state.readiness = Load::Ready(WorkstationReadiness::new(
         "synthetic-deployment".into(),
         "2026-01-01T00:00:00Z".into(),
-        vec![ReadinessCheck::new(
-            ReadinessCheckId::Gateway,
-            ReadinessState::Ready,
-            "ok".into(),
-            "Synthetic gateway probe".into(),
-            "2026-01-01T00:00:00Z".into(),
-        )],
+        vec![gateway],
     ));
     state.readiness_received_at = Some(0.0);
     let mut runtime = Runtime::new(
@@ -534,7 +537,7 @@ fn setup_advanced_toggle_switch_reveals_and_hides_readiness_checks() {
     runtime.update(|_, tx| tx.scroll_into_view("setup-advanced-toggle"));
     runtime.frame(1.0 / 60.0);
     let (x, y) = runtime
-        .find("setup-advanced-toggle")
+        .find("setup-advanced-toggle/switch")
         .expect("setup advanced readiness Switch");
     runtime.pointer_down(x, y);
     runtime.pointer_up(x, y);
@@ -545,17 +548,554 @@ fn setup_advanced_toggle_switch_reveals_and_hides_readiness_checks() {
         .to_string()
         .contains("Gateway: Ready"));
 
+    runtime.update(|_, tx| tx.blur());
+    runtime.frame(3.0 / 60.0);
+    assert!(!status_check_element(&runtime, "setup-advanced-toggle/switch").focused);
     let (x, y) = runtime
         .find("setup-advanced-toggle")
-        .expect("setup advanced readiness Switch remains reachable");
+        .expect("the original readiness row remains a pointer target");
     runtime.pointer_down(x, y);
     runtime.pointer_up(x, y);
+    runtime.frame(4.0 / 60.0);
+    assert!(!runtime.state.setup_advanced_open);
+    assert!(status_check_element(&runtime, "setup-advanced-toggle/switch").focused);
+    assert!(!runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Gateway: Ready"));
+}
+
+fn compact_connected_setup_readiness_toggle(kind: fleetworks_workstation::native::BackendKind) {
+    use fleetworks_contracts::readiness::ReadinessCheck;
+    use fleetworks_contracts::readiness::ReadinessCheckId;
+    use fleetworks_contracts::readiness::ReadinessState;
+    use fleetworks_contracts::readiness::WorkstationReadiness;
+    use fleetworks_workstation::native::BackendKind;
+
+    let mut state = registered_fixture();
+    state.backend_kind = kind;
+    if kind == BackendKind::Local {
+        state.connection.origin = TextEdit::new("local://embedded");
+    }
+    let mut gateway = ReadinessCheck::new(
+        ReadinessCheckId::Gateway,
+        ReadinessState::Ready,
+        "ok".into(),
+        "Synthetic gateway probe".into(),
+        "2026-01-01T00:00:00Z".into(),
+    );
+    gateway.fresh_for_ms = 60_000;
+    state.readiness = Load::Ready(WorkstationReadiness::new(
+        "synthetic-deployment".into(),
+        "2026-01-01T00:00:00Z".into(),
+        vec![gateway],
+    ));
+    state.readiness_received_at = Some(0.0);
+
+    let mut runtime = Runtime::new(
+        state,
+        app::view,
+        (640.0, 480.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    runtime.frame(0.0);
+    runtime.frame(1.0 / 60.0);
+    assert!(!runtime.state.setup_gateway);
+    let (x, y) = runtime
+        .find("connection-editor")
+        .expect("reopen Setup Gateway");
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(2.0 / 60.0);
+    assert!(runtime.state.setup_gateway);
+    assert!(runtime.state.connected());
+    assert!(runtime.state.registration.context.is_some());
+
+    let key = "setup-advanced-toggle/switch";
+    runtime.update(|_, tx| tx.scroll_into_view("setup-advanced-toggle"));
     runtime.frame(3.0 / 60.0);
+    let elements = runtime.elements();
+    let switch = elements
+        .iter()
+        .find(|element| element.path.ends_with(key))
+        .expect("actual readiness switch");
+    let copy = elements
+        .iter()
+        .find(|element| {
+            element
+                .path
+                .ends_with("setup-advanced-toggle/copy/description")
+        })
+        .expect("visible readiness switch description");
+    assert_eq!(switch.role, "switch");
+    assert_eq!(switch.label.as_deref(), Some("Status checks · 1 passed"),);
+    assert_eq!(
+        switch.visible, switch.rect,
+        "entire {kind:?} switch must fit"
+    );
+    assert_eq!(
+        copy.visible, copy.rect,
+        "entire {kind:?} description must fit"
+    );
+    assert!(switch.rect[2] >= 44.0 && switch.rect[3] >= 32.0);
+    let [x, y, w, h] = switch.rect;
+    assert!(x >= 0.0 && y >= 0.0 && x + w <= 640.0 && y + h <= 480.0);
+    assert!(!runtime.state.setup_advanced_open);
+
+    // Press the switch itself, rather than the centre of its enclosing row.
+    let (x, y) = runtime.find(key).expect("switch pointer target");
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(4.0 / 60.0);
+    assert!(runtime.state.setup_advanced_open);
+    assert!(runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Gateway: Ready"));
+
+    runtime.update(|_, tx| tx.focus("setup-advanced-toggle", true));
+    runtime.frame(5.0 / 60.0);
+    assert!(runtime
+        .elements()
+        .iter()
+        .any(|element| element.path.ends_with(key) && element.focused));
+    runtime.key(rune::KeyEvent {
+        key: rune::Key::Text(" ".into()),
+        mods: rune::Mods::default(),
+    });
+    runtime.frame(6.0 / 60.0);
     assert!(!runtime.state.setup_advanced_open);
     assert!(!runtime
         .accessibility_json()
         .to_string()
         .contains("Gateway: Ready"));
+}
+
+#[test]
+fn compact_connected_embedded_setup_keeps_readiness_switch_usable() {
+    compact_connected_setup_readiness_toggle(fleetworks_workstation::native::BackendKind::Local);
+}
+
+#[test]
+fn compact_connected_distributed_setup_keeps_readiness_switch_usable() {
+    compact_connected_setup_readiness_toggle(fleetworks_workstation::native::BackendKind::Remote);
+}
+
+#[test]
+fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_visible() {
+    use fleetworks_contracts::context::JobOrigin;
+    use fleetworks_contracts::context::OriginSource;
+    use fleetworks_contracts::readiness::MaintenanceOperation;
+    use fleetworks_contracts::readiness::MaintenanceReceipt;
+    use fleetworks_contracts::readiness::ReadinessCheck;
+    use fleetworks_contracts::readiness::ReadinessCheckId;
+    use fleetworks_contracts::readiness::ReadinessState;
+    use fleetworks_contracts::readiness::WorkstationReadiness;
+    use fleetworks_workstation::native::BackendKind;
+
+    const OBSERVED: &str = "2026-01-01T00:00:00Z";
+    const CRITICAL: &str = "readiness-critical-action";
+    const SECTION: &str = "status-checks-toggle/trigger";
+    const SETUP_SWITCH: &str = "setup-advanced-toggle/switch";
+    const FAILED_ROW: &str = "readiness-trigger-jobs";
+    const FAILED_DETAIL: &str = "readiness-details-jobs";
+    const ACTOR_ROW: &str = "readiness-trigger-actor_search";
+    const PASSED_ROW: &str = "readiness-trigger-gateway";
+
+    let check = |id, state, reason: &str, explanation: &str| {
+        let mut check = ReadinessCheck::new(
+            id,
+            state,
+            reason.to_owned(),
+            explanation.to_owned(),
+            OBSERVED.to_owned(),
+        );
+        check.fresh_for_ms = 60_000;
+        check
+    };
+    let mut unverified = check(
+        ReadinessCheckId::Datastore,
+        ReadinessState::Ready,
+        "datastore_unverified",
+        "An earlier gateway response marked the datastore ready.",
+    );
+    unverified.fresh_for_ms = 0;
+    let checks = vec![
+        check(
+            ReadinessCheckId::Gateway,
+            ReadinessState::Ready,
+            "gateway_reachable",
+            "The synthetic gateway accepted the workstation registration.",
+        ),
+        unverified,
+        check(
+            ReadinessCheckId::Brain,
+            ReadinessState::Unknown,
+            "brain_pending",
+            "The query service has yet to be checked.",
+        ),
+        check(
+            ReadinessCheckId::ActorSearch,
+            ReadinessState::Running,
+            "index_catching_up",
+            "The index projection is converging on the current checkpoint.",
+        ),
+        check(
+            ReadinessCheckId::Jobs,
+            ReadinessState::NotReady,
+            "process_not_ready",
+            "The Jobs service reported that its dispatcher was not ready.",
+        ),
+    ];
+
+    for (kind, setup, disclosure) in [
+        (BackendKind::Remote, false, SECTION),
+        (BackendKind::Local, true, SETUP_SWITCH),
+        (BackendKind::Remote, true, SETUP_SWITCH),
+    ] {
+        let mut state = registered_fixture();
+        state.backend_kind = kind;
+        state.setup_gateway = setup;
+        if kind == BackendKind::Local {
+            state.connection.origin = TextEdit::new("local://embedded");
+        }
+        state.complete_readiness(Ok(WorkstationReadiness::new(
+            "synthetic-deployment".into(),
+            OBSERVED.into(),
+            checks.clone(),
+        )));
+        let mut runtime = Runtime::new(
+            state,
+            app::view,
+            (640.0, 480.0),
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.reduced_motion = true;
+        let mut frame = 0;
+        tick_status_checks(&mut runtime, &mut frame);
+
+        let summary = status_check_element(&runtime, disclosure).label.unwrap();
+        assert!(summary.contains("Status checks"), "{summary}");
+        assert!(summary.contains("1 passed"), "{summary}");
+        assert!(summary.contains("1 failed"), "{summary}");
+        assert!(runtime.find(FAILED_ROW).is_none());
+        assert!(runtime.find(FAILED_DETAIL).is_none());
+
+        // The blocker must be visible in the initial viewport on all three surfaces.
+        let critical = assert_status_check_fully_visible(&runtime, CRITICAL);
+        assert_eq!(critical.scrolled, [0.0, 0.0], "{kind:?}, setup={setup}");
+        assert_eq!(critical.label.as_deref(), Some("Refresh checks"));
+        assert!(critical.focusable);
+        focus_status_check(&mut runtime, CRITICAL, &mut frame);
+        runtime.state.intents.clear();
+        press_status_check(&mut runtime, &mut frame);
+        assert!(runtime.state.intents.contains(&Intent::Readiness));
+        assert!(runtime.find(FAILED_ROW).is_none());
+
+        focus_status_check(&mut runtime, disclosure, &mut frame);
+        press_status_check(&mut runtime, &mut frame);
+        assert!(runtime.find("backend-readiness-checks").is_some());
+        assert!(runtime.find(FAILED_DETAIL).is_none());
+
+        let failed = status_check_element(&runtime, FAILED_ROW);
+        let actor = status_check_element(&runtime, ACTOR_ROW);
+        let passed = status_check_element(&runtime, PASSED_ROW);
+        assert_eq!(failed.label.as_deref(), Some("Jobs: Failed"));
+        assert_eq!(
+            actor.label.as_deref(),
+            Some("Actor search: Background indexing")
+        );
+        assert_eq!(passed.label.as_deref(), Some("Gateway: Ready"));
+        assert!(failed.target[1] < actor.target[1], "{kind:?}");
+        assert!(actor.target[1] < passed.target[1], "{kind:?}");
+        for key in ["readiness-icon-jobs", "readiness-icon-gateway"] {
+            assert!(status_check_element(&runtime, key).rect[2] > 0.0);
+        }
+        let unverified = status_check_element(&runtime, "readiness-unsynced-datastore");
+        assert!(unverified
+            .label
+            .as_deref()
+            .is_some_and(|label| { label.to_ascii_lowercase().contains("unsynced") }));
+        let tree = runtime.accessibility_json().to_string();
+        assert!(tree.contains("Datastore observation unsynced."));
+        assert!(!tree.contains("process_not_ready"));
+        assert!(!tree.contains("The Jobs service reported that its dispatcher was not ready."));
+
+        runtime.key(rune::KeyEvent {
+            key: rune::Key::Tab,
+            mods: rune::Mods::default(),
+        });
+        tick_status_checks(&mut runtime, &mut frame);
+        assert!(assert_status_check_fully_visible(&runtime, FAILED_ROW).focused);
+        press_status_check(&mut runtime, &mut frame);
+        assert!(runtime.find(FAILED_DETAIL).is_some());
+        assert!(status_check_element(&runtime, FAILED_ROW).focused);
+        let tree = runtime.accessibility_json().to_string();
+        assert!(tree.contains("process_not_ready"));
+        assert!(tree.contains("The Jobs service reported that its dispatcher was not ready."));
+
+        runtime.update(|state, _| {
+            let Load::Ready(previous) = &state.readiness else {
+                panic!("expected the previous observation");
+            };
+            let mut next = previous.clone();
+            next.checks.reverse();
+            let jobs = next
+                .checks
+                .iter_mut()
+                .find(|check| check.id == ReadinessCheckId::Jobs)
+                .unwrap();
+            jobs.explanation = "The Jobs service still reports its dispatcher as not ready.".into();
+            state.complete_readiness(Ok(next));
+        });
+        tick_status_checks(&mut runtime, &mut frame);
+        assert!(status_check_element(&runtime, FAILED_ROW).focused);
+        assert!(runtime.find(FAILED_DETAIL).is_some());
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("The Jobs service still reports its dispatcher as not ready."));
+
+        runtime.update(|_, tx| tx.scroll_into_view(FAILED_DETAIL));
+        tick_status_checks(&mut runtime, &mut frame);
+        assert_status_check_fully_visible(&runtime, FAILED_DETAIL);
+
+        runtime.update(|state, _| {
+            let origin = JobOrigin::new(
+                state.registration.context.as_ref().unwrap(),
+                OriginSource::Native,
+                "synthetic-reindex-request".into(),
+                OBSERVED.into(),
+                0,
+                Vec::new(),
+            );
+            state.maintenance.receipt = Load::Ready(MaintenanceReceipt::new(
+                "synthetic-reindex".into(),
+                MaintenanceOperation::ReindexActors,
+                origin,
+                None,
+                false,
+            ));
+        });
+        tick_status_checks(&mut runtime, &mut frame);
+        assert_eq!(
+            status_check_element(&runtime, ACTOR_ROW).label.as_deref(),
+            Some("Actor search: Checking")
+        );
+
+        focus_status_check(&mut runtime, disclosure, &mut frame);
+        press_status_check(&mut runtime, &mut frame);
+        assert!(runtime.find(FAILED_ROW).is_none());
+        runtime.update(|_, tx| tx.scroll_into_view(CRITICAL));
+        tick_status_checks(&mut runtime, &mut frame);
+        assert_status_check_fully_visible(&runtime, CRITICAL);
+    }
+}
+
+#[test]
+fn desktop_status_table_aligns_columns_and_exposes_the_granted_row_action() {
+    use fleetworks_contracts::readiness::DatasetKind;
+    use fleetworks_contracts::readiness::ReadinessAction;
+    use fleetworks_contracts::readiness::ReadinessActionId;
+    use fleetworks_contracts::readiness::ReadinessCheck;
+    use fleetworks_contracts::readiness::ReadinessCheckId;
+    use fleetworks_contracts::readiness::ReadinessState;
+    use fleetworks_contracts::readiness::WorkstationReadiness;
+
+    const OBSERVED: &str = "2026-01-01T00:00:00Z";
+    const SEED: &str = "readiness-action-actor_catalog-SeedActors";
+    let mut state = registered_fixture();
+    state.backend.profile = Load::Ready(crate::backend::ProfileSnapshot {
+        configuration_revision: 0,
+        configuration_format: 1,
+        accounts: vec![],
+        tool_credentials: vec![],
+        setup_required: false,
+        portable_schema_version: 4,
+    });
+    let mut gateway = ReadinessCheck::new(
+        ReadinessCheckId::Gateway,
+        ReadinessState::Ready,
+        "gateway_reachable".into(),
+        "The gateway accepted the request.".into(),
+        OBSERVED.into(),
+    );
+    gateway.fresh_for_ms = 60_000;
+    let mut catalog = ReadinessCheck::new(
+        ReadinessCheckId::ActorCatalog,
+        ReadinessState::NotReady,
+        "database_catalog_empty".into(),
+        "The catalog is empty at the current checkpoint.".into(),
+        OBSERVED.into(),
+    );
+    catalog.fresh_for_ms = 60_000;
+    catalog.actions.push(ReadinessAction::new(
+        ReadinessActionId::SeedActors,
+        Permission::MaintainBackend,
+        true,
+    ));
+    let mut jobs = ReadinessCheck::new(
+        ReadinessCheckId::Jobs,
+        ReadinessState::NotReady,
+        "process_not_ready".into(),
+        "The dispatcher is unavailable.".into(),
+        OBSERVED.into(),
+    );
+    jobs.fresh_for_ms = 60_000;
+    let mut readiness = WorkstationReadiness::new(
+        "synthetic-deployment".into(),
+        OBSERVED.into(),
+        vec![gateway, catalog, jobs],
+    );
+    readiness.registration = Some(RegistrationReceipt::new(
+        "synthetic-deployment".into(),
+        "synthetic-node".into(),
+        "synthetic-registration".into(),
+        Some("192.0.2.42".parse().unwrap()),
+        1,
+    ));
+    state.complete_readiness(Ok(readiness));
+    let mut runtime = Runtime::new(
+        state,
+        app::view,
+        (1280.0, 800.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    runtime.reduced_motion = true;
+    let mut frame = 0;
+    tick_status_checks(&mut runtime, &mut frame);
+    let blocker = status_check_element(&runtime, "readiness-critical-action");
+    assert_eq!(blocker.visible, blocker.rect);
+    assert_eq!(blocker.label.as_deref(), Some("Refresh checks"));
+    assert!(runtime.find("workstation-open-seed").is_none());
+    assert!(runtime.find(SEED).is_none());
+    runtime.update(|_, tx| tx.focus("status-checks-toggle", true));
+    tick_status_checks(&mut runtime, &mut frame);
+    press_status_check(&mut runtime, &mut frame);
+    let header = status_check_element(&runtime, "readiness-status-table-header");
+    let column_labels: Vec<_> = runtime
+        .elements()
+        .into_iter()
+        .filter(|element| element.path.starts_with(&format!("{}/", header.path)))
+        .filter_map(|element| element.text)
+        .collect();
+    assert_eq!(column_labels, ["Service", "Status", "Action"]);
+    let catalog_status = status_check_element(&runtime, "readiness-status-actor_catalog");
+    let gateway_status = status_check_element(&runtime, "readiness-status-gateway");
+    let jobs_status = status_check_element(&runtime, "readiness-status-jobs");
+    assert!(jobs_status.target[1] < catalog_status.target[1]);
+    assert_eq!(catalog_status.target[0], gateway_status.target[0]);
+    assert!(catalog_status.target[1] < gateway_status.target[1]);
+    assert!(runtime.find("readiness-details-actor_catalog").is_none());
+    let seed = status_check_element(&runtime, SEED);
+    assert!(seed.focusable);
+    assert!(seed.target[0] > catalog_status.target[0]);
+    runtime.update(|_, tx| {
+        tx.scroll_into_view(SEED);
+        tx.focus(SEED, true);
+    });
+    tick_status_checks(&mut runtime, &mut frame);
+    assert!(status_check_element(&runtime, SEED).focused);
+    runtime.state.intents.clear();
+    press_status_check(&mut runtime, &mut frame);
+    assert!(runtime.state.intents.contains(&Intent::ChooseDataset {
+        kind: DatasetKind::ActorCatalog,
+    }));
+    assert!(runtime.find("readiness-details-actor_catalog").is_none());
+
+    runtime.update(|state, _| {
+        let Load::Ready(readiness) = &state.readiness else {
+            panic!("expected the previous observation");
+        };
+        let mut next = readiness.clone();
+        let catalog = next
+            .checks
+            .iter_mut()
+            .find(|check| check.id == ReadinessCheckId::ActorCatalog)
+            .unwrap();
+        catalog.state = ReadinessState::Ready;
+        catalog.reason_code = "database_catalog_ready".into();
+        catalog.explanation = "The catalog is ready at the current checkpoint.".into();
+        state.complete_readiness(Ok(next));
+    });
+    tick_status_checks(&mut runtime, &mut frame);
+    let jobs_status = status_check_element(&runtime, "readiness-status-jobs");
+    let catalog_status = status_check_element(&runtime, "readiness-status-actor_catalog");
+    assert!(jobs_status.target[1] < catalog_status.target[1]);
+    assert!(runtime.find(SEED).is_none());
+    const CATALOG_ROW: &str = "readiness-trigger-actor_catalog";
+    runtime.update(|_, tx| {
+        tx.scroll_into_view(CATALOG_ROW);
+        tx.focus(CATALOG_ROW, true);
+    });
+    tick_status_checks(&mut runtime, &mut frame);
+    let catalog_row = status_check_element(&runtime, CATALOG_ROW);
+    assert!(catalog_row.focused);
+    assert_eq!(catalog_row.visible, catalog_row.rect);
+    press_status_check(&mut runtime, &mut frame);
+    assert!(runtime.find("readiness-details-actor_catalog").is_some());
+    assert!(status_check_element(&runtime, SEED).focusable);
+}
+
+fn tick_status_checks(runtime: &mut Runtime<State>, frame: &mut u32) {
+    *frame += 1;
+    runtime.frame(f64::from(*frame) / 60.0);
+}
+
+fn status_check_element(runtime: &Runtime<State>, key: &str) -> rune::ElementInfo {
+    runtime
+        .elements()
+        .into_iter()
+        .find(|element| {
+            !element.exiting
+                && (element.key.as_deref() == Some(key)
+                    || element.path.ends_with(&format!("/{key}")))
+        })
+        .unwrap_or_else(|| panic!("expected element {key}"))
+}
+
+fn assert_status_check_fully_visible(runtime: &Runtime<State>, key: &str) -> rune::ElementInfo {
+    let element = status_check_element(runtime, key);
+    assert_eq!(element.visible, element.rect, "{key} is clipped");
+    let [x, y, w, h] = element.rect;
+    assert!(w > 0.0 && h > 0.0, "{key}: {element:?}");
+    assert!(
+        x >= 0.0 && y >= 0.0 && x + w <= 640.5 && y + h <= 480.5,
+        "{key}: {element:?}",
+    );
+    element
+}
+
+fn focus_status_check(runtime: &mut Runtime<State>, path: &str, frame: &mut u32) {
+    // Rune's focus request accepts an element key and chooses its first focusable
+    // descendant. The scroll request and assertions can target the exact child path.
+    let anchor = path.split_once('/').map_or(path, |(key, _)| key);
+    runtime.update(move |_, tx| {
+        tx.scroll_into_view(path);
+        tx.focus(anchor, true);
+    });
+    tick_status_checks(runtime, frame);
+    assert!(
+        assert_status_check_fully_visible(runtime, path).focused,
+        "expected keyboard focus at {path} within {anchor}",
+    );
+}
+
+fn press_status_check(runtime: &mut Runtime<State>, frame: &mut u32) {
+    runtime.key(rune::KeyEvent {
+        key: rune::Key::Text(" ".into()),
+        mods: rune::Mods::default(),
+    });
+    tick_status_checks(runtime, frame);
 }
 
 #[test]
@@ -588,14 +1128,13 @@ fn workstation_metric_tile_opens_and_closes_telemetry_modal() {
         .to_string()
         .contains("CPU Telemetry"));
 
-    runtime.update(|_, tx| tx.scroll_into_view("workstation-tile-cpu"));
-    runtime.frame(1.0 / 60.0);
+    assert!(runtime.find("host-resources-card").is_some());
     let (x, y) = runtime
         .find("workstation-tile-cpu")
-        .expect("clickable CPU metric ring tile");
+        .expect("CPU dial is available on the dashboard without disclosure");
     runtime.pointer_down(x, y);
     runtime.pointer_up(x, y);
-    runtime.frame(2.0 / 60.0);
+    runtime.frame(1.0 / 60.0);
     assert_eq!(
         runtime.state.workstation_inspector,
         Some(WorkstationInspector::Cpu)
@@ -604,6 +1143,19 @@ fn workstation_metric_tile_opens_and_closes_telemetry_modal() {
     assert!(tree.contains("CPU Telemetry"));
     assert!(tree.contains("Observed reading: 42.5%"));
     assert!(tree.contains("Measurements describe the API host"));
+
+    runtime.update(|state, _| {
+        state.apply_host_metrics(Err("gateway timed out".into()));
+    });
+    runtime.frame(2.0 / 60.0);
+    assert_eq!(
+        runtime.state.workstation_inspector,
+        Some(WorkstationInspector::Cpu)
+    );
+    assert!(runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Observed reading: 42.5%"));
 
     runtime.update(|state, _| state.workstation_inspector = None);
     runtime.frame(3.0 / 60.0);
@@ -684,12 +1236,12 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
     assert!(runtime.find("preflight-datastore").is_none());
     assert!(runtime.find("preflight-dataset").is_none());
     assert!(runtime.find("maintenance-seed").is_some());
-    assert!(runtime.find("maintenance-train").is_some());
+    assert!(runtime.find("maintenance-train").is_none());
     assert!(runtime.find("maintenance-reindex").is_some());
-    let (seed_action, train_action) = if cfg!(target_os = "linux") {
-        ("Enter actor CSV path", "Enter training CSV path")
+    let seed_action = if cfg!(target_os = "linux") {
+        "Enter actor CSV path"
     } else {
-        ("1. Seed Actors", "Optional · Train Classifier (Natural)")
+        "1. Seed Actors"
     };
     let seed_explanation =
         "Use a CSV to add or update actors. Existing actors outside this CSV are kept.";
@@ -697,7 +1249,6 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
     assert!(!seed_tree.contains("Pre-flight Checklist"));
     assert!(seed_tree.contains(&format!("{seed_action} (Ready)")));
     assert!(seed_tree.contains("2. Build Search Index (Unavailable)"));
-    assert!(seed_tree.contains(&format!("{train_action} (Unavailable)")));
     assert!(seed_tree.contains(seed_explanation));
     assert!(!seed_tree.contains("Use a training CSV for a Natural candidate."));
     assert!(runtime.find("loading-shimmer").is_none());
@@ -717,13 +1268,6 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
         state.maintenance.upload = Load::Idle;
         state.maintenance.local_dataset = None;
     });
-
-    runtime.update(|state, _| state.seed_stage = SeedStage::Classifier);
-    runtime.frame(1.0 / 60.0);
-    let classifier_tree = runtime.accessibility_json().to_string();
-    assert!(classifier_tree
-        .contains("This gateway has not advertised a durable consumer for this operation"));
-    assert!(!classifier_tree.contains(seed_explanation));
 
     runtime.update(|state, _| state.seed_stage = SeedStage::Maintenance);
     runtime.frame(2.0 / 60.0);
@@ -751,40 +1295,93 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
 }
 
 #[test]
-fn host_resources_show_stale_marker_after_a_failed_refresh() {
+fn dashboard_metrics_distinguish_unavailable_zero_and_last_known_samples() {
     use crate::workstation_dashboard::HostMetrics;
+    use fleetworks_workstation::native::BackendKind;
 
+    const CPU: &str = "workstation-tile-cpu";
+    const MEMORY: &str = "workstation-tile-memory";
+    const DISK: &str = "workstation-tile-disk";
+    const UNSYNCED: &str = "host-metrics-unsynced";
     let mut state = registered_fixture();
-    state.page = Page::Workstation;
-    state.host_metrics = Load::Ready(HostMetrics {
-        cpu_percent: Some(42.5),
-        ..HostMetrics::default()
-    });
-    state.host_metrics_observed_at = Some(0.0);
+    state.backend_kind = BackendKind::Local;
+    state.connection.origin = TextEdit::new("local://embedded");
+    state.host_metrics = Load::Loading;
+    state.readiness = Load::Loading;
     let mut runtime = Runtime::new(
         state,
         app::view,
-        (1180.0, 780.0),
+        (640.0, 480.0),
         Env {
             system_dark: true,
             scale: 1.0,
         },
     );
-    runtime.frame(0.0);
-    assert!(runtime.find("host-metrics-unsynced").is_none());
-
-    runtime.update(|state, _| state.apply_host_metrics(Err("gateway timed out".into())));
-    runtime.frame(1.0 / 60.0);
+    runtime.reduced_motion = true;
+    let mut frame = 0;
+    tick_status_checks(&mut runtime, &mut frame);
+    assert!(runtime.find("workstation-status-header").is_some());
+    assert!(runtime.find("host-metrics-loading").is_some());
     let tree = runtime.accessibility_json().to_string();
-    assert!(
-        runtime.find("host-metrics-unsynced").is_some(),
-        "unsynced glyph missing"
-    );
-    assert!(tree.contains("Latest refresh failed: gateway timed out"));
+    assert!(tree.contains("API host resources"));
+    assert!(tree.contains("Status checks · checking"));
+    for (key, label) in [
+        (CPU, "CPU: Unavailable"),
+        (MEMORY, "Memory: Unavailable"),
+        (DISK, "Disk: Unavailable"),
+    ] {
+        assert_eq!(
+            status_check_element(&runtime, key).label.as_deref(),
+            Some(label)
+        );
+    }
+
+    runtime.update(|state, _| {
+        state.apply_host_metrics(Ok(HostMetrics {
+            cpu_percent: Some(0.0),
+            disk_percent: Some(42.5),
+            ..HostMetrics::default()
+        }));
+    });
+    tick_status_checks(&mut runtime, &mut frame);
+    assert!(runtime.find("host-metrics-loading").is_none());
+    assert!(runtime.find(UNSYNCED).is_none());
+    let values = [
+        (CPU, "CPU: 0.0%"),
+        (MEMORY, "Memory: Unavailable"),
+        (DISK, "Disk: 42.5%"),
+    ];
+    for (key, label) in values {
+        runtime.update(|_, tx| tx.scroll_into_view(key));
+        tick_status_checks(&mut runtime, &mut frame);
+        let tile = assert_status_check_fully_visible(&runtime, key);
+        assert_eq!(tile.scrolled[0], 0.0, "{key} required horizontal scrolling");
+        assert_eq!(tile.label.as_deref(), Some(label));
+    }
+
+    focus_status_check(&mut runtime, DISK, &mut frame);
+    runtime.update(|state, _| state.apply_host_metrics(Err("gateway timed out".into())));
+    tick_status_checks(&mut runtime, &mut frame);
+    for (key, label) in values {
+        assert_eq!(
+            status_check_element(&runtime, key).label.as_deref(),
+            Some(label)
+        );
+    }
+    assert!(status_check_element(&runtime, DISK).focused);
+    assert!(runtime.find(UNSYNCED).is_some());
+    assert!(runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Last known API host readings. Open a metric for details."));
 
     runtime.update(|state, _| state.apply_host_metrics(Ok(HostMetrics::default())));
-    runtime.frame(2.0 / 60.0);
-    assert!(runtime.find("host-metrics-unsynced").is_none());
+    tick_status_checks(&mut runtime, &mut frame);
+    assert!(runtime.find(UNSYNCED).is_none());
+    assert_eq!(
+        status_check_element(&runtime, DISK).label.as_deref(),
+        Some("Disk: Unavailable")
+    );
 }
 
 pub(crate) fn brain_search_response_fixture() -> ActorSearchResponse {

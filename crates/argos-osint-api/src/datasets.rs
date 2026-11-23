@@ -3,6 +3,8 @@
 //! Public inputs are a dataset kind/hash and raw bytes, never a server/Mac path.
 //! A returned reference exists only after CSV validation and durable metadata.
 
+use std::io::Read;
+use std::io::Seek;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -30,9 +32,11 @@ use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::dataset_upload::DatasetUploadRequest;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::DatasetRef;
+use fleetworks_contracts::DatasetUpload;
 use futures_util::Stream;
 use futures_util::StreamExt;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::json;
 use sha2::Digest;
 use sha2::Sha256;
@@ -44,6 +48,8 @@ use tokio::sync::Semaphore;
 use crate::request_context::ResolvedRequest;
 use crate::ApiState;
 use crate::AuthenticatedPrincipal;
+
+const LOCAL_PART_ID_PREFIX: &str = "dataset-ipc-";
 
 pub(crate) fn upload_binding(context: &ResolvedRequest) -> Option<UploadTicketBinding> {
     if !matches!(
@@ -74,6 +80,30 @@ struct CancelValidation(Arc<AtomicBool>);
 impl Drop for CancelValidation {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
+    }
+}
+
+/// A companion-owned partial file. Only a live upload owns its writable handle.
+pub(crate) struct LocalDatasetPart {
+    id: String,
+    path: PathBuf,
+    file: tokio::fs::File,
+    preserve_link_identity: bool,
+}
+
+impl LocalDatasetPart {
+    pub(crate) async fn write_chunk(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.file.write_all(bytes).await
+    }
+}
+
+impl Drop for LocalDatasetPart {
+    fn drop(&mut self) {
+        // Unlink on cancellation or disconnect. The journal also covers an
+        // interrupted process and any unlink that needs an expiry retry.
+        if !self.preserve_link_identity {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -234,6 +264,113 @@ impl DatasetStore {
             stream,
         )
         .await
+        .map(|upload| upload.dataset)
+    }
+
+    /// Open the single companion-owned file that will be validated and published.
+    pub(crate) async fn begin_local_part(
+        &self,
+        repo: &Repository,
+        authority: &RegistryAuthority,
+        kind: DatasetKind,
+    ) -> anyhow::Result<LocalDatasetPart> {
+        self.verify_root().await?;
+        let id = format!(
+            "{LOCAL_PART_ID_PREFIX}{}",
+            argos_osint_core::store::new_id()
+        );
+        setup_jobs::begin_upload(repo, authority, &id, kind).await?;
+        let path = self.path(&id, "part")?;
+        self.verify_root().await?;
+        // Opening and constructing the guard in the same blocking task covers
+        // cancellation while the operating system is still creating the file.
+        tokio::task::spawn_blocking(move || {
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true).write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let file = tokio::fs::File::from_std(options.open(&path)?);
+            Ok(LocalDatasetPart {
+                id,
+                path,
+                file,
+                preserve_link_identity: false,
+            })
+        })
+        .await?
+    }
+
+    /// Verify the complete private file against the claimed ticket, then publish it.
+    pub(crate) async fn finish_local_part(
+        &self,
+        repo: &Repository,
+        context: &ResolvedRequest,
+        mut part: LocalDatasetPart,
+        expected: DatasetUploadRequest,
+        permit: OwnedSemaphorePermit,
+        cancelled: Arc<AtomicBool>,
+    ) -> anyhow::Result<DatasetUpload> {
+        let _cancel_validation = CancelValidation(Arc::clone(&cancelled));
+        anyhow::ensure!(
+            !cancelled.load(Ordering::Acquire),
+            "dataset validation cancelled"
+        );
+        expected.validate()?;
+        self.verify_root().await?;
+        part.file.flush().await?;
+        part.file.sync_data().await?;
+        let reference = DatasetRef::new(
+            part.id.clone(),
+            expected.kind,
+            expected.sha256,
+            expected.size_bytes,
+        )?;
+        verify_staged_file(&part.path, &part.file, reference.size_bytes).await?;
+        let file = part.file.try_clone().await?.into_std().await;
+        let path = part.path.clone();
+        let validation_reference = reference.clone();
+        let permit = Arc::new(permit);
+        let cpu_cancel = Arc::clone(&cancelled);
+        let rows = spawn_validation(Arc::clone(&permit), move || {
+            validate_local_part(file, &path, &validation_reference, &cpu_cancel)
+        })
+        .await??;
+        context
+            .revalidate(repo)
+            .await
+            .map_err(|_| anyhow::anyhow!("dataset upload authority changed"))?;
+        self.verify_root().await?;
+        verify_staged_file(&part.path, &part.file, reference.size_bytes).await?;
+        let final_path = self.path(&reference.id, "csv")?;
+        anyhow::ensure!(
+            !cancelled.load(Ordering::Acquire),
+            "dataset validation cancelled"
+        );
+
+        // Keep proof of ownership through registration. An interrupted link
+        // or metadata commit leaves the journal enough information to recover.
+        part.preserve_link_identity = true;
+        if let Err(error) = tokio::fs::hard_link(&part.path, &final_path).await {
+            part.preserve_link_identity = false;
+            return Err(error.into());
+        }
+        verify_staged_file(&final_path, &part.file, reference.size_bytes).await?;
+        if cancelled.load(Ordering::Acquire) {
+            tokio::fs::remove_file(&final_path).await?;
+            part.preserve_link_identity = false;
+            anyhow::bail!("dataset validation cancelled");
+        }
+        let upload = register_publication(repo, context.authority(), reference, rows).await?;
+        if tokio::fs::remove_file(&part.path).await.is_err() {
+            tracing::warn!(
+                code = "dataset_upload_cleanup_pending",
+                "Validated upload retained its partial name for expiry recovery"
+            );
+        }
+        Ok(upload)
     }
 
     pub(crate) async fn stage_checked<S, E>(
@@ -244,7 +381,7 @@ impl DatasetStore {
         expected_sha256: String,
         expectation: StageExpectation<'_>,
         stream: S,
-    ) -> anyhow::Result<DatasetRef>
+    ) -> anyhow::Result<DatasetUpload>
     where
         S: Stream<Item = Result<Bytes, E>> + Send,
         E: Send,
@@ -315,7 +452,7 @@ impl DatasetStore {
             file.sync_data().await?;
             let validation_path = part.clone();
             let cpu_cancel = Arc::clone(&cancelled);
-            spawn_validation(Arc::clone(&permit), move || {
+            let row_count = spawn_validation(Arc::clone(&permit), move || {
                 validate_csv(&validation_path, kind, &cpu_cancel)
             })
             .await??;
@@ -326,13 +463,11 @@ impl DatasetStore {
                     .await
                     .map_err(|_| anyhow::anyhow!("dataset upload authority changed"))?;
             }
-            // hard_link refuses an existing destination; an ordinary rename would overwrite it.
+            // hard_link refuses an existing destination.
             tokio::fs::hard_link(&part, &final_path).await?;
             tokio::fs::remove_file(&part).await?;
             let reference = DatasetRef::new(id, kind, actual, size)?;
-            setup_jobs::register_dataset(repo, authority, &reference, setup_jobs::DATASET_TTL)
-                .await?;
-            Ok(reference)
+            register_publication(repo, authority, reference, row_count).await
         }
         .await;
         if result.is_err() {
@@ -359,19 +494,18 @@ impl DatasetStore {
         let mut removed = 0;
         for item in expired {
             self.verify_root().await?;
-            for suffix in ["part", "csv"] {
-                let path = self.path(&item.dataset_id, suffix)?;
-                match tokio::fs::symlink_metadata(&path).await {
-                    Ok(metadata) => {
-                        anyhow::ensure!(
-                            metadata.is_file() && !metadata.file_type().is_symlink(),
-                            "staging cleanup object changed"
-                        );
-                        tokio::fs::remove_file(path).await?;
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
+            let part = self.path(&item.dataset_id, "part")?;
+            let final_path = self.path(&item.dataset_id, "csv")?;
+            if item.dataset_id.starts_with(LOCAL_PART_ID_PREFIX) && !item.registered {
+                // An unregistered final name can only belong to this local
+                // upload if it still names the retained private inode.
+                if same_staged_file(&part, &final_path).await? {
+                    remove_staged_file(&final_path).await?;
                 }
+                remove_staged_file(&part).await?;
+            } else {
+                remove_staged_file(&part).await?;
+                remove_staged_file(&final_path).await?;
             }
             setup_jobs::finish_upload_cleanup(repo, &item.dataset_id).await?;
             removed += 1;
@@ -380,34 +514,160 @@ impl DatasetStore {
     }
 }
 
-fn spawn_validation(
+async fn register_publication(
+    repo: &Repository,
+    authority: &RegistryAuthority,
+    reference: DatasetRef,
+    row_count: u64,
+) -> anyhow::Result<DatasetUpload> {
+    setup_jobs::register_dataset(repo, authority, &reference, setup_jobs::DATASET_TTL).await?;
+    let mut upload = DatasetUpload::new(reference, setup_jobs::DATASET_TTL.as_secs());
+    upload.row_count = Some(row_count);
+    Ok(upload)
+}
+
+async fn remove_staged_file(path: &Path) -> anyhow::Result<()> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => {
+            anyhow::ensure!(metadata.is_file(), "staging cleanup object changed");
+            tokio::fs::remove_file(path).await?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+async fn same_staged_file(first: &Path, second: &Path) -> anyhow::Result<bool> {
+    async fn metadata(path: &Path) -> anyhow::Result<Option<std::fs::Metadata>> {
+        match tokio::fs::symlink_metadata(path).await {
+            Ok(metadata) => Ok(Some(metadata)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+    let Some(first) = metadata(first).await? else {
+        return Ok(false);
+    };
+    let Some(second) = metadata(second).await? else {
+        return Ok(false);
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(first.is_file()
+            && second.is_file()
+            && (first.dev(), first.ino()) == (second.dev(), second.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (first, second);
+        Ok(false)
+    }
+}
+
+async fn verify_staged_file(path: &Path, file: &tokio::fs::File, size: u64) -> anyhow::Result<()> {
+    let named = tokio::fs::symlink_metadata(path).await?;
+    let opened = file.metadata().await?;
+    anyhow::ensure!(
+        named.is_file() && opened.is_file() && named.len() == size && opened.len() == size,
+        "staged dataset file changed"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        anyhow::ensure!(
+            (named.dev(), named.ino()) == (opened.dev(), opened.ino()),
+            "staged dataset file identity changed"
+        );
+    }
+    Ok(())
+}
+
+struct HashingReader<R> {
+    file: R,
+    digest: Sha256,
+}
+
+impl<R: Read> Read for HashingReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.file.read(buffer)?;
+        self.digest.update(&buffer[..read]);
+        Ok(read)
+    }
+}
+
+fn validate_local_part(
+    mut file: std::fs::File,
+    path: &Path,
+    expected: &DatasetRef,
+    cancelled: &AtomicBool,
+) -> anyhow::Result<u64> {
+    file.rewind()?;
+    fleetworks_contracts::dataset_upload::validate_csv_header(&mut file, expected.kind)?;
+    file.rewind()?;
+    let mut reader = HashingReader {
+        file,
+        digest: Sha256::new(),
+    };
+    let rows = if expected.kind == DatasetKind::ActorCatalog {
+        // Hash the actual bytes as the bounded parser reads the open file.
+        validate_actor_csv(&mut reader, cancelled)?
+    } else {
+        // Preserve the historical classifier parser's explicit-path interface.
+        let mut buffer = vec![0; 64 * 1024];
+        loop {
+            anyhow::ensure!(
+                !cancelled.load(Ordering::Acquire),
+                "dataset validation cancelled"
+            );
+            if reader.read(&mut buffer)? == 0 {
+                break;
+            }
+        }
+        validate_csv(path, expected.kind, cancelled)?
+    };
+    anyhow::ensure!(
+        format!("{:x}", reader.digest.finalize()) == expected.sha256,
+        "dataset SHA-256 mismatch"
+    );
+    anyhow::ensure!(
+        !cancelled.load(Ordering::Acquire),
+        "dataset validation cancelled"
+    );
+    Ok(rows)
+}
+
+fn validate_actor_csv(reader: impl Read, cancelled: &AtomicBool) -> anyhow::Result<u64> {
+    Ok(argos_osint_core::actor_catalog::scan_bounded(
+        reader,
+        &argos_osint_core::actor_catalog::ActorReadLimits::default(),
+        cancelled,
+        |_| Ok(()),
+        |_| Ok(()),
+    )?
+    .rows as u64)
+}
+
+fn spawn_validation<T: Send + 'static>(
     work_slot: Arc<OwnedSemaphorePermit>,
-    work: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
-) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+    work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> tokio::task::JoinHandle<anyhow::Result<T>> {
     tokio::task::spawn_blocking(move || {
         let _work_slot = work_slot;
         work()
     })
 }
 
-fn validate_csv(path: &Path, kind: DatasetKind, cancelled: &AtomicBool) -> anyhow::Result<()> {
+fn validate_csv(path: &Path, kind: DatasetKind, cancelled: &AtomicBool) -> anyhow::Result<u64> {
     anyhow::ensure!(
         !cancelled.load(Ordering::Acquire),
         "dataset validation cancelled"
     );
     let mut header = std::fs::File::open(path)?;
     fleetworks_contracts::dataset_upload::validate_csv_header(&mut header, kind)?;
-    match kind {
-        DatasetKind::ActorCatalog => {
-            let file = std::fs::File::open(path)?;
-            argos_osint_core::actor_catalog::scan_bounded(
-                file,
-                &argos_osint_core::actor_catalog::ActorReadLimits::default(),
-                cancelled,
-                |_| Ok(()),
-                |_| Ok(()),
-            )?;
-        }
+    let rows = match kind {
+        DatasetKind::ActorCatalog => validate_actor_csv(std::fs::File::open(path)?, cancelled)?,
         DatasetKind::ClassifierTraining => {
             let mut request = argos_osint_core::classifier::dataset::DatasetRequest::default();
             request.explicit_file = Some(path.to_owned());
@@ -419,15 +679,17 @@ fn validate_csv(path: &Path, kind: DatasetKind, cancelled: &AtomicBool) -> anyho
             request.executable = std::env::current_exe()?;
             request.home = request.cwd.clone();
             let resolution = argos_osint_core::classifier::dataset::resolve_dataset(&request)?;
-            argos_osint_core::classifier::dataset::parse_csv(&resolution)?;
+            argos_osint_core::classifier::dataset::parse_csv(&resolution)?
+                .summary
+                .rows
         }
         _ => anyhow::bail!("unsupported dataset kind"),
-    }
+    };
     anyhow::ensure!(
         !cancelled.load(Ordering::Acquire),
         "dataset validation cancelled"
     );
-    Ok(())
+    Ok(rows)
 }
 
 #[derive(Deserialize)]
@@ -724,17 +986,14 @@ pub(crate) async fn put_upload(
         )
         .await;
     match result {
-        Ok(reference) => {
+        Ok(upload) => {
             if context.revalidate(&state.repo).await.is_err() {
                 return response(
                     StatusCode::UNAUTHORIZED,
                     json!({"error":"Upload authority changed; recover staged metadata after reconnecting"}),
                 );
             }
-            response(
-                StatusCode::CREATED,
-                json!({"dataset":reference,"expires_in_seconds":setup_jobs::DATASET_TTL.as_secs()}),
-            )
+            response(StatusCode::CREATED, upload)
         }
         Err(_) => response(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -783,7 +1042,7 @@ fn ticket_failure(
     response(status, json!({"error":message}))
 }
 
-fn response(status: StatusCode, value: serde_json::Value) -> Response {
+fn response<T: Serialize>(status: StatusCode, value: T) -> Response {
     let mut response = (status, Json(value)).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
@@ -801,7 +1060,10 @@ mod tests {
         let root = tempfile::tempdir().expect("temporary staging parent");
         let csv = root.path().join("actors.csv");
         std::fs::write(&csv,b"actor_id,actor_name,actor_type,aliases,name_normalized\nsynthetic-1,Harbor Union,organization,[],harbor union\n").expect("synthetic actor CSV");
-        assert!(validate_csv(&csv, DatasetKind::ActorCatalog, &AtomicBool::new(false)).is_ok());
+        assert_eq!(
+            validate_csv(&csv, DatasetKind::ActorCatalog, &AtomicBool::new(false)).unwrap(),
+            1
+        );
         assert!(validate_csv(
             &csv,
             DatasetKind::ClassifierTraining,
@@ -839,12 +1101,15 @@ mod tests {
             }
         }
         std::fs::write(&training, rows).expect("synthetic training CSV");
-        assert!(validate_csv(
-            &training,
-            DatasetKind::ClassifierTraining,
-            &AtomicBool::new(false)
-        )
-        .is_ok());
+        assert_eq!(
+            validate_csv(
+                &training,
+                DatasetKind::ClassifierTraining,
+                &AtomicBool::new(false),
+            )
+            .unwrap(),
+            12
+        );
         assert!(validate_csv(
             &training,
             DatasetKind::ActorCatalog,

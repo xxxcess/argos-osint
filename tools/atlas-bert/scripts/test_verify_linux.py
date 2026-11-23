@@ -7,7 +7,9 @@ import struct
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
+import finetune
 import verify_linux as verify
 
 AMD = "x86_64-unknown-linux-gnu"
@@ -161,6 +163,274 @@ class LinuxWorkerVerification(unittest.TestCase):
         binary.write_bytes(binary.read_bytes() + b"changed")
         with self.assertRaises(verify.VerifyError):
             verify.check_bundle(bundle, AMD, REVISION)
+
+
+class FineTuningContract(unittest.TestCase):
+    def test_only_exact_manual_fleetworks_backend_run_selects_amd64_fitting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            event = Path(temporary) / "event.json"
+            inputs = {"stage": "standard", "mode": "pr", "components": "backend",
+                      "base": "b" * 40, "head": REVISION}
+            verify.save(event, {"inputs": inputs})
+            env = {
+                "GITHUB_ACTIONS": "true",
+                "GITHUB_EVENT_NAME": "workflow_dispatch",
+                "GITHUB_EVENT_PATH": str(event),
+                "GITHUB_REF": "refs/heads/feature/bert",
+                "GITHUB_REPOSITORY": "owner/repo",
+                "GITHUB_SHA": REVISION,
+                "GITHUB_WORKFLOW_REF": "owner/repo/.github/workflows/fleetworks.yml@refs/heads/feature/bert",
+            }
+            self.assertTrue(verify.managed_finetune(AMD, REVISION, env))
+            self.assertFalse(verify.managed_finetune(ARM, REVISION, env))
+            self.assertFalse(verify.managed_finetune(AMD, REVISION, {**env, "GITHUB_EVENT_NAME": "pull_request"}))
+            self.assertFalse(verify.managed_finetune(AMD, REVISION, {**env, "GITHUB_EVENT_NAME": "push"}))
+            self.assertFalse(verify.managed_finetune(AMD, REVISION, {**env, "GITHUB_WORKFLOW_REF": "other"}))
+            with self.assertRaisesRegex(verify.VerifyError, "exact dispatched head"):
+                verify.managed_finetune(AMD, REVISION, {**env, "GITHUB_SHA": "d" * 40})
+            for override in ({"stage": "second"}, {"mode": "full"}, {"components": "auto"}):
+                verify.save(event, {"inputs": {**inputs, **override}})
+                self.assertFalse(verify.managed_finetune(AMD, REVISION, env))
+
+    def test_candidate_payloads_are_bounded_and_explicitly_opted_in(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = root / "bundle"
+            candidate = bundle / "proof/candidate/rust_model.ot"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_bytes(b"model")
+            with self.assertRaisesRegex(verify.VerifyError, "Unexpected candidate"):
+                verify.payload_files(bundle)
+            self.assertEqual(verify.payload_files(bundle, proof=True), [candidate])
+            archive = root / "bundle.tar.gz"
+            with tarfile.open(archive, "w:gz") as output:
+                output.add(candidate, arcname=candidate.relative_to(bundle))
+            with self.assertRaisesRegex(verify.VerifyError, "Unexpected candidate"):
+                verify.safe_unpack(archive, root / "baseline")
+            with patch.object(verify, "MAX_CANDIDATE_PROOF", 2):
+                with self.assertRaisesRegex(verify.VerifyError, "exceeds"):
+                    verify.safe_unpack(archive, root / "oversized", proof=True)
+            verify.safe_unpack(archive, root / "proof", proof=True)
+            self.assertEqual((root / "proof/proof/candidate/rust_model.ot").read_bytes(), b"model")
+
+    def test_pinned_corpus_fitting_partitions_and_worker_hypotheses(self):
+        partitions = ("train", "development", "calibration")
+        corpus = finetune.read_articles(finetune.read_corpus(), partitions)
+        self.assertEqual({key: len(value) for key, value in corpus.items()}, {
+            "train": 440, "development": 165, "calibration": 230,
+        })
+        self.assertTrue(all(article.text.count("\n") == 1 for rows in corpus.values() for article in rows))
+        contract = finetune.runtime_contract()
+        self.assertEqual(contract["domains"], list(finetune.DOMAINS))
+        self.assertEqual(len(set(contract["hypotheses"])), 6)
+        self.assertEqual(contract["max_tokens"], 192)
+
+    def test_rust_admission_gates_preserve_cap_and_ambiguity(self):
+        for scores, expected in (
+            ([.99, .98, .97, .1, .1, .1], ("governance", "security")),
+            ([.97, .98, .99, .1, .1, .1], ("economic", "security")),
+            ([.99, .98, .98, .1, .1, .1], ("governance",)),
+            ([.99, .99, .98, .1, .1, .1], ()),
+            ([.99, .99, .1, .1, .1, .1], ("governance", "security")),
+            ([.79, .1, .1, .1, .1, .1], ()),
+        ):
+            with self.subTest(scores=scores):
+                self.assertEqual(finetune.select_domains(scores, .8), expected)
+
+    def test_reports_full_membership_and_does_not_hide_false_admissions(self):
+        articles = [
+            finetune.Article("complete triad", frozenset({"governance", "security", "economic"})),
+            finetune.Article("complete pair", frozenset({"security", "economic"})),
+            finetune.Article("out of scope", frozenset()),
+        ]
+        scores = [
+            [.99, .98, .97, .1, .1, .1],
+            [.1, .98, .99, .1, .1, .1],
+            [.99, .1, .1, .1, .1, .1],
+        ]
+        unsafe = finetune.metrics(articles, scores, .8)
+        self.assertAlmostEqual(unsafe["micro_f1"], .8)
+        self.assertEqual(unsafe["out_of_scope_rows"], 1)
+        self.assertEqual(unsafe["false_out_of_scope_admissions"], 1)
+        self.assertEqual(unsafe["per_domain"]["economic"]["fn"], 1)
+        self.assertEqual(unsafe["top_two"]["valid_triad_pairs"], 1)
+        self.assertEqual(unsafe["top_two"]["exact_pair_rows"], 1)
+
+    def test_promotion_requires_macro_f1_strictly_above_the_floor(self):
+        for score, expected in ((.649, False), (.65, False), (.651, True), (.85, True),
+                                (True, False), (float("nan"), False), (1.01, False)):
+            with self.subTest(score=score):
+                self.assertEqual(finetune.promotion_passes({"macro_f1": score}), expected)
+
+    def test_calibration_selects_best_macro_f1_and_reports_false_admissions(self):
+        articles = [finetune.Article(f"positive {index}", frozenset({"governance"})) for index in range(3)]
+        articles.append(finetune.Article("out of scope", frozenset()))
+        baseline = [[score, .1, .1, .1, .1, .1] for score in (.9, .9, .1, .1)]
+        candidate = [[score, .1, .1, .1, .1, .1] for score in (.975, .954, .704, .724)]
+        for index, domain in enumerate(finetune.DOMAINS[1:], 1):
+            articles.append(finetune.Article(domain, frozenset({domain})))
+            row = [.1] * len(finetune.DOMAINS)
+            row[index] = .99
+            baseline.append(row)
+            candidate.append(row)
+        report = finetune.select_threshold(articles, baseline, candidate)
+        self.assertEqual(report["status"], "qualified")
+        self.assertEqual(report["regression_policy"], "atlas-bert-macro-f1-floor-v2")
+        self.assertEqual(report["baseline_threshold"], .8)
+        self.assertEqual(report["tested_thresholds"], 50)
+        self.assertEqual(report["selected"], report["best_overall"])
+        self.assertEqual(report["selected"]["threshold"], .7)
+        self.assertGreater(report["selected"]["metrics"]["macro_f1"], report["baseline"]["macro_f1"])
+        self.assertEqual(report["baseline"]["false_out_of_scope_admissions"], 0)
+        self.assertEqual(report["selected"]["metrics"]["false_out_of_scope_admissions"], 1)
+
+    def test_rejected_calibration_writes_evidence_and_never_freezes_candidate(self):
+        articles = [finetune.Article("positive", frozenset({"governance"})),
+                    finetune.Article("out of scope", frozenset())]
+        baseline = [[.9, .1, .1, .1, .1, .1], [.1, .1, .1, .1, .1, .1]]
+        candidate = [[.7, .1, .1, .1, .1, .1], [.9, .1, .1, .1, .1, .1]]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination, checkpoint, worker = (root / name for name in ("candidate", "model", "worker"))
+            checkpoint.mkdir()
+            worker.write_bytes(b"worker")
+            for name in finetune.MODEL_FILES:
+                (checkpoint / name).write_text(name)
+
+            def train(*args):
+                args[-1].write_bytes(b"pytorch weights")
+
+            def convert(command, **options):
+                command[3].with_name("rust_model.ot").write_bytes(b"converted weights")
+
+            phase = {"train": [], "development": [], "calibration": articles}
+            with (
+                patch.object(finetune, "validate_prepared", return_value=(checkpoint, root)),
+                patch.object(finetune, "read_corpus", return_value=b"test data"),
+                patch.object(finetune, "read_articles", return_value=phase) as read,
+                patch.object(finetune, "train_checkpoint", side_effect=train),
+                patch.object(finetune.subprocess, "run", side_effect=convert),
+                patch.object(finetune, "score_with_worker", side_effect=(baseline, candidate)) as score,
+            ):
+                self.assertIsNone(finetune.fit(root, destination, worker, REVISION))
+            read.assert_called_once_with(b"test data", ("train", "development", "calibration"))
+            self.assertEqual(score.call_count, 2)
+            self.assertEqual(score.call_args_list[0].args[:3], (worker, checkpoint, articles))
+            self.assertEqual(score.call_args_list[1].args[2], articles)
+            report = json.loads(finetune.calibration_receipt_path(destination).read_text())
+            self.assertEqual(report["status"], "rejected")
+            self.assertEqual(report["qualifying_thresholds"], 0)
+            self.assertIsNone(report["selected"])
+            self.assertFalse(destination.exists())
+
+    def test_malformed_worker_responses_are_rejected(self):
+        first = '{"protocol":"argos-atlas-bert-v1"}\n'
+        for response in ('{"scores":[[true,0,0,0,0,0]]}', '{"scores":[[NaN,0,0,0,0,0]]}',
+                         '{"scores":[[0,0,0,0,0]]}', '{"scores":[]}'):
+            with self.subTest(response=response), self.assertRaises(verify.VerifyError):
+                finetune.parse_worker_scores(first + response, [1], "argos-atlas-bert-v1")
+
+    def test_holdout_refuses_mutated_weights_before_reading_test_articles(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "candidate"
+            baseline = root / "baseline"
+            worker = root / "worker"
+            worker.write_bytes(b"worker")
+            for directory in (candidate, baseline):
+                directory.mkdir()
+                for name in finetune.MODEL_FILES:
+                    (directory / name).write_text(name)
+            path = candidate / finetune.FROZEN_NAME
+            frozen = {
+                "schema_version": "atlas-bert-frozen-v1",
+                "dataset_sha256": finetune.DATASET_SHA256,
+                "split_counts": finetune.SPLIT_COUNTS,
+                "base_checkpoint_revision": finetune.MODEL_COMMIT,
+                "assets": finetune.model_assets(candidate),
+                "threshold": .8,
+                "provenance": {
+                    "baseline_assets": finetune.model_assets(baseline),
+                    "runtime_contract": finetune.runtime_contract(),
+                    "calibration_worker_sha256": verify.sha(worker),
+                },
+            }
+            finetune.write_new(path, frozen)
+            finetune.load_frozen(candidate, baseline, worker)
+            with patch.object(finetune, "read_corpus") as corpus:
+                with self.assertRaisesRegex(verify.VerifyError, "current calibration qualification"):
+                    finetune.evaluate(candidate, baseline, worker)
+                corpus.assert_not_called()
+            (candidate / "rust_model.ot").write_bytes(b"mutated")
+            with patch.object(finetune, "read_corpus") as corpus:
+                with self.assertRaisesRegex(verify.VerifyError, "Frozen model"):
+                    finetune.evaluate(candidate, baseline, worker)
+                corpus.assert_not_called()
+
+    def test_frozen_calibration_qualification_binds_policy_identity_and_selected_metrics(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate, baseline, worker = (root / name for name in ("candidate", "baseline", "worker"))
+            worker.write_bytes(b"worker")
+            for directory in (candidate, baseline):
+                directory.mkdir()
+                for name in finetune.MODEL_FILES:
+                    (directory / name).write_text(name)
+            candidate_assets, baseline_assets = map(finetune.model_assets, (candidate, baseline))
+            domains = finetune.DOMAINS
+            articles = [
+                finetune.Article("fixture", frozenset({domains[index % len(domains)]}))
+                for index in range(230)
+            ]
+            scores = [
+                [.945 if domain in article.labels else .1 for domain in domains]
+                for article in articles
+            ]
+            qualification = finetune.select_threshold(articles, scores, scores)
+            qualification.update({"dataset_sha256": finetune.DATASET_SHA256, "source_revision": REVISION,
+                                  "worker_sha256": verify.sha(worker), "baseline_assets": baseline_assets,
+                                  "candidate_assets": candidate_assets})
+            frozen = {
+                "schema_version": "atlas-bert-frozen-v1", "dataset_sha256": finetune.DATASET_SHA256,
+                "split_counts": finetune.SPLIT_COUNTS, "base_checkpoint_revision": finetune.MODEL_COMMIT,
+                "assets": candidate_assets, "threshold": qualification["selected"]["threshold"],
+                "provenance": {
+                    "baseline_assets": baseline_assets, "runtime_contract": finetune.runtime_contract(),
+                    "calibration_worker_sha256": verify.sha(worker), "source_revision": REVISION,
+                    "calibration": copy.deepcopy(qualification["selected"]["metrics"]),
+                    "calibration_qualification": qualification,
+                },
+            }
+            path = candidate / finetune.FROZEN_NAME
+            verify.save(path, frozen)
+            finetune.load_frozen(candidate, baseline, worker)
+            for key, value in (
+                ("status", "rejected"),
+                ("worker_sha256", "mismatch"),
+                ("qualifying_thresholds", 0),
+                ("regression_policy", "atlas-bert-synthetic-noninferiority-v1"),
+            ):
+                changed = copy.deepcopy(frozen)
+                changed["provenance"]["calibration_qualification"][key] = value
+                verify.save(path, changed)
+                with self.subTest(key=key), self.assertRaisesRegex(verify.VerifyError, "calibration qualification"):
+                    finetune.load_frozen(candidate, baseline, worker)
+
+            verify.save(path, frozen)
+            test_rows = finetune.SPLIT_COUNTS["test"]
+            held_out = articles[:test_rows]
+            rejected_scores = [[.1] * len(domains)] * test_rows
+            with (
+                patch.object(finetune, "read_corpus", return_value=b"held-out data"),
+                patch.object(finetune, "read_articles", return_value={"test": held_out}) as read,
+                patch.object(finetune, "score_with_worker", side_effect=(scores[:test_rows], rejected_scores)),
+            ):
+                evaluation = finetune.evaluate(candidate, baseline, worker)
+            read.assert_called_once_with(b"held-out data", ("test",))
+            self.assertEqual(evaluation["regression_policy"], finetune.REGRESSION_POLICY)
+            self.assertEqual(evaluation["held_out_rows"], test_rows)
+            self.assertEqual(evaluation["candidate"]["macro_f1"], 0.0)
+            self.assertFalse(evaluation["passed"])
 
 
 if __name__ == "__main__":

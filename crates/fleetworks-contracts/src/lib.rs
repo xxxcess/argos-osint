@@ -13,6 +13,7 @@ pub mod dataset_upload;
 pub mod ipc;
 pub mod operational_logs;
 pub mod pairing;
+pub mod qa_worker;
 pub mod readiness;
 pub mod search;
 

@@ -5,8 +5,8 @@
 //! configuration-reset security boundaries enforced by the HTTP gateway.
 
 use std::collections::HashMap;
-use std::io::SeekFrom;
-use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -15,7 +15,6 @@ use argos_osint_core::osint::manual::Tools;
 use argos_osint_core::storage;
 use argos_osint_core::storage::configuration_reset;
 use argos_osint_core::storage::job_actions;
-use argos_osint_core::storage::setup_jobs;
 use argos_osint_core::storage::upload_ticket;
 use argos_osint_core::storage::upload_ticket::UploadTicketBinding;
 use axum::body::Bytes;
@@ -33,14 +32,11 @@ use fleetworks_contracts::ipc::MAX_IPC_CHUNK_BYTES;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use fleetworks_contracts::search::ActorSearchMode;
-use fleetworks_contracts::DatasetUpload;
 use fleetworks_contracts::Ready;
 use fleetworks_contracts::API_VERSION;
 use serde::Serialize;
-use tokio::fs::File;
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncSeekExt;
-use tokio::io::AsyncWriteExt;
+use sha2::Digest;
+use sha2::Sha256;
 use tokio::sync::Mutex;
 
 use crate::activity;
@@ -73,7 +69,6 @@ use crate::PrivateServices;
 
 const MAX_LOCAL_UPLOAD_SESSIONS: usize = 16;
 const MAX_CONFIGURATION_IMPORT_BYTES: usize = 2 * 1024 * 1024;
-const STREAM_READ_CHUNK_BYTES: usize = 64 * 1024;
 const RETRY_AFTER_CAPACITY_SECONDS: u64 = 60;
 
 /// Host capability flags exposed and enforced by [`LocalGateway`].
@@ -132,29 +127,20 @@ impl From<(StatusCode, &'static str)> for DispatchError {
     }
 }
 
-struct TempFileGuard(Option<PathBuf>);
-
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        if let Some(path) = self.0.take() {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
 struct UploadSession {
-    binding: UploadTicketBinding,
     kind: DatasetKind,
     expected_sha256: String,
     expected_size_bytes: u64,
     written_bytes: u64,
-    expires_at: Instant,
-    _temp_path: TempFileGuard,
-    file: File,
+    digest: Sha256,
+    started_at: Instant,
+    part: Option<datasets::LocalDatasetPart>,
 }
 
 #[derive(Clone)]
 struct UploadSessionEntry {
+    binding: UploadTicketBinding,
+    cancelled: Arc<AtomicBool>,
     expires_at: Instant,
     session: Arc<Mutex<UploadSession>>,
 }
@@ -164,6 +150,8 @@ struct UploadSessionEntry {
 pub struct LocalGateway {
     state: ApiState,
     services: PrivateServices,
+    qa: crate::inbox_qa::QaTarget,
+    qa_availability: crate::inbox_qa::QaRuntimeAvailability,
     capability_config: LocalCapabilityConfig,
     job_cursors: Arc<activity_paging::JobsCursors>,
     log_cursors: Arc<operational_logs::LogCursors>,
@@ -173,22 +161,54 @@ pub struct LocalGateway {
 }
 
 impl LocalGateway {
+    /// Cancel every partial upload when the companion's sole connection ends.
+    pub async fn cancel_dataset_uploads(&self) {
+        let uploads = {
+            let mut sessions = self.upload_sessions.lock().await;
+            for entry in sessions.values() {
+                entry.cancelled.store(true, Ordering::Release);
+            }
+            std::mem::take(&mut *sessions)
+        };
+        drop(uploads);
+    }
+
     /// Construct a local IPC gateway over initialized storage and service clients.
     pub fn new(
         state: ApiState,
         services: PrivateServices,
         capability_config: LocalCapabilityConfig,
     ) -> anyhow::Result<Self> {
+        let host_sampler = host_metrics::new_sampler();
+        let qa = crate::inbox_qa::QaTarget::new(
+            services.readiness.clone(),
+            services.search.clone(),
+            true,
+        )
+        .with_metrics(host_sampler.clone());
         Ok(Self {
             state,
+            qa,
+            qa_availability: crate::inbox_qa::QaRuntimeAvailability::default(),
             services,
             capability_config,
             job_cursors: Arc::new(activity_paging::JobsCursors::new()),
             log_cursors: Arc::new(operational_logs::LogCursors::new()),
-            host_sampler: host_metrics::new_sampler(),
+            host_sampler,
             tools: Arc::new(Tools::default()),
             upload_sessions: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Share the diagnosis reported by this companion's supervised model worker.
+    #[must_use]
+    pub fn qa_runtime_availability(&self) -> crate::inbox_qa::QaRuntimeAvailability {
+        self.qa_availability.clone()
+    }
+
+    /// Refresh QA health observations for this companion while inference is enabled.
+    pub async fn run_qa_health_refresh(&self, stop: &crate::inbox_qa::CancellationToken) {
+        self.qa.refresh(&self.state, stop).await;
     }
 
     /// Return runtime-backed local capability metadata governed by `LocalCapabilityConfig`.
@@ -274,6 +294,14 @@ impl LocalGateway {
         self.enforce_reset_fence(principal).await?;
 
         match op {
+            op @ (IpcOperation::QaSettings
+            | IpcOperation::QaSettingsUpdate(_)
+            | IpcOperation::QaTurnSubmit(_)
+            | IpcOperation::QaLatest
+            | IpcOperation::QaEvents(_)
+            | IpcOperation::QaCancel(_)) => {
+                Box::pin(self.dispatch_qa_op(principal, registration, op)).await
+            }
             op @ (IpcOperation::Ready
             | IpcOperation::Capabilities
             | IpcOperation::WorkstationReadiness
@@ -300,6 +328,66 @@ impl LocalGateway {
                 Box::pin(self.dispatch_read_op(principal, registration, op)).await
             }
             op => Box::pin(self.dispatch_write_op(principal, registration, op)).await,
+        }
+    }
+
+    async fn dispatch_qa_op(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        registration: Option<&RegisteredContext>,
+        op: IpcOperation,
+    ) -> Result<IpcPayload, DispatchError> {
+        use crate::inbox_qa;
+
+        if principal.purpose() != CredentialPurpose::Native {
+            return Err(ContextFailure::forbidden().into());
+        }
+        let permission = match &op {
+            IpcOperation::QaSettings => Permission::ReadBackend,
+            IpcOperation::QaSettingsUpdate(_) => Permission::ManageInboxQa,
+            IpcOperation::QaLatest | IpcOperation::QaEvents(_) => {
+                Permission::ReadWorkstationActivity
+            }
+            IpcOperation::QaTurnSubmit(_) | IpcOperation::QaCancel(_) => {
+                Permission::SubmitInteractive
+            }
+            _ => return Err(DispatchError::bad_request("Invalid Inbox operation")),
+        };
+        let context = self
+            .resolve(
+                principal,
+                registration,
+                permission,
+                ContextRequirement::Registered,
+            )
+            .await?;
+        match op {
+            IpcOperation::QaSettings => json_payload(
+                inbox_qa::settings_request(&self.state, &context, Some(&self.qa_availability))
+                    .await?,
+            ),
+            IpcOperation::QaSettingsUpdate(request) => json_payload(
+                inbox_qa::update_request(
+                    &self.state,
+                    &context,
+                    request,
+                    Some(&self.qa_availability),
+                )
+                .await?,
+            ),
+            IpcOperation::QaTurnSubmit(request) => json_payload(
+                inbox_qa::submit_request(&self.state, &context, &self.qa, request).await?,
+            ),
+            IpcOperation::QaLatest => {
+                json_payload(inbox_qa::latest_request(&self.state, &context).await?)
+            }
+            IpcOperation::QaEvents(query) => json_payload(
+                inbox_qa::events_request(&self.state, &context, &self.qa, query).await?,
+            ),
+            IpcOperation::QaCancel(request) => {
+                json_payload(inbox_qa::cancel_request(&self.state, &context, request).await?)
+            }
+            _ => Err(DispatchError::bad_request("Invalid Inbox operation")),
         }
     }
 
@@ -612,7 +700,6 @@ impl LocalGateway {
                 json_payload(history)
             }
             IpcOperation::ClassifierCandidateDetail(query) => {
-                self.require_classifier_enabled()?;
                 let context = self
                     .resolve(
                         principal,
@@ -637,7 +724,6 @@ impl LocalGateway {
                 json_payload(preview)
             }
             IpcOperation::ClassifierActivationResult(query) => {
-                self.require_classifier_enabled()?;
                 let context = self
                     .resolve(
                         principal,
@@ -802,19 +888,17 @@ impl LocalGateway {
             IpcOperation::DatasetUploadChunk {
                 upload_id,
                 offset,
-                data_b64,
+                data,
             } => {
-                self.handle_dataset_upload_chunk(
-                    principal,
-                    registration,
-                    upload_id,
-                    offset,
-                    data_b64,
-                )
-                .await
+                self.handle_dataset_upload_chunk(principal, registration, upload_id, offset, data)
+                    .await
             }
             IpcOperation::DatasetUploadFinish { upload_id } => {
                 self.handle_dataset_upload_finish(principal, registration, upload_id)
+                    .await
+            }
+            IpcOperation::DatasetUploadCancel { upload_id } => {
+                self.handle_dataset_upload_cancel(principal, registration, upload_id)
                     .await
             }
             IpcOperation::SeedActors(request) => {
@@ -832,13 +916,12 @@ impl LocalGateway {
                     &context,
                     request,
                     MaintenanceOperation::SeedActors,
+                    maintenance::SetupIngress::Embedded(None),
                 )
                 .await?;
                 json_payload(receipt)
             }
             IpcOperation::TrainClassifier(request) => {
-                self.require_jobs_enabled()?;
-                self.require_classifier_enabled()?;
                 let context = self
                     .resolve(
                         principal,
@@ -852,6 +935,7 @@ impl LocalGateway {
                     &context,
                     request,
                     MaintenanceOperation::TrainClassifier,
+                    maintenance::SetupIngress::Embedded(None),
                 )
                 .await?;
                 json_payload(receipt)
@@ -867,17 +951,27 @@ impl LocalGateway {
                         ContextRequirement::Registered,
                     )
                     .await?;
+                // A failed status read never proves the current generation is reusable.
+                let index_status = if let Some(search) = self.services.search.clone() {
+                    crate::run_shielded_timeout(std::time::Duration::from_secs(2), async move {
+                        search.status().await
+                    })
+                    .await
+                    .and_then(Result::ok)
+                } else {
+                    None
+                };
                 let receipt = maintenance::admit_request(
                     &self.state,
                     &context,
                     request,
                     MaintenanceOperation::ReindexActors,
+                    maintenance::SetupIngress::Embedded(index_status.as_ref()),
                 )
                 .await?;
                 json_payload(receipt)
             }
-            IpcOperation::ClassifierActivate(request) => {
-                self.require_classifier_enabled()?;
+            IpcOperation::ClassifierActivate(_) => {
                 let context = self
                     .resolve(
                         principal,
@@ -886,13 +980,8 @@ impl LocalGateway {
                         ContextRequirement::Registered,
                     )
                     .await?;
-                let owner = self.services.activation.as_ref().ok_or_else(|| {
-                    DispatchError::unavailable("Classifier activation unavailable")
-                })?;
-                let receipt =
-                    classifier_activation::submit_request(&self.state, &context, owner, request)
-                        .await?;
-                json_payload(receipt)
+                classifier_activation::ensure_activation_authority(&context)?;
+                Err(classifier_activation::retired_activation().into())
             }
             IpcOperation::ModelRoleSet(request) => {
                 let context = self
@@ -1105,15 +1194,6 @@ impl LocalGateway {
         Ok(())
     }
 
-    fn require_classifier_enabled(&self) -> Result<(), DispatchError> {
-        if !self.capability_config.classifier_enabled {
-            return Err(DispatchError::unavailable(
-                "Classifier capability is disabled",
-            ));
-        }
-        Ok(())
-    }
-
     fn require_jobs_enabled(&self) -> Result<(), DispatchError> {
         if !self.capability_config.jobs_enabled {
             return Err(DispatchError::unavailable("Jobs capability is disabled"));
@@ -1160,6 +1240,7 @@ impl LocalGateway {
             "profile-management",
             "actor-discovery",
             "workstation-cycle-history-v1",
+            crate::inbox_qa::FEATURE,
         ]
         .into_iter()
         .map(str::to_owned)
@@ -1204,6 +1285,7 @@ impl LocalGateway {
             owners,
             search,
             context.context().cloned(),
+            true,
         )
         .await?;
         Ok(IpcPayload::Json(value))
@@ -1242,25 +1324,24 @@ impl LocalGateway {
             .filter(|id| valid_upload_id(id))
             .ok_or_else(|| crate::internal("invalid upload ticket path"))?
             .to_owned();
-        let temp_path = store
-            .path(&format!("ipc-{upload_id}"), "tmp")
-            .map_err(crate::internal)?;
-        let file = create_private_temp_file(&temp_path)
+        let part = store
+            .begin_local_part(&self.state.repo, context.authority(), request.kind)
             .await
             .map_err(crate::internal)?;
-        let temp_guard = TempFileGuard(Some(temp_path));
-        let expires_at = Instant::now() + Duration::from_secs(ticket.expires_in_seconds);
+        let started_at = Instant::now();
+        let expires_at = started_at + Duration::from_secs(ticket.expires_in_seconds);
         let entry = UploadSessionEntry {
+            binding,
+            cancelled: Arc::new(AtomicBool::new(false)),
             expires_at,
             session: Arc::new(Mutex::new(UploadSession {
-                binding,
                 kind: request.kind,
                 expected_sha256: request.sha256.to_ascii_lowercase(),
                 expected_size_bytes: request.size_bytes,
                 written_bytes: 0,
-                expires_at,
-                _temp_path: temp_guard,
-                file,
+                digest: Sha256::new(),
+                started_at,
+                part: Some(part),
             })),
         };
         let mut sessions = self.upload_sessions.lock().await;
@@ -1283,7 +1364,7 @@ impl LocalGateway {
         registration: Option<&RegisteredContext>,
         upload_id: String,
         offset: u64,
-        data_b64: String,
+        data: Vec<u8>,
     ) -> Result<IpcPayload, DispatchError> {
         let context = self
             .resolve(
@@ -1306,42 +1387,19 @@ impl LocalGateway {
                 "Native or Operator upload credential required",
             )
         })?;
-        let chunk = base64::decode(&data_b64, MAX_IPC_CHUNK_BYTES)
-            .map_err(|_| DispatchError::bad_request("Invalid dataset upload chunk payload"))?;
-        if chunk.is_empty() {
+        if data.is_empty() {
             return Err(DispatchError::bad_request(
                 "Dataset upload chunk must not be empty",
             ));
         }
-        let session_arc = {
-            let mut sessions = self.upload_sessions.lock().await;
-            let now = Instant::now();
-            sessions.retain(|_, existing| existing.expires_at > now);
-            sessions
-                .get(&upload_id)
-                .map(|entry| entry.session.clone())
-                .ok_or_else(|| {
-                    DispatchError::new(
-                        StatusCode::NOT_FOUND,
-                        "Dataset upload destination not found",
-                    )
-                })?
-        };
-        let mut session = session_arc.lock().await;
-        if session.binding != binding {
-            return Err(DispatchError::new(
-                StatusCode::FORBIDDEN,
-                "Dataset upload belongs to another credential",
+        if data.len() > MAX_IPC_CHUNK_BYTES {
+            return Err(DispatchError::bad_request(
+                "Dataset upload chunk exceeds the size limit",
             ));
         }
-        if Instant::now() >= session.expires_at {
-            drop(session);
-            self.upload_sessions.lock().await.remove(&upload_id);
-            return Err(DispatchError::new(
-                StatusCode::NOT_FOUND,
-                "Dataset upload destination expired",
-            ));
-        }
+        let entry = self.dataset_upload_session(&upload_id, &binding).await?;
+        let mut session = entry.session.lock().await;
+        check_upload_live(&entry)?;
         if offset != session.written_bytes {
             return Err(DispatchError::new(
                 StatusCode::CONFLICT,
@@ -1349,7 +1407,7 @@ impl LocalGateway {
             ));
         }
         let next_offset = offset
-            .checked_add(chunk.len() as u64)
+            .checked_add(data.len() as u64)
             .ok_or_else(|| DispatchError::bad_request("Dataset upload offset overflow"))?;
         if next_offset > session.expected_size_bytes {
             return Err(DispatchError::new(
@@ -1357,12 +1415,81 @@ impl LocalGateway {
                 "Dataset upload exceeds declared size",
             ));
         }
-        session
-            .file
-            .write_all(&chunk)
-            .await
-            .map_err(crate::internal)?;
+        // A canceled write may leave partial bytes. Keeping ownership outside
+        // the session during the write unlinks the file on failure or cancel.
+        let mut part = session.part.take().ok_or_else(|| {
+            DispatchError::new(StatusCode::NOT_FOUND, "Dataset upload destination closed")
+        })?;
+        part.write_chunk(&data).await.map_err(crate::internal)?;
+        check_upload_live(&entry)?;
+        session.digest.update(&data);
         session.written_bytes = next_offset;
+        session.part = Some(part);
+        Ok(IpcPayload::DatasetUploadProgress {
+            received_bytes: next_offset,
+        })
+    }
+
+    async fn dataset_upload_session(
+        &self,
+        upload_id: &str,
+        binding: &UploadTicketBinding,
+    ) -> Result<UploadSessionEntry, DispatchError> {
+        let mut sessions = self.upload_sessions.lock().await;
+        let now = Instant::now();
+        sessions.retain(|_, existing| existing.expires_at > now);
+        let entry = sessions.get(upload_id).ok_or_else(|| {
+            DispatchError::new(
+                StatusCode::NOT_FOUND,
+                "Dataset upload destination not found",
+            )
+        })?;
+        if &entry.binding != binding {
+            return Err(DispatchError::new(
+                StatusCode::FORBIDDEN,
+                "Dataset upload belongs to another credential",
+            ));
+        }
+        Ok(entry.clone())
+    }
+
+    async fn handle_dataset_upload_cancel(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        registration: Option<&RegisteredContext>,
+        upload_id: String,
+    ) -> Result<IpcPayload, DispatchError> {
+        if !valid_upload_id(&upload_id) {
+            return Err(DispatchError::bad_request("Invalid dataset upload ID"));
+        }
+        let context = self
+            .resolve(
+                principal,
+                registration,
+                Permission::MaintainBackend,
+                ContextRequirement::Registered,
+            )
+            .await?;
+        context.revalidate(&self.state.repo).await?;
+        let binding = datasets::upload_binding(&context).ok_or_else(|| {
+            DispatchError::new(
+                StatusCode::FORBIDDEN,
+                "Native or Operator upload credential required",
+            )
+        })?;
+        let mut sessions = self.upload_sessions.lock().await;
+        if let Some(entry) = sessions.get(&upload_id) {
+            if entry.binding != binding {
+                return Err(DispatchError::new(
+                    StatusCode::FORBIDDEN,
+                    "Dataset upload belongs to another credential",
+                ));
+            }
+            entry.cancelled.store(true, Ordering::Release);
+        }
+        let cancelled = sessions.remove(&upload_id);
+        drop(sessions);
+        drop(cancelled);
         Ok(IpcPayload::Empty)
     }
 
@@ -1394,119 +1521,82 @@ impl LocalGateway {
                 "Native or Operator upload credential required",
             )
         })?;
-        let session_arc = {
-            let mut sessions = self.upload_sessions.lock().await;
-            let now = Instant::now();
-            sessions.retain(|_, existing| existing.expires_at > now);
-            sessions
-                .get(&upload_id)
-                .map(|entry| entry.session.clone())
-                .ok_or_else(|| {
-                    DispatchError::new(
-                        StatusCode::NOT_FOUND,
-                        "Dataset upload destination not found",
-                    )
-                })?
-        };
-        let mut session = session_arc.lock().await;
-        if session.binding != binding {
-            return Err(DispatchError::new(
-                StatusCode::FORBIDDEN,
-                "Dataset upload belongs to another credential",
-            ));
-        }
-        if Instant::now() >= session.expires_at {
-            drop(session);
-            self.upload_sessions.lock().await.remove(&upload_id);
-            return Err(DispatchError::new(
-                StatusCode::NOT_FOUND,
-                "Dataset upload destination expired",
-            ));
-        }
+        let entry = self.dataset_upload_session(&upload_id, &binding).await?;
+        let mut session = entry.session.lock().await;
+        check_upload_live(&entry)?;
         if session.written_bytes != session.expected_size_bytes {
             return Err(DispatchError::bad_request("Dataset upload is incomplete"));
         }
-        // Only remove from the active session table once ownership and
-        // completeness have been verified, and keep `temp_path` guarded by `session`.
-        self.upload_sessions.lock().await.remove(&upload_id);
         let permit = store.uploads.clone().try_acquire_owned().map_err(|_| {
             DispatchError::new(
                 StatusCode::TOO_MANY_REQUESTS,
                 "Dataset upload capacity reached",
             )
         })?;
-        session.file.flush().await.map_err(crate::internal)?;
-        session
-            .file
-            .seek(SeekFrom::Start(0))
-            .await
-            .map_err(crate::internal)?;
-        let lease = upload_ticket::claim(&self.state.repo, &binding, &upload_id)
-            .await
-            .map_err(|error| {
-                datasets::ticket_failure_status_message(error, StatusCode::NOT_FOUND)
-            })?;
-        if lease.kind != session.kind
-            || lease.size_bytes != session.expected_size_bytes
-            || lease.sha256 != session.expected_sha256
-        {
-            return Err(DispatchError::bad_request(
-                "Dataset upload metadata mismatch",
+        let part = session.part.take().ok_or_else(|| {
+            DispatchError::new(StatusCode::NOT_FOUND, "Dataset upload destination closed")
+        })?;
+        let transfer_ms = session.started_at.elapsed().as_millis() as u64;
+        let validation_started = Instant::now();
+        let written_sha256 = format!("{:x}", std::mem::take(&mut session.digest).finalize());
+        let expected_kind = session.kind;
+        let expected_size = session.expected_size_bytes;
+        let expected_sha256 = session.expected_sha256.clone();
+        drop(session);
+        let staged = async {
+            let lease = upload_ticket::claim(&self.state.repo, &binding, &upload_id)
+                .await
+                .map_err(|error| {
+                    datasets::ticket_failure_status_message(error, StatusCode::NOT_FOUND)
+                })?;
+            if lease.kind != expected_kind
+                || lease.size_bytes != expected_size
+                || lease.sha256 != expected_sha256
+            {
+                return Err(DispatchError::bad_request("Dataset upload metadata mismatch"));
+            }
+            if written_sha256 != lease.sha256 {
+                return Err(DispatchError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "Dataset SHA-256 mismatch; request a new destination",
+                ));
+            }
+            store
+                .finish_local_part(&self.state.repo, &context, part, lease, permit, entry.cancelled)
+                .await
+                .map_err(|_| DispatchError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "Upload validation failed or staging capacity is unavailable; request a new destination",
+                ))
+        }
+        .await;
+        self.upload_sessions.lock().await.remove(&upload_id);
+        let upload = staged?;
+        if context.revalidate(&self.state.repo).await.is_err() {
+            return Err(DispatchError::new(
+                StatusCode::UNAUTHORIZED,
+                "Upload authority changed; recover staged metadata after reconnecting",
             ));
         }
-        let cloned = session.file.try_clone().await.map_err(crate::internal)?;
-        let stream = futures_util::stream::try_unfold(cloned, |mut file| async move {
-            let mut buffer = vec![0_u8; STREAM_READ_CHUNK_BYTES];
-            let read = file.read(&mut buffer).await?;
-            if read == 0 {
-                Ok::<_, std::io::Error>(None)
-            } else {
-                buffer.truncate(read);
-                Ok(Some((Bytes::from(buffer), file)))
-            }
-        });
-        let staged = store
-            .stage_checked(
-                &self.state.repo,
-                context.authority(),
-                lease.kind,
-                lease.sha256,
-                datasets::StageExpectation {
-                    size: Some(lease.size_bytes),
-                    context: Some(&context),
-                    permit: Some(permit),
-                },
-                stream,
-            )
-            .await;
-        drop(session);
-        match staged {
-            Ok(reference) => {
-                if context.revalidate(&self.state.repo).await.is_err() {
-                    return Err(DispatchError::new(
-                        StatusCode::UNAUTHORIZED,
-                        "Upload authority changed; recover staged metadata after reconnecting",
-                    ));
-                }
-                Ok(IpcPayload::DatasetUpload(DatasetUpload::new(
-                    reference,
-                    setup_jobs::DATASET_TTL.as_secs(),
-                )))
-            }
-            Err(_) => Err(DispatchError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "Upload validation failed or staging capacity is unavailable; request a new destination",
-            )),
-        }
+        tracing::info!(
+            code = "dataset_upload_single_copy",
+            bytes = upload.dataset.size_bytes,
+            transfer_ms,
+            validation_publish_ms = validation_started.elapsed().as_millis() as u64,
+            "Embedded dataset received and published"
+        );
+        Ok(IpcPayload::DatasetUpload(upload))
     }
 }
 
-async fn create_private_temp_file(path: &std::path::Path) -> std::io::Result<File> {
-    let mut options = tokio::fs::OpenOptions::new();
-    options.read(true).write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    options.open(path).await
+fn check_upload_live(entry: &UploadSessionEntry) -> Result<(), DispatchError> {
+    if entry.cancelled.load(Ordering::Acquire) || Instant::now() >= entry.expires_at {
+        return Err(DispatchError::new(
+            StatusCode::NOT_FOUND,
+            "Dataset upload destination closed",
+        ));
+    }
+    Ok(())
 }
 
 fn valid_upload_id(id: &str) -> bool {
@@ -1765,6 +1855,45 @@ mod tests {
         format!("{:x}", Sha256::digest(bytes))
     }
 
+    async fn start_actor_upload(
+        gateway: &LocalGateway,
+        principal: &AuthenticatedPrincipal,
+        registration: &RegisteredContext,
+        bytes: &[u8],
+        sha256: String,
+    ) -> String {
+        let request =
+            DatasetUploadRequest::new(DatasetKind::ActorCatalog, sha256, bytes.len() as u64)
+                .expect("upload request");
+        let outcome = gateway
+            .dispatch(
+                principal,
+                Some(registration),
+                IpcOperation::DatasetUploadStart(request),
+            )
+            .await;
+        let IpcOutcome::Ok(IpcPayload::Json(ticket)) = outcome else {
+            panic!("expected upload ticket, got {outcome:?}");
+        };
+        ticket["upload_path"]
+            .as_str()
+            .expect("upload path")
+            .rsplit('/')
+            .next()
+            .expect("upload ID")
+            .to_owned()
+    }
+
+    fn only_staged_part(root: &Path) -> std::path::PathBuf {
+        let parts: Vec<_> = std::fs::read_dir(root)
+            .expect("staging files")
+            .map(|entry| entry.expect("staging entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "part"))
+            .collect();
+        assert_eq!(parts.len(), 1, "the upload owns one private file");
+        parts.into_iter().next().expect("one staged part")
+    }
+
     #[test]
     fn local_ipc_principal_validation_enforces_identity_and_permission_boundaries() {
         assert!(AuthenticatedPrincipal::for_local_ipc(
@@ -1879,7 +2008,8 @@ mod tests {
             std::fs::set_permissions(&staging_dir, std::fs::Permissions::from_mode(0o700))
                 .expect("private dataset dir");
         }
-        let dataset_store = datasets::DatasetStore::open(staging_dir).expect("dataset store");
+        let dataset_store =
+            datasets::DatasetStore::open(staging_dir.clone()).expect("dataset store");
 
         let test_repo = open_test_repo(&root, "local_dispatch", "gateway_test").await;
         let repo = test_repo.repo;
@@ -1906,7 +2036,7 @@ mod tests {
         .with_workspace_root(root.clone());
         let services = PrivateServices::new(None, None, None, None)
             .with_search(search_client)
-            .with_datasets(dataset_store);
+            .with_datasets(dataset_store.clone());
 
         let disabled_gateway = LocalGateway::new(
             state.clone(),
@@ -2160,17 +2290,14 @@ mod tests {
             },
         }))
         .expect("maintenance request");
-        let disabled_train = disabled_gateway
+        let retired_train = disabled_gateway
             .dispatch(
                 &principal,
                 Some(&registration),
                 IpcOperation::TrainClassifier(maint_req),
             )
             .await;
-        assert!(matches!(
-            disabled_train,
-            IpcOutcome::Err { status: 503, .. }
-        ));
+        assert!(matches!(retired_train, IpcOutcome::Err { status: 410, .. }));
 
         // Enabled search succeeds (returning NotBuilt before outbox indexing begins).
         let search_outcome = gateway
@@ -2183,29 +2310,21 @@ mod tests {
 
         // Dataset chunked upload roundtrip & tampered chunk/binding rejection.
         let csv_bytes = b"actor_id,actor_name,actor_type,aliases,name_normalized\nact-1,Acme Org,organization,[],acme org\n";
-        let upload_req = DatasetUploadRequest::new(
-            DatasetKind::ActorCatalog,
+        let upload_id = start_actor_upload(
+            &gateway,
+            &principal,
+            &registration,
+            csv_bytes,
             sha256_hex(csv_bytes),
-            csv_bytes.len() as u64,
         )
-        .expect("upload request");
-        let start = gateway
-            .dispatch(
-                &principal,
-                Some(&registration),
-                IpcOperation::DatasetUploadStart(upload_req),
-            )
-            .await;
-        let IpcOutcome::Ok(IpcPayload::Json(ticket_json)) = start else {
-            panic!("expected upload start ticket, got {start:?}");
+        .await;
+        let part = only_staged_part(&staging_dir);
+        #[cfg(unix)]
+        let initial_inode = {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = std::fs::metadata(&part).expect("open upload inode");
+            (metadata.dev(), metadata.ino())
         };
-        let upload_id = ticket_json["upload_path"]
-            .as_str()
-            .expect("upload_path")
-            .rsplit('/')
-            .next()
-            .expect("upload_id")
-            .to_owned();
 
         // Wrong offset is rejected with 409 Conflict.
         let bad_offset = gateway
@@ -2215,25 +2334,46 @@ mod tests {
                 IpcOperation::DatasetUploadChunk {
                     upload_id: upload_id.clone(),
                     offset: 1,
-                    data_b64: base64::encode(csv_bytes),
+                    data: csv_bytes.to_vec(),
                 },
             )
             .await;
         assert!(matches!(bad_offset, IpcOutcome::Err { status: 409, .. }));
 
+        for data in [Vec::new(), vec![0; MAX_IPC_CHUNK_BYTES + 1]] {
+            let outcome = gateway
+                .dispatch(
+                    &principal,
+                    Some(&registration),
+                    IpcOperation::DatasetUploadChunk {
+                        upload_id: upload_id.clone(),
+                        offset: 0,
+                        data,
+                    },
+                )
+                .await;
+            assert!(matches!(outcome, IpcOutcome::Err { status: 400, .. }));
+        }
+
         // Valid chunk & finish succeed.
-        let chunk_ok = gateway
-            .dispatch(
-                &principal,
-                Some(&registration),
-                IpcOperation::DatasetUploadChunk {
-                    upload_id: upload_id.clone(),
-                    offset: 0,
-                    data_b64: base64::encode(csv_bytes),
-                },
-            )
-            .await;
-        assert!(matches!(chunk_ok, IpcOutcome::Ok(IpcPayload::Empty)));
+        for (offset, chunk) in [(0, &csv_bytes[..32]), (32, &csv_bytes[32..])] {
+            let chunk_ok = gateway
+                .dispatch(
+                    &principal,
+                    Some(&registration),
+                    IpcOperation::DatasetUploadChunk {
+                        upload_id: upload_id.clone(),
+                        offset,
+                        data: chunk.to_vec(),
+                    },
+                )
+                .await;
+            assert!(matches!(
+                chunk_ok,
+                IpcOutcome::Ok(IpcPayload::DatasetUploadProgress { received_bytes })
+                    if received_bytes == offset + chunk.len() as u64
+            ));
+        }
 
         let finish_ok = gateway
             .dispatch(
@@ -2246,6 +2386,118 @@ mod tests {
             panic!("expected DatasetUpload finish payload, got {finish_ok:?}");
         };
         assert_eq!(uploaded.dataset.size_bytes, csv_bytes.len() as u64);
+        assert_eq!(uploaded.dataset.sha256, sha256_hex(csv_bytes));
+        assert_eq!(uploaded.row_count, Some(1));
+        let published = staging_dir.join(format!("{}.csv", uploaded.dataset.id));
+        assert!(
+            !part.exists(),
+            "publication removes the private partial name"
+        );
+        assert_eq!(
+            std::fs::read(&published).expect("published bytes"),
+            csv_bytes
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = std::fs::metadata(&published).expect("published inode");
+            assert_eq!(
+                (metadata.dev(), metadata.ino()),
+                initial_inode,
+                "publication reuses the originally received inode"
+            );
+        }
+
+        let cancel_id = start_actor_upload(
+            &gateway,
+            &principal,
+            &registration,
+            csv_bytes,
+            sha256_hex(csv_bytes),
+        )
+        .await;
+        let cancelled_part = only_staged_part(&staging_dir);
+        for _ in 0..2 {
+            let outcome = gateway
+                .dispatch(
+                    &principal,
+                    Some(&registration),
+                    IpcOperation::DatasetUploadCancel {
+                        upload_id: cancel_id.clone(),
+                    },
+                )
+                .await;
+            assert!(matches!(outcome, IpcOutcome::Ok(IpcPayload::Empty)));
+        }
+        assert!(
+            !cancelled_part.exists(),
+            "cancellation unlinks the partial file"
+        );
+
+        for (expected, collision) in [(sha256_hex(csv_bytes), true), ("0".repeat(64), false)] {
+            let upload_id =
+                start_actor_upload(&gateway, &principal, &registration, csv_bytes, expected).await;
+            let part = only_staged_part(&staging_dir);
+            let final_path = part.with_extension("csv");
+            if collision {
+                std::fs::write(&final_path, b"unrelated destination").expect("write collision");
+            }
+            let chunk = gateway
+                .dispatch(
+                    &principal,
+                    Some(&registration),
+                    IpcOperation::DatasetUploadChunk {
+                        upload_id: upload_id.clone(),
+                        offset: 0,
+                        data: csv_bytes.to_vec(),
+                    },
+                )
+                .await;
+            assert!(matches!(
+                chunk,
+                IpcOutcome::Ok(IpcPayload::DatasetUploadProgress { received_bytes })
+                    if received_bytes == csv_bytes.len() as u64
+            ));
+            let outcome = gateway
+                .dispatch(
+                    &principal,
+                    Some(&registration),
+                    IpcOperation::DatasetUploadFinish { upload_id },
+                )
+                .await;
+            assert!(matches!(outcome, IpcOutcome::Err { status: 422, .. }));
+            assert!(!part.exists(), "rejected upload removes its private name");
+            if collision {
+                let dataset_id = final_path.file_stem().unwrap().to_str().unwrap().to_owned();
+                repo.db()
+                    .query("UPDATE setup_upload SET expires_at=time::now()-1s WHERE dataset_id=$id")
+                    .bind(("id", dataset_id))
+                    .await
+                    .expect("expire collision journal")
+                    .check()
+                    .expect("expire collision statement");
+                dataset_store
+                    .expire_abandoned(&repo)
+                    .await
+                    .expect("recover expired local upload");
+                assert_eq!(
+                    std::fs::read(final_path).expect("collision survives expiry"),
+                    b"unrelated destination"
+                );
+            } else {
+                assert!(!final_path.exists(), "wrong SHA cannot publish a file");
+            }
+        }
+
+        let _abandoned = start_actor_upload(
+            &gateway,
+            &principal,
+            &registration,
+            csv_bytes,
+            sha256_hex(csv_bytes),
+        )
+        .await;
+        let disconnected_part = only_staged_part(&staging_dir);
 
         // Reset fence blocks subsequent local dispatch with 401.
         repo.db()
@@ -2258,5 +2510,10 @@ mod tests {
             .dispatch(&principal, None, IpcOperation::ProfileRead)
             .await;
         assert!(matches!(fenced, IpcOutcome::Err { status: 401, .. }));
+        drop(gateway);
+        assert!(
+            !disconnected_part.exists(),
+            "disconnect drops bounded partial uploads"
+        );
     }
 }

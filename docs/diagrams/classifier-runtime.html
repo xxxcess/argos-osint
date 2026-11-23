@@ -11,7 +11,7 @@
 <p>Atlas requests an exact worker/checkpoint/threshold pin from the private Linux classifier service before fresh collection. The service keeps the Rust-BERT CPU worker warm. Atlas applies its existing admission policy to the six independent scores; the Mac app sends gateway requests and owns no classifier engine.</p>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 420" role="img" aria-labelledby="classifier-runtime-title classifier-runtime-desc">
 <title id="classifier-runtime-title">Pinned Rust-BERT classification on Linux</title>
-<desc id="classifier-runtime-desc">Atlas pins an exact Linux worker, MNLI checkpoint and threshold before fresh collection. The private Linux classifier keeps the Rust-BERT worker warm and returns six independent domain scores for Atlas admission. Optional Natural training and explicit activation are separate. Native AMD64 and ARM64 real-checkpoint execution remains pending evidence; this source diagram records no runtime pass.</desc>
+<desc id="classifier-runtime-desc">Atlas pins an exact Linux worker, checkpoint and threshold before collection. The private Rust-BERT worker returns six independent domain scores. The operator can explicitly activate a frozen candidate after held-out scoring using the Rust worker.</desc>
 <defs>
   <marker id="classifier-runtime-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
 </defs>
@@ -54,9 +54,9 @@
 <text x="664" y="287" class="note" text-anchor="middle">Zero, one, or two qualifying domains</text>
 <text x="558" y="204" class="note" text-anchor="start">Score article titles and descriptions</text>
 <text x="40" y="344" class="note">Mac pages use the gateway; the backend owns the worker, native libraries and checkpoint.</text>
-<text x="40" y="372" class="note">Optional Natural training / activation does not retrain Rust-BERT or change fresh Atlas routing.</text>
+<text x="40" y="372" class="note">An operator activates a frozen candidate only after Rust-worker evaluation and an exact prior revision check.</text>
 <text x="40" y="400" class="note">Real inference on both Linux architectures and installed Mac GUI evidence remain pending and separate.</text>
 </svg>
-<p>Transport readiness and model readiness are separate. A model pin failure appears in Jobs before article acquisition. The external operator supplies matching Linux worker/native-library/model assets. The existing verification workflow configures native AMD64 and ARM64 build/link/real-checkpoint and extracted-bundle checks; actual execution on both architectures remains pending. Installed-Mac GUI evidence is independent. Optional Natural training and explicit candidate activation preserve fresh Atlas Rust-BERT routing.</p>
+<p>Transport readiness and model readiness are separate. The operator provisions a matching worker and pinned model assets. Atlas records pin failures in Jobs before article acquisition. Candidate evaluation uses the same Rust worker before an explicit activation changes the revision for new runs.</p>
 <p><a href="../wiki/code/classifier.md">Classifier contract</a> · <a href="../../deploy/atlas-dispatch.md">Atlas deployment</a> · <a href="../diagrams.md">Diagram catalog</a></p>
 </main></body></html>

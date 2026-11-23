@@ -1,6 +1,6 @@
 //! Supervised local embedded companion backend lifecycle and strict executable discovery.
 //!
-//! Communicates exclusively over framed stdio IPC via `LocalIpcClient` and `Client::from_local_ipc`.
+//! Communicates exclusively over a private Unix socket via `LocalIpcClient` and `Client::from_local_ipc`.
 //! Never searches bare `PATH` and never falls back to HTTP, TCP, or Unix sockets.
 
 use std::fmt;
@@ -54,7 +54,6 @@ pub struct LocalJobProgress {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LocalCapabilityAssessment {
     pub nlp_available: bool,
-    pub classifier_available: bool,
     pub actor_search_available: bool,
     pub warnings: Vec<String>,
 }
@@ -67,24 +66,11 @@ pub fn assess_local_capabilities(capabilities: &Capabilities) -> LocalCapability
             .categories
             .iter()
             .any(|category| category == "nlp");
-    let classifier_available = capabilities
-        .features
-        .iter()
-        .any(|feature| feature == "classifier")
-        || capabilities
-            .categories
-            .iter()
-            .any(|category| category == "classifier");
     let actor_search_available = capabilities.require_actor_search().is_ok();
 
     let mut warnings = Vec::new();
     if !nlp_available {
         warnings.push("The embedded backend is not advertising NLP support.".into());
-    }
-    if !classifier_available {
-        warnings.push(
-            "The embedded backend is not advertising Natural classifier support. Training and activation are unavailable.".into(),
-        );
     }
     if !actor_search_available {
         warnings.push(
@@ -94,7 +80,6 @@ pub fn assess_local_capabilities(capabilities: &Capabilities) -> LocalCapability
     }
     LocalCapabilityAssessment {
         nlp_available,
-        classifier_available,
         actor_search_available,
         warnings,
     }
@@ -144,7 +129,7 @@ impl From<ClientError> for LocalBackendError {
     }
 }
 
-/// Supervised local companion backend process attached over framed stdio IPC.
+/// Supervised local companion backend process attached over a private Unix socket.
 pub struct LocalBackendProcess {
     binary_path: Option<PathBuf>,
     state_dir: PathBuf,
@@ -166,14 +151,14 @@ impl fmt::Debug for LocalBackendProcess {
 }
 
 impl LocalBackendProcess {
-    /// Spawn `argos-api-host --role local-ipc --state-dir <dir>` with cleaned environment and stdio IPC.
+    /// Spawn `argos-api-host --role local-ipc --state-dir <dir>` with cleaned environment and a private Unix socket.
     pub async fn spawn(binary: &Path, state_dir: &Path) -> Result<Self, LocalBackendError> {
         let validated_bin = validate_companion_executable(binary)?;
         let validated_dir = validate_private_state_dir(state_dir)?;
-        let mut command = build_companion_command(&validated_bin, &validated_dir)?;
+        let command = build_companion_command(&validated_bin, &validated_dir)?;
         let ipc = Arc::new(
             LocalIpcClient::spawn_command_with_diagnostics(
-                &mut command,
+                command,
                 "fleetworks-desktop",
                 env!("CARGO_PKG_VERSION"),
             )

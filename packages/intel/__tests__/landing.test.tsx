@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, render } from "@testing-library/react";
+import { Group, Mesh, Sprite } from "three";
 import { connectionChecks } from "../src/landing/checks";
 import OrbitCanvas from "../src/landing/OrbitCanvas";
 const recording = vi.hoisted(() => ({
@@ -29,82 +30,73 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
-const checks = ["api", "service", "protocol", "storage", "workspace"];
 describe("landing canvas motion preference", () => {
-  it("renders one settled orbiter per passing check and never schedules animation under reduced motion", () => {
+  function graphData() {
+    return recording.props.graphData as {
+      nodes: { id: string }[];
+      links: unknown[];
+    };
+  }
+
+  it("uses a single mark with no connections and stays static under reduced motion", () => {
     const frame = vi.fn();
     vi.stubGlobal("requestAnimationFrame", frame);
-    render(<OrbitCanvas reduced checks={checks} />);
-    const data = recording.props.graphData as {
-      nodes: { id: string; x: number; y: number; z: number }[];
-    };
-    expect(data.nodes).toHaveLength(6);
-    for (const node of data.nodes.slice(1)) {
-      const radius = Math.hypot(node.x, node.y, node.z);
-      expect(radius).toBeGreaterThanOrEqual(80);
-      expect(radius).toBeLessThanOrEqual(160);
-    }
+    render(<OrbitCanvas reduced />);
+    expect(graphData().nodes.map(({ id }) => id)).toEqual(["core"]);
+    expect(graphData().links).toEqual([]);
     expect(recording.props.cooldownTicks).toBe(0);
     expect(frame).not.toHaveBeenCalled();
   });
-  it("cancels active orbit motion when the preference changes", () => {
-    const cancel = vi.fn();
+
+  it("pulses the warm core halo with the existing period and settles with reduced motion", () => {
+    const gradient = { addColorStop: vi.fn() };
+    const canvas = {
+      createRadialGradient: vi.fn(() => gradient),
+      createLinearGradient: vi.fn(() => gradient),
+      translate: vi.fn(),
+      fillRect: vi.fn(),
+      beginPath: vi.fn(),
+      arc: vi.fn(),
+      fill: vi.fn(),
+      stroke: vi.fn(),
+    };
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      canvas as unknown as CanvasRenderingContext2D,
+    );
+    let tick: FrameRequestCallback = () => {};
     vi.stubGlobal(
       "requestAnimationFrame",
-      vi.fn(() => 42),
+      vi.fn((callback) => {
+        tick = callback;
+        return 42;
+      }),
     );
+    const cancel = vi.fn();
     vi.stubGlobal("cancelAnimationFrame", cancel);
-    const { rerender } = render(
-      <OrbitCanvas reduced={false} checks={checks} />,
-    );
+
+    const { rerender } = render(<OrbitCanvas reduced={false} />);
+    expect(graphData().nodes.map(({ id }) => id)).toEqual(["core"]);
+    expect(graphData().links).toEqual([]);
+
+    const createMark = recording.props.nodeThreeObject as () => Group;
+    const mark = createMark();
+    expect(mark.children).toHaveLength(3);
+    const [core, halo, crescent] = mark.children;
+    expect(core).toBeInstanceOf(Mesh);
+    expect(halo).toBeInstanceOf(Sprite);
+    expect(crescent).toBeInstanceOf(Sprite);
+    expect(canvas.arc).toHaveBeenCalledTimes(2);
     expect(recording.props.cooldownTicks).toBe(Infinity);
-    rerender(<OrbitCanvas reduced checks={checks} />);
+
+    act(() => tick(600));
+    expect((halo as Sprite).material.opacity).toBeCloseTo(0.62);
+    act(() => tick(3000));
+    expect((halo as Sprite).material.opacity).toBeCloseTo(0.62);
+
+    rerender(<OrbitCanvas reduced />);
     expect(cancel).toHaveBeenCalledWith(42);
-    const data = recording.props.graphData as {
-      nodes: { x: number; y: number; z: number }[];
-    };
-    for (const node of data.nodes.slice(1))
-      expect(Math.hypot(node.x, node.y, node.z)).toBeLessThanOrEqual(160);
+    expect((halo as Sprite).material.opacity).toBeCloseTo(0.55);
   });
-});
-
-it("reports completion after the final staggered arrival, once", () => {
-  let tick: FrameRequestCallback = () => {};
-  vi.stubGlobal(
-    "requestAnimationFrame",
-    vi.fn((callback) => {
-      tick = callback;
-      return 42;
-    }),
-  );
-  vi.stubGlobal("cancelAnimationFrame", vi.fn());
-  vi.spyOn(performance, "now").mockReturnValue(0);
-  const complete = vi.fn();
-  render(
-    <OrbitCanvas reduced={false} checks={checks} ready onComplete={complete} />,
-  );
-  act(() => tick(1));
-  act(() => tick(4999));
-  expect(complete).not.toHaveBeenCalled();
-  act(() => tick(5001));
-  expect(complete).toHaveBeenCalledTimes(1);
-  act(() => tick(12001));
-  expect(complete).toHaveBeenCalledTimes(1);
-});
-
-it("starts with a core and adds exactly the successful connection checks", () => {
-  const { rerender } = render(<OrbitCanvas reduced checks={[]} />);
-  expect(
-    (recording.props.graphData as { nodes: unknown[] }).nodes,
-  ).toHaveLength(1);
-  rerender(<OrbitCanvas reduced checks={["api", "service"]} />);
-  expect(
-    (recording.props.graphData as { nodes: { id: string }[] }).nodes.map(
-      (node) => node.id,
-    ),
-  ).toEqual(["core", "api", "service"]);
-  expect(recording.props.width).toBe(560);
-  expect(recording.props.height).toBe(320);
 });
 
 it("only admits checks evidenced by the readiness response", () => {

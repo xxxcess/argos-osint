@@ -160,7 +160,12 @@ impl Engine {
         manifest.repair_checksum = Some(request.expected_manifest_checksum.clone());
         drop(state.pending.take());
         drop(state.active.writer.take());
-        state.active.writer = Some(super::writer(&state.active.index, &self.config)?);
+        let embedded_catch_up = self.lazy_active_writer && !state.active.committed.source_complete;
+        state.active.writer = Some(super::writer(
+            &state.active.index,
+            &self.config,
+            embedded_catch_up,
+        )?);
         let mut meta = state.active.committed.clone();
         meta.writer_epoch = request.writer_epoch;
         if let Err(error) = state.active.commit(meta) {

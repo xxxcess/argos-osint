@@ -85,6 +85,7 @@ pub struct ActorIndexWorker {
     transport: IndexTransport,
     owner: String,
     status: Option<(Instant, ActorIndexStatus)>,
+    deferred_initial_seed: bool,
 }
 
 fn validate_owner(owner: &str) -> anyhow::Result<()> {
@@ -125,6 +126,7 @@ impl ActorIndexWorker {
             },
             owner,
             status: None,
+            deferred_initial_seed: false,
         })
     }
 
@@ -135,6 +137,7 @@ impl ActorIndexWorker {
             transport: IndexTransport::Local(service),
             owner,
             status: None,
+            deferred_initial_seed: false,
         })
     }
 
@@ -174,6 +177,28 @@ impl ActorIndexWorker {
             || status.analyzer_version != ACTOR_INDEX_ANALYZER
         {
             return Err(DeliveryFailure::permanent());
+        }
+        if let Some(pressure) = status
+            .pressure
+            .as_ref()
+            .filter(|_| matches!(&self.transport, IndexTransport::Local(_)))
+        {
+            let previous = self
+                .status
+                .as_ref()
+                .and_then(|(_, status)| status.pressure.as_ref());
+            if previous.is_none_or(|previous| {
+                previous.paused != pressure.paused || previous.reason_code != pressure.reason_code
+            }) {
+                tracing::info!(
+                    code = "embedded_actor_index_pressure_transition",
+                    paused = pressure.paused,
+                    reason = pressure.reason_code.as_deref().unwrap_or("none"),
+                    resident_bytes = pressure.resident_bytes.unwrap_or(0),
+                    disk_free_bytes = pressure.disk_free_bytes.unwrap_or(0),
+                    "Observed an Embedded actor index pressure change"
+                );
+            }
         }
         self.status = Some((Instant::now(), status.clone()));
         Ok(status)
@@ -232,6 +257,44 @@ impl ActorIndexWorker {
             }
         };
         actor_search_outbox::observe_resources(repo, &claim, &status, Utc::now()).await?;
+        let embedded = matches!(&self.transport, IndexTransport::Local(_));
+        if embedded
+            && status
+                .pressure
+                .as_ref()
+                .is_some_and(|pressure| pressure.paused)
+        {
+            // Preserve any pending receipt and avoid allocating a new projection
+            // while the co-located writer is waiting for resources.
+            return Ok(TickReport::Waiting);
+        }
+        let embedded_catch_up = embedded
+            && status
+                .active
+                .as_ref()
+                .is_some_and(|active| !active.source_complete);
+        let defer_initial_seed = embedded
+            && status.rebuilding.is_none()
+            && status
+                .active
+                .as_ref()
+                .is_some_and(|active| active.visible_checkpoint == 0 && !active.source_complete)
+            && actor_search_outbox::defer_initial_seed_index(
+                repo,
+                status.limits.backlog_resume_events,
+            )
+            .await?;
+        if defer_initial_seed {
+            if !self.deferred_initial_seed {
+                tracing::info!(
+                    code = "embedded_actor_index_seed_deferred",
+                    "Holding initial actor index writes while the catalog commits"
+                );
+            }
+            self.deferred_initial_seed = true;
+            return Ok(TickReport::Waiting);
+        }
+        self.deferred_initial_seed = false;
         match actor_search_outbox::next_rebuild(repo, &self.owner, &status, Utc::now()).await {
             Ok(Some(action)) => return self.rebuild_tick(repo, action).await,
             Ok(None) => (),
@@ -246,24 +309,34 @@ impl ActorIndexWorker {
             }
             Err(error) => return Err(error.into()),
         }
-        let preparation =
-            match actor_search_outbox::prepare(repo, &self.owner, &status, Utc::now()).await {
-                Ok(preparation) => preparation,
-                Err(TxError::Abort(reason)) => {
-                    // Known source/schema/generation/oversize conflicts require a
-                    // reviewed correction. Unavailable service state is retried.
-                    let permanent = reason != "actor_index_service_unavailable";
-                    self.status = None;
-                    actor_search_outbox::defer(repo, &claim, None, permanent, Utc::now()).await?;
-                    return Ok(TickReport::Deferred {
-                        correction_required: permanent,
-                    });
-                }
-                Err(error) => return Err(error.into()),
-            };
+        let prepare_started = Instant::now();
+        let preparation = match actor_search_outbox::prepare_with_embedded_policy(
+            repo,
+            &self.owner,
+            &status,
+            Utc::now(),
+            embedded,
+        )
+        .await
+        {
+            Ok(preparation) => preparation,
+            Err(TxError::Abort(reason)) => {
+                // Known source/schema/generation/oversize conflicts require a
+                // reviewed correction. Unavailable service state is retried.
+                let permanent = reason != "actor_index_service_unavailable";
+                self.status = None;
+                actor_search_outbox::defer(repo, &claim, None, permanent, Utc::now()).await?;
+                return Ok(TickReport::Deferred {
+                    correction_required: permanent,
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
         let Preparation::Batch { lease, prepared } = preparation else {
             return Ok(TickReport::Waiting);
         };
+        let prepare_ms = prepare_started.elapsed().as_millis() as u64;
+        let write_started = Instant::now();
         let result = {
             let delivery = self.deliver(&prepared.batch);
             tokio::pin!(delivery);
@@ -277,10 +350,18 @@ impl ActorIndexWorker {
                 }
             }
         };
+        let write_ms = write_started.elapsed().as_millis() as u64;
         match result {
             Ok(receipt) => {
-                if let Err(error) =
-                    actor_search_outbox::acknowledge(repo, &lease, &receipt, Utc::now()).await
+                let acknowledge_started = Instant::now();
+                if let Err(error) = actor_search_outbox::acknowledge_with_retirement(
+                    repo,
+                    &lease,
+                    &receipt,
+                    Utc::now(),
+                    embedded_catch_up,
+                )
+                .await
                 {
                     self.status = None;
                     if matches!(&error,TxError::Abort(reason) if reason=="actor_index_receipt_mismatch" || reason=="actor_index_checksum")
@@ -291,6 +372,17 @@ impl ActorIndexWorker {
                         });
                     }
                     return Err(error.into());
+                }
+                if embedded_catch_up {
+                    tracing::info!(
+                        code = "embedded_actor_index_batch_elapsed",
+                        prepare_ms,
+                        write_ms,
+                        ack_ms = acknowledge_started.elapsed().as_millis() as u64,
+                        mutations = prepared.batch.mutations.len(),
+                        checkpoint = receipt.visible_checkpoint,
+                        "Embedded initial actor index batch acknowledged"
+                    );
                 }
                 if let Some((_, status)) = &mut self.status {
                     if let Some(active) = &mut status.active {

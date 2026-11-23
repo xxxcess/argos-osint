@@ -89,6 +89,8 @@ The native-review helper adds [`compose.actor-bootstrap.yml`](compose.actor-boot
 
 This stack starts no web frontend. WebRelay remains separately configured; remote access requires independently configured HTTPS ingress and allowed-host policy. Explicit operator/headless clients retain token-file mode. [Verification status](../.planning/2026-11-12-native-pairing-implementation/acceptance.md) separates source/test evidence from actual backend and live Keychain journeys.
 
+The optional [Inbox QA deployment](inbox-qa.md) uses a shared offline model pack contract for Embedded and Distributed. Apply its isolation overlay after provisioning a dedicated model and executor pair.
+
 Search process health authenticates `/internal/v1/actors/status`; an empty generation can be healthy while discovery remains `not_built`/`indexing`. Seed completion and reader-visible index completion are separate. Search failure does not gate gateway or seed admission startup. Source/generation mismatch, corruption and writer conflicts stay visible and preserve data; there is no automatic delete/rebuild. Explicit maintenance reports rebuild/pressure state; retain the old serving generation and diagnose before changing any directory or source epoch.
 
 First-party services emit one structured `Fleetworks startup summary` after their listener, worker pools, or storage bootstrap is ready. The summary identifies the role and safe availability fields without credentials, token files, or dataset paths. Use the selected Compose project's logs to compare startup milestones before investigating a failed health check.
@@ -175,7 +177,7 @@ Hosted trusted pushes build selected images on native Linux AMD64/ARM64, smoke e
 
 ## Optional maintenance and inference
 
-Workstation readiness is a bounded read. Seed, index rebuild, Natural training and candidate activation are explicit durable operations with separate permissions, confirmed context/configuration revisions and Jobs receipts. Natural activation requires the exact candidate hashes, expected prior model revision and explicit synthetic-baseline consent where applicable. It never installs Rust-BERT. [Classifier contract](../docs/wiki/code/classifier.md)
+Workstation readiness is a bounded read. Seed and index rebuild are explicit durable operations with maintenance permission, confirmed context and configuration revisions, and Jobs receipts. The operator evaluates and explicitly activates Atlas BERT in the inference workspace. Historical Natural jobs retain their original engine identity. [Classifier contract](../docs/wiki/code/classifier.md)
 
 A live Atlas deployment requires separately staged, hash-verified architecture-matching Linux inference assets and configured provider accounts. [Atlas dispatch](atlas-dispatch.md) describes that boundary. Backend service executables such as `argos-api-host` and administrative support scripts remain available; Venture, the six terminal clients and legacy `argos` are [retired](../docs/archive/cli-retirement.md).
 
@@ -189,9 +191,9 @@ Rebuild both backend and native app for this workflow; schema **11** requires co
 python3 deploy/native_review.py up --name native-local
 ```
 
-In **DB Seed & Train**, each dataset button opens its own CSV picker. A bounded local header check runs **before any request or backend worker**. Actors require `actor_id`, `actor_name`, `actor_type`, `aliases` and `name_normalized`; extra columns are allowed, duplicate columns are rejected. Natural training requires the exact unique [18-column header set](../docs/wiki/concepts/strategic-domains-taxonomy.md#synthetic-dataset-boundary), in any order. Validation/upload progress and errors remain visible; an invalid header stops locally.
+In **DB Setup**, the actor step selects the pinned bundled CSV by default. A local override opens a CSV picker and checks its header before upload. The actor file requires `actor_id`, `actor_name`, `actor_type`, `aliases` and `name_normalized`. Additional columns are allowed and duplicate columns are rejected. The app displays validation and upload progress.
 
-**Upload flow:** local check → authenticated request for an upload URL → stream bytes with PUT to that exact gateway URL → backend upload worker rechecks schema/hash/size → immutable staging → explicit job confirmation. Authentication-bound, single-use tickets persist in the shared database and survive gateway restarts until their **five-minute expiry**. Existing seed/training workers read the staged `DatasetRef` from shared backend storage, never a Mac path or an external fetch. Accepted jobs remain durable across restart. This uses the existing services and credentials.
+**Upload flow:** local check → authenticated request for an upload URL → stream bytes with PUT to that exact gateway URL → backend upload worker rechecks schema/hash/size → immutable staging → explicit job confirmation. Authentication-bound, single-use tickets persist in the shared database and survive gateway restarts until their **five-minute expiry**. The seed worker read the staged `DatasetRef` from shared backend storage, never a Mac path or an external fetch. Accepted jobs remain durable across restart. This uses the existing services and credentials.
 
 | Resource | Bound / deployment requirement |
 | --- | --- |
@@ -204,13 +206,12 @@ In **DB Seed & Train**, each dataset button opens its own CSV picker. A bounded 
 | --- | --- |
 | **Seed Actors** | Choose `datasets/argos_actors.csv` → local check/upload/staging → confirm → wait for completed seeding and actors in the database |
 | **Build Search Index** | Enabled only after completed, nonempty seeding with no queued/active reseed → confirm → wait for reader readiness |
-| **Train Classifier — Natural** | Choose a separate training CSV → local check/upload/staging → confirm → candidate only, without activation. `datasets/argos_atlas_strategic_domains_v2.csv` is synthetic. |
 
 Actor imports **merge by stable actor ID**: add actors, update selected fields on matching actors and preserve actors absent from the CSV. Existing/manual aliases remain; new aliases are upserted without deletions. Full source metadata is retained. Every job stays pinned to its exact dataset/hash/configuration revision; choosing a new CSV does not replace or wipe the catalog.
 
-Only confirmation submits a seed/training job, pinned to the actual configuration revision (fresh **0** is valid). The focused maintenance page refreshes bounded readiness checks automatically; **Refresh checks** requests an immediate read. Neither submits jobs. A queued receipt is not completion.
+Only confirmation submits a seed job, pinned to the actual configuration revision (fresh **0** is valid). The focused maintenance page refreshes bounded readiness checks automatically; **Refresh checks** requests an immediate read. Neither submits jobs. A queued receipt is not completion.
 
-Optional operator metadata remains supported through startup-loaded `FLEETWORKS_MAINTENANCE_INPUTS_FILE`; it is not required for the native CSV flow. Its bounded JSON array holds at most three unique entries, pinning `operation`, `dataset` and the actual current `configuration_revision`. Supported operations are `seed_actors`, `train_classifier` and `reindex_actors`; seed/train reference staged, validated datasets, while reindex uses `dataset: null`. For a fresh revision 0:
+Optional operator metadata remains supported through startup-loaded `FLEETWORKS_MAINTENANCE_INPUTS_FILE`; it is not required for the native CSV flow. Its bounded JSON array holds bounded unique entries, pinning `operation`, `dataset` and the actual current `configuration_revision`. Active operations are `seed_actors` and `reindex_actors`. Seed references a staged, validated dataset. Reindex uses `dataset: null`. For a fresh revision 0:
 
 ```json
 [{"operation":"reindex_actors","dataset":null,"configuration_revision":0}]

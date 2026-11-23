@@ -128,11 +128,11 @@ pub static PLUS: Icon = Icon {
     body: r#"<path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"#,
 };
 
-/// Inbox bell.
-pub static BELL: Icon = Icon {
-    name: "fw-bell",
+/// Inbox tray.
+pub static INBOX: Icon = Icon {
+    name: "fw-inbox",
     view: 16.0,
-    body: r#"<path d="M4 11V7.2a4 4 0 0 1 8 0V11l1.2 1.6H2.8L4 11Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" fill="none"/><path d="M6.6 14h2.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>"#,
+    body: r#"<path d="M4 3.5h8l2 6v3.2c0 .5-.3.8-.8.8H2.8c-.5 0-.8-.3-.8-.8V9.5l2-6Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" fill="none"/><path d="M2 9.5h3.3l1 1.5h3.4l1-1.5H14" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" fill="none"/>"#,
 };
 
 /// Assistant dock: a window with a docked right pane.

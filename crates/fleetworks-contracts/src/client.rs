@@ -24,6 +24,8 @@ pub use log_transfer::LogExportPage;
 mod configuration_transfer;
 pub use configuration_transfer::ConfigurationTransferReceipt;
 
+mod inbox_qa;
+
 pub(crate) const MAX_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_QUERY_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -35,6 +37,8 @@ const MAX_TOKEN_BYTES: usize = 4 * 1024;
 pub struct DatasetUpload {
     pub dataset: crate::readiness::DatasetRef,
     pub expires_in_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_count: Option<u64>,
 }
 
 impl DatasetUpload {
@@ -44,6 +48,7 @@ impl DatasetUpload {
         Self {
             dataset,
             expires_in_seconds,
+            row_count: None,
         }
     }
 }
@@ -116,6 +121,12 @@ impl HttpClient {
             .http
             .request(method, url)
             .header(header::ACCEPT, "application/json");
+        if inbox_qa::is_qa_route(route) {
+            request = request.header(
+                crate::chat::QA_EVIDENCE_HEADER,
+                crate::chat::QA_EVIDENCE_VERSION,
+            );
+        }
         if let Some((registration, revision)) = &self.registration {
             request = request
                 .header("x-fleetworks-registration", registration.clone())
@@ -134,6 +145,20 @@ enum ClientTransport {
     LocalIpc(Arc<LocalIpcClient>),
 }
 
+struct PendingLocalUpload {
+    ipc: Arc<LocalIpcClient>,
+    registration: Option<crate::context::RegisteredContext>,
+    upload_id: Option<String>,
+}
+
+impl Drop for PendingLocalUpload {
+    fn drop(&mut self) {
+        if let Some(upload_id) = self.upload_id.take() {
+            self.ipc.cancel_upload(self.registration.take(), upload_id);
+        }
+    }
+}
+
 /// A transport-neutral client pinned to one public API origin or local IPC stream.
 ///
 /// For HTTP, authorization stays on that origin and redirects/proxies are disabled.
@@ -145,6 +170,9 @@ pub struct Client {
 
 /// Validate a literal versioned API route path without query or traversal segments.
 pub(crate) fn validate_route(route: &str) -> Result<(), ClientError> {
+    if inbox_qa::is_qa_route(route) {
+        return Ok(());
+    }
     let tail = route
         .strip_prefix("/api/v1/")
         .ok_or(ClientError::InvalidRoute)?;
@@ -504,43 +532,58 @@ impl Client {
                     .and_then(|suffix| suffix.strip_prefix('/'))
                     .ok_or(ClientError::InvalidResponse)?
                     .to_owned();
+                let mut pending = PendingLocalUpload {
+                    ipc: Arc::clone(ipc),
+                    registration: self.registered_context.clone(),
+                    upload_id: Some(upload_id.clone()),
+                };
                 let mut offset = 0_u64;
-                let mut buffer = vec![0_u8; crate::ipc::MAX_IPC_CHUNK_BYTES];
-                loop {
-                    let length = file
-                        .read(&mut buffer)
-                        .await
-                        .map_err(|_| ClientError::Transport)?;
-                    if length == 0 {
-                        if offset != size {
+                let mut finished = false;
+                while !finished {
+                    let mut chunks = Vec::with_capacity(crate::ipc::IPC_UPLOAD_WINDOW);
+                    for _ in 0..crate::ipc::IPC_UPLOAD_WINDOW {
+                        let mut data = vec![0; crate::ipc::MAX_IPC_CHUNK_BYTES];
+                        let length = file
+                            .read(&mut data)
+                            .await
+                            .map_err(|_| ClientError::Transport)?;
+                        if length == 0 {
+                            if offset != size {
+                                return Err(ClientError::InvalidRequest);
+                            }
+                            finished = true;
+                            break;
+                        }
+                        data.truncate(length);
+                        let next_offset = offset
+                            .checked_add(length as u64)
+                            .ok_or(ClientError::RequestTooLarge)?;
+                        if next_offset > size {
                             return Err(ClientError::InvalidRequest);
                         }
-                        break;
-                    }
-                    let next_offset = offset
-                        .checked_add(length as u64)
-                        .ok_or(ClientError::RequestTooLarge)?;
-                    if next_offset > size {
-                        return Err(ClientError::InvalidRequest);
-                    }
-                    let data_b64 = crate::ipc::base64_encode(&buffer[..length]);
-                    let _: serde_json::Value = ipc
-                        .request_json(
-                            self.registered_context.clone(),
+                        chunks.push((
                             IpcOperation::DatasetUploadChunk {
                                 upload_id: upload_id.clone(),
                                 offset,
-                                data_b64,
+                                data,
                             },
-                        )
-                        .await?;
-                    offset = next_offset;
+                            next_offset,
+                        ));
+                        offset = next_offset;
+                    }
+                    if !chunks.is_empty() {
+                        ipc.upload_window(self.registered_context.clone(), chunks)
+                            .await?;
+                    }
                 }
-                ipc.request_json(
-                    self.registered_context.clone(),
-                    IpcOperation::DatasetUploadFinish { upload_id },
-                )
-                .await?
+                let uploaded = ipc
+                    .request_json(
+                        self.registered_context.clone(),
+                        IpcOperation::DatasetUploadFinish { upload_id },
+                    )
+                    .await?;
+                pending.upload_id = None;
+                uploaded
             }
         };
 
@@ -560,6 +603,11 @@ impl Client {
     async fn send<T: DeserializeOwned>(request: RequestBuilder) -> Result<T, ClientError> {
         let (http, request) = request.build_split();
         let request = request.map_err(|_| ClientError::InvalidRequest)?;
+        let response_limit = if inbox_qa::is_qa_route(request.url().path()) {
+            crate::chat::MAX_PAGE_BYTES
+        } else {
+            MAX_RESPONSE_BYTES
+        };
         if request
             .url()
             .query()
@@ -576,13 +624,13 @@ impl Client {
         }
         if response
             .content_length()
-            .is_some_and(|len| len > MAX_RESPONSE_BYTES as u64)
+            .is_some_and(|len| len > response_limit as u64)
         {
             return Err(ClientError::ResponseTooLarge);
         }
         let mut body = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(ClientError::transport)? {
-            if chunk.len() > MAX_RESPONSE_BYTES - body.len() {
+            if chunk.len() > response_limit - body.len() {
                 return Err(ClientError::ResponseTooLarge);
             }
             body.extend_from_slice(&chunk);

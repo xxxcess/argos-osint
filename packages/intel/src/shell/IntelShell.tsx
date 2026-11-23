@@ -10,10 +10,11 @@ import {
 import {
   intelColors as c,
   intelMetricColors,
+  intelRadius,
   intelStatus,
 } from "./intel-theme";
 import { intelFonts } from "./intel-fonts";
-import { FleetworksMark } from "@argos/ui";
+import { colors, FleetworksMark, glassProps } from "@argos/ui";
 import type { JobState } from "./jobState";
 
 const subscribeHydration = () => () => {};
@@ -104,13 +105,18 @@ export function IntelStatusBar({
   );
   const width = hydrated ? dimensions.width : 0;
   const wide = width >= 1100;
+  const compact = width < 600;
   const navSize = width >= 600 ? 18 : 13;
   const networkValue = metric(metrics?.networkKBps, "");
   const networkAvailable = networkValue !== "—";
   const serverLabel = backendName?.trim() || "Backend";
   return (
     <View nativeID="intel-status-bar" style={s.bar}>
-      <View style={[s.cluster, s.navCluster]}>
+      <View
+        role="group"
+        aria-label="Workstation actions"
+        style={[s.cluster, s.navCluster, compact && s.compactCluster]}
+      >
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={serverLabel}
@@ -155,6 +161,7 @@ export function IntelStatusBar({
             </View>
           </Pressable>
         ) : null}
+        {compact ? job : null}
       </View>
       <View
         nativeID="intel-status-details"
@@ -217,7 +224,7 @@ export function IntelStatusBar({
             <View nativeID="intel-status-metric-divider" style={s.divider} />
           </>
         ) : null}
-        {job}
+        {!compact ? job : null}
         {!hideConnectionIndicator ? (
           connected && connectionUnsynced ? (
             <View style={s.unsyncedRow}>
@@ -316,6 +323,7 @@ export function JobDropUp({ jobs }: { jobs: StatusJob[] }) {
       </Pressable>
       {open ? (
         <View
+          {...glassProps.overlay}
           nativeID="intel-job-menu"
           accessibilityRole="menu"
           style={s.jobMenu}
@@ -403,12 +411,12 @@ const s = StyleSheet.create({
     borderRadius: 8,
     borderWidth: 1,
     borderColor: c.borderStrong,
-    backgroundColor: c.panelRaised,
+    backgroundColor: colors.elevated,
   },
   jobHeading: {
     fontFamily: intelFonts.mono,
     fontSize: 13,
-    color: c.muted,
+    color: c.dim,
   },
   jobRow: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
   jobLabel: {
@@ -423,6 +431,7 @@ const s = StyleSheet.create({
   },
   cluster: { flexDirection: "row", alignItems: "center", gap: 16, minWidth: 0 },
   navCluster: { height: "100%", flexShrink: 1 },
+  compactCluster: { gap: 4 },
   home: {
     flexShrink: 1,
     minWidth: 40,
@@ -465,15 +474,16 @@ const s = StyleSheet.create({
     height: "100%",
     justifyContent: "center",
     paddingHorizontal: 12,
-    backgroundColor: c.inset,
-    borderBottomWidth: 2,
-    borderBottomColor: c.accent,
+    backgroundColor: colors.moltenSurface,
+    borderRadius: intelRadius.control,
+    borderWidth: 1,
+    borderColor: colors.molten,
   },
   appText: {
     fontFamily: intelFonts.mono,
     fontSize: 17,
     fontWeight: "700",
-    color: c.accent,
+    color: colors.molten,
   },
   appTextWide: { fontSize: 21 },
   telemetry: {

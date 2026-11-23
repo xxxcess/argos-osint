@@ -1,0 +1,110 @@
+name: "GSD Nightly: UI"
+
+on:
+  workflow_call:
+    inputs:
+      head:
+        type: string
+        required: true
+      full:
+        type: boolean
+        required: true
+      publish:
+        type: boolean
+        required: true
+      release-version:
+        type: string
+      linux-native:
+        type: boolean
+        required: true
+      macos:
+        type: boolean
+        required: true
+      web:
+        type: boolean
+        required: true
+      web-dev:
+        type: boolean
+        required: true
+      inbox-qa:
+        type: boolean
+        default: false
+    secrets:
+      depot-ci-token:
+        required: false
+    outputs:
+      desktop_result:
+        value: ${{ jobs.results.outputs.desktop_result }}
+      desktop_linux_result:
+        value: ${{ jobs.results.outputs.desktop_linux_result }}
+      web_result:
+        value: ${{ jobs.results.outputs.web_result }}
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  desktop:
+    name: Mac app / ${{ matrix.target }}
+    needs: desktop_linux
+    if: always() && inputs.macos && (needs.desktop_linux.result == 'success' || needs.desktop_linux.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            runner: macos-15
+    uses: ./.github/workflows/fleetworks-native.yml
+    with:
+      expected-head: ${{ inputs.head }}
+      target: ${{ matrix.target }}
+      runner: ${{ matrix.runner }}
+      release-version: ${{ inputs.release-version }}
+      inbox-qa: ${{ inputs.inbox-qa }}
+
+  desktop_linux:
+    name: Linux app / x86_64-unknown-linux-gnu
+    if: inputs.linux-native
+    uses: ./.github/workflows/fleetworks-native-linux-route.yml
+    with:
+      expected-head: ${{ inputs.head }}
+      mode: ${{ inputs.full && 'full' || 'pr' }}
+      profile: ${{ inputs.publish && 'release' || 'debug' }}
+      release-version: ${{ inputs.release-version }}
+    secrets:
+      depot-ci-token: ${{ secrets.depot-ci-token }}
+
+  web:
+    name: Scoped web
+    if: inputs.web
+    uses: ./.github/workflows/intel-web.yml
+    with:
+      head: ${{ inputs.head }}
+      development: ${{ inputs.web-dev }}
+
+  results:
+    name: Collect UI verification results
+    needs: [desktop, desktop_linux, web]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      desktop_result: ${{ steps.results.outputs.desktop_result }}
+      desktop_linux_result: ${{ steps.results.outputs.desktop_linux_result }}
+      web_result: ${{ steps.results.outputs.web_result }}
+    steps:
+      - name: Record selected lane outcomes
+        id: results
+        env:
+          DESKTOP_RESULT: ${{ needs.desktop.result }}
+          DESKTOP_LINUX_RESULT: ${{ needs.desktop_linux.result }}
+          WEB_RESULT: ${{ needs.web.result }}
+        shell: bash
+        run: |
+          printf '%s=%s\n' desktop_result "$DESKTOP_RESULT" >> "$GITHUB_OUTPUT"
+          printf '%s=%s\n' desktop_linux_result "$DESKTOP_LINUX_RESULT" >> "$GITHUB_OUTPUT"
+          printf '%s=%s\n' web_result "$WEB_RESULT" >> "$GITHUB_OUTPUT"

@@ -1,0 +1,10 @@
+# syntax=docker/dockerfile:1
+# qa_pack is the exact architecture's previously verified pack directory.
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgcc-s1 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=qa_pack --chmod=0555 / /opt/fleetworks-qa/
+USER 65532:65532
+ENTRYPOINT ["/opt/fleetworks-qa/bin/fleetworks-assistant-bert-listener"]
+CMD ["--socket", "/run/fleetworks-qa/model.sock", "--worker", "/opt/fleetworks-qa/bin/fleetworks-assistant-bert", "--model-dir", "/opt/fleetworks-qa/model"]

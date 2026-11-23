@@ -3,6 +3,9 @@
 #[allow(dead_code)]
 #[path = "../src/actor_index_worker.rs"]
 mod actor_index_worker;
+#[cfg(all(feature = "classifier", unix))]
+#[path = "../src/classifier_service.rs"]
+mod classifier_service;
 #[allow(dead_code)]
 #[path = "../src/native_worker.rs"]
 mod native_worker;
@@ -39,6 +42,7 @@ use argos_osint_api::classifier_activation::ActivationArtifacts;
 use argos_osint_api::datasets::DatasetStore;
 use argos_osint_api::network_router_with_private_services;
 use argos_osint_api::workstation::ReadinessOwners;
+use argos_osint_api::workstation::ReadinessProbe;
 use argos_osint_api::ApiState;
 use argos_osint_api::NetworkPolicy;
 use argos_osint_api::PrivateServices;
@@ -53,6 +57,11 @@ use argos_osint_core::storage::setup_jobs as core_setup_jobs;
 use fleetworks_contracts::actor_index::ActorIndexLimits;
 use fleetworks_contracts::capabilities::Capabilities;
 use fleetworks_contracts::chat::ChatTurnAck;
+use fleetworks_contracts::chat::QaCancelRequest;
+use fleetworks_contracts::chat::QaEventQuery;
+use fleetworks_contracts::chat::QaPhase;
+use fleetworks_contracts::chat::QaSettingsUpdate;
+use fleetworks_contracts::chat::QaTurnRequest;
 use fleetworks_contracts::chat::CHAT_TURNS_PATH;
 use fleetworks_contracts::classifier_activation::ActivationRequest;
 use fleetworks_contracts::classifier_activation::ActiveModelRevision;
@@ -81,10 +90,10 @@ use fleetworks_contracts::ipc::LocalIpcClient;
 use fleetworks_contracts::operational_logs::LogQuery;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::DatasetRef;
+use fleetworks_contracts::readiness::DeclaredAtlasBertCandidate;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use fleetworks_contracts::readiness::MaintenanceReceipt;
 use fleetworks_contracts::readiness::MaintenanceRequest;
-use fleetworks_contracts::readiness::ReadinessActionId;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
 use fleetworks_contracts::readiness::WorkstationReadiness;
@@ -318,6 +327,98 @@ fn companion_source_description() -> String {
     }
 }
 
+struct DeclaredClassifierHarness {
+    home: tempfile::TempDir,
+    expected: DeclaredAtlasBertCandidate,
+    probe: ReadinessProbe,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for DeclaredClassifierHarness {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[cfg(all(feature = "classifier", unix))]
+mod declared_classifier_fixture {
+    use argos_osint_core::atlas_taxonomy::{DomainId, DOMAIN_IDS};
+    use argos_osint_core::classifier::artifact;
+
+    mod candidate {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../crates/argos-osint-core/tests/fixtures/classifier/atlas_bert_candidate.rs"
+        ));
+    }
+
+    use super::*;
+    use argos_osint_core::classifier::bert_activation;
+    use argos_osint_core::classifier::readiness::ClassifierHome;
+    use argos_osint_core::classifier::WorkControl;
+    use std::os::unix::fs::PermissionsExt;
+
+    const CLASSIFIER_TOKEN: &str = "parity-test-private-classifier-0123456789abcdef";
+
+    pub(super) async fn start() -> DeclaredClassifierHarness {
+        let fixture = candidate::StagedCandidate::new(0.8);
+        let home = fixture.home.path();
+        std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))
+            .expect("make classifier and companion fixture workspace private");
+        let prior = bert_activation::revision(home)
+            .await
+            .expect("baseline revision");
+        let activated = bert_activation::activate(
+            home,
+            &fixture.frozen_sha256,
+            &fixture.evaluation_sha256,
+            &prior,
+            &WorkControl::new(),
+        )
+        .await
+        .expect("activate synthetic fixture candidate");
+        let revision = bert_activation::revision(home)
+            .await
+            .expect("operator readback revision");
+        let expected = DeclaredAtlasBertCandidate::new(activated.snapshot.model_id, revision);
+        // The readback is intentionally independent of model bytes and runtime warming.
+        std::fs::write(
+            fixture.model_dir.join("rust_model.ot"),
+            "different fixture bytes",
+        )
+        .expect("change the candidate weights without changing the declaration");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("private classifier listener");
+        let address = listener.local_addr().expect("private classifier address");
+        let policy = NetworkPolicy::new(&[address.to_string()], CLASSIFIER_TOKEN)
+            .expect("private classifier credential");
+        let app = argos_osint_api::guard_network(
+            classifier_service::router(ClassifierHome::new(home.to_owned())),
+            policy,
+            Arc::new(Vec::new()),
+            address.port(),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve private classifier status");
+        });
+        let probe = ReadinessProbe::new(
+            ReadinessCheckId::Classifier,
+            &format!("http://{address}"),
+            CLASSIFIER_TOKEN,
+        )
+        .expect("private classifier probe");
+        DeclaredClassifierHarness {
+            home: fixture.home,
+            expected,
+            probe,
+            task,
+        }
+    }
+}
+
 struct HttpHarness {
     root: PathBuf,
     origin: String,
@@ -329,7 +430,7 @@ struct HttpHarness {
 }
 
 impl HttpHarness {
-    async fn start() -> Self {
+    async fn start(probes: Vec<ReadinessProbe>) -> Self {
         let root = create_private_dir("fleetworks-http-parity");
         let surreal_dir = root.join("surreal");
         let jobs_dir = root.join("jobs");
@@ -386,18 +487,16 @@ impl HttpHarness {
         );
 
         let dataset_store = DatasetStore::open(staged_dir).expect("open dataset store");
-        let readiness = ReadinessOwners::new(deployment.deployment_id.clone(), Vec::new())
+        let readiness = ReadinessOwners::new(deployment.deployment_id.clone(), probes)
             .expect("readiness owners");
-        let mut services = PrivateServices::default()
+        let services = PrivateServices::default()
             .with_search(SearchClient::from_local(Arc::new(LocalActorSearchBackend(
                 Arc::clone(&search_service),
             ))))
-            .with_workstation(readiness, dataset_store.clone());
-        if cfg!(feature = "classifier") {
-            services = services.with_activation_artifacts(
-                ActivationArtifacts::new(root.clone()).expect("HTTP activation artifact owner"),
+            .with_workstation(readiness, dataset_store.clone())
+            .with_activation_artifacts(
+                ActivationArtifacts::new(root.clone()).expect("historical artifact owner"),
             );
-        }
 
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -411,6 +510,7 @@ impl HttpHarness {
             Permission::RegisterWorkstation,
             Permission::RebindWorkstation,
             Permission::ManageConfiguration,
+            Permission::ManageInboxQa,
             Permission::MaintainBackend,
             Permission::SubmitInteractive,
             Permission::ReadWorkstationActivity,
@@ -466,7 +566,6 @@ impl HttpHarness {
             store: dataset_store,
             index: Some(index_worker),
             relinquish_on_shutdown: false,
-            classifier_enabled: cfg!(feature = "classifier"),
         };
         let worker_repo = repo.clone();
         let worker_root = root.clone();
@@ -520,6 +619,7 @@ async fn run_shared_flow(
     unauthenticated_http_client: Option<&Client>,
     csv_path: &Path,
     transport: &str,
+    expected_candidate: Option<&DeclaredAtlasBertCandidate>,
     report: &mut ParityReport,
 ) -> SharedFlowResult {
     let record = |report: &mut ParityReport, op: &str, category: &str, summary: &str| {
@@ -548,16 +648,13 @@ async fn run_shared_flow(
         .expect("capabilities satisfy native contract");
     assert!(caps.features.iter().any(|f| f == "actor-discovery"));
     assert!(caps.features.iter().any(|f| f == "workstation-readiness"));
+    assert!(caps.features.iter().any(|f| f == "inbox-qa-v2"));
     assert!(caps.features.iter().any(|f| f == "jobs"));
     assert!(caps.features.iter().any(|f| f == "logs"));
     let local = transport == "ipc";
     let local_nlp = local && cfg!(feature = "nlp");
-    let classifier_enabled = cfg!(feature = "classifier");
     assert_eq!(caps.features.iter().any(|f| f == "nlp"), local_nlp);
-    assert_eq!(
-        caps.features.iter().any(|f| f == "classifier"),
-        local && classifier_enabled
-    );
+    assert!(!caps.features.iter().any(|f| f == "classifier"));
     record(
         &mut *report,
         "capabilities",
@@ -1056,14 +1153,30 @@ async fn run_shared_flow(
         stale_mutation.clone(),
     )
     .expect("build reindex request");
-    let reindex_receipt = client
-        .reindex_actors(&reindex_req)
-        .await
-        .expect("submit reindex actors");
+    let admission_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let reindex_receipt = loop {
+        match client.reindex_actors(&reindex_req).await {
+            Ok(receipt) => break receipt,
+            Err(ClientError::Status(422)) if transport == "ipc" => {
+                assert!(
+                    tokio::time::Instant::now() < admission_deadline,
+                    "Embedded actor index observation did not settle before reindex admission"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => panic!("{transport}: submit reindex actors: {error}"),
+        }
+    };
     assert_eq!(
         reindex_receipt.operation,
         MaintenanceOperation::ReindexActors
     );
+    if reindex_receipt.already_completed {
+        assert_eq!(transport, "ipc", "only Embedded reuses a serving index");
+        assert!(reindex_receipt.reused && reindex_receipt.job_id.is_empty());
+    } else {
+        assert!(!reindex_receipt.job_id.is_empty());
+    }
     let reindex_replay = client
         .reindex_actors(&reindex_req)
         .await
@@ -1123,6 +1236,18 @@ async fn run_shared_flow(
         .await
         .expect("workstation readiness");
     assert_eq!(readiness.deployment_id, registered_context.deployment_id);
+    assert_eq!(
+        readiness.declared_atlas_bert_candidate.as_ref(),
+        expected_candidate,
+        "{transport}: operator and registered-client candidate revision must agree"
+    );
+    assert!(readiness.checks.iter().any(|check| {
+        check.id == ReadinessCheckId::ClassifierInference && check.state != ReadinessState::Ready
+    }));
+    if local {
+        assert!(readiness.atlas_preflight.is_none());
+    }
+
     assert!(readiness
         .checks
         .iter()
@@ -1135,27 +1260,25 @@ async fn run_shared_flow(
         local_nlp,
         "{transport}: readiness must reflect the bundled NLP startup probe"
     );
-    for id in [
-        ReadinessActionId::TrainClassifier,
-        ReadinessActionId::ActivateClassifier,
-    ] {
-        assert_eq!(
-            readiness
-                .checks
-                .iter()
-                .flat_map(|check| &check.actions)
-                .find(|action| action.id == id)
-                .expect("classifier preflight action")
-                .allowed,
-            classifier_enabled,
-            "{transport}: preflight {id:?} must reflect the configured Natural worker"
-        );
-    }
+    assert!(readiness.checks.iter().any(|check| {
+        check.id == ReadinessCheckId::ClassifierTraining
+            && check.state == ReadinessState::NotApplicable
+            && check.actions.is_empty()
+    }));
+    let unregistered = base_client
+        .workstation_readiness()
+        .await
+        .expect("unregistered workstation may read general diagnostics");
+    assert!(
+        unregistered.declared_atlas_bert_candidate.is_none(),
+        "{transport}: a registered Native context is required for candidate readback"
+    );
+
     record(
         &mut *report,
         "workstation_readiness",
         "live_parity",
-        "post-seed/index readiness check parity",
+        "post-seed/index readiness and declared Atlas BERT candidate revision parity",
     );
 
     // Articles & cycle history & negative lifecycle parity checks.
@@ -1310,6 +1433,73 @@ async fn run_shared_flow(
         "chat turn ok acknowledgement and empty-input 400 parity",
     );
 
+    let qa_settings = client.qa_settings().await.expect("registered QA settings");
+    assert!(
+        !qa_settings.enabled,
+        "{transport}: Inbox QA defaults to Off"
+    );
+    assert_eq!(qa_settings.phase, QaPhase::Off);
+    assert!(qa_settings.can_manage);
+    assert!(
+        client
+            .latest_qa_turn()
+            .await
+            .expect("latest Inbox exchange")
+            .is_none(),
+        "{transport}: a fresh registration has no accepted QA exchange",
+    );
+    let qa_context = MutationContext::new(&registered_context);
+    assert_eq!(
+        client
+            .update_qa_settings(&QaSettingsUpdate::new(
+                qa_context.clone(),
+                qa_settings.revision + 1,
+                true,
+            ))
+            .await
+            .unwrap_err(),
+        ClientError::Status(409),
+    );
+    let qa_turn = QaTurnRequest::new(
+        format!("parity-inbox-qa-{transport}"),
+        qa_context.clone(),
+        "What is the state of the gateway?".to_owned(),
+        None,
+    )
+    .expect("valid QA turn");
+    assert_eq!(
+        client.submit_qa_turn(&qa_turn).await.unwrap_err(),
+        ClientError::Status(503),
+    );
+    let missing_turn_id = "missing-parity-turn";
+    assert_eq!(
+        client
+            .qa_events(&QaEventQuery::new(missing_turn_id.to_owned(), 0, 0))
+            .await
+            .unwrap_err(),
+        ClientError::Status(404),
+    );
+    assert_eq!(
+        client
+            .cancel_qa_turn(&QaCancelRequest::new(
+                qa_context,
+                missing_turn_id.to_owned()
+            ))
+            .await
+            .unwrap_err(),
+        ClientError::Status(404),
+    );
+    for (operation, summary) in [
+        ("qa_settings", "registered backend defaults to Off"),
+        ("qa_settings_update", "stale setting revision conflict"),
+        ("qa_turn_submit", "disabled inference rejects turn"),
+        ("qa_latest", "fresh registration has no latest exchange"),
+        ("qa_events", "unknown turn rejects event read"),
+        ("qa_cancel", "unknown turn rejects Stop"),
+    ] {
+        record(report, operation, "live_parity", summary);
+    }
+
     assert_eq!(
         client
             .get_with_query::<serde_json::Value>(
@@ -1362,9 +1552,7 @@ async fn run_shared_flow(
         "missing job_cancel 404 parity",
     );
 
-    // Both configured backends reach the scoped lookup. An unavailable
-    // classifier must fail closed before resolving the synthetic candidate.
-    let candidate_status = if classifier_enabled { 404 } else { 503 };
+    // Both transports retire Natural writes and retain protected historical reads.
     let candidate = CandidateIdentity::new(
         "candidate-1".to_owned(),
         "train-job-1".to_owned(),
@@ -1387,14 +1575,14 @@ async fn run_shared_flow(
             .post::<serde_json::Value>(ACTIVATION_PATH, &activate_req)
             .await
             .unwrap_err(),
-        ClientError::Status(candidate_status),
-        "{transport}: activation rejects an absent candidate or unavailable engine"
+        ClientError::Status(410),
+        "{transport}: Natural activation is retired"
     );
     record(
         &mut *report,
         "classifier_activate",
         "live_parity",
-        "activation rejects the missing candidate or unavailable service",
+        "legacy activation returns 410",
     );
 
     assert_eq!(
@@ -1405,14 +1593,14 @@ async fn run_shared_flow(
             )
             .await
             .unwrap_err(),
-        ClientError::Status(candidate_status),
-        "{transport}: candidate preview rejects an absent candidate or unavailable engine"
+        ClientError::Status(404),
+        "{transport}: protected readback rejects an absent historical candidate"
     );
     record(
         &mut *report,
         "classifier_candidate_detail",
         "live_parity",
-        "preview rejects the missing candidate or unavailable service",
+        "missing historical candidate returns 404",
     );
 
     let act_result_err = client
@@ -1421,22 +1609,14 @@ async fn run_shared_flow(
         .unwrap_err();
     assert_eq!(
         act_result_err,
-        ClientError::Status(if local && !classifier_enabled {
-            503
-        } else {
-            404
-        }),
-        "{transport}: activation result requires an enabled IPC engine and an existing job"
+        ClientError::Status(404),
+        "{transport}: protected readback requires an existing activation job"
     );
     record(
         &mut *report,
         "classifier_activation_result",
-        if classifier_enabled {
-            "live_parity"
-        } else {
-            "intentional_exception"
-        },
-        "disabled IPC engine returns 503; missing activation job returns 404",
+        "live_parity",
+        "missing historical activation job returns 404",
     );
 
     let train_dataset = DatasetRef::new(
@@ -1448,7 +1628,7 @@ async fn run_shared_flow(
     .expect("train dataset ref");
     let train_req = MaintenanceRequest::for_training(
         format!("parity-train-{transport}"),
-        stale_mutation,
+        stale_mutation.clone(),
         train_dataset,
     )
     .expect("build train request");
@@ -1458,16 +1638,15 @@ async fn run_shared_flow(
         .unwrap_err();
     assert_eq!(
         train_err,
-        ClientError::Status(if classifier_enabled { 409 } else { 503 }),
-        "{transport}: training requires an enabled worker and a valid dataset"
+        ClientError::Status(410),
+        "{transport}: Natural training is retired"
     );
     record(
         &mut *report,
         "train_classifier",
         "live_parity",
-        "unavailable worker returns 503; missing training dataset returns 409",
+        "legacy training returns 410 before staging or training",
     );
-
     let logs_follow_op = IpcOperation::from_get_with_query(LOGS_FOLLOW_PATH, &LogQuery::default())
         .expect("logs/follow route mapping");
     assert_eq!(
@@ -1513,25 +1692,19 @@ async fn run_shared_flow(
 }
 
 async fn verify_ipc_protocol_mismatch_exception(ipc_dir: &Path) {
-    let mut cmd = spawn_local_ipc_command(ipc_dir);
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .expect("spawn local-ipc for version mismatch check");
-    let mut stdin = child.stdin.take().expect("child stdin");
-    let mut stdout = child.stdout.take().expect("child stdout");
+    let (mut child, mut socket) =
+        fleetworks_contracts::ipc::spawn_companion_socket(spawn_local_ipc_command(ipc_dir))
+            .expect("spawn local-ipc for version mismatch check");
 
     let mut hello = IpcHello::new("parity-version-probe".to_owned(), "99.0.0".to_owned());
     hello.protocol_version = 99;
     hello.min_protocol_version = 99;
     let incompatible = IpcEnvelope::Hello(hello);
-    write_frame(&mut stdin, &incompatible)
+    write_frame(&mut socket, &incompatible)
         .await
         .expect("write incompatible hello");
 
-    let ack_frame = read_frame(&mut stdout)
+    let ack_frame = read_frame(&mut socket)
         .await
         .expect("read HelloAck frame")
         .expect("non-empty HelloAck frame");
@@ -1545,7 +1718,6 @@ async fn verify_ipc_protocol_mismatch_exception(ipc_dir: &Path) {
         }
         other => panic!("expected HelloAck, got {other:?}"),
     }
-    drop(stdin);
     let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
         .await
         .expect("child exits cleanly after incompatible HelloAck")
@@ -1571,7 +1743,13 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
     .expect("write fixture csv");
 
     // 1. Run full shared scenario suite against real Axum HTTP gateway + LocalNativeWorker.
-    let http = HttpHarness::start().await;
+    #[cfg(all(feature = "classifier", unix))]
+    let classifier = Some(declared_classifier_fixture::start().await);
+    #[cfg(not(all(feature = "classifier", unix)))]
+    let classifier: Option<DeclaredClassifierHarness> = None;
+    let expected_candidate = classifier.as_ref().map(|owner| &owner.expected);
+    let probes = classifier.iter().map(|owner| owner.probe.clone()).collect();
+    let http = HttpHarness::start(probes).await;
     let http_client = Client::new(&http.origin, Some(TOKEN)).expect("HTTP native client");
     let http_unauth = Client::new(&http.origin, None).expect("HTTP unauth client");
     let http_res = run_shared_flow(
@@ -1579,6 +1757,7 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
         Some(&http_unauth),
         &csv_path,
         "http",
+        expected_candidate,
         &mut report,
     )
     .await;
@@ -1595,15 +1774,26 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
     http.shutdown().await;
 
     // 2. Run exact same shared scenario suite against compiled `argos-api-host --role local-ipc`.
-    let ipc_root = create_private_dir("fleetworks-ipc-parity");
-    let mut cmd1 = spawn_local_ipc_command(&ipc_root);
+    let ipc_root = classifier.as_ref().map_or_else(
+        || create_private_dir("fleetworks-ipc-parity"),
+        |owner| owner.home.path().to_owned(),
+    );
+    let cmd1 = spawn_local_ipc_command(&ipc_root);
     let ipc1 = Arc::new(
-        LocalIpcClient::spawn_command(&mut cmd1, "http-ipc-parity", "1.0.0")
+        LocalIpcClient::spawn_command(cmd1, "http-ipc-parity", "1.0.0")
             .await
             .expect("spawn argos-api-host --role local-ipc session 1"),
     );
     let ipc_client1 = Client::from_local_ipc(Arc::clone(&ipc1));
-    let ipc_res = run_shared_flow(&ipc_client1, None, &csv_path, "ipc", &mut report).await;
+    let ipc_res = run_shared_flow(
+        &ipc_client1,
+        None,
+        &csv_path,
+        "ipc",
+        expected_candidate,
+        &mut report,
+    )
+    .await;
 
     // Graceful IPC shutdown relinquishes leases and checkpoints local durable stores.
     drop(ipc_client1);
@@ -1620,9 +1810,9 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
 
     // 3. Restart real `argos-api-host --role local-ipc` child on SAME state directory (no network storage)
     // and verify durable state, request_id -> job_id preservation, replay idempotency, and search visibility.
-    let mut cmd2 = spawn_local_ipc_command(&ipc_root);
+    let cmd2 = spawn_local_ipc_command(&ipc_root);
     let ipc2 = Arc::new(
-        LocalIpcClient::spawn_command(&mut cmd2, "http-ipc-parity-restart", "1.0.0")
+        LocalIpcClient::spawn_command(cmd2, "http-ipc-parity-restart", "1.0.0")
             .await
             .expect("spawn argos-api-host --role local-ipc session 2"),
     );
@@ -1635,6 +1825,16 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
     let ipc_client2 = Client::from_local_ipc(Arc::clone(&ipc2))
         .with_registered_context(&ipc_res.registered_context)
         .expect("attach saved registered context after restart");
+
+    let restarted_readiness = ipc_client2
+        .workstation_readiness()
+        .await
+        .expect("workstation readiness across companion restart");
+    assert_eq!(
+        restarted_readiness.declared_atlas_bert_candidate.as_ref(),
+        expected_candidate
+    );
+    assert!(restarted_readiness.atlas_preflight.is_none());
 
     let assoc_after_restart = ipc_client2
         .request_detail(&WorkstationRequestDetailQuery::new(
@@ -1703,17 +1903,16 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
         verified: true,
     });
     report.record_exception(IntentionalExceptionRecord {
-        id: "optional_classifier_and_nlp_capabilities".to_owned(),
+        id: "optional_nlp_capabilities".to_owned(),
         operations: vec![
             "capabilities".to_owned(),
             "workstation_readiness".to_owned(),
-            "classifier_activation_result".to_owned(),
         ],
-        reason: "Embedded IPC advertises bundled engines after startup probes. Distributed HTTP clients use readiness for configured workers and independently probed services."
+        reason: "Embedded IPC advertises bundled NLP after a startup probe. Distributed HTTP clients use readiness for independently probed services."
             .to_owned(),
-        http_behavior: "Capabilities omit the bundled engine flags. The fixture does not configure a private NLP probe. A configured worker exposes Natural training and activation; missing activation job results return 404."
+        http_behavior: "The HTTP fixture has no private NLP probe and does not advertise bundled NLP."
             .to_owned(),
-        ipc_behavior: "Enabled builds report NLP Ready and expose the same Natural maintenance workflow. Disabled classifier builds reject classifier operations with 503."
+        ipc_behavior: "Enabled IPC builds report NLP Ready after the bundled probe."
             .to_owned(),
         verified: true,
     });

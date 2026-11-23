@@ -1,4 +1,4 @@
-//! Explicit registered Natural candidate preview and durable activation.
+//! Registered readback for historical Natural candidates and activation results.
 //! Training-job membership/private eligibility precedes every artifact/report
 //! lookup; maintenance permission is separate and does not follow membership.
 
@@ -16,11 +16,9 @@ use axum::routing::get;
 use axum::routing::post;
 use axum::Json;
 use axum::Router;
-use fleetworks_contracts::classifier_activation::ActivationReceipt;
 use fleetworks_contracts::classifier_activation::ActivationRequest;
 use fleetworks_contracts::classifier_activation::ActivationResult;
 use fleetworks_contracts::classifier_activation::CandidatePreview;
-use fleetworks_contracts::classifier_activation::SyntheticBaselineConsent;
 use fleetworks_contracts::classifier_activation::ACTIVATION_PATH;
 use fleetworks_contracts::classifier_activation::ACTIVATION_RESULT_PATH;
 use fleetworks_contracts::classifier_activation::CANDIDATE_DETAIL_PATH;
@@ -119,7 +117,7 @@ pub(crate) async fn actual_preview(
     let store = owner.store.clone();
     let job = source.training_job_id;
     let model = source.model_id;
-    let preview =
+    let mut preview =
         tokio::task::spawn_blocking(move || candidate_activation::preview(&store, &job, &model))
             .await
             .map_err(|_| crate::internal("Natural preview unavailable"))?
@@ -129,6 +127,7 @@ pub(crate) async fn actual_preview(
     }
     eligible(state, context, &query.training_job_id).await?;
     context.revalidate(&state.repo).await?;
+    preview.activation_supported = false;
     Ok(preview)
 }
 async fn preview(
@@ -143,82 +142,19 @@ async fn preview(
         actual_preview(&state, &context, &owner, &query).await?,
     ))
 }
-pub(crate) async fn submit_request(
-    state: &ApiState,
-    context: &ResolvedRequest,
-    owner: &ActivationArtifacts,
-    request: ActivationRequest,
-) -> Result<ActivationReceipt, ApiError> {
-    ensure_activation_authority(context)?;
-    request.validate().map_err(|error| {
-        if error == fleetworks_contracts::classifier_activation::ActivationInputError::MissingConfigurationRevision {
-            ApiError(StatusCode::PRECONDITION_REQUIRED, "Configuration revision required")
-        } else {crate::bad()}
-    })?;
-    let admission = crate::admission::capture_checked(
-        state,
-        context,
-        &request.request_id,
-        classifier_activation::OPERATION,
-        Some(&request.context),
+pub(crate) fn retired_activation() -> ApiError {
+    ApiError(
+        StatusCode::GONE,
+        "Natural classifier activation has been retired",
     )
-    .await?;
-    // Exact accepted replay is reconciled before candidate/prior can change.
-    // Storage still requires matching immutable input and real current proof.
-    let replay = admission
-        .replay_job(&state.repo, classifier_activation::OPERATION)
-        .await
-        .map_err(crate::internal)?
-        .is_some();
-    if !replay {
-        let preview = actual_preview(
-            state,
-            context,
-            owner,
-            &PreviewQuery {
-                training_job_id: request.candidate.training_job_id.clone(),
-                model_id: request.candidate.model_id.clone(),
-            },
-        )
-        .await?;
-        if !preview.activation_supported {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                "Natural activation evidence unavailable",
-            ));
-        }
-        if preview.candidate != request.candidate
-            || preview.expected_prior != request.expected_prior
-        {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                "Candidate or prior Natural model changed; refresh confirmation",
-            ));
-        }
-        if preview.synthetic_baseline
-            && request.synthetic_baseline != SyntheticBaselineConsent::ActivateSyntheticBaseline
-        {
-            return Err(ApiError(
-                StatusCode::BAD_REQUEST,
-                "Explicit synthetic baseline consent required",
-            ));
-        }
-    }
-    classifier_activation::admit(&state.repo, &admission, &request)
-        .await
-        .map_err(storage_failure)
 }
 
 async fn submit(
-    State(state): State<ApiState>,
     context: Option<Extension<ResolvedRequest>>,
-    owner: Option<Extension<Arc<ActivationArtifacts>>>,
-    Json(request): Json<ActivationRequest>,
-) -> Result<(StatusCode, Json<ActivationReceipt>), ApiError> {
-    let context = authority(context)?;
-    let owner = artifacts(owner)?;
-    let receipt = submit_request(&state, &context, &owner, request).await?;
-    Ok((StatusCode::ACCEPTED, Json(receipt)))
+    Json(_request): Json<ActivationRequest>,
+) -> Result<StatusCode, ApiError> {
+    let _context = authority(context)?;
+    Err(retired_activation())
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

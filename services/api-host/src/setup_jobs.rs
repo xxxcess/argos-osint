@@ -12,20 +12,16 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Context;
 use argos_osint_api::datasets::DatasetStore;
 #[cfg(test)]
 use argos_osint_core::actor_catalog::Actor;
-use argos_osint_core::classifier::dataset::DatasetRequest;
-use argos_osint_core::classifier::readiness::ClassifierHome;
-use argos_osint_core::classifier::readiness::ManualTrainRequest;
-use argos_osint_core::classifier::readiness::TrainingJobState;
-use argos_osint_core::classifier::training::SyntheticActivation;
-use argos_osint_core::classifier::Provenance;
 use argos_osint_core::events::NewEvent;
 use argos_osint_core::events::Severity;
 use argos_osint_core::storage::actor_catalog;
+use argos_osint_core::storage::actor_search_outbox;
 use argos_osint_core::storage::event_log;
 use argos_osint_core::storage::jobs;
 use argos_osint_core::storage::jobs::ClaimedTask;
@@ -54,6 +50,9 @@ pub(crate) fn safe_failure_reason(error: &anyhow::Error) -> &'static str {
     for cause in error.chain() {
         match cause.to_string().as_str() {
             "worker_bulk_cancelled" => return "setup_interrupted",
+            "worker_memory_pressure" => return "setup_worker_memory_pressure",
+            "worker_workspace_disk_pressure" => return "setup_worker_disk_pressure",
+            "worker_pressure_unknown" => return "setup_worker_pressure_unavailable",
             "worker_parse_resource_budget"
             | "worker_seed_resource_budget"
             | "worker_training_resource_budget" => return "setup_worker_resource_pressure",
@@ -70,6 +69,15 @@ pub(crate) fn safe_failure_reason(error: &anyhow::Error) -> &'static str {
         }
     }
     "native_domain_operation_failed"
+}
+
+pub(crate) fn is_worker_pressure_failure(reason: &str) -> bool {
+    matches!(
+        reason,
+        "setup_worker_memory_pressure"
+            | "setup_worker_disk_pressure"
+            | "setup_worker_pressure_unavailable"
+    )
 }
 
 /// Best-effort operational summary write so worker milestones appear in Logs.
@@ -105,6 +113,7 @@ pub(crate) async fn execute(
     store: &DatasetStore,
     task: &ClaimedTask,
     cancel: Arc<AtomicBool>,
+    embedded: bool,
 ) -> anyhow::Result<SetupOutcome> {
     let payload = setup_jobs::payload(repo, &task.job_id, &task.input_hash).await?;
     anyhow::ensure!(
@@ -119,13 +128,18 @@ pub(crate) async fn execute(
         .path_for_job(repo, &task.job_id, &dataset)
         .await
         .context("setup_dataset_unavailable")?;
-    let budget = bulk_pressure::await_admission(repo, task, &workspace, &cancel).await?;
+    let reclaim_unused_memory = embedded && payload.operation == MaintenanceOperation::SeedActors;
+    let started = Instant::now();
+    let budget =
+        bulk_pressure::await_admission(repo, task, &workspace, &cancel, reclaim_unused_memory)
+            .await;
+    if reclaim_unused_memory {
+        report_seed_phase("admission", started);
+    }
+    let budget = budget?;
     match payload.operation {
         MaintenanceOperation::SeedActors => {
             seed(repo, task, workspace, path, dataset, budget, cancel).await
-        }
-        MaintenanceOperation::TrainClassifier => {
-            train(repo, task, workspace, path, dataset, budget, cancel).await
         }
         // Reindex belongs to the actual index coordinator, not CSV ingestion.
         _ => anyhow::bail!("setup_operation_requires_its_own_consumer"),
@@ -202,6 +216,32 @@ fn read_actors(path: &Path, dataset: &DatasetRef) -> anyhow::Result<Vec<Actor>> 
     Ok(actors)
 }
 
+async fn check_shared_seed_pressure(repo: &Repository) -> anyhow::Result<()> {
+    let Some(observation) = actor_search_outbox::observe(repo)
+        .await?
+        .filter(|observation| observation.pressure_paused)
+    else {
+        return Ok(());
+    };
+    // Physical pressure from the co-located index describes the seed worker too.
+    match observation.pressure_reason.as_str() {
+        "memory_high_water" => anyhow::bail!("worker_memory_pressure"),
+        "disk_high_water" => anyhow::bail!("worker_workspace_disk_pressure"),
+        "pressure_measurement_unavailable" | "resource_measurement_unavailable" => {
+            anyhow::bail!("worker_pressure_unknown")
+        }
+        _ => Ok(()),
+    }
+}
+
+fn report_seed_phase(phase: &'static str, started: Instant) {
+    tracing::debug!(
+        code = "embedded_actor_seed_phase_elapsed",
+        phase,
+        elapsed_us = started.elapsed().as_micros() as u64,
+    );
+}
+
 async fn seed(
     repo: &Repository,
     task: &ClaimedTask,
@@ -213,17 +253,21 @@ async fn seed(
 ) -> anyhow::Result<SetupOutcome> {
     let execution = actor_catalog::SeedExecution::from_claimed(repo, task, &cancel).await?;
     let selected = dataset.clone();
+    let started = Instant::now();
     let validated = tokio::task::spawn_blocking({
         let cancel = Arc::clone(&cancel);
         let workspace = workspace.clone();
         let budget = budget.clone();
         move || bulk_pressure::scan_actors_checked(&path, &selected, &workspace, &budget, &cancel)
     })
-    .await??;
+    .await;
+    report_seed_phase("csv_spool_validation", started);
+    let validated = validated??;
     if cancel.load(Ordering::Acquire) {
         return Ok(SetupOutcome::Interrupted);
     }
     let total = validated.total;
+    let started = Instant::now();
     record_job_event(
         repo,
         task,
@@ -232,6 +276,7 @@ async fn seed(
         format!("Validated actor catalog dataset ({total} records)"),
     )
     .await;
+    report_seed_phase("job_log", started);
     let (send_batch, batches) = mpsc::channel(1);
     let producer = tokio::task::spawn_blocking({
         let cancel = Arc::clone(&cancel);
@@ -258,95 +303,128 @@ async fn seed(
         },
     ));
     let mut last_logged_bucket: i64 = -1;
-    let mut last_logged_at: Option<std::time::Instant> = None;
-    let mut last_processed: usize = 0;
+    let mut last_logged_at: Option<Instant> = None;
+    let mut last_published_at: Option<Instant> = None;
+    let mut last_batch_at = Instant::now();
+    let progress_publish_interval = Duration::from_secs(10);
+    let pressure_interval = Duration::from_secs(5);
+    let mut pressure_tick = tokio::time::interval(pressure_interval);
+    pressure_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let complete = loop {
         tokio::select! {
             result=&mut operation=>break result,
+            _ = pressure_tick.tick(), if budget.has_co_located_index() => {
+                if last_batch_at.elapsed() < pressure_interval {
+                    continue;
+                }
+                // While the shared guard is paused, the source future can
+                // wait indefinitely without sending another Progress event.
+                if let Err(error) = check_shared_seed_pressure(repo).await {
+                    argos_osint_core::cancellation::cancel_with_notify(&cancel);
+                    let _ = operation.as_mut().await;
+                    break Err(error);
+                }
+            }
             Some(progress)=receive.recv()=>{
+                last_batch_at = Instant::now();
                 let observation=tokio::task::spawn_blocking({let workspace=workspace.clone();let budget=budget.clone();move||budget.check_running(&workspace)}).await;
-                if !matches!(observation,Ok(Ok(()))) {
+                if let Err(error) = observation.map_err(anyhow::Error::from).and_then(|result| result) {
                     argos_osint_core::cancellation::cancel_with_notify(&cancel);
                     let _=operation.as_mut().await;
-                    break Err(anyhow::anyhow!("worker_seed_resource_budget"));
+                    break Err(error);
                 }
-                if let Err(error)=setup_jobs::record_progress(repo,task,"Seeding actors",progress.processed as u64,progress.total as u64).await {
-                    argos_osint_core::cancellation::cancel_with_notify(&cancel);
-                    // Retain the source future so owner-conditional partial
-                    // cleanup closes only its already committed causal range.
-                    let _=operation.as_mut().await;
-                    break Err(error.into());
+                // The source has already persisted its exact checkpoint.
+                // Coalesce the separate Jobs display counter during active work.
+                if last_published_at.is_none_or(|at| at.elapsed() >= progress_publish_interval) {
+                    let started = Instant::now();
+                    let published = setup_jobs::record_progress(repo,task,"Seeding actors",progress.processed as u64,progress.total as u64).await;
+                    report_seed_phase("job_progress", started);
+                    if let Err(error) = published {
+                        argos_osint_core::cancellation::cancel_with_notify(&cancel);
+                        // Retain the source future so owner-conditional partial
+                        // cleanup closes only its already committed causal range.
+                        let _=operation.as_mut().await;
+                        break Err(error.into());
+                    }
+                    last_published_at = Some(Instant::now());
                 }
-                last_processed = progress.processed;
                 let pct = if progress.total > 0 {
                     ((progress.processed as u64 * 100) / progress.total as u64).min(100) as i64
                 } else {
                     0
                 };
                 let bucket = pct / 10;
-                if last_logged_bucket < 0 {
-                    last_logged_bucket = bucket;
-                    last_logged_at = Some(std::time::Instant::now());
-                    record_job_event(
-                        repo,
-                        task,
-                        Severity::Info,
-                        "worker.progress",
-                        format!("Seeding actors started (0 / {})", progress.total),
-                    )
-                    .await;
+                let message = if last_logged_bucket < 0 {
+                    Some(format!("Seeding actors started ({} / {})", progress.processed, progress.total))
                 } else if bucket > last_logged_bucket
                     || last_logged_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
                 {
+                    Some(format!("Seeding actors: {} / {} ({}%)", progress.processed, progress.total, pct))
+                } else {
+                    None
+                };
+                if let Some(message) = message {
+                    let started = Instant::now();
                     last_logged_bucket = bucket;
-                    last_logged_at = Some(std::time::Instant::now());
-                    record_job_event(
-                        repo,
-                        task,
-                        Severity::Info,
-                        "worker.progress",
-                        format!("Seeding actors: {} / {} ({}%)", progress.processed, progress.total, pct),
-                    )
-                    .await;
+                    last_logged_at = Some(started);
+                    record_job_event(repo, task, Severity::Info, "worker.progress", message).await;
+                    report_seed_phase("job_log", started);
                 }
             }
         }
     };
-    if let Err(error) = &complete {
+    if complete.is_err() {
         argos_osint_core::cancellation::cancel_with_notify(&cancel);
-        record_job_event(
-            repo,
-            task,
-            Severity::Error,
-            "worker.error",
-            format!(
-                "Actor seed failed at {} / {}: {}",
-                last_processed,
-                total,
-                safe_failure_reason(error)
-            ),
-        )
-        .await;
     }
     // Dropping the completed source future closes its bounded receiver before
     // joining, so a blocked producer always wakes on failure/cancellation.
     drop(operation);
     let produced = producer.await;
+    if let Err(error) = &complete {
+        let reason = safe_failure_reason(error);
+        let message =
+            match setup_jobs::actor_seed_checkpoint(repo, &task.job_id, &dataset.sha256).await {
+                Ok(Some(checkpoint)) if checkpoint.status == "failed" => {
+                    let _ = setup_jobs::record_result(
+                        repo,
+                        task,
+                        &json!({
+                            "operation": "actor_seed",
+                            "dataset_sha256": dataset.sha256,
+                            "processed": checkpoint.processed,
+                            "total": checkpoint.total,
+                            "database_seeded": false,
+                        }),
+                    )
+                    .await;
+                    format!(
+                        "Actor seed stopped at {} / {} committed rows: {}",
+                        checkpoint.processed, checkpoint.total, reason
+                    )
+                }
+                _ => format!("Actor seed stopped: {reason}"),
+            };
+        record_job_event(repo, task, Severity::Error, "worker.error", message).await;
+    }
     let complete = complete?;
     produced.context("actor batch producer stopped")??;
+    let _ = tokio::task::spawn_blocking(move || budget.release_seed_allocations()).await;
     let phase = if complete.complete {
         "Database seeded"
     } else {
         "Seed incomplete"
     };
-    setup_jobs::record_progress(
+    let started = Instant::now();
+    let published = setup_jobs::record_progress(
         repo,
         task,
         phase,
         complete.processed as u64,
         complete.total as u64,
     )
-    .await?;
+    .await;
+    report_seed_phase("final_progress", started);
+    published?;
     setup_jobs::record_result(repo,task,&json!({"operation":"actor_seed","dataset_sha256":dataset.sha256,"processed":complete.processed,"total":complete.total,"aliases":complete.aliases,"database_seeded":complete.complete,"actor_search_state":"not_observed"})).await?;
     record_job_event(
         repo,
@@ -368,137 +446,6 @@ async fn seed(
     } else {
         SetupOutcome::Interrupted
     })
-}
-
-async fn train(
-    repo: &Repository,
-    task: &ClaimedTask,
-    workspace: PathBuf,
-    path: PathBuf,
-    dataset: DatasetRef,
-    budget: bulk_pressure::ParserBudget,
-    cancel: Arc<AtomicBool>,
-) -> anyhow::Result<SetupOutcome> {
-    budget.check_training_input(dataset.size_bytes)?;
-    let check_path = path.clone();
-    let check_dataset = dataset.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut reader = verified_reader(&check_path, &check_dataset)?;
-        std::io::copy(&mut reader, &mut std::io::sink())?;
-        verify_complete(reader, &check_dataset)
-    })
-    .await??;
-    let mut request = DatasetRequest::default();
-    request.explicit_file = Some(path);
-    request.cwd = workspace.clone();
-    request.executable = std::env::current_exe()?;
-    request.home = workspace.clone();
-    tokio::task::spawn_blocking({
-        let workspace = workspace.clone();
-        let budget = budget.clone();
-        move || budget.check_running(&workspace)
-    })
-    .await??;
-    if cancel.load(Ordering::Acquire) {
-        return Ok(SetupOutcome::Interrupted);
-    }
-    let home = ClassifierHome::new(workspace.clone());
-    // The exact durable job ID is the stable domain request key. Activation is
-    // absent from the public maintenance request and explicitly retained here.
-    let accepted = home
-        .start_training(ManualTrainRequest::new(
-            request,
-            task.job_id.clone(),
-            SyntheticActivation::RetainPrior,
-        ))
-        .await?;
-    record_job_event(
-        repo,
-        task,
-        Severity::Info,
-        "worker.progress",
-        "Classifier training started",
-    )
-    .await;
-    let mut tick = tokio::time::interval(Duration::from_millis(250));
-    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let mut cancelled = false;
-    let mut pressure_failed = false;
-    let mut last_pressure = std::time::Instant::now();
-    let mut last_stage = String::new();
-    let mut last_stage_log: Option<std::time::Instant> = None;
-    let result = async {loop {
-        tick.tick().await;
-        if last_pressure.elapsed()>=Duration::from_secs(1) {
-            let observation=tokio::task::spawn_blocking({let workspace=workspace.clone();let budget=budget.clone();move||budget.check_running(&workspace)}).await?;
-            last_pressure=std::time::Instant::now();
-            if observation.is_err()&&!cancelled {
-                home.cancel_training(&accepted.job_id).await?;
-                cancelled=true;pressure_failed=true;
-            }
-        }
-        if cancel.load(Ordering::Acquire) && !cancelled {
-            home.cancel_training(&accepted.job_id).await?;
-            cancelled = true;
-        }
-        let detail = home.job_detail(&accepted.job_id).await?;
-        if let Some(progress) = detail.progress {
-            let stage = progress.stage.as_str();
-            setup_jobs::record_progress(
-                repo,
-                task,
-                stage,
-                progress.rows_seen,
-                progress.rows_total,
-            )
-            .await?;
-            if stage != last_stage
-                || last_stage_log.is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
-            {
-                last_stage = stage.to_owned();
-                last_stage_log = Some(std::time::Instant::now());
-                record_job_event(
-                    repo,
-                    task,
-                    Severity::Info,
-                    "worker.progress",
-                    format!(
-                        "Classifier training ({stage}): {} / {}",
-                        progress.rows_seen, progress.rows_total
-                    ),
-                )
-                .await;
-            }
-        }
-        match detail.state {
-            TrainingJobState::Completed => {
-                anyhow::ensure!(!pressure_failed,"worker_training_resource_budget");
-                let outcome = detail
-                    .outcome
-                    .ok_or_else(|| anyhow::anyhow!("training_completed_without_candidate"))?;
-                let Provenance::SyntheticBaseline { dataset_sha256, .. } =
-                    &outcome.report.provenance
-                else {
-                    anyhow::bail!("training_dataset_provenance_unavailable");
-                };
-                anyhow::ensure!(
-                    dataset_sha256 == &dataset.sha256,
-                    "training_dataset_hash_mismatch"
-                );
-                setup_jobs::record_result(repo,task,&json!({"operation":"classifier_train","engine":"natural","atlas_engine":"rust_bert_zero_shot","dataset_sha256":dataset.sha256,"candidate_model_id":outcome.candidate_model_id,"active_model_id":outcome.active_model_id,"activation_requested":false,"state":outcome.state})).await?;
-                break Ok(SetupOutcome::Complete);
-            }
-            TrainingJobState::Cancelled | TrainingJobState::Interrupted => {
-                anyhow::ensure!(!pressure_failed,"worker_training_resource_budget");
-                break Ok(SetupOutcome::Interrupted)
-            }
-            TrainingJobState::Failed => break Err(anyhow::anyhow!("natural_training_failed")),
-            _ => {}
-        }
-    }}.await;
-    let stopped = home.shutdown().await;
-    stopped?;
-    result
 }
 
 #[cfg(test)]
@@ -524,6 +471,25 @@ mod tests {
             )),
             "native_domain_operation_failed"
         );
+    }
+
+    #[test]
+    fn physical_seed_failures_keep_safe_distinct_retry_reasons() {
+        for (code, reason) in [
+            ("worker_memory_pressure", "setup_worker_memory_pressure"),
+            (
+                "worker_workspace_disk_pressure",
+                "setup_worker_disk_pressure",
+            ),
+            (
+                "worker_pressure_unknown",
+                "setup_worker_pressure_unavailable",
+            ),
+        ] {
+            assert_eq!(safe_failure_reason(&anyhow::anyhow!(code)), reason);
+            assert!(is_worker_pressure_failure(reason));
+        }
+        assert!(!is_worker_pressure_failure("setup_dataset_resource_budget"));
     }
 
     #[test]

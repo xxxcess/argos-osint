@@ -90,6 +90,17 @@ impl From<&Provenance> for ProvenanceSummary {
                     seed_dataset_sha256: None,
                 }
             }
+            Provenance::FineTunedAtlasBert { dataset_sha256, .. } => {
+                return Self {
+                    kind: "fine_tuned_atlas_bert".into(),
+                    label: value.label().into(),
+                    dataset_version: "atlas-bert-frozen-v1".into(),
+                    dataset_sha256: dataset_sha256.clone(),
+                    review_reference: None,
+                    seed_dataset_sha256: None,
+                };
+            }
+
             Provenance::SyntheticBaseline {
                 dataset_version,
                 dataset_sha256,
@@ -546,6 +557,28 @@ impl ClassifierHome {
         &self.inner.home
     }
 
+    /// Checks that the configured Atlas worker and checkpoint files are present.
+    /// This observation starts no worker and does not certify inference or a model pin.
+    pub async fn check_local_atlas_assets(&self) -> Result<(), ClassifierError> {
+        self.check_local_atlas_checkpoint().await.map(|_| ())
+    }
+
+    /// Checks local Atlas assets and reads the selected candidate pointer when present.
+    /// This observation starts no worker and does not certify inference or the model bytes.
+    pub async fn check_local_atlas_checkpoint(
+        &self,
+    ) -> Result<Option<super::remote::PinIdentity>, ClassifierError> {
+        #[cfg(feature = "classifier")]
+        {
+            let home = self.inner.home.clone();
+            blocking(move || super::bert::check_configured_assets(&home).map_err(HomeError::from))
+                .await
+                .map_err(classifier_error)
+        }
+        #[cfg(not(feature = "classifier"))]
+        Err(ClassifierError::Unavailable)
+    }
+
     /// Constructs a lazy home adapter; runtime paths should already be absolute.
     #[must_use]
     pub fn new(home: PathBuf) -> Self {
@@ -652,7 +685,15 @@ impl ClassifierHome {
         if requested.is_some_and(|snapshot| {
             snapshot.algorithm_version != super::ZERO_SHOT_ALGORITHM_VERSION
         }) {
-            return self.pin_natural(requested).await;
+            // Archive fixtures replay their original exact receipts. Shipping
+            // builds compile out the Natural runtime.
+            if super::LEGACY_RUNTIME_AVAILABLE {
+                return self.pin_natural(requested).await;
+            }
+            return Err(ClassifierError::Incompatible(
+                "historical Natural models are retained for audit and cannot run Atlas inference"
+                    .into(),
+            ));
         }
         if super::remote::is_configured() {
             return super::remote::pin_configured(requested, &self.inner.cancel).await;
@@ -698,14 +739,17 @@ impl ClassifierHome {
             {
                 let mut pins = self.inner.pins.lock().map_err(|_| ClassifierError::Busy)?;
                 if let Some(service) = pins.get(&key).and_then(Weak::upgrade) {
-                    let snapshot = if current {
-                        service
-                            .pinned_model()
-                            .cloned()
-                            .ok_or(ClassifierError::Unavailable)?
-                    } else {
-                        snapshot
-                    };
+                    // A BERT activation persists its timestamp even when the same
+                    // model bytes were already warm from an earlier activation.
+                    let snapshot =
+                        if current && matches!(&snapshot.provenance, Provenance::ZeroShot) {
+                            service
+                                .pinned_model()
+                                .cloned()
+                                .ok_or(ClassifierError::Unavailable)?
+                        } else {
+                            snapshot
+                        };
                     return Ok(PinnedClassifier {
                         snapshot,
                         manifest_sha256,
@@ -743,7 +787,7 @@ impl ClassifierHome {
         &self,
         requested: Option<&ModelSnapshot>,
     ) -> Result<PinnedClassifier, ClassifierError> {
-        if !cfg!(feature = "classifier") {
+        if !super::LEGACY_RUNTIME_AVAILABLE {
             return Err(ClassifierError::Unavailable);
         }
         // Coalesce concurrent cold pins before constructing a native runtime.
@@ -805,7 +849,7 @@ impl ClassifierHome {
         &self,
         request: ManualTrainRequest,
     ) -> Result<JobAccepted, HomeError> {
-        if !cfg!(feature = "classifier") {
+        if !super::LEGACY_RUNTIME_AVAILABLE {
             return Err(ClassifierError::Unavailable.into());
         }
         if self.inner.cancel.load(Ordering::Acquire) {
@@ -935,11 +979,14 @@ impl ClassifierHome {
         validate_job_id(job_id)?;
         let home = self.inner.home.clone();
         let id = job_id.to_string();
-        blocking(move || job_detail_sync(&home, &id, true)).await
+        blocking(move || job_detail_sync(&home, &id, super::LEGACY_RUNTIME_AVAILABLE)).await
     }
 
     /// Requests cancellation of this home's exact manual job, idempotently.
     pub async fn cancel_training(&self, job_id: &str) -> Result<TrainingJob, HomeError> {
+        if !super::LEGACY_RUNTIME_AVAILABLE {
+            return Err(ClassifierError::Unavailable.into());
+        }
         validate_job_id(job_id)?;
         let home = self.inner.home.clone();
         let id = job_id.to_string();
@@ -975,7 +1022,7 @@ impl ClassifierHome {
 
     /// Rolls back only to a previously activated and revalidated named model.
     pub async fn rollback_to(&self, model: &ModelId) -> Result<RollbackResult, HomeError> {
-        if !cfg!(feature = "classifier") {
+        if !super::LEGACY_RUNTIME_AVAILABLE {
             return Err(ClassifierError::Unavailable.into());
         }
         let home = self.inner.home.clone();
@@ -1088,7 +1135,7 @@ fn unavailable_readiness(code: &str) -> Readiness {
         schema_version: "classifier-readiness-v1".into(),
         state: ClassifierStatus::Unavailable,
         active_model_state: ClassifierStatus::Unavailable,
-        feature_enabled: cfg!(feature = "classifier"),
+        feature_enabled: super::LEGACY_RUNTIME_AVAILABLE,
         can_infer: false,
         can_train: false,
         integrity: "pending".into(),
@@ -1112,7 +1159,7 @@ fn prepare_probe(
     request: &DatasetRequest,
 ) -> Result<(String, Readiness, Option<DatasetResolution>), HomeError> {
     let mut value = unavailable_readiness("verification_pending");
-    if !cfg!(feature = "classifier") {
+    if !super::LEGACY_RUNTIME_AVAILABLE {
         value.diagnostic = Some(diagnostic(
             "feature_disabled",
             "Classifier feature unavailable",
@@ -1234,7 +1281,7 @@ fn refresh_probe(
     selected: Option<DatasetResolution>,
     mut value: Readiness,
 ) -> Result<Readiness, HomeError> {
-    if !cfg!(feature = "classifier") {
+    if !super::LEGACY_RUNTIME_AVAILABLE {
         return Ok(value);
     }
     let root = artifact::root_for(home)?;
@@ -2279,7 +2326,7 @@ pub async fn preflight_cycle(
     })
 }
 
-#[cfg(all(test, feature = "classifier"))]
+#[cfg(all(test, feature = "classifier", feature = "legacy-natural-fixtures"))]
 mod ownership_tests {
     use super::*;
 

@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 
+[features]
+native-github-dataset = []
+
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
@@ -14,8 +17,10 @@ sha2.workspace = true
 clap.workspace = true
 fleetworks-contracts = { path = "../../crates/fleetworks-contracts" }
 fleetworks-workstation = { path = "../../crates/fleetworks-workstation" }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "sync", "net", "fs", "io-util"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -35,6 +40,3 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dirs.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

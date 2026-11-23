@@ -1,13 +1,45 @@
 #!/usr/bin/env bash
-# Install the pinned Atlas checkpoint into a new directory.
+# Install the pinned Atlas checkpoint into a new directory, optionally with offline fitting inputs.
 set -euo pipefail
 
+worker_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
+convert_weights() {
+  local weights=$1 converter=$2 torch_lib
+  if [[ ${LIBTORCH_USE_PYTORCH:-} == 1 || -z ${LIBTORCH:-} ]]; then
+    torch_lib=$(python -c 'import pathlib, torch; print(pathlib.Path(torch.__file__).parent / "lib")')
+    export LIBTORCH_USE_PYTORCH=1
+  else
+    torch_lib="$LIBTORCH/lib"
+  fi
+  if [[ $(uname -s) == Darwin ]]; then
+    export DYLD_LIBRARY_PATH="$torch_lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+  else
+    export LD_LIBRARY_PATH="$torch_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  fi
+  export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$worker_dir/target}"
+  cargo build --locked --manifest-path "$converter/Cargo.toml" --bin convert-tensor
+  TORCH_FORCE_WEIGHTS_ONLY_LOAD=1 CARGO_NET_OFFLINE=true \
+    python "$converter/utils/convert_model.py" "$weights"
+  test -s "$(dirname "$weights")/rust_model.ot"
+  rm -- "$(dirname "$weights")/model.npz"
+}
+
+if [[ $# == 3 && $1 == --convert ]]; then
+  convert_weights "$2" "$3"
+  exit
+fi
+
+keep_training=false
+if [[ $# == 2 && $1 == --keep-training-inputs ]]; then
+  keep_training=true
+  shift
+fi
 if [[ $# != 1 || -z "$1" ]]; then
-  echo "usage: bash tools/atlas-bert/scripts/prepare-model.sh <new-model-dir>" >&2
+  echo "usage: bash tools/atlas-bert/scripts/prepare-model.sh [--keep-training-inputs] <new-dir>" >&2
   exit 2
 fi
 
-worker_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 mkdir -p -- "$(dirname "$1")"
 parent_dir=$(cd "$(dirname "$1")" && pwd)
 model_dir="$parent_dir/$(basename "$1")"
@@ -53,25 +85,15 @@ tar -xOf "$converter/rust-bert.crate" rust-bert-0.22.0/utils/convert_model.py > 
 tar -xOf "$converter/rust-bert.crate" rust-bert-0.22.0/src/convert-tensor.rs > "$converter/src/bin/convert-tensor.rs"
 cp "$worker_dir/Cargo.toml" "$worker_dir/Cargo.lock" "$converter/"
 
-if [[ ${LIBTORCH_USE_PYTORCH:-} == 1 || -z ${LIBTORCH:-} ]]; then
-  torch_lib=$(python -c 'import pathlib, torch; print(pathlib.Path(torch.__file__).parent / "lib")')
-  export LIBTORCH_USE_PYTORCH=1
+convert_weights "$model/pytorch_model.bin" "$converter"
+if $keep_training; then
+  installed="$work_dir"
 else
-  torch_lib="$LIBTORCH/lib"
+  rm -- "$model/pytorch_model.bin"
+  installed="$model"
 fi
-if [[ $(uname -s) == Darwin ]]; then
-  export DYLD_LIBRARY_PATH="$torch_lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-else
-  export LD_LIBRARY_PATH="$torch_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-fi
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$worker_dir/target}"
-cargo build --locked --manifest-path "$converter/Cargo.toml" --bin convert-tensor
-TORCH_FORCE_WEIGHTS_ONLY_LOAD=1 CARGO_NET_OFFLINE=true \
-  python "$converter/utils/convert_model.py" "$model/pytorch_model.bin"
-test -s "$model/rust_model.ot"
-rm "$model/pytorch_model.bin" "$model/model.npz"
 
-python - "$model" "$model_dir" <<'PY'
+python - "$installed" "$model_dir" <<'PY'
 import os
 import sys
 

@@ -11,7 +11,7 @@ import { paint, sheetProp, sheetStyle } from "../../../vitest.test-support";
  * prove real components consume them rather than redeclaring values.
  */
 describe("Theme tokens (imported from @argos/ui source)", () => {
-  it("defines the matte canvas and cool charcoal surfaces", () => {
+  it("defines the deep-space backdrop and charcoal material bases", () => {
     expect(colors.bg).toBe("#060709");
     expect(colors.panel).toBe("#0B0F14");
     expect(colors.raised).toBe("#121820");
@@ -29,7 +29,7 @@ describe("Theme tokens (imported from @argos/ui source)", () => {
     expect(colors.danger).toBe("#f280a0");
   });
 
-  it("retains compatibility names as opaque matte fills and faint decorative edges", () => {
+  it("retains the opaque fallback and decorative edge tokens", () => {
     expect(colors.glass).toBe("#0B0F14");
     expect(colors.glassStrong).toBe("#121820");
     expect(colors.glassBorder).toBe("#647587");
@@ -58,10 +58,10 @@ describe("Theme tokens (imported from @argos/ui source)", () => {
     expect(g.boxShadow).toBe(`inset 0 0 0 1px ${colors.accent}`);
   });
 
-  it("the legacy glass recipe is an opaque matte card without backdrop blur", () => {
+  it("the shared glass recipe supplies opaque paint and a functional hairline", () => {
     expect(glass.backgroundColor).toBe(colors.panel);
     expect(glass.borderWidth).toBe(1);
-    expect(glass.borderColor).toBe(colors.cardEdge);
+    expect(glass.borderColor).toBe(colors.border);
     expect(glass).not.toHaveProperty("backdropFilter");
     expect(glass).not.toHaveProperty("WebkitBackdropFilter");
   });
@@ -77,7 +77,7 @@ describe("Theme tokens (imported from @argos/ui source)", () => {
     const appliedStyle = sheetStyle(panel);
     expect(paint(panel, "backgroundColor")).toBe(colors.glass.toLowerCase());
     expect(appliedStyle["backdrop-filter"]).toBeUndefined();
-    expect(appliedStyle["border-top-width"]).toBe("0px");
+    expect(appliedStyle["border-top-width"]).toBe("1px");
     expect(screen.getByText("token consumer")).toBeVisible();
   });
 

@@ -230,7 +230,8 @@ impl ScopedCredential {
                 || (!permissions.contains(&Permission::RegisterWorkstation)
                     && !permissions.contains(&Permission::RebindWorkstation)
                     && !permissions.contains(&Permission::MaintainBackend)
-                    && !permissions.contains(&Permission::ManageConfiguration)),
+                    && !permissions.contains(&Permission::ManageConfiguration)
+                    && !permissions.contains(&Permission::ManageInboxQa)),
             "web relay cannot receive native registration or maintenance authority"
         );
         Ok(Self {
@@ -717,7 +718,8 @@ pub(crate) async fn protect(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
-    headers.insert(header::VARY, HeaderValue::from_static("Origin"));
+    // Preserve response-specific negotiation while varying gateway responses by origin.
+    headers.append(header::VARY, HeaderValue::from_static("Origin"));
     if let Some(value) = origin {
         headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
         headers.insert(

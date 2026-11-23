@@ -346,6 +346,46 @@ pub fn mapping_predicates_sha256() -> String {
     format!("{:x}", digest.finalize())
 }
 
+/// Returns the compiled news-provider rules and fingerprint for operator review.
+pub fn mapping_review_manifest() -> serde_json::Value {
+    let vocabularies = [
+        ("newsdata-v1", NEWSDATA_ELIGIBLE),
+        ("currents-v1", CURRENTS_ELIGIBLE),
+    ];
+    let providers: serde_json::Map<String, serde_json::Value> = vocabularies
+        .into_iter()
+        .map(|(provider, labels)| {
+            let categories: serde_json::Map<String, serde_json::Value> = labels
+                .iter()
+                .map(|label| {
+                    (
+                        (*label).to_owned(),
+                        serde_json::json!(candidate_domains_for_label(label)),
+                    )
+                })
+                .collect();
+            (provider.to_owned(), serde_json::Value::Object(categories))
+        })
+        .collect();
+    let anchors: serde_json::Map<String, serde_json::Value> = DomainId::ALL
+        .into_iter()
+        .map(|domain| {
+            (
+                domain.as_str().to_owned(),
+                serde_json::json!(anchors_for_domain(domain)),
+            )
+        })
+        .collect();
+    serde_json::json!({
+        "version": MAPPING_VERSION,
+        "sha256": mapping_predicates_sha256(),
+        "provider_categories": providers,
+        "domain_anchors": anchors,
+        "excluded_categories": EXCLUDED_LABELS,
+        "reference": "Eligible provider categories nominate domains. An English title or description must also match a whole-word domain phrase within a sentence. Observations with unknown categories or no domain matches abstain."
+    })
+}
+
 /// Validates an independent review certificate against the compiled predicate set.
 pub fn validate_approval(approval: &MappingApproval) -> Result<(), ClassifierError> {
     let valid = approval.mapping_version == MAPPING_VERSION
@@ -705,6 +745,26 @@ pub fn map_labels(
     })
 }
 
+/// Builds the reference set for agreement with the compiled provider mapping.
+///
+/// An unmapped observation abstains. A domain outside the returned set is a
+/// nonmatch for agreement scoring. Its actual article membership stays unknown.
+///
+/// # Errors
+/// Returns a classifier error for malformed or oversized observation evidence.
+pub fn mapping_agreement_reference(
+    observation: &ProviderObservation,
+) -> Result<Option<[bool; 6]>, ClassifierError> {
+    let result = map_labels(observation, None)?;
+    let set = result
+        .membership
+        .map(|label| label == LabelMembership::Present);
+    Ok(
+        (result.abstain == Some(AbstainReason::UnreviewedMapping) && set.contains(&true))
+            .then_some(set),
+    )
+}
+
 /// Extracts structured provider diagnostics for receipt telemetry.
 ///
 /// # Errors
@@ -773,6 +833,7 @@ mod tests {
         let masked = map_labels(&obs, None).unwrap();
         assert_eq!(masked.abstain, Some(AbstainReason::UnknownVocabulary));
         assert_eq!(masked.membership, [LabelMembership::Unknown; 6]);
+        assert_eq!(mapping_agreement_reference(&obs).unwrap(), None);
     }
 
     #[test]
@@ -791,5 +852,14 @@ mod tests {
         assert!(!masked.eligible_for_training);
         assert_eq!(masked.abstain, Some(AbstainReason::UnreviewedMapping));
         assert!(!masked.evidence.is_empty());
+        assert_eq!(
+            mapping_agreement_reference(&obs).unwrap(),
+            Some([true, false, false, false, false, false])
+        );
+        let unsupported = ProviderObservation {
+            language: Some("fr".into()),
+            ..obs
+        };
+        assert_eq!(mapping_agreement_reference(&unsupported).unwrap(), None);
     }
 }

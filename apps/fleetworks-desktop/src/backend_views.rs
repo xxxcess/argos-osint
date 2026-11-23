@@ -1,14 +1,16 @@
 //! Allowlisted backend operation cards and workstation-scoped activity.
 
 use fleetworks_contracts::context::Permission;
+use fleetworks_contracts::readiness::AtlasKeyPresence;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::MaintenanceOperation;
+use fleetworks_contracts::readiness::ReadinessState;
 use rune::Cx;
 use rune::El;
+use rune::Key;
 use rune::ScrollSpec;
 use rune::TextEdit;
 use rune_kit::Cell;
-use rune_kit::Dialog;
 use rune_kit::Kit;
 use rune_kit::Progress;
 use rune_kit::RollingText;
@@ -23,6 +25,7 @@ use crate::app::ModelsTab;
 use crate::app::Page;
 use crate::app::SeedStage;
 use crate::app::State;
+use crate::backend::ReadRequest;
 use crate::icons;
 use crate::job_actions::JobAction;
 use crate::logs::LogStatus;
@@ -45,7 +48,7 @@ fn card(state: &State, preferences: ViewPreferences, tone: StatusTone, body: El)
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
     let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
     material::luminous_card(
-        body.padding(16.0).gap(10.0).w_full(),
+        body.padding(12.0).gap(8.0).w_full(),
         tone,
         false,
         preferences,
@@ -129,6 +132,25 @@ fn job_worker_sync_summary(job: &crate::backend::ActivityJob) -> String {
     summary
 }
 
+fn job_error_summary(job: &crate::backend::ActivityJob) -> &str {
+    if job.operation != fleetworks_contracts::ATLAS_CYCLE_OPERATION {
+        return &job.error_summary;
+    }
+    match job.error_summary.as_str() {
+        "atlas_gnews_key_missing" => "GNews API key missing. Save a key in OSINT Tools.",
+        "atlas_newsdata_key_missing" => "NewsData.io API key missing. Save a key in OSINT Tools.",
+        "atlas_newsapi_key_missing" => "NewsAPI API key missing. Save a key in OSINT Tools.",
+        "atlas_currents_key_missing" => "Currents API key missing. Save a key in OSINT Tools.",
+        "atlas_classifier_unavailable" | "atlas_classifier_service_unavailable" => {
+            "Rust-BERT worker unavailable. Check the Distributed gateway."
+        }
+        "atlas_classifier_model_not_configured" => "Rust-BERT checkpoint is not configured.",
+        "atlas_classifier_timeout" => "Rust-BERT worker timed out.",
+        "atlas_classifier_busy" => "Rust-BERT worker is busy.",
+        _ => &job.error_summary,
+    }
+}
+
 pub(crate) fn page(
     state: &State,
     cx: &Cx<State>,
@@ -142,8 +164,8 @@ pub(crate) fn page(
     match state.page {
         Page::Seed => scroll(maintenance(state, preferences, kit, layers), "seed-body"),
         Page::Atlas => atlas(state, preferences, kit, layers),
-        Page::Tools => tools(state, preferences, kit, layers),
-        Page::Models => models(state, preferences, kit, layers),
+        Page::Tools => tools(state, cx, preferences, kit, layers),
+        Page::Models => models(state, cx, preferences, kit, layers),
         Page::Jobs => jobs(state, preferences, kit, layers, log_width),
         _ => rune::col(),
     }
@@ -203,27 +225,42 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
     })
     .build(kit, preferences, pointer_ref);
 
-    let mut action = rune::col().child(ui_components::section_header(
+    let mut action = rune::col().gap(8.0).child(ui_components::section_header(
         &icons::ATLAS,
         "News Cycles",
-        Some("Queue incremental news collection or inspect prior runs"),
+        None,
         count_badge,
-        Some(trigger),
+        None,
         kit,
     ));
 
-    if let Some(reason) = reason {
-        action = action.child(quiet(reason, kit));
+    if state.atlas_advertised() {
+        action = action.child(atlas_prerequisites(state, preferences, kit));
+        tool_key_dialog(state, preferences, kit, layers);
     }
+    if let Some(reason) = &reason {
+        action = action.child(quiet(reason.as_str(), kit));
+    }
+    if state.is_local_backend() {
+        action = action.child(
+            ActionButton::new("Set up Distributed")
+                .key("atlas-open-distributed-setup")
+                .on_press_tx(|state: &mut State, tx| {
+                    state.setup_gateway = true;
+                    tx.scroll_into_view("switch-remote-gateway");
+                    tx.focus("switch-remote-gateway", tx.by_keys());
+                })
+                .build(kit, preferences, None),
+        );
+    }
+    action = action.child(rune::row().child(trigger));
     if !lane.busy() {
         if let Some(snapshot) = &lane.confirmation {
-            action = action.child(
+            action = action.child(material::glass_panel(
                 rune::col()
                     .gap(8.0)
                     .padding(12.0)
                     .radius(8.0)
-                    .fill(theme::hex(theme::SURFACE_RAISED))
-                    .border(1.0, theme::hex(theme::ACCENT_DEEP))
                     .key("atlas-submit-confirmation")
                     .child(heading("Confirm New Cycle", kit))
                     .child(quiet(
@@ -242,6 +279,7 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                                     .key("atlas-submit-confirm")
                                     .icon(&icons::ATLAS)
                                     .finish(MetalFinish::FracturedConfirm)
+                                    .disabled(reason.is_some())
                                     .on_press(|state: &mut State| {
                                         state.confirm_submission(SubmissionKind::Atlas)
                                     })
@@ -257,7 +295,8 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                                     .build(kit, preferences, pointer_ref),
                             ),
                     ),
-            );
+                preferences,
+            ));
         }
     }
     let status = match lane.phase {
@@ -587,13 +626,213 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
     )
 }
 
-fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Vec<El>) -> El {
+pub(crate) fn switch_to_distributed(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    ActionButton::new("Switch to Distributed")
+        .key("switch-remote-gateway")
+        .disabled(
+            state.connection.status == crate::connection::ConnectionStatus::Connecting
+                || state.local_backend.stopping,
+        )
+        .on_press_tx(State::open_atlas_distributed_setup)
+        .build(kit, preferences, None)
+}
+
+fn atlas_prerequisites(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    let preflight = state.atlas_preflight();
+    let mut checks = rune::col()
+        .key("atlas-prerequisites")
+        .gap(4.0)
+        .w_full()
+        .child(ui_components::section_header(
+            &icons::SHIELD_CHECK,
+            "Cycle prerequisites",
+            None,
+            None,
+            Some(
+                rune::row()
+                    .gap(6.0)
+                    .center_y()
+                    .child(
+                        ActionButton::new("Configure API keys")
+                            .key("atlas-configure-provider-keys")
+                            .icon(&icons::KEY)
+                            .finish(MetalFinish::ObsidianPill)
+                            .disabled(!can_configure_atlas_keys(state))
+                            .on_press(|state: &mut State| {
+                                if !can_configure_atlas_keys(state) {
+                                    return;
+                                }
+                                reset_tool_key_editor(state);
+                                state.tool_key_dialog = true;
+                                state.submissions.atlas.confirmation = None;
+                                state.backend_read(ReadRequest::Profile);
+                            })
+                            .build(kit, preferences, None),
+                    )
+                    .child(
+                        ActionButton::new("Refresh checks")
+                            .key("atlas-preflight-refresh")
+                            .icon(&icons::REFRESH)
+                            .finish(MetalFinish::ObsidianPill)
+                            .disabled(
+                                !state.permission(Permission::ReadBackend)
+                                    || state.readiness_pending(),
+                            )
+                            .on_press(|state: &mut State| state.refresh_readiness())
+                            .build(kit, preferences, None),
+                    ),
+            ),
+            kit,
+        ));
+
+    for (id, label, observed, ready_label) in [
+        (
+            "atlas-worker",
+            "Atlas worker",
+            preflight.map(|report| report.atlas_worker),
+            "Available",
+        ),
+        (
+            "rust-bert",
+            "Rust-BERT worker and checkpoint",
+            preflight.map(|report| report.rust_bert),
+            if preflight.is_some_and(|report| report.rust_bert_verified) {
+                "Verified"
+            } else {
+                "Checkpoint available"
+            },
+        ),
+    ] {
+        let (status, tone) = match observed {
+            Some(ReadinessState::Ready) => (ready_label, StatusTone::Ok),
+            Some(ReadinessState::Running) => ("Checking", StatusTone::Info),
+            Some(ReadinessState::NotReady | ReadinessState::Degraded) => {
+                ("Not ready", StatusTone::Warn)
+            }
+            Some(ReadinessState::Unavailable | ReadinessState::NotApplicable) => {
+                ("Unavailable", StatusTone::Neutral)
+            }
+            _ => ("Unchecked", StatusTone::Neutral),
+        };
+        checks = checks.child(atlas_check_row(id, label, status, tone, None, kit));
+    }
+
+    let keys = state.atlas_key_states();
+    let mut have_saved_key = false;
+    for (provider, label, presence) in keys {
+        let (status, tone) = atlas_key_status(presence);
+        have_saved_key |= presence == AtlasKeyPresence::Saved;
+        let action = (presence == AtlasKeyPresence::Missing).then(|| {
+            ActionButton::new("OSINT Tools")
+                .key(format!("atlas-key-open-{provider}"))
+                .finish(MetalFinish::ObsidianPill)
+                .on_press(move |state: &mut State| {
+                    state.navigate(Page::Tools);
+                    open_tool_credential_editor(state, provider);
+                })
+                .build(kit, preferences, None)
+                .label(format!("Configure the {label} API key in OSINT Tools"))
+        });
+        checks = checks.child(atlas_check_row(provider, label, status, tone, action, kit));
+    }
+    if have_saved_key {
+        checks = checks.child(quiet("Saved keys still need provider authentication.", kit));
+    }
+    checks
+}
+
+fn atlas_key_status(presence: AtlasKeyPresence) -> (&'static str, StatusTone) {
+    match presence {
+        AtlasKeyPresence::Missing => ("Missing key", StatusTone::Warn),
+        AtlasKeyPresence::Saved => ("Key saved", StatusTone::Neutral),
+        _ => ("Unchecked", StatusTone::Neutral),
+    }
+}
+
+fn atlas_check_row(
+    id: &str,
+    name: &str,
+    status: &str,
+    tone: StatusTone,
+    action: Option<El>,
+    kit: &Kit,
+) -> El {
+    rune::row()
+        .key(format!("atlas-check-{id}"))
+        .w_full()
+        .min_w(0.0)
+        .flex_wrap()
+        .center_y()
+        .gap(6.0)
+        .child(line(name, kit).grow(1.0).min_w(0.0))
+        .child(ui_components::status_pill(status, None, tone, kit))
+        .children(action)
+}
+
+fn can_configure_atlas_keys(state: &State) -> bool {
+    state.page == Page::Atlas
+        && state.atlas_advertised()
+        && state.connected()
+        && state.registration.context.is_some()
+        && state.permission(Permission::ManageConfiguration)
+        && !matches!(state.configuration.result, Load::Loading)
+}
+
+fn current_tool_credential_slot<'a>(
+    state: &'a State,
+    provider: &str,
+) -> Option<&'a crate::backend::ToolCredentialMetadata> {
+    let Load::Ready(profile) = &state.backend.profile else {
+        return None;
+    };
+    if state.configuration_revision() != Some(profile.configuration_revision) {
+        return None;
+    }
+    profile
+        .tool_credentials
+        .iter()
+        .find(|slot| slot.provider == provider)
+}
+
+fn reset_tool_key_editor(state: &mut State) {
+    state.configuration.tool_provider.replace_text("");
+    state.clear_tool_credential_draft();
+    state.configuration_edited();
+    if !matches!(state.configuration.result, Load::Loading) {
+        state.configuration.result = Load::Idle;
+        state.configuration.message = None;
+    }
+}
+
+fn open_tool_credential_editor(state: &mut State, provider: &str) {
+    let available = match state.page {
+        Page::Tools => state.permission(Permission::ManageConfiguration),
+        Page::Atlas => {
+            can_configure_atlas_keys(state)
+                && current_tool_credential_slot(state, provider).is_some()
+        }
+        _ => false,
+    };
+    if !available {
+        return;
+    }
+    reset_tool_key_editor(state);
+    state.configuration.tool_provider = TextEdit::new(provider);
+    state.tool_key_dialog = true;
+}
+
+fn tools(
+    state: &State,
+    cx: &Cx<State>,
+    preferences: ViewPreferences,
+    kit: &Kit,
+    layers: &mut Vec<El>,
+) -> El {
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
-    let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
     let mut body = rune::col().gap(12.0).child(ui_components::section_header(
         &icons::TOOLS,
         "OSINT Tools",
-        Some("Inspect gateway-advertised services & configure masked provider keys"),
+        None,
         None,
         None,
         kit,
@@ -611,15 +850,27 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
         if catalog.tools.is_empty() {
             body = body.child(quiet("No services are advertised by this gateway.", kit));
         }
+        let wide = cx
+            .layout_size("page-content")
+            .is_some_and(|size| size[0] >= 780.0);
+        let mut grid = if wide {
+            rune::row().flex_wrap()
+        } else {
+            rune::col()
+        }
+        .w_full()
+        .gap(10.0);
         for tool in &catalog.tools {
-            body = body.child(material::luminous_card(
+            let tile = material::canvas_tile(
                 rune::col()
-                    .padding(14.0)
+                    .min_w(0.0)
+                    .padding(10.0)
                     .gap(6.0)
                     .key(format!("tool-{}", tool.id))
                     .child(
                         rune::row()
                             .w_full()
+                            .flex_wrap()
                             .center_y()
                             .gap(8.0)
                             .child(
@@ -627,7 +878,7 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                                     .color(theme::hex(theme::ENTITY_TECH))
                                     .a11y_hidden(),
                             )
-                            .child(heading(tool.name.clone(), kit))
+                            .child(heading(tool.name.clone(), kit).min_w(0.0).shrink())
                             .child(rune::spacer())
                             .child(ui_components::status_pill(
                                 tool.category.clone(),
@@ -638,12 +889,13 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                     )
                     .child(line(tool.description.clone(), kit))
                     .child(quiet(tool.restrictions.clone(), kit)),
-                StatusTone::Cyan,
                 false,
                 preferences,
-                pointer_ref,
-                shadow_ref,
-            ));
+            );
+            grid = grid.child(if wide { tile.w_frac(0.48) } else { tile });
+        }
+        if !catalog.tools.is_empty() {
+            body = body.child(grid);
         }
     }
     if let Some(message) = list_load_or_skeleton(
@@ -664,9 +916,9 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
             } else {
                 StatusTone::Warn
             };
-            body = body.child(material::interactive_tile(
+            body = body.child(material::canvas_tile(
                 rune::row()
-                    .padding(14.0)
+                    .padding(10.0)
                     .gap(10.0)
                     .center_y()
                     .key(format!("tool-provider-{}", credential.provider))
@@ -674,10 +926,12 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                     .child(
                         rune::col()
                             .grow(1.0)
+                            .min_w(0.0)
                             .gap(4.0)
                             .child(heading(credential.provider.clone(), kit))
                             .child(
                                 rune::row()
+                                    .flex_wrap()
                                     .gap(6.0)
                                     .child(ui_components::status_pill(
                                         if credential.primary_present {
@@ -716,49 +970,153 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                             .finish(MetalFinish::Gunmetal)
                             .disabled(!state.permission(Permission::ManageConfiguration))
                             .on_press(move |state: &mut State| {
-                                state.configuration.tool_provider = TextEdit::new(&provider);
-                                state.configuration.tool_primary.replace_text("");
-                                state.configuration.tool_fallback.replace_text("");
-                                state.configuration.clear_tool_primary = false;
-                                state.configuration.clear_tool_fallback = false;
-                                state.configuration_edited();
-                                state.tool_key_dialog = true;
+                                open_tool_credential_editor(state, &provider);
                             })
                             .build(kit, preferences, pointer_ref),
                     ),
                 false,
-                tone,
                 preferences,
-                pointer_ref,
-                shadow_ref,
             ));
         }
     }
-    Dialog::new(
+    tool_key_dialog(state, preferences, kit, layers);
+    scroll(body, "tools-body")
+}
+
+fn tool_key_dialog(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Vec<El>) {
+    if !state.tool_key_dialog {
+        return;
+    }
+    let atlas = state.page == Page::Atlas;
+    let provider = state.configuration.tool_provider.text.as_str();
+    let editing = !provider.is_empty();
+    let title = if atlas {
+        "Atlas provider keys".into()
+    } else {
+        format!("{provider} API keys")
+    };
+    let editor = if atlas && !editing {
+        atlas_key_sources(state, preferences, kit)
+    } else {
+        tool_key_editor(state, atlas, provider, preferences, kit)
+    };
+    layers.extend(ui_components::glass_dialog(
         "tool-api-key",
-        format!("{} API keys", state.configuration.tool_provider.text),
-    )
-    .open(state.tool_key_dialog)
-    .width(480.0)
-    .click_outside(false)
-    .on_close(|state: &mut State| {
-        state.tool_key_dialog = false;
-        state.configuration.tool_primary.replace_text("");
-        state.configuration.tool_fallback.replace_text("");
-        state.configuration.clear_tool_primary = false;
-        state.configuration.clear_tool_fallback = false;
-        state.configuration_edited();
-    })
-    .child(
+        &title,
+        480.0,
         rune::col()
-            .grow(1.0)
+            .key(if editing {
+                "provider-key-editor"
+            } else {
+                "atlas-key-sources"
+            })
+            .w_full()
+            .max_h(316.0)
             .min_h(0.0)
             .scroll(ScrollSpec {
                 stick_bottom: false,
             })
             .padding(16.0)
             .gap(12.0)
-            .child(quiet(
+            .child(editor)
+            .child(configuration_status(state, preferences, kit)),
+        false,
+        |state: &mut State| {
+            state.tool_key_dialog = false;
+            reset_tool_key_editor(state);
+        },
+        preferences,
+        kit,
+    ));
+}
+
+fn atlas_key_sources(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    let mut body = rune::col().gap(6.0).child(quiet(
+        "Save a primary or fallback key for each source. Saved keys still need provider authentication.",
+        kit,
+    ));
+    for (provider, label, presence) in state.atlas_key_states() {
+        let (status, tone) = atlas_key_status(presence);
+        let editor = ActionButton::new("Edit key")
+            .key(format!("atlas-key-edit-{provider}"))
+            .finish(MetalFinish::ObsidianPill)
+            .disabled(
+                !can_configure_atlas_keys(state)
+                    || current_tool_credential_slot(state, provider).is_none(),
+            )
+            .on_press(move |state: &mut State| open_tool_credential_editor(state, provider))
+            .build(kit, preferences, None)
+            .label(format!("Edit {label} API keys"));
+        body = body.child(atlas_check_row(
+            &format!("source-{provider}"),
+            label,
+            status,
+            tone,
+            Some(editor),
+            kit,
+        ));
+    }
+    if let Some(message) = load_message(
+        &state.backend.profile,
+        "Saved provider slots have not been loaded.",
+        preferences,
+        kit,
+    ) {
+        body = body.child(message);
+    }
+    if !matches!(state.backend.profile, Load::Loading | Load::Pending)
+        && state
+            .atlas_key_states()
+            .iter()
+            .any(|(provider, _, _)| current_tool_credential_slot(state, provider).is_none())
+    {
+        body = body.child(
+            ActionButton::new("Refresh provider slots")
+                .key("atlas-key-refresh-slots")
+                .on_press(|state: &mut State| state.backend_read(ReadRequest::Profile))
+                .build(kit, preferences, None),
+        );
+    }
+    body
+}
+
+fn tool_key_editor(
+    state: &State,
+    atlas: bool,
+    provider: &str,
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> El {
+    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
+    let changed = !state.configuration.tool_primary.text.is_empty()
+        || !state.configuration.tool_fallback.text.is_empty()
+        || state.configuration.clear_tool_primary
+        || state.configuration.clear_tool_fallback;
+    let mut body = rune::col().gap(12.0);
+    if atlas {
+        let provider_name = state
+            .atlas_key_states()
+            .into_iter()
+            .find_map(|(id, name, _)| (id == provider).then_some(name))
+            .unwrap_or(provider);
+        body = body.child(
+            rune::row()
+                .w_full()
+                .center_y()
+                .flex_wrap()
+                .gap(8.0)
+                .child(heading(provider_name, kit).grow(1.0))
+                .child(
+                    ActionButton::new("All providers")
+                        .key("atlas-key-back")
+                        .finish(MetalFinish::ObsidianPill)
+                        .disabled(matches!(state.configuration.result, Load::Loading))
+                        .on_press(|state: &mut State| reset_tool_key_editor(state))
+                        .build(kit, preferences, None),
+                ),
+        );
+    }
+    body.child(quiet(
                 "Keys remain masked and are sent only after confirmation. Blank fields preserve saved keys; clearing a slot requires its explicit toggle.",
                 kit,
             ))
@@ -807,19 +1165,18 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                 },
             ))
             .child(
-                ActionButton::new("Review key replacement")
+                ActionButton::new(if atlas { "Review API keys" } else { "Review key replacement" })
                     .key("tool-credentials-preview")
                     .icon(&icons::SHIELD_CHECK)
                     .finish(MetalFinish::GoldCta)
                     .busy(matches!(state.configuration.result, Load::Loading))
-                    .disabled(!state.permission(Permission::ManageConfiguration))
+                    .disabled(
+                        !state.permission(Permission::ManageConfiguration)
+                            || (atlas && (!changed || current_tool_credential_slot(state, provider).is_none())),
+                    )
                     .on_press(|state: &mut State| state.preview_tool_credentials())
                     .build(kit, preferences, pointer_ref),
             )
-            .child(configuration_status(state, preferences, kit)),
-    )
-    .build(kit, layers);
-    scroll(body, "tools-body")
 }
 
 fn input(
@@ -842,9 +1199,14 @@ fn input(
         .child(field.build(kit).key(key.to_owned()))
 }
 
-fn models(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Vec<El>) -> El {
+fn models(
+    state: &State,
+    cx: &Cx<State>,
+    preferences: ViewPreferences,
+    kit: &Kit,
+    layers: &mut Vec<El>,
+) -> El {
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
-    let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
     let active_tab = if !state.configuration.account_id.text.is_empty() {
         ModelsTab::Providers
     } else {
@@ -1023,10 +1385,22 @@ fn models(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut V
                     StatusTone::Info,
                     kit,
                 ));
+                let wide = state.configuration.role.text.is_empty()
+                    && cx
+                        .layout_size("page-content")
+                        .is_some_and(|size| size[0] >= 780.0);
+                let mut grid = if wide {
+                    rune::row().flex_wrap()
+                } else {
+                    rune::col()
+                }
+                .w_full()
+                .gap(10.0);
                 for role in &defaults.roles {
                     let edited = role.clone();
                     let active = state.configuration.role.text == *role;
                     let mut row = rune::col()
+                        .min_w(0.0)
                         .gap(8.0)
                         .key(format!("model-role-{role}"))
                         .child(
@@ -1042,7 +1416,7 @@ fn models(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut V
                                     },
                                     preferences,
                                 ))
-                                .child(heading(role.clone(), kit))
+                                .child(heading(role.clone(), kit).min_w(0.0).shrink())
                                 .child(rune::spacer())
                                 .children(active.then(|| {
                                     ui_components::status_pill(
@@ -1082,18 +1456,11 @@ fn models(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut V
                                 .build(kit, preferences, pointer_ref),
                         );
                     }
-                    body = body.child(material::interactive_tile(
-                        row.padding(14.0),
-                        active,
-                        if active {
-                            StatusTone::Accent
-                        } else {
-                            StatusTone::Info
-                        },
-                        preferences,
-                        pointer_ref,
-                        shadow_ref,
-                    ));
+                    let tile = material::canvas_tile(row.padding(10.0), active, preferences);
+                    grid = grid.child(if wide { tile.w_frac(0.48) } else { tile });
+                }
+                if !defaults.roles.is_empty() {
+                    body = body.child(grid);
                 }
             }
         }
@@ -1244,7 +1611,7 @@ fn jobs(
     let mut body = rune::col().gap(12.0).child(ui_components::section_header(
         &icons::JOBS,
         "Jobs & Logs",
-        Some("Workstation-scoped activity stream and bounded operational summaries"),
+        None,
         count_pill,
         None,
         kit,
@@ -1390,6 +1757,7 @@ fn jobs(
             };
             let detail_id = detail.job.id.clone();
             let tone = state_tone(&detail.job.state);
+            let error_summary = job_error_summary(&detail.job);
             let mut details = rune::col().gap(10.0).child(ui_components::section_header(
                 &icons::JOBS,
                 detail_title.clone(),
@@ -1441,15 +1809,11 @@ fn jobs(
                     (false, None) => format!("Phase: {phase}"),
                     (true, None) => detail.job.state.clone(),
                 };
-                if crate::backend::job_is_active(&detail.job.state) {
-                    details = details.child(
-                        Progress::new(None)
-                            .label(progress_label)
-                            .build(kit)
-                            .w_full(),
-                    );
-                } else if known_done.is_some() || !phase.is_empty() {
-                    details = details.child(quiet(progress_label, kit));
+                if crate::backend::job_is_active(&detail.job.state)
+                    || known_done.is_some()
+                    || !phase.is_empty()
+                {
+                    details = details.child(quiet(progress_label, kit).role("status"));
                 }
             }
             if !detail.private_details_available
@@ -1461,9 +1825,8 @@ fn jobs(
                     kit,
                 ));
             } else {
-                if !detail.job.error_summary.is_empty() {
-                    details =
-                        details.child(line(detail.job.error_summary.clone(), kit).role("alert"));
+                if !error_summary.is_empty() {
+                    details = details.child(line(error_summary, kit).role("alert"));
                 }
                 if detail.job.state == "failed" || detail.job.can_retry {
                     let retry_reason = state.job_action_disabled_reason(JobAction::Retry);
@@ -1757,8 +2120,7 @@ fn jobs(
                     .child(line(format!("State: {}", detail.job.state), kit))
                     .child(line(format!("Phase: {}", detail.job.phase), kit))
                     .children(
-                        (!detail.job.error_summary.is_empty())
-                            .then(|| line(detail.job.error_summary.clone(), kit).role("alert")),
+                        (!error_summary.is_empty()).then(|| line(error_summary, kit).role("alert")),
                     );
                 ui_components::modal_prompt(
                     "job-operational-summary",
@@ -1951,24 +2313,10 @@ fn maintenance_preflight_status(
     operation: MaintenanceOperation,
     preflight: &crate::maintenance::MaintenancePreflight,
 ) -> (&'static str, StatusTone, bool) {
-    if matches!(state.maintenance.upload, Load::Loading) {
-        let uploading_op = state
-            .maintenance
-            .local_dataset
-            .as_ref()
-            .and_then(|dataset| match dataset.kind {
-                DatasetKind::ActorCatalog => Some(MaintenanceOperation::SeedActors),
-                DatasetKind::ClassifierTraining => Some(MaintenanceOperation::TrainClassifier),
-                _ => None,
-            })
-            .or(state.maintenance.pending_preview)
-            .unwrap_or(match state.seed_stage {
-                SeedStage::Classifier => MaintenanceOperation::TrainClassifier,
-                SeedStage::Seed | SeedStage::Maintenance => MaintenanceOperation::SeedActors,
-            });
-        if uploading_op == operation {
-            return ("Uploading…", StatusTone::Accent, true);
-        }
+    if matches!(state.maintenance.upload, Load::Loading)
+        && operation == MaintenanceOperation::SeedActors
+    {
+        return ("Uploading…", StatusTone::Accent, true);
     }
     let queuing_for_op = (matches!(state.maintenance.receipt, Load::Loading)
         || state.maintenance.busy())
@@ -1993,7 +2341,6 @@ fn operation_key(operation: MaintenanceOperation) -> &'static str {
     match operation {
         MaintenanceOperation::SeedActors => "seed",
         MaintenanceOperation::ReindexActors => "reindex",
-        MaintenanceOperation::TrainClassifier => "train",
         _ => "other",
     }
 }
@@ -2057,7 +2404,7 @@ fn operation_job_card_status(
                 stage_title.to_owned(),
                 parts.join(" · "),
                 state_tone(&job.state),
-                Some(frac),
+                frac,
             )
         }
         Some((job, result)) if job.state == "completed" => {
@@ -2085,13 +2432,6 @@ fn operation_job_card_status(
                         "Index built".to_owned()
                     } else {
                         "Search index ready".to_owned()
-                    }
-                }
-                MaintenanceOperation::TrainClassifier => {
-                    if result.and_then(|r| r.active_model_id.as_ref()).is_some() {
-                        "Classifier trained".to_owned()
-                    } else {
-                        "Candidate trained · Not activated".to_owned()
                     }
                 }
                 _ => "Completed".to_owned(),
@@ -2169,7 +2509,7 @@ fn operation_job_card_status(
         );
     if let Some(frac) = active_progress {
         strip = strip.child(
-            Progress::new(frac)
+            Progress::new(Some(frac))
                 .label(format!("{title} · Job {short_id}"))
                 .build(kit)
                 .w_full(),
@@ -2205,7 +2545,6 @@ pub(crate) fn maintenance(
     let active_step = match state.seed_stage {
         SeedStage::Seed => 0,
         SeedStage::Maintenance => 1,
-        SeedStage::Classifier => 2,
     };
     let checking_readiness = matches!(state.readiness, Load::Pending | Load::Loading);
     let refresh_btn = ActionButton::new("Refresh checks")
@@ -2229,24 +2568,17 @@ pub(crate) fn maintenance(
         .on_press(|state: &mut State| state.refresh_page())
         .build(kit, preferences, pointer_ref);
 
-    let stage_picker = SegmentedControl::new(
-        &[
-            "1. Seed Actors",
-            "2. Search Index",
-            "Optional · Train Classifier",
-        ],
-        Some(active_step),
-    )
-    .label("Maintenance stage")
-    .fit()
-    .on_pick(|state: &mut State, idx, _| {
-        state.seed_stage = match idx {
-            1 => SeedStage::Maintenance,
-            2 => SeedStage::Classifier,
-            _ => SeedStage::Seed,
-        };
-    })
-    .build(kit);
+    let stage_picker =
+        SegmentedControl::new(&["1. Seed Actors", "2. Search Index"], Some(active_step))
+            .label("Maintenance stage")
+            .fit()
+            .on_pick(|state: &mut State, idx, _| {
+                state.seed_stage = match idx {
+                    1 => SeedStage::Maintenance,
+                    _ => SeedStage::Seed,
+                };
+            })
+            .build(kit);
 
     let readiness_unsynced = state.readiness_error.as_ref().map(|error| {
         crate::views::unsynced_glyph(
@@ -2259,8 +2591,8 @@ pub(crate) fn maintenance(
         .gap(12.0)
         .child(ui_components::section_header(
             &icons::SEED,
-            "DB Seed & Train",
-            Some("Seed Actors → Search Index; Train Classifier is independent and optional."),
+            "Actor Maintenance",
+            Some("Seed the actor catalog, then make it searchable."),
             readiness_unsynced,
             Some(refresh_btn),
             kit,
@@ -2317,15 +2649,6 @@ pub(crate) fn maintenance(
             &icons::BRAIN,
             MetalFinish::Gunmetal,
         ),
-        (
-            SeedStage::Classifier,
-            "Optional · Train Classifier (Natural)",
-            MaintenanceOperation::TrainClassifier,
-            maintenance::TRAIN_ACTION_KEY,
-            "Independent of search indexing. Use a training CSV for a Natural candidate. Activation is separate.",
-            &icons::MODELS,
-            MetalFinish::Gunmetal,
-        ),
     ] {
         let preflight = state.maintenance_preflight(operation);
         let reason = preflight.disabled_reason();
@@ -2334,17 +2657,13 @@ pub(crate) fn maintenance(
         let focused = state.seed_stage == stage_match;
         let dataset = match operation {
             MaintenanceOperation::SeedActors => Some(DatasetKind::ActorCatalog),
-            MaintenanceOperation::TrainClassifier => Some(DatasetKind::ClassifierTraining),
             _ => None,
         };
         let action_label = match dataset {
             Some(DatasetKind::ActorCatalog) if cfg!(target_os = "linux") => "Enter actor CSV path",
-            Some(DatasetKind::ClassifierTraining) if cfg!(target_os = "linux") => {
-                "Enter training CSV path"
-            }
             _ => label,
         };
-        let mut operation_card = rune::col().padding(14.0).gap(8.0).child(
+        let mut operation_card = rune::col().padding(10.0).gap(8.0).child(
             rune::row()
                 .w_full()
                 .center_y()
@@ -2395,10 +2714,6 @@ pub(crate) fn maintenance(
             let matches_card = matches!(
                 (operation, prompt.kind),
                 (MaintenanceOperation::SeedActors, DatasetKind::ActorCatalog)
-                    | (
-                        MaintenanceOperation::TrainClassifier,
-                        DatasetKind::ClassifierTraining
-                    )
             );
             if matches_card {
                 operation_card =
@@ -2442,7 +2757,7 @@ pub(crate) fn maintenance(
     body
 }
 
-fn csv_path_prompt(
+pub(crate) fn csv_path_prompt(
     prompt: &crate::maintenance::CsvPathPrompt,
     preferences: ViewPreferences,
     kit: &Kit,
@@ -2459,6 +2774,15 @@ fn csv_path_prompt(
                 .as_mut()
                 .expect("path prompt is open while its field is shown")
                 .input
+        })
+        .on_key(|state: &mut State, event, tx| {
+            if event.key != Key::Escape {
+                return false;
+            }
+            if !tx.key_repeat() {
+                state.cancel_csv_path_prompt(tx);
+            }
+            true
         })
         .on_submit(|state: &mut State, _| state.submit_csv_path())
         .build(kit)
@@ -2699,7 +3023,7 @@ pub(crate) fn actor_index_receipt_banner(
         );
     }
     if let Load::Ready(receipt) = &state.maintenance.receipt {
-        if receipt.operation != MaintenanceOperation::ReindexActors {
+        if receipt.operation != MaintenanceOperation::ReindexActors || receipt.already_completed {
             return None;
         }
         let title = if receipt.reused {

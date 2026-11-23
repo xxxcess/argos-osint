@@ -45,9 +45,10 @@ webpki-roots = { version = "1", optional = true }
 # The companion (`argos-api-host`) enables the features it needs via its own defaults.
 default = []
 nlp = ["dep:rquickjs"]
-# Local six-domain classifier (QuickJS + Natural engine). Independent of `nlp`.
-# Makes heavy deps (tokenizers, tract-onnx) optional so workspace-wide builds skip them.
-classifier = ["dep:rquickjs", "dep:tokenizers", "dep:tract-onnx"]
+# Process-backed Atlas BERT and local Brain sentence embeddings.
+classifier = ["dep:tokenizers", "dep:tract-onnx"]
+# Archived Natural runtime for development tests. Production builds omit this feature.
+legacy-natural-fixtures = ["dep:rquickjs"]
 # SurrealDB storage API without an engine; pick `embedded` and/or `server`.
 surreal = ["dep:surrealdb"]
 # Embedded RocksDB engine in-process (single owner per Argos home). Default.
@@ -60,6 +61,7 @@ fixtures = []
 test-util = ["tokio/test-util"]
 
 [dev-dependencies]
+argos-osint-core = { path = ".", default-features = false, features = ["legacy-natural-fixtures"] }
 tempfile.workspace = true
 proptest = "1.4"
 

@@ -1,0 +1,190 @@
+name: Build an exact Fleetworks Inbox QA pack
+
+on:
+  workflow_call:
+    inputs:
+      head:
+        type: string
+        required: true
+      target:
+        type: string
+        required: true
+      runner:
+        type: string
+        required: true
+      streaming-test:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  FLEETWORKS_HEAD: ${{ inputs.head }}
+  QA_TARGET: ${{ inputs.target }}
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_TERM_COLOR: never
+  CARGO_BUILD_JOBS: 2
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_RELEASE_DEBUG: 0
+  PYTHONDONTWRITEBYTECODE: 1
+
+jobs:
+  linux:
+    name: Debian bookworm CPU worker
+    if: endsWith(inputs.target, '-linux-gnu')
+    runs-on: ${{ inputs.runner }}
+    container: python:3.11-bookworm
+    timeout-minutes: 60
+    steps:
+      - &checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.head }}
+          persist-credentials: false
+          lfs: false
+      - name: Trust the mounted workspace in this isolated container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - &pin
+        name: Verify exact source and pin the Rust toolchain
+        id: rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$FLEETWORKS_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$FLEETWORKS_HEAD"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+          match = re.search(r'^channel\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', Path("rust-toolchain.toml").read_text(), re.M)
+          if not match:
+              raise SystemExit("Exact Rust toolchain required")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print("version=" + match[1], file=output)
+          PY
+      - name: Install Debian build tools and the selected Rust compiler
+        env:
+          TOOLCHAIN: ${{ steps.rust.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev binutils curl ca-certificates
+          curl --fail --silent --show-error --location --retry 3 https://sh.rustup.rs -o "$RUNNER_TEMP/rustup-init.sh"
+          sh "$RUNNER_TEMP/rustup-init.sh" -y --no-modify-path --profile minimal --default-toolchain "$TOOLCHAIN" --component rustfmt
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - &cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: inbox-qa-${{ inputs.target }}-${{ steps.rust.outputs.version }}-${{ hashFiles('tools/assistant-bert/Cargo.lock') }}
+          workspaces: tools/assistant-bert -> ../../target/agents
+          cache-on-failure: true
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - &build
+        name: Link, test, archive and verify the pinned model pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel="$(python3 -B scripts/fleetworks_qa_ci.py wheel --target "$QA_TARGET")"
+          python3 -m pip install --only-binary=:all: "$wheel" 'numpy==1.26.4'
+          output="$RUNNER_TEMP/inbox-qa-pack-build"
+          python3 -B scripts/fleetworks_qa_ci.py build --target "$QA_TARGET" --output "$output"
+          RECEIPT="$output/digests.json" python3 - <<'PY'
+          from pathlib import Path
+          import json
+          import os
+          receipt = Path(os.environ["RECEIPT"])
+          value = json.loads(receipt.read_text())
+          value.update(source_sha=os.environ["FLEETWORKS_HEAD"], run_id=os.environ["GITHUB_RUN_ID"],
+                       run_attempt=int(os.environ["GITHUB_RUN_ATTEMPT"]))
+          receipt.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              print(f"Inbox QA pack for `{value['target']}` at `{value['source_sha']}`", file=summary)
+              print(f"\nArchive SHA-256 `{value['archive_sha256']}`", file=summary)
+              print(f"\nManifest SHA-256 `{value['manifest_sha256']}`", file=summary)
+          PY
+          # A single directory input is translated consistently into the
+          # Debian job container. Stage only the two public files.
+          stage="$RUNNER_TEMP/inbox-qa-pack"
+          mkdir "$stage"
+          mv "$output/Fleetworks-Inbox-QA-Pack-$QA_TARGET.tar.gz" "$output/digests.json" "$stage/"
+      - &upload
+        name: Retain the verified offline pack and digest receipt
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Fleetworks-Inbox-QA-Pack-${{ inputs.target }}-${{ inputs.head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/inbox-qa-pack/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - &build_fixture
+        name: Build the fixture worker that holds after its first real finding
+        if: inputs.streaming-test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import os
+          from pathlib import Path
+          import shutil
+          import sys
+          from tempfile import TemporaryDirectory
+
+          sys.path.insert(0, "scripts")
+          from fleetworks_qa_ci import linux_libraries, mac_libraries, run, torch_environment
+          from fleetworks_qa_pack import native_architecture
+
+          target = os.environ["QA_TARGET"]
+          torch_root, loader_key, env = torch_environment()
+          run(sys.executable, "scripts/agent_cargo.py", "build", "--locked", "--release",
+              "--manifest-path", "tools/assistant-bert/Cargo.toml", "--example", "qa_stream_gate", env=env)
+          stage = Path(os.environ["RUNNER_TEMP"]) / "inbox-qa-stream-gate"
+          stage.mkdir()
+          fixture = stage / "qa_stream_gate"
+          shutil.copy2("target/agents/release/examples/qa_stream_gate", fixture)
+          native_architecture(fixture, target)
+          libraries = stage.parent / "inbox-qa-pack-build" / "installed" / "lib"
+          if target.endswith("-apple-darwin"):
+              # Prepare Mach-O load commands exactly as for the pack worker.
+              # The smoke installs this binary into that verified pack's bin/.
+              with TemporaryDirectory(prefix="inbox-qa-gate-libraries-", dir=stage.parent) as scratch:
+                  dependencies = mac_libraries(fixture, Path(scratch), torch_root)
+                  if any(not (libraries / path.name).is_file() for path in dependencies):
+                      raise SystemExit("Inbox QA fixture links a library absent from the verified pack")
+              run("codesign", "--verify", "--strict", str(fixture), timeout=60)
+          else:
+              linux_libraries(fixture, libraries, {**env, loader_key: str(libraries)}, installed=True)
+          PY
+      - &upload_fixture
+        name: Retain the separate Inbox QA streaming fixture worker
+        if: inputs.streaming-test
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Fleetworks-Inbox-QA-Stream-Gate-${{ inputs.target }}-${{ inputs.head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/inbox-qa-stream-gate/
+          if-no-files-found: error
+          retention-days: 7
+
+  macos:
+    name: Native macOS CPU worker
+    if: endsWith(inputs.target, '-apple-darwin')
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    steps:
+      - *checkout
+      - *pin
+      - name: Select CPython 3.11 for the pinned Torch wheel
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11"
+      - name: Install the selected Rust compiler
+        env:
+          TOOLCHAIN: ${{ steps.rust.outputs.version }}
+        shell: bash
+        run: rustup toolchain install "$TOOLCHAIN" --profile minimal --component rustfmt
+      - *cache
+      - *build
+      - *upload
+      - *build_fixture
+      - *upload_fixture

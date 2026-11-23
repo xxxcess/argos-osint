@@ -118,7 +118,7 @@ jobs:
         id: bundle
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: atlas-bert-bundle-${{ matrix.arch }}-${{ env.ATLAS_BERT_HEAD }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: Fleetworks-Atlas-BERT-Worker-Bundle-Linux-${{ matrix.arch }}-${{ env.ATLAS_BERT_HEAD }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/atlas-bert-linux-${{ matrix.arch }}/atlas-bert-linux-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
           compression-level: 0
@@ -152,7 +152,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: atlas-bert-evidence-${{ matrix.arch }}-${{ env.ATLAS_BERT_HEAD }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: Fleetworks-Atlas-BERT-Runtime-Checks-Linux-${{ matrix.arch }}-${{ env.ATLAS_BERT_HEAD }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/atlas-bert-linux-${{ matrix.arch }}/evidence.json
             ${{ runner.temp }}/atlas-bert-linux-${{ matrix.arch }}/*.log
@@ -171,7 +171,7 @@ jobs:
         run: test "$RUNTIME_RESULT" = success
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: atlas-bert-evidence-*-${{ env.ATLAS_BERT_HEAD }}-${{ github.run_id }}-${{ github.run_attempt }}
+          pattern: Fleetworks-Atlas-BERT-Runtime-Checks-Linux-*-${{ env.ATLAS_BERT_HEAD }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: evidence
       - name: Reject missing mismatched or failed runtime evidence
         env:

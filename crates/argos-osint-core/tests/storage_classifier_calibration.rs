@@ -354,7 +354,7 @@ async fn provider_capture_survives_country_filtering_replay_restart_and_bounded_
         (result.processed, result.state.as_str(), result.promoted),
         (515, "completed", false)
     );
-    assert_eq!(result.reason, "insufficient_reviewed_evidence");
+    assert_eq!(result.reason, "legacy_classifier_monitoring_only");
     assert_eq!(
         std::fs::read(installed.directory.path().join("classifier/active.json")).unwrap(),
         active
@@ -480,10 +480,13 @@ async fn empty_terminal_is_completed_without_model_and_observed_terminal_is_bloc
 }
 
 #[tokio::test]
-async fn actual_review_import_and_approval_queue_and_fit_one_durable_candidate() {
+async fn historical_review_import_and_approval_do_not_queue_training() {
+    use std::collections::BTreeSet;
+
     use argos_osint_core::atlas_taxonomy::DomainId;
     use argos_osint_core::classifier::review::ReviewDecision;
-    use argos_osint_core::storage::{classifier_learning as learning, classifier_review as review};
+    use argos_osint_core::classifier::training::Split;
+    use argos_osint_core::storage::classifier_review as review;
     let _serial = fixture::serial().await;
     let installed = tokio::task::spawn_blocking(fixture::install).await.unwrap();
     let repo = Repository::connect(
@@ -499,7 +502,13 @@ async fn actual_review_import_and_approval_queue_and_fit_one_durable_candidate()
     let ctx = context("review-cohort");
     let news:Vec<_>=(0u64..400).map(|index| {
         let distinctive=(0..40).map(|word|format!("w{:016x}",index*64+word)).collect::<Vec<_>>().join(" ");
-        serde_json::json!({"article_id":format!("story-{index}"),"link":format!("https://fixture.invalid/story-{index}"),"language":"en","source_name":"Fixture","category":["business","crime","politics","health","environment","science"],"title":distinctive,"description":"Fictional parliament discusses a military operation, central bank measures, hospital care, water pollution and laboratory research."})
+        let language = if index % 20 == 1 { "es" } else { "en" };
+        let categories = if index % 20 == 2 {
+            serde_json::json!(["unknown fixture category"])
+        } else {
+            serde_json::json!(["business", "crime", "politics", "health", "environment", "science"])
+        };
+        serde_json::json!({"article_id":format!("story-{index}"),"link":format!("https://fixture.invalid/story-{index}"),"language":language,"source_name":"Fixture","category":categories,"title":distinctive,"description":"Fictional parliament discusses a military operation, central bank measures, hospital care, water pollution and laboratory research."})
     }).collect();
     let capture = capture::capture_categories(
         ProviderFormat::NewsDataV1,
@@ -512,6 +521,12 @@ async fn actual_review_import_and_approval_queue_and_fit_one_durable_candidate()
         calibration::capture(&repo, &ctx, batch).await.unwrap();
     }
     finish(&repo, &installed.home, &ctx.cycle_id, true).await;
+    let incomplete = review::export_completed_cycle(&repo, &ctx.cycle_id)
+        .await
+        .unwrap_err();
+    assert!(incomplete
+        .to_string()
+        .contains("review_cycle_monitoring_not_complete"));
     calibration::drain_one(
         &repo,
         &installed.home,
@@ -525,7 +540,9 @@ async fn actual_review_import_and_approval_queue_and_fit_one_durable_candidate()
         0,
         "uncertified labels only monitor"
     );
-    let mut exchange = review::export(&repo, &ctx.cycle_id).await.unwrap();
+    let mut exchange = review::export_completed_cycle(&repo, &ctx.cycle_id)
+        .await
+        .unwrap();
     assert_eq!(
         exchange.items.len(),
         400,
@@ -535,7 +552,7 @@ async fn actual_review_import_and_approval_queue_and_fit_one_durable_candidate()
         exchange
             .items
             .iter()
-            .filter(|item| item.split == argos_osint_core::classifier::training::Split::Train)
+            .filter(|item| item.split == Split::Train)
             .count()
             >= 100
     );
@@ -561,10 +578,7 @@ async fn actual_review_import_and_approval_queue_and_fit_one_durable_candidate()
             .iter()
             .find(|item| item.observation.observation_id == replay.observation_id)
             .unwrap();
-        assert_ne!(
-            item.split,
-            argos_osint_core::classifier::training::Split::Test
-        );
+        assert_ne!(item.split, Split::Test);
         assert_eq!(replay.payload_sha256, item.payload_sha256);
         assert_eq!(replay.receipt.scores.len(), 6);
     }
@@ -574,6 +588,42 @@ async fn actual_review_import_and_approval_queue_and_fit_one_durable_candidate()
         roundtrip.items, annotated.review.items,
         "diagnostic sidecars do not mint human labels"
     );
+    let cycles = vec![ctx.cycle_id.clone()];
+    let mapping = review::mapping_cohort(&repo, cycles.clone()).await.unwrap();
+    let holdout_items = exchange
+        .items
+        .iter()
+        .filter(|item| matches!(item.split, Split::Calibration | Split::Test));
+    assert!(holdout_items
+        .clone()
+        .any(|item| item.observation.language.as_deref() == Some("es")));
+    assert!(holdout_items.clone().any(|item| {
+        item.observation.raw_categories == serde_json::json!(["unknown fixture category"])
+    }));
+    let eligible: BTreeSet<_> = holdout_items
+        .filter(|item| {
+            item.observation.language.as_deref() == Some("en")
+                && item.observation.raw_categories
+                    != serde_json::json!(["unknown fixture category"])
+        })
+        .map(|item| item.observation.observation_id.as_str())
+        .collect();
+    assert!(!eligible.is_empty());
+    let mapped: BTreeSet<_> = mapping
+        .items
+        .iter()
+        .map(|item| {
+            assert_eq!(item.decision, ReviewDecision::Unreviewed);
+            assert!(item.domains.is_empty());
+            item.observation.observation_id.as_str()
+        })
+        .collect();
+    assert_eq!(mapped, eligible);
+    assert!(review::recalibration_cohort(&repo, cycles.clone())
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("recalibration_requires_all_six_reviewed_domains_in_each_split"));
     for item in &mut exchange.items {
         item.decision = ReviewDecision::Complete;
         item.domains = DomainId::ALL.to_vec();
@@ -591,6 +641,28 @@ async fn actual_review_import_and_approval_queue_and_fit_one_durable_candidate()
         0,
         "exact review replay is idempotent"
     );
+    assert_eq!(
+        mapping,
+        review::mapping_cohort(&repo, cycles.clone()).await.unwrap(),
+        "the provider mapping cohort does not depend on stored article reviews"
+    );
+    let cohort = review::recalibration_cohort(&repo, cycles.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        cohort,
+        review::recalibration_cohort(&repo, cycles).await.unwrap(),
+        "the same stored evidence freezes the same cohort"
+    );
+    let mut families = BTreeSet::new();
+    assert!(cohort.items.iter().all(|item| {
+        item.decision == ReviewDecision::Complete
+            && matches!(item.split, Split::Calibration | Split::Test)
+            && families.insert(item.family_id.clone())
+    }));
+    for split in [Split::Calibration, Split::Test] {
+        assert!(cohort.items.iter().any(|item| item.split == split));
+    }
     let mut conflict = exchange.clone();
     conflict.items[0].domains.clear();
     assert!(
@@ -621,51 +693,37 @@ async fn actual_review_import_and_approval_queue_and_fit_one_durable_candidate()
     )
     .await
     .unwrap();
-    assert_eq!(count(&repo, "classifier_learning_job").await, 1);
+    let mut wrong_cycle = exchange.clone();
+    wrong_cycle.run_id = next.cycle_id.clone();
+    wrong_cycle
+        .items
+        .retain(|item| item.observation.observation_id != capture.observations[0].observation_id);
+    let outside_cycle = review::import(
+        &repo,
+        &installed.home,
+        &wrong_cycle,
+        "isolated-human-review",
+    )
+    .await
+    .unwrap_err();
+    assert!(outside_cycle
+        .to_string()
+        .contains("review_observation_outside_completed_cycle"));
     assert_eq!(
-        learning::drain_one(
-            &repo,
-            &installed.home,
-            "candidate-worker",
-            Arc::new(AtomicBool::new(false))
-        )
-        .await
-        .unwrap(),
-        1
+        count(&repo, "classifier_learning_job").await,
+        0,
+        "approved legacy reviews cannot submit new Natural training"
     );
-    let mut response = repo
-        .db()
-        .query("SELECT VALUE result_json FROM classifier_learning_job;")
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-    let results: Vec<String> = response.take(0).unwrap();
-    let result: serde_json::Value = serde_json::from_str(&results[0]).unwrap();
-    assert_eq!(result["state"], "candidate_retained", "{result}");
-    assert_eq!(result["promoted"], false);
-    assert!(count(&repo, "classifier_learning_used").await >= 100);
+    assert_eq!(count(&repo, "classifier_learning_used").await, 0);
     assert_eq!(
         std::fs::read(installed.directory.path().join("classifier/active.json")).unwrap(),
-        active,
-        "candidate fitting never confers activation authority"
-    );
-    assert_eq!(
-        learning::drain_one(
-            &repo,
-            &installed.home,
-            "candidate-restart",
-            Arc::new(AtomicBool::new(false))
-        )
-        .await
-        .unwrap(),
-        0
+        active
     );
     let mut changed = exchange.clone();
     let mut edited = changed
         .items
         .iter()
-        .find(|item| item.split == argos_osint_core::classifier::training::Split::Development)
+        .find(|item| item.split == Split::Development)
         .unwrap()
         .clone();
     edited.revision += 1;

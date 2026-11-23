@@ -354,26 +354,13 @@ pub(crate) async fn record_web_admission_in(
     record_admission_inner(tx, authority, context, origin, job_id, operation, created).await
 }
 
-async fn record_admission_inner(
+/// Fence an accepted no-op and admitted work against the same registration/epoch changes.
+pub(crate) async fn validate_admission_context_in(
     tx: &Tx,
     authority: &RegistryAuthority,
     context: &RegisteredContext,
     origin: &JobOrigin,
-    job_id: &str,
-    operation: &str,
-    created: bool,
 ) -> Result<(), TxError> {
-    if !opaque(job_id, 512)
-        || !opaque(operation, 64)
-        || !opaque(&origin.request_id, 128)
-        || origin.credential_references.len() > 64
-        || origin
-            .credential_references
-            .iter()
-            .any(|reference| !opaque(reference, 256))
-    {
-        return Err(abort("invalid durable request identity"));
-    }
     // Share the caller's registry guard and actual acceptance transaction.
     super::configuration_reset::check_user_epoch_in(
         tx,
@@ -408,6 +395,30 @@ async fn record_admission_inner(
     {
         return Err(abort("registered admission context unavailable or changed"));
     }
+    Ok(())
+}
+
+async fn record_admission_inner(
+    tx: &Tx,
+    authority: &RegistryAuthority,
+    context: &RegisteredContext,
+    origin: &JobOrigin,
+    job_id: &str,
+    operation: &str,
+    created: bool,
+) -> Result<(), TxError> {
+    if !opaque(job_id, 512)
+        || !opaque(operation, 64)
+        || !opaque(&origin.request_id, 128)
+        || origin.credential_references.len() > 64
+        || origin
+            .credential_references
+            .iter()
+            .any(|reference| !opaque(reference, 256))
+    {
+        return Err(abort("invalid durable request identity"));
+    }
+    validate_admission_context_in(tx, authority, context, origin).await?;
     let key = request_key(context, operation, &origin.request_id);
     let mut response = jobs::run(
         tx,

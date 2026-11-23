@@ -14,7 +14,6 @@ use argos_osint_core::events::Severity;
 use argos_osint_core::osint::manual;
 use argos_osint_core::osint::manual::DurableToolOutcome;
 use argos_osint_core::storage::classifier_activation;
-use argos_osint_core::storage::classifier_activation::ActivationWork;
 use argos_osint_core::storage::job_dispatch;
 use argos_osint_core::storage::job_dispatch::DeliveryClaim;
 use argos_osint_core::storage::job_dispatch::DeliveryFinish;
@@ -50,7 +49,6 @@ pub(crate) struct LocalWorkerConfig {
     pub(crate) store: DatasetStore,
     pub(crate) index: Option<ActorIndexWorker>,
     pub(crate) relinquish_on_shutdown: bool,
-    pub(crate) classifier_enabled: bool,
 }
 
 pub(crate) async fn run(
@@ -95,7 +93,6 @@ pub(crate) async fn run(
             store,
             index,
             relinquish_on_shutdown: false,
-            classifier_enabled: true,
         },
         signal,
     )
@@ -116,46 +113,43 @@ pub(crate) async fn run_with_config(
         store,
         index,
         relinquish_on_shutdown,
-        classifier_enabled,
     } = config;
     let reindex = index.is_some();
     let pools: Vec<&'static str> = lanes::Lane::ALL
         .into_iter()
         .filter(|lane| reindex || *lane != lanes::Lane::Reindex)
-        .filter(|lane| {
-            classifier_enabled || !matches!(lane, lanes::Lane::Train | lanes::Lane::Activate)
-        })
+        .filter(|lane| !matches!(lane, lanes::Lane::Train | lanes::Lane::Activate))
         .map(lanes::Lane::pool)
         .collect();
-    if !classifier_enabled {
-        job_dispatch::configure_pool(repo.db(), setup_jobs::TRAIN_POOL, false).await?;
-        classifier_activation::configure_consumer(&repo, false).await?;
-    }
+    job_dispatch::configure_pool(repo.db(), setup_jobs::TRAIN_POOL, false).await?;
+    classifier_activation::configure_consumer(&repo, false).await?;
+    setup_jobs::enable_operation(repo.db(), MaintenanceOperation::TrainClassifier, false).await?;
     for pool in &pools {
         job_dispatch::ensure_queue_transport(repo.db(), pool).await?;
         job_dispatch::enable_pool(repo.db(), pool).await?;
     }
-    for operation in [
-        MaintenanceOperation::SeedActors,
-        MaintenanceOperation::TrainClassifier,
-    ] {
-        setup_jobs::enable_operation(
-            repo.db(),
-            operation,
-            operation != MaintenanceOperation::TrainClassifier || classifier_enabled,
-        )
-        .await?;
-    }
+    setup_jobs::enable_operation(repo.db(), MaintenanceOperation::SeedActors, true).await?;
     if reindex {
         setup_jobs::enable_operation(repo.db(), MaintenanceOperation::ReindexActors, true).await?;
     }
     let (stop, receive) = watch::channel(false);
-    let (routes, receivers) =
-        lanes::bounded_for_capabilities::<Received>(reindex, classifier_enabled);
+    let (routes, receivers) = lanes::bounded_for_capabilities::<Received>(reindex, false);
     let tools = Arc::new(manual::Tools::default());
     let relinquished = Arc::new(AtomicUsize::new(0));
     let mut tasks = JoinSet::new();
-    tasks.spawn(index_loop(repo.clone(), index, receive.clone()));
+    let index_interval = if relinquish_on_shutdown {
+        // Poll between the writer admission windows so local batches don't
+        // miss a full window to scheduling jitter. Write pacing is unchanged.
+        Duration::from_millis(250)
+    } else {
+        Duration::from_secs(1)
+    };
+    tasks.spawn(index_loop(
+        repo.clone(),
+        index,
+        receive.clone(),
+        index_interval,
+    ));
     let runtime = LaneRuntime {
         repo: repo.clone(),
         workspace,
@@ -172,8 +166,6 @@ pub(crate) async fn run_with_config(
             receive.clone(),
         ));
     }
-    // Queue transport and the actual bounded activation lane are now owned.
-    classifier_activation::configure_consumer(&repo, classifier_enabled).await?;
     tracing::info!(
         role = if relinquish_on_shutdown {
             "local-ipc-worker"
@@ -212,8 +204,9 @@ async fn index_loop(
     repo: Repository,
     mut index: Option<ActorIndexWorker>,
     mut stop: watch::Receiver<bool>,
+    interval: Duration,
 ) -> Result<()> {
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut tick = tokio::time::interval(interval);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
@@ -396,6 +389,7 @@ struct DeliveryLane<'a> {
 enum WorkerOutcome {
     Complete { result_ref: String },
     Failed { reason: &'static str },
+    RetrySeedPressure { reason: &'static str },
     Relinquish { reason: &'static str },
     Stale,
 }
@@ -439,16 +433,27 @@ async fn handle(
         }
         DeliveryClaim::Claimed(lease) => lease,
     };
+    // Seed and reindex have durable, idempotent checkpoints on both runtimes.
+    // A planned Distributed restart must not turn those checkpoints into a
+    // terminal failure or consume a failure retry.
+    let shutdown_reason = if relinquish_on_shutdown {
+        Some("local_backend_shutdown")
+    } else if matches!(
+        lease.task.pool.as_str(),
+        setup_jobs::SEED_POOL | setup_jobs::REINDEX_POOL
+    ) {
+        Some("native_worker_shutdown")
+    } else {
+        None
+    };
+    let shutdown_outcome = || match shutdown_reason {
+        Some(reason) => WorkerOutcome::Relinquish { reason },
+        None => WorkerOutcome::Failed {
+            reason: "native_worker_shutdown",
+        },
+    };
     let outcome = if *stop.borrow() {
-        if relinquish_on_shutdown {
-            WorkerOutcome::Relinquish {
-                reason: "local_backend_shutdown",
-            }
-        } else {
-            WorkerOutcome::Failed {
-                reason: "native_worker_shutdown",
-            }
-        }
+        shutdown_outcome()
     } else {
         crate::setup_jobs::record_job_event(
             repo,
@@ -468,22 +473,6 @@ async fn handle(
                 tools
                     .execute_claimed(repo, &lease.task, cancel.clone())
                     .await
-            } else if lease.task.pool == classifier_activation::POOL {
-                match classifier_activation::execute_claimed(
-                    repo,
-                    workspace.to_path_buf(),
-                    &lease.task,
-                    cancel.clone(),
-                )
-                .await?
-                {
-                    ActivationWork::Complete { result_ref } => {
-                        Ok(DurableToolOutcome::Complete { result_ref })
-                    }
-                    ActivationWork::Failed { reason } => Ok(DurableToolOutcome::Failed { reason }),
-                    ActivationWork::Stale => Ok(DurableToolOutcome::Stale),
-                    _ => Err(anyhow::anyhow!("activation_outcome_unsupported")),
-                }
             } else if lease.task.pool == setup_jobs::REINDEX_POOL {
                 reindex_job::execute(repo, &lease.task, &cancel).await
             } else {
@@ -493,6 +482,7 @@ async fn handle(
                     store,
                     &lease.task,
                     cancel.clone(),
+                    relinquish_on_shutdown,
                 )
                 .await?
                 {
@@ -521,15 +511,7 @@ async fn handle(
                     // Retain the operation until its cancellation is observed; a
                     // detached trainer/seed must not outlive its claimed lease.
                     let _ = operation.await;
-                    break if relinquish_on_shutdown {
-                        WorkerOutcome::Relinquish {
-                            reason: "local_backend_shutdown",
-                        }
-                    } else {
-                        WorkerOutcome::Failed {
-                            reason: "native_worker_shutdown",
-                        }
-                    };
+                    break shutdown_outcome();
                 }
                 _ = heartbeat.tick() => {
                     let queue_live = received.renew().await;
@@ -558,16 +540,21 @@ async fn handle(
                             WorkerOutcome::Complete { result_ref }
                         }
                         DurableToolOutcome::Failed { reason }
-                            if relinquish_on_shutdown
+                            if shutdown_reason.is_some()
                                 && (*stop.borrow()
                                     || matches!(
                                         reason,
                                         "setup_interrupted" | "actor_reindex_interrupted"
                                     )) =>
                         {
-                            WorkerOutcome::Relinquish {
-                                reason: "local_backend_shutdown",
-                            }
+                            shutdown_outcome()
+                        }
+                        DurableToolOutcome::Failed { reason }
+                            if relinquish_on_shutdown
+                                && lease.task.pool == setup_jobs::SEED_POOL
+                                && crate::setup_jobs::is_worker_pressure_failure(reason) =>
+                        {
+                            WorkerOutcome::RetrySeedPressure { reason }
                         }
                         DurableToolOutcome::Failed { reason } => WorkerOutcome::Failed { reason },
                         DurableToolOutcome::Stale => WorkerOutcome::Stale,
@@ -616,6 +603,19 @@ async fn handle(
             )
             .await?
         }
+        WorkerOutcome::RetrySeedPressure { reason } => {
+            // The dispatcher applies the existing finite attempt limit.
+            job_dispatch::finish_delivery(
+                repo.db(),
+                &lease,
+                DeliveryOutcome::Retry {
+                    reason,
+                    delay_secs: 60,
+                },
+                Utc::now(),
+            )
+            .await?
+        }
         WorkerOutcome::Relinquish { reason } => {
             crate::setup_jobs::record_job_event(
                 repo,
@@ -623,7 +623,7 @@ async fn handle(
                 Severity::Info,
                 "task.relinquished",
                 format!(
-                    "Relinquished {} on local backend shutdown",
+                    "Relinquished {} on worker shutdown",
                     jobs::job_title(&lease.task.operation)
                 ),
             )
@@ -672,6 +672,17 @@ mod tests {
 
     #[tokio::test]
     async fn relinquish_on_shutdown_preserves_retry_budget_and_resumes_same_job_id() {
+        check_reindex_worker_shutdown(true).await;
+    }
+
+    #[tokio::test]
+    async fn distributed_shutdown_requeues_reindex_under_the_same_job_id() {
+        check_reindex_worker_shutdown(false).await;
+    }
+
+    // Exercise the worker's transport-specific shutdown policy using isolated
+    // local storage and queue; the public HTTP contract is tested separately.
+    async fn check_reindex_worker_shutdown(embedded: bool) {
         let _lifecycle_guard = crate::tests::EMBEDDED_LIFECYCLE_TEST_LOCK.lock().await;
         use argos_osint_core::storage::bootstrap;
         use argos_osint_core::storage::connect_registry;
@@ -832,8 +843,7 @@ mod tests {
                     ActorIndexWorker::local(unready_search, "index-owner-1".into())
                         .expect("local index worker"),
                 ),
-                relinquish_on_shutdown: true,
-                classifier_enabled: true,
+                relinquish_on_shutdown: embedded,
             },
             async move {
                 let _ = stop1_rx.await;
@@ -919,8 +929,7 @@ mod tests {
                     ActorIndexWorker::local(ready_search, "index-owner-2".into())
                         .expect("local index worker 2"),
                 ),
-                relinquish_on_shutdown: true,
-                classifier_enabled: true,
+                relinquish_on_shutdown: embedded,
             },
             async move {
                 let _ = stop2_rx.await;

@@ -23,6 +23,7 @@ use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::setup_jobs;
 use fleetworks_contracts::actor_index::ActorIndexLimits;
 use fleetworks_contracts::readiness::DatasetRef;
+use fleetworks_search_index::pressure::release_unused_heap;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Measurement {
@@ -32,14 +33,17 @@ pub(super) struct Measurement {
 
 #[derive(Default)]
 struct Admission {
-    paused: bool,
+    memory_paused: bool,
+    disk_paused: bool,
     cooldown_until: Option<Instant>,
+    reclaim_unused_memory: bool,
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct ParserBudget {
     limits: ActorIndexLimits,
     retained_bytes: u64,
+    reclaim_unused_memory: bool,
 }
 
 enum Decision {
@@ -53,15 +57,20 @@ enum Decision {
 fn physical_reason(
     limits: &ActorIndexLimits,
     sample: Measurement,
-    resuming: bool,
+    resuming_memory: bool,
+    resuming_disk: bool,
 ) -> Option<&'static str> {
     let (Some(memory), Some(disk)) = (sample.resident_bytes, sample.workspace_free_bytes) else {
         return Some("worker_pressure_unknown");
     };
-    if memory >= limits.memory_pause_bytes || (resuming && memory > limits.memory_resume_bytes) {
+    if memory >= limits.memory_pause_bytes
+        || (resuming_memory && memory > limits.memory_resume_bytes)
+    {
         return Some("worker_memory_pressure");
     }
-    if disk <= limits.disk_pause_free_bytes || (resuming && disk < limits.disk_resume_free_bytes) {
+    if disk <= limits.disk_pause_free_bytes
+        || (resuming_disk && disk < limits.disk_resume_free_bytes)
+    {
         return Some("worker_workspace_disk_pressure");
     }
     None
@@ -75,9 +84,17 @@ impl Admission {
         now: Instant,
     ) -> Result<Decision> {
         limits.validate()?;
-        let reason = physical_reason(limits, sample, self.paused);
-        if reason.is_some() && !self.paused {
-            self.paused = true;
+        let was_paused = self.memory_paused || self.disk_paused;
+        // Preserve a missing resource's low-water requirement, without
+        // applying it to the other available reading.
+        self.memory_paused |= sample
+            .resident_bytes
+            .is_none_or(|memory| memory >= limits.memory_pause_bytes);
+        self.disk_paused |= sample
+            .workspace_free_bytes
+            .is_none_or(|disk| disk <= limits.disk_pause_free_bytes);
+        let reason = physical_reason(limits, sample, self.memory_paused, self.disk_paused);
+        if reason.is_some() && !was_paused {
             self.cooldown_until = Some(now + Duration::from_millis(u64::from(limits.cooldown_ms)));
         }
         if let Some(reason) = reason {
@@ -101,23 +118,29 @@ impl Admission {
         // other bounded worker work. Retained input has its own hard 32 MiB cap.
         let retained_bytes = ((limits.memory_pause_bytes - memory) / 4).min(32 * 1024 * 1024);
         if retained_bytes < 8 * 1024 * 1024 {
-            self.paused = true;
+            self.memory_paused = true;
             self.cooldown_until = Some(now + Duration::from_millis(u64::from(limits.cooldown_ms)));
             return Ok(Decision::Wait {
                 reason: "worker_parser_headroom",
                 retry_after: Duration::from_secs(5),
             });
         }
-        self.paused = false;
+        self.memory_paused = false;
+        self.disk_paused = false;
         self.cooldown_until = None;
         Ok(Decision::Ready(ParserBudget {
             limits: limits.clone(),
             retained_bytes,
+            reclaim_unused_memory: self.reclaim_unused_memory,
         }))
     }
 }
 
 impl ParserBudget {
+    pub(super) fn has_co_located_index(&self) -> bool {
+        self.reclaim_unused_memory
+    }
+
     fn actor_limits(&self) -> ActorReadLimits {
         ActorReadLimits {
             max_retained_bytes: self.retained_bytes,
@@ -125,28 +148,27 @@ impl ParserBudget {
         }
     }
     fn check_sample(&self, sample: Measurement) -> Result<()> {
-        ensure!(
-            physical_reason(&self.limits, sample, false).is_none(),
-            "worker_parse_resource_budget"
-        );
-        Ok(())
+        match physical_reason(&self.limits, sample, false, false) {
+            Some(reason) => Err(anyhow::anyhow!(reason)),
+            None => Ok(()),
+        }
     }
 
-    /// The existing Natural parser already bounds rows, raw records and corpus
-    /// text. Apply an additional conservative local input cap before starting
-    /// that domain worker; larger validated uploads remain explicit failures.
-    pub(super) fn check_training_input(&self, input_bytes: u64) -> Result<()> {
-        ensure!(
-            input_bytes <= self.retained_bytes,
-            "worker_training_input_budget"
-        );
-        Ok(())
-    }
-
-    /// Use on a blocking worker at bounded training progress intervals. On
-    /// failure the caller cancels and awaits the actual training operation.
+    /// Rechecks physical pressure while the operation is running.
     pub(super) fn check_running(&self, workspace: &Path) -> Result<()> {
-        self.check_sample(measure(workspace))
+        let reclaim_from = self.reclaim_unused_memory.then(|| {
+            self.limits
+                .memory_pause_bytes
+                .saturating_sub(8 * 1024 * 1024)
+        });
+        self.check_sample(measure(workspace, reclaim_from))
+    }
+
+    /// Release free pages before the Embedded index starts applying committed work.
+    pub(super) fn release_seed_allocations(&self) {
+        if self.reclaim_unused_memory {
+            release_unused_heap();
+        }
     }
 }
 
@@ -158,14 +180,19 @@ pub(super) async fn await_admission(
     task: &ClaimedTask,
     workspace: &Path,
     cancel: &AtomicBool,
+    reclaim_unused_memory: bool,
 ) -> Result<ParserBudget> {
-    let mut policy = Admission::default();
+    let mut policy = Admission {
+        reclaim_unused_memory,
+        ..Admission::default()
+    };
     loop {
         ensure!(!cancel.load(Ordering::Acquire), "worker_bulk_cancelled");
         let limits = actor_search_outbox::resource_limits(repo).await?;
+        let reclaim_from = reclaim_unused_memory.then_some(limits.memory_resume_bytes);
         let sample = tokio::task::spawn_blocking({
             let workspace = workspace.to_owned();
-            move || measure(&workspace)
+            move || measure(&workspace, reclaim_from)
         })
         .await?;
         ensure!(!cancel.load(Ordering::Acquire), "worker_bulk_cancelled");
@@ -256,7 +283,7 @@ pub(super) fn scan_actors_checked(
     cancel: &AtomicBool,
 ) -> Result<ValidatedActors> {
     scan_actors_with_probe(path, dataset, budget, cancel, || {
-        budget.check_sample(measure(workspace))
+        budget.check_running(workspace)
     })
 }
 
@@ -325,7 +352,7 @@ pub(super) fn produce_actor_batches(
     sender: tokio::sync::mpsc::Sender<Result<Vec<Actor>>>,
 ) -> Result<()> {
     produce_actor_batches_with_probe(validated, cancel, sender, || {
-        budget.check_sample(measure(workspace))
+        budget.check_running(workspace)
     })
 }
 
@@ -404,9 +431,18 @@ fn produce_actor_batches_with_probe(
     Ok(())
 }
 
-fn measure(workspace: &Path) -> Measurement {
+fn measure(workspace: &Path, reclaim_from: Option<u64>) -> Measurement {
+    let resident = resident_bytes();
+    let reclaim = resident
+        .zip(reclaim_from)
+        .is_some_and(|(resident, threshold)| resident >= threshold);
+    let resident = if reclaim && release_unused_heap() {
+        resident_bytes()
+    } else {
+        resident
+    };
     Measurement {
-        resident_bytes: resident_bytes(),
+        resident_bytes: resident,
         workspace_free_bytes: free_bytes(workspace),
     }
 }
@@ -503,6 +539,7 @@ mod tests {
         ParserBudget {
             limits: ActorIndexLimits::default(),
             retained_bytes: 32 * 1024 * 1024,
+            reclaim_unused_memory: false,
         }
     }
 
@@ -694,6 +731,63 @@ mod tests {
             .is_err());
     }
 
+    #[test]
+    fn seed_admission_requires_low_water_only_for_the_resource_under_pressure() {
+        let limits = ActorIndexLimits::default();
+        let now = Instant::now();
+        let after_cooldown = now + Duration::from_millis(u64::from(limits.cooldown_ms));
+        let disk_between = Some(limits.disk_resume_free_bytes - 1);
+        let memory_between = Some(limits.memory_resume_bytes + 1);
+        let cases = [
+            (
+                Measurement {
+                    resident_bytes: Some(limits.memory_pause_bytes),
+                    workspace_free_bytes: disk_between,
+                },
+                "worker_memory_pressure",
+                Measurement {
+                    workspace_free_bytes: disk_between,
+                    ..healthy()
+                },
+            ),
+            (
+                Measurement {
+                    resident_bytes: memory_between,
+                    workspace_free_bytes: Some(limits.disk_pause_free_bytes),
+                },
+                "worker_workspace_disk_pressure",
+                Measurement {
+                    resident_bytes: memory_between,
+                    ..healthy()
+                },
+            ),
+            (
+                Measurement {
+                    resident_bytes: memory_between,
+                    workspace_free_bytes: None,
+                },
+                "worker_pressure_unknown",
+                Measurement {
+                    resident_bytes: memory_between,
+                    ..healthy()
+                },
+            ),
+        ];
+        for (high, expected, recovered) in cases {
+            let mut admission = Admission::default();
+            assert!(matches!(
+                admission.observe(&limits, high, now).expect("high watermark"),
+                Decision::Wait { reason, .. } if reason == expected
+            ));
+            assert!(matches!(
+                admission
+                    .observe(&limits, recovered, after_cooldown)
+                    .expect("low watermark"),
+                Decision::Ready(_)
+            ));
+        }
+    }
+
     #[tokio::test]
     async fn bulk_pressure_wait_is_async_and_does_not_hold_interactive_execution() {
         let limits = ActorIndexLimits::default();
@@ -736,7 +830,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let rss = resident_bytes().expect("resident bytes reported on host OS");
         assert!(rss > 0);
-        let measured = measure(dir.path());
+        let measured = measure(dir.path(), None);
         assert!(measured.resident_bytes.is_some_and(|value| value > 0));
     }
 
@@ -744,7 +838,7 @@ mod tests {
     #[test]
     fn combined_backend_rss_budget_coordinates_search_meter_and_bulk_admission() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let live = measure(dir.path());
+        let live = measure(dir.path(), None);
         let rss = live.resident_bytes.expect("process RSS available");
         assert!(rss > 0);
 

@@ -59,6 +59,7 @@ pub mod entities;
 pub mod event_log;
 pub mod graph;
 pub mod home;
+pub mod inbox_qa;
 pub mod index_drain;
 pub mod insight;
 pub mod insight_owner;

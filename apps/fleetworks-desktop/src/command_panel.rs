@@ -11,8 +11,11 @@ use rune::TextEdit;
 use rune::Transition;
 use rune_kit::Kit;
 
+use crate::accessibility::ViewPreferences;
 use crate::app::Page;
 use crate::icons;
+use crate::material;
+use crate::material::GlassSurface;
 use crate::theme;
 use crate::State;
 
@@ -136,7 +139,6 @@ impl State {
             || self.transfer.confirmation.is_some()
             || self.submissions.atlas.confirmation.is_some()
             || self.submissions.tools.confirmation.is_some()
-            || self.classifier_activation.confirmation.is_some()
             || self.job_actions.confirmation.is_some()
             || self.workspaces.confirmation.is_some()
             || self.rebind.confirmation.is_some()
@@ -149,8 +151,7 @@ impl State {
             return;
         }
         self.settings_open = false;
-        self.inbox.open = false;
-        self.inbox.selected = None;
+        self.inbox.close();
         let mut query = TextEdit::new("");
         query.focused = true;
         self.commands.query = query;
@@ -167,7 +168,7 @@ impl State {
                 self.setup_gateway = true;
             }
             Command::OpenSettings => self.settings_open = true,
-            Command::OpenInbox => self.inbox.open = true,
+            Command::OpenInbox => self.open_inbox(),
             Command::ToggleAssistant => {
                 use crate::assistant::Preference;
                 self.assistant.preference = if self.assistant.preference == Preference::Closed {
@@ -199,14 +200,50 @@ fn on_field_key(state: &mut State, event: &KeyEvent) -> bool {
     true
 }
 
+pub(crate) const TOOLBAR_COMMAND_COMPACT_WIDTH: f32 = 88.0;
+pub(crate) const TOOLBAR_COMMAND_LABELED_WIDTH: f32 = 192.0;
+
 /// The toolbar button.
-pub(crate) fn toolbar_button(kit: &Kit) -> El {
-    rune_kit::IconButton::new(&icons::COMMAND)
-        .variant(rune_kit::IconButtonVariant::Ghost)
-        .label("Command panel (Ctrl+K or ⌘K)")
+pub(crate) fn toolbar_button(kit: &Kit, compact: bool, preferences: ViewPreferences) -> El {
+    let shortcut = if cfg!(target_os = "macos") {
+        "⌘K"
+    } else {
+        "Ctrl+K"
+    };
+    let width = if compact {
+        TOOLBAR_COMMAND_COMPACT_WIDTH
+    } else {
+        TOOLBAR_COMMAND_LABELED_WIDTH
+    };
+    let button = rune_kit::Button::new("Run a command")
+        .variant(rune_kit::ButtonVariant::Ghost)
+        .icon(&icons::COMMAND)
+        .shortcut(shortcut)
+        .label_with(move |font, color| {
+            let mut label = rune::row().gap(8.0).center_y();
+            if !compact {
+                label = label.child(
+                    rune::text("Run a command")
+                        .key("command-toolbar-label")
+                        .font(font)
+                        .color(color),
+                );
+            }
+            label.child(
+                rune::text(shortcut)
+                    .font(font)
+                    .color(theme::hex(theme::TEXT_SECONDARY)),
+            )
+        })
         .on_press(|state: &mut State| state.open_command_panel())
         .build(kit)
         .key("command-open")
+        .w(width)
+        .shrink()
+        .h(28.0)
+        .px(11.0)
+        .radius(999.0);
+    material::glass_control(button, preferences)
 }
 
 /// The command overlay, pushed to `layers` while it is open. It keeps the modal contract of a
@@ -215,7 +252,8 @@ pub(crate) fn toolbar_button(kit: &Kit) -> El {
 pub(crate) fn view(
     state: &State,
     kit: &Kit,
-    preferences: crate::accessibility::ViewPreferences,
+    preferences: ViewPreferences,
+    narrow: bool,
     layers: &mut Vec<El>,
 ) {
     if !state.commands.open || state.has_active_confirmation_dialog() {
@@ -298,14 +336,14 @@ pub(crate) fn view(
                     .color(kit.c.text_base),
             ),
         )
-        .child(close);
+        .child(material::glass_control(close, preferences));
     let body = rune::col()
         .key("body")
         .w_full()
         .px(16.0)
         .pb(16.0)
         .gap(10.0)
-        .child(search)
+        .child(material::glass_control(search, preferences))
         .child(rune_kit::popover::fit_scroll(list));
     let mut panel = rune::col()
         .key("command-panel-dialog")
@@ -325,7 +363,8 @@ pub(crate) fn view(
     for shadow in kit.shadow_layers(&kit.elevation.overlay) {
         panel = panel.box_shadow(shadow);
     }
-    let panel = crate::material::glass(panel, crate::material::GlassSurface::Overlay, preferences)
+    let panel = material::glass(panel, GlassSurface::Overlay, preferences)
+        .focus_return("command-open")
         .modal(true, |state: &mut State| state.commands.close())
         .modal_click_outside(true);
     layers.push(
@@ -334,7 +373,11 @@ pub(crate) fn view(
             .absolute(0.0, 0.0)
             .w_full()
             .h_full()
-            .fill(kit.c.scrim)
+            .fill(if narrow {
+                kit.c.scrim.alpha(kit.c.scrim.a.max(0.52))
+            } else {
+                kit.c.scrim
+            })
             .transition(if preferences.reduced_motion {
                 Transition::none()
             } else {
@@ -630,6 +673,121 @@ mod tests {
             runtime.frame(0.0);
             assert_eq!(runtime.state.commands.query.text, "jobs");
             assert_eq!(runtime.presented("app-shell"), Some(stable_shell));
+        }
+    }
+
+    #[test]
+    fn populated_telemetry_has_separate_hit_bounds_from_the_command_trigger() {
+        use crate::app::Load;
+        use crate::workstation_dashboard::HostMetrics;
+
+        let mut state = crate::tests::registered_fixture();
+        state.page = Page::Workstation;
+        state.assistant.enabled = true;
+        state.host_metrics = Load::Ready(HostMetrics {
+            cpu_percent: Some(100.0),
+            memory_percent: Some(89.0),
+            disk_percent: Some(73.0),
+            ..HostMetrics::default()
+        });
+        state.seed_inbox_drawer_fixture();
+        state.inbox.close();
+        let mut runtime = rune::Runtime::new(
+            state,
+            crate::app::view,
+            (1180.0, 812.0),
+            rune::Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.on_key = crate::app::spec().on_key;
+        let bounds = |runtime: &rune::Runtime<State>, key: &str| {
+            runtime
+                .presented(key)
+                .unwrap_or_else(|| panic!("missing {key}"))
+                .0
+        };
+        let click = |runtime: &mut rune::Runtime<State>, key, now| {
+            let (x, y) = runtime.find(key).unwrap_or_else(|| panic!("missing {key}"));
+            runtime.pointer_down(x, y);
+            runtime.pointer_up(x, y);
+            runtime.frame(now);
+        };
+        for (step, (width, sidebar, labeled_metrics, labeled_command)) in [
+            (1180.0, 188.0, true, false),
+            (1203.0, 188.0, true, false),
+            (1205.0, 188.0, true, true),
+            (1099.0, 188.0, false, false),
+            (1101.0, 188.0, true, false),
+            (1180.0, 340.0, false, false),
+            (819.0, 340.0, false, false),
+            (821.0, 340.0, false, false),
+            (640.0, 340.0, false, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let now = 2.0 * step as f64;
+            runtime.update(|state, _| state.sidebar.set_width(sidebar));
+            runtime.set_viewport((width, 812.0), 1.0);
+            runtime.frame(now);
+            runtime.frame(now + 0.5);
+            let command = bounds(&runtime, "command-open");
+            let telemetry = bounds(&runtime, "toolbar-telemetry");
+            let assistant = bounds(&runtime, "assistant-toggle");
+            let bell = bounds(&runtime, "inbox-toggle");
+            assert!(
+                command[0] + command[2] <= assistant[0],
+                "{width} / {sidebar}"
+            );
+            assert!(
+                assistant[0] + assistant[2] <= telemetry[0],
+                "{width} / {sidebar}"
+            );
+            assert!(bell[0] + bell[2] <= width + 0.5);
+            assert_eq!(
+                runtime.find("command-toolbar-label").is_some(),
+                labeled_command
+            );
+            assert_eq!(
+                runtime.find("toolbar-telemetry/CPU").is_some(),
+                labeled_metrics
+            );
+
+            let telemetry_key = if labeled_metrics {
+                "toolbar-telemetry/CPU"
+            } else {
+                "telemetry-summary"
+            };
+            click(&mut runtime, telemetry_key, now + 0.6);
+            assert!(
+                !runtime.state.commands.open,
+                "telemetry opened Commands at {width}"
+            );
+            click(&mut runtime, "command-open", now + 0.7);
+            assert!(runtime.state.commands.open);
+            runtime.key(KeyEvent {
+                key: Key::Escape,
+                mods: rune::Mods::default(),
+            });
+            runtime.frame(now + 0.8);
+            assert!(!runtime.state.commands.open);
+            runtime.key(KeyEvent {
+                key: Key::Command('k'),
+                mods: rune::Mods {
+                    ctrl: true,
+                    ..rune::Mods::default()
+                },
+            });
+            runtime.frame(now + 0.9);
+            assert!(runtime.state.commands.open);
+            runtime.key(KeyEvent {
+                key: Key::Escape,
+                mods: rune::Mods::default(),
+            });
+            runtime.frame(now + 1.0);
+            assert!(!runtime.state.commands.open);
         }
     }
 

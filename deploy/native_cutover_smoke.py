@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise a separately started, task-owned native-review backend over HTTP.
 
-Uses synthetic actors/training only. Does not build/start/stop Docker, invoke a
+Uses a synthetic actor fixture. Does not build/start/stop Docker, invoke a
 provider, reset credentials, or use the user's native home. This is Linux backend
 evidence; it does not establish native app/GUI or Rust-BERT inference acceptance.
 """
@@ -36,16 +36,6 @@ def private_read(path, limit):
         value = source.read(limit + 1)
         assert len(value) <= limit
         return value
-
-
-def training_csv():
-    value = "sample_id,title,description,domain_labels,primary_domain,secondary_domain,subcategories,source_kind,difficulty,dataset_version,annotation_notes,split,scenario_group,language,synthetic,labels_complete,expected_admission,rejection_reason\n"
-    for split in ("train", "calibration"):
-        for group, (first, second) in enumerate((("governance", "security"), ("economic", "human"), ("environmental", "scientific"))):
-            for repeat in range(2):
-                identity = f"{split}-{group}-{repeat}"
-                value += f"{identity},Synthetic {first} {second} bulletin {repeat},Fictional {first} and {second} report,{first}|{second},{first},{second},,synthetic,cross_domain,synthetic-development-v1,,{split},{identity},en,true,true,admit,\n"
-    return value.encode()
 
 
 class Journey:
@@ -136,37 +126,19 @@ class Journey:
         self.search(proof, "Harbor Guild", canonical)
         self.record("durable reindex", job_id=rebuilt)
 
-        self.step = "Natural training"
-        active = self.workspace / "classifier/active.json"
-        prior = active.read_bytes() if active.exists() else None
-        for index, content in enumerate((training_csv(), training_csv() + b"\r\n")):
-            dataset = self.upload(proof, "classifier_training", content)
-            trained, detail = self.maintain(proof, "/api/v1/workstation/maintenance/train-classifier", f"cutover-train-{index}", dataset=dataset, engine="natural")
-            assert (active.read_bytes() if active.exists() else None) == prior, "training auto-activated"
-            model = detail["maintenance_result"]["candidate_model_id"]
-            self.record("Natural candidate retains prior", job_id=trained, dataset_sha256=dataset["sha256"])
-
-        self.step = "explicit activation"
-        preview_path = "/api/v1/classifier/candidates/detail?" + urlencode({"training_job_id": trained, "model_id": model})
-        preview = self.request(preview_path, proof=proof)
-        assert preview["activation_supported"] and preview["synthetic_baseline"]
-        fields = {"engine": "natural", "candidate": preview["candidate"], "expected_prior": preview["expected_prior"]}
-        denied = {"request_id": "cutover-activate-no-consent", "context": verify.submission_context(self.port, self.token, proof), **fields}
-        assert verify.request(self.port, "/api/v1/classifier/activate", self.token, denied, headers=proof)[0] in (400, 403, 409)
-        activated, _ = self.maintain(proof, "/api/v1/classifier/activate", "cutover-activate-natural", **fields, synthetic_baseline="activate_synthetic_baseline")
-        result_path = "/api/v1/classifier/activation/result?" + urlencode({"job_id": activated})
-        result = self.request(result_path, proof=proof)
-        assert result["state"] == "activated" and result["candidate"] == preview["candidate"]
-        assert result["activated_revision"]["model_id"] == model
-        self.record("separate operation-owned activation", job_id=activated, candidate=preview["candidate"])
+        self.step = "legacy classifier retirement"
+        readiness = self.request("/api/v1/workstation/readiness", proof=proof)
+        training = next(check for check in readiness["checks"] if check["id"] == "classifier_training")
+        assert training["reason_code"] == "legacy_classifier_retired" and not training["actions"]
+        self.record("legacy classifier actions retired")
 
         self.step = "scoped activity"
         logs = self.request("/api/v1/logs?limit=100", proof=proof)
         assert logs["private_logs_only"] and logs["available"]
         assert all("details" not in row and "seq" not in row for row in logs["rows"])
         foreign = verify.native_headers(self.origin("node-b", "192.0.2.62"))
-        for path in ("/api/v1/jobs/detail?id=" + trained, preview_path, result_path):
-            assert verify.request(self.port, path, self.token, headers=foreign)[0] in (403, 404)
+        path = "/api/v1/jobs/detail?id=" + seed
+        assert verify.request(self.port, path, self.token, headers=foreign)[0] in (403, 404)
         self.search(foreign, "Harbor Guild", canonical)
         self.record("private activity and shared global search", observed_log_rows=len(logs["rows"]))
 

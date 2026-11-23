@@ -702,6 +702,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disk_checkpoint_survives_pressure_and_replays_before_becoming_ready() {
+        let (_temporary, config) = local_config(ActorIndexLimits::default());
+        let open = || {
+            let engine = Engine::open_embedded(config.engine.clone()).expect("open disk index");
+            SearchService::new(
+                config.clone(),
+                Arc::new(EngineSlot::new(Some(Arc::new(engine)))),
+                "synthetic_unavailable",
+            )
+            .expect("open service with fresh pressure meter")
+        };
+        let query = ActorIndexQuery {
+            query: "Harbor".into(),
+            limit: 25,
+        };
+        let mut first = batch(
+            "seed-first",
+            "g1",
+            0,
+            1,
+            vec![actor("actor:a", 1, "Original Harbor")],
+        );
+        first.source_complete = false;
+        let mut next = batch(
+            "seed-next",
+            "g1",
+            1,
+            1,
+            vec![actor("actor:a", 2, "Updated Harbor")],
+        );
+        next.source_complete = false;
+
+        let paused_generation = {
+            let service = open();
+            service
+                .apply_batch(&first, None)
+                .await
+                .expect("first commit");
+            service
+                .meter()
+                .record_query(Duration::from_secs(10))
+                .expect("inject query pressure without changing the disk index");
+            reset_pace(&service);
+            let refused = service
+                .apply_batch(&next, None)
+                .await
+                .expect_err("pressure refuses the next batch");
+            assert_eq!(refused.code, "resource_pressure_paused");
+            let status = service.status().await.expect("paused status");
+            assert_eq!(status.state, "paused");
+            assert_eq!(
+                status.reason_code.as_deref(),
+                Some("query_latency_high_water")
+            );
+            let active = status.active.expect("committed generation");
+            assert_eq!(active.committed_checkpoint, 1);
+            assert_eq!(active.visible_checkpoint, 1);
+            assert!(!active.source_complete);
+            let prior = service
+                .query(&query)
+                .await
+                .expect("serve committed snapshot");
+            assert_eq!(prior.visible_checkpoint, 1);
+            assert_eq!(prior.serving_state, "indexing");
+            assert_eq!(prior.hits.len(), 1);
+            assert_eq!(prior.hits[0].projection.display_name, "Original Harbor");
+            active
+        };
+
+        let service = open();
+        let reopened = service.status().await.expect("reopened status");
+        assert_eq!(reopened.state, "indexing");
+        assert_eq!(reopened.active, Some(paused_generation));
+        let recovered = service
+            .apply_batch(&next, None)
+            .await
+            .expect("retry the original refused batch");
+        assert!(!recovered.replayed, "the paused attempt never committed");
+        assert_eq!(recovered.visible_checkpoint, 2);
+        reset_pace(&service);
+        let replay = service
+            .apply_batch(&next, None)
+            .await
+            .expect("retry the committed batch after an uncertain receipt");
+        assert!(replay.replayed);
+        assert_eq!(replay.checksum, recovered.checksum);
+        assert_eq!(replay.visible_checkpoint, 2);
+        let resumed = service.query(&query).await.expect("read recovered update");
+        assert_eq!(resumed.serving_state, "indexing");
+        assert!(!resumed.source_complete);
+        assert_eq!(resumed.hits.len(), 1);
+        assert_eq!(resumed.hits[0].revision, 2);
+        assert_eq!(resumed.hits[0].projection.display_name, "Updated Harbor");
+
+        let tail = batch(
+            "seed-tail",
+            "g1",
+            2,
+            1,
+            vec![actor("actor:b", 1, "Harbor Freight")],
+        );
+        reset_pace(&service);
+        service
+            .apply_batch(&tail, None)
+            .await
+            .expect("commit final tail");
+        let ready = service.query(&query).await.expect("read complete catalog");
+        assert_eq!(ready.serving_state, "ready");
+        assert!(ready.source_complete);
+        assert_eq!(ready.visible_checkpoint, 3);
+        let mut hits: Vec<_> = ready
+            .hits
+            .iter()
+            .map(|hit| (hit.actor_id.as_str(), hit.revision))
+            .collect();
+        hits.sort_unstable();
+        assert_eq!(hits, [("actor:a", 2), ("actor:b", 1)]);
+    }
+
+    #[tokio::test]
     async fn service_enforces_limits_pacing_concurrency_and_reader_drained_retirement() {
         let limits = ActorIndexLimits {
             batch_documents: 1,

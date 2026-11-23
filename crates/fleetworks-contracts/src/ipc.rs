@@ -1,6 +1,6 @@
 //! Versioned, length-delimited typed IPC framing and multiplexed transport.
 //!
-//! This module provides local pipe/stream communication between a native
+//! This module provides local Unix socket communication between a native
 //! workstation client and an attached backend process without HTTP headers,
 //! URLs, or bearer tokens on the wire.
 
@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt;
 use std::net::IpAddr;
+#[cfg(unix)]
 use std::process::Stdio;
 use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
@@ -35,7 +36,16 @@ use tokio::task::JoinHandle;
 
 use crate::capabilities::Capabilities;
 use crate::chat::ChatTurnRequest;
+use crate::chat::QaCancelRequest;
+use crate::chat::QaEventQuery;
+use crate::chat::QaSettingsUpdate;
+use crate::chat::QaTurnRequest;
 use crate::chat::CHAT_TURNS_PATH;
+use crate::chat::QA_CANCEL_PATH;
+use crate::chat::QA_EVENTS_PATH;
+use crate::chat::QA_LATEST_PATH;
+use crate::chat::QA_SETTINGS_PATH;
+use crate::chat::QA_TURNS_PATH;
 use crate::classifier_activation::ActivationRequest;
 use crate::classifier_activation::ACTIVATION_PATH;
 use crate::classifier_activation::ACTIVATION_RESULT_PATH;
@@ -80,9 +90,13 @@ use crate::TOOL_RESULT_PATH;
 use crate::TOOL_RUN_PATH;
 
 /// Current local IPC wire protocol version.
-pub const IPC_PROTOCOL_VERSION: u16 = 1;
+pub const IPC_PROTOCOL_VERSION: u16 = 2;
 /// Minimum supported local IPC wire protocol version.
-pub const IPC_MIN_PROTOCOL_VERSION: u16 = 1;
+pub const IPC_MIN_PROTOCOL_VERSION: u16 = 2;
+/// Transport name asserted by the companion handshake.
+pub const IPC_TRANSPORT: &str = "embedded-unix-socket";
+/// Maximum number of contiguous dataset chunks sent before waiting for acknowledgments.
+pub const IPC_UPLOAD_WINDOW: usize = 4;
 /// Maximum serialized JSON payload bytes permitted in a single IPC frame.
 pub const MAX_IPC_FRAME_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum raw binary chunk size per dataset upload chunk frame.
@@ -94,12 +108,16 @@ pub const MAX_IPC_QUEUE_DEPTH: usize = 64;
 /// Maximum retained stderr bytes captured from an attached child process.
 pub const MAX_IPC_STDERR_BYTES: usize = 64 * 1024;
 
+const RAW_UPLOAD_FRAME: u32 = 1 << 31;
+const MAX_UPLOAD_METADATA_BYTES: usize = 16 * 1024;
+
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(50);
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const EVENT_CHANNEL_CAPACITY: usize = 64;
 
 const DATASET_UPLOAD_CHUNK_PATH: &str = "/api/v1/workstation/datasets/uploads/chunk";
+const DATASET_UPLOAD_CANCEL_PATH: &str = "/api/v1/workstation/datasets/uploads/cancel";
 const DATASET_UPLOAD_FINISH_PATH: &str = "/api/v1/workstation/datasets/uploads/finish";
 const HOST_METRICS_PATH: &str = "/api/v1/host/metrics";
 const WORKSTATION_DATASETS_PATH: &str = "/api/v1/workstation/datasets";
@@ -252,7 +270,7 @@ pub struct IpcHello {
 }
 
 impl IpcHello {
-    /// Construct a protocol-v1 greeting.
+    /// Construct a greeting for the supported local protocol.
     #[must_use]
     pub fn new(client_name: String, client_version: String) -> Self {
         Self {
@@ -272,6 +290,9 @@ pub struct IpcHelloAck {
     pub protocol_version: u16,
     pub min_protocol_version: u16,
     pub compatible: bool,
+    pub transport: String,
+    pub dataset_upload_chunk_bytes: usize,
+    pub dataset_upload_window: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -281,13 +302,16 @@ pub struct IpcHelloAck {
 }
 
 impl IpcHelloAck {
-    /// Construct a compatible protocol-v1 acknowledgment.
+    /// Construct a compatible Unix socket acknowledgment.
     #[must_use]
     pub fn compatible(capabilities: Option<Capabilities>, ready: Option<Ready>) -> Self {
         Self {
             protocol_version: IPC_PROTOCOL_VERSION,
             min_protocol_version: IPC_MIN_PROTOCOL_VERSION,
             compatible: true,
+            transport: IPC_TRANSPORT.into(),
+            dataset_upload_chunk_bytes: MAX_IPC_CHUNK_BYTES,
+            dataset_upload_window: IPC_UPLOAD_WINDOW,
             reason: None,
             capabilities,
             ready,
@@ -301,6 +325,9 @@ impl IpcHelloAck {
             protocol_version,
             min_protocol_version: IPC_MIN_PROTOCOL_VERSION,
             compatible: false,
+            transport: IPC_TRANSPORT.into(),
+            dataset_upload_chunk_bytes: MAX_IPC_CHUNK_BYTES,
+            dataset_upload_window: IPC_UPLOAD_WINDOW,
             reason,
             capabilities: None,
             ready: None,
@@ -678,9 +705,13 @@ pub enum IpcOperation {
     DatasetUploadChunk {
         upload_id: String,
         offset: u64,
-        data_b64: String,
+        #[serde(skip)]
+        data: Vec<u8>,
     },
     DatasetUploadFinish {
+        upload_id: String,
+    },
+    DatasetUploadCancel {
         upload_id: String,
     },
     SeedActors(MaintenanceRequest),
@@ -688,6 +719,12 @@ pub enum IpcOperation {
     ReindexActors(MaintenanceRequest),
     ClassifierActivate(ActivationRequest),
     ChatTurnSubmit(ChatTurnRequest),
+    QaSettings,
+    QaSettingsUpdate(QaSettingsUpdate),
+    QaTurnSubmit(QaTurnRequest),
+    QaLatest,
+    QaEvents(QaEventQuery),
+    QaCancel(QaCancelRequest),
     ModelRoleSet(ModelRoleSetRequest),
     ProfileAccountUpsert(ProfileAccountUpsertRequest),
     ProfileAccountDelete(ProfileAccountDeleteRequest),
@@ -748,15 +785,19 @@ impl fmt::Debug for IpcOperation {
             Self::DatasetUploadChunk {
                 upload_id,
                 offset,
-                data_b64,
+                data,
             } => f
                 .debug_struct("DatasetUploadChunk")
                 .field("upload_id", upload_id)
                 .field("offset", offset)
-                .field("encoded_len", &data_b64.len())
+                .field("bytes", &data.len())
                 .finish(),
             Self::DatasetUploadFinish { upload_id } => f
                 .debug_struct("DatasetUploadFinish")
+                .field("upload_id", upload_id)
+                .finish(),
+            Self::DatasetUploadCancel { upload_id } => f
+                .debug_struct("DatasetUploadCancel")
                 .field("upload_id", upload_id)
                 .finish(),
             Self::SeedActors(r) => f.debug_tuple("SeedActors").field(r).finish(),
@@ -765,6 +806,12 @@ impl fmt::Debug for IpcOperation {
             Self::ClassifierActivate(r) => f.debug_tuple("ClassifierActivate").field(r).finish(),
             // Operator text stays out of debug output.
             Self::ChatTurnSubmit(_) => f.write_str("ChatTurnSubmit(..)"),
+            Self::QaSettings => f.write_str("QaSettings"),
+            Self::QaSettingsUpdate(_) => f.write_str("QaSettingsUpdate(..)"),
+            Self::QaTurnSubmit(_) => f.write_str("QaTurnSubmit(..)"),
+            Self::QaLatest => f.write_str("QaLatest"),
+            Self::QaEvents(_) => f.write_str("QaEvents(..)"),
+            Self::QaCancel(_) => f.write_str("QaCancel(..)"),
             Self::ModelRoleSet(r) => f.debug_tuple("ModelRoleSet").field(r).finish(),
             Self::ProfileAccountUpsert(r) => {
                 f.debug_tuple("ProfileAccountUpsert").field(r).finish()
@@ -790,7 +837,7 @@ impl fmt::Debug for IpcOperation {
 }
 
 impl IpcOperation {
-    /// Complete canonical list of [`IpcOperation`] names for parity coverage checks.
+    /// Operation names tracked by the HTTP and IPC parity inventory.
     pub const ALL_OPERATION_NAMES: &'static [&'static str] = &[
         "ready",
         "capabilities",
@@ -833,6 +880,12 @@ impl IpcOperation {
         "reindex_actors",
         "classifier_activate",
         "chat_turn_submit",
+        "qa_settings",
+        "qa_settings_update",
+        "qa_turn_submit",
+        "qa_latest",
+        "qa_events",
+        "qa_cancel",
         "model_role_set",
         "profile_account_upsert",
         "profile_account_delete",
@@ -881,11 +934,18 @@ impl IpcOperation {
             Self::DatasetUploadStart(_) => "dataset_upload_start",
             Self::DatasetUploadChunk { .. } => "dataset_upload_chunk",
             Self::DatasetUploadFinish { .. } => "dataset_upload_finish",
+            Self::DatasetUploadCancel { .. } => "dataset_upload_cancel",
             Self::SeedActors(_) => "seed_actors",
             Self::TrainClassifier(_) => "train_classifier",
             Self::ReindexActors(_) => "reindex_actors",
             Self::ClassifierActivate(_) => "classifier_activate",
             Self::ChatTurnSubmit(_) => "chat_turn_submit",
+            Self::QaSettings => "qa_settings",
+            Self::QaSettingsUpdate(_) => "qa_settings_update",
+            Self::QaTurnSubmit(_) => "qa_turn_submit",
+            Self::QaLatest => "qa_latest",
+            Self::QaEvents(_) => "qa_events",
+            Self::QaCancel(_) => "qa_cancel",
             Self::ModelRoleSet(_) => "model_role_set",
             Self::ProfileAccountUpsert(_) => "profile_account_upsert",
             Self::ProfileAccountDelete(_) => "profile_account_delete",
@@ -934,11 +994,18 @@ impl IpcOperation {
             Self::DatasetUploadStart(_) => (IpcMethod::Post, DATASET_UPLOADS_PATH),
             Self::DatasetUploadChunk { .. } => (IpcMethod::Post, DATASET_UPLOAD_CHUNK_PATH),
             Self::DatasetUploadFinish { .. } => (IpcMethod::Post, DATASET_UPLOAD_FINISH_PATH),
+            Self::DatasetUploadCancel { .. } => (IpcMethod::Post, DATASET_UPLOAD_CANCEL_PATH),
             Self::SeedActors(_) => (IpcMethod::Post, ACTOR_SEED_PATH),
             Self::TrainClassifier(_) => (IpcMethod::Post, CLASSIFIER_TRAIN_PATH),
             Self::ReindexActors(_) => (IpcMethod::Post, ACTOR_REINDEX_PATH),
             Self::ClassifierActivate(_) => (IpcMethod::Post, ACTIVATION_PATH),
             Self::ChatTurnSubmit(_) => (IpcMethod::Post, CHAT_TURNS_PATH),
+            Self::QaSettings => (IpcMethod::Get, QA_SETTINGS_PATH),
+            Self::QaSettingsUpdate(_) => (IpcMethod::Post, QA_SETTINGS_PATH),
+            Self::QaTurnSubmit(_) => (IpcMethod::Post, QA_TURNS_PATH),
+            Self::QaLatest => (IpcMethod::Get, QA_LATEST_PATH),
+            Self::QaEvents(_) => (IpcMethod::Get, QA_EVENTS_PATH),
+            Self::QaCancel(_) => (IpcMethod::Post, QA_CANCEL_PATH),
             Self::ModelRoleSet(_) => (IpcMethod::Post, MODELS_DEFAULTS_SET_PATH),
             Self::ProfileAccountUpsert(_) => (IpcMethod::Post, PROFILE_ACCOUNTS_UPSERT_PATH),
             Self::ProfileAccountDelete(_) => (IpcMethod::Post, PROFILE_ACCOUNTS_DELETE_PATH),
@@ -963,6 +1030,8 @@ impl IpcOperation {
             JOBS_PATH => Ok(Self::JobsList(JobsListQuery::default())),
             CYCLE_HISTORY_PATH => Ok(Self::CycleHistory(CycleHistoryQuery::default())),
             LOGS_PATH => Ok(Self::LogsPage(LogQuery::default())),
+            QA_SETTINGS_PATH => Ok(Self::QaSettings),
+            QA_LATEST_PATH => Ok(Self::QaLatest),
             _ => Err(ClientError::InvalidRoute),
         }
     }
@@ -997,6 +1066,7 @@ impl IpcOperation {
             CYCLE_HISTORY_PATH => decode_query(value).map(Self::CycleHistory),
             CANDIDATE_DETAIL_PATH => decode_query(value).map(Self::ClassifierCandidateDetail),
             ACTIVATION_RESULT_PATH => decode_query(value).map(Self::ClassifierActivationResult),
+            QA_EVENTS_PATH => decode_query(value).map(Self::QaEvents),
             _ => Err(ClientError::InvalidRoute),
         }
     }
@@ -1024,6 +1094,9 @@ impl IpcOperation {
             ACTOR_REINDEX_PATH => decode_body(body_bytes).map(Self::ReindexActors),
             ACTIVATION_PATH => decode_body(body_bytes).map(Self::ClassifierActivate),
             CHAT_TURNS_PATH => decode_body(body_bytes).map(Self::ChatTurnSubmit),
+            QA_SETTINGS_PATH => decode_body(body_bytes).map(Self::QaSettingsUpdate),
+            QA_TURNS_PATH => decode_body(body_bytes).map(Self::QaTurnSubmit),
+            QA_CANCEL_PATH => decode_body(body_bytes).map(Self::QaCancel),
             MODELS_DEFAULTS_SET_PATH => decode_body(body_bytes).map(Self::ModelRoleSet),
             PROFILE_ACCOUNTS_UPSERT_PATH => decode_body(body_bytes).map(Self::ProfileAccountUpsert),
             PROFILE_ACCOUNTS_DELETE_PATH => decode_body(body_bytes).map(Self::ProfileAccountDelete),
@@ -1054,6 +1127,9 @@ pub enum IpcPayload {
     Empty,
     Json(serde_json::Value),
     DatasetUpload(DatasetUpload),
+    DatasetUploadProgress {
+        received_bytes: u64,
+    },
     ConfigurationExport {
         bytes_b64: String,
     },
@@ -1071,6 +1147,10 @@ impl fmt::Debug for IpcPayload {
             Self::Empty => f.write_str("Empty"),
             Self::Json(value) => f.debug_tuple("Json").field(value).finish(),
             Self::DatasetUpload(upload) => f.debug_tuple("DatasetUpload").field(upload).finish(),
+            Self::DatasetUploadProgress { received_bytes } => f
+                .debug_struct("DatasetUploadProgress")
+                .field("received_bytes", received_bytes)
+                .finish(),
             Self::ConfigurationExport { bytes_b64 } => f
                 .debug_struct("ConfigurationExport")
                 .field("encoded_len", &bytes_b64.len())
@@ -1104,7 +1184,7 @@ pub enum IpcOutcome {
     },
 }
 
-/// Write a single 4-byte big-endian length-prefixed UTF-8 JSON envelope frame.
+/// Write one big-endian length-prefixed control envelope or raw dataset chunk.
 pub async fn write_frame<W>(writer: &mut W, envelope: &IpcEnvelope) -> Result<(), IpcError>
 where
     W: AsyncWrite + Unpin,
@@ -1113,64 +1193,128 @@ where
     if payload.is_empty() || payload.len() > MAX_IPC_FRAME_BYTES {
         return Err(IpcError::FrameTooLarge);
     }
-    let len = u32::try_from(payload.len()).map_err(|_| IpcError::FrameTooLarge)?;
-    writer
-        .write_all(&len.to_be_bytes())
-        .await
-        .map_err(map_write_io_error)?;
-    writer
-        .write_all(&payload)
-        .await
-        .map_err(map_write_io_error)?;
+    if let IpcEnvelope::Request {
+        op: IpcOperation::DatasetUploadChunk { data, .. },
+        ..
+    } = envelope
+    {
+        if data.is_empty()
+            || data.len() > MAX_IPC_CHUNK_BYTES
+            || payload.len() > MAX_UPLOAD_METADATA_BYTES
+        {
+            return Err(IpcError::FrameTooLarge);
+        }
+        let length = (4 + payload.len() + data.len()) as u32 | RAW_UPLOAD_FRAME;
+        writer
+            .write_all(&length.to_be_bytes())
+            .await
+            .map_err(map_write_io_error)?;
+        writer
+            .write_all(&(payload.len() as u32).to_be_bytes())
+            .await
+            .map_err(map_write_io_error)?;
+        writer
+            .write_all(&payload)
+            .await
+            .map_err(map_write_io_error)?;
+        writer.write_all(data).await.map_err(map_write_io_error)?;
+    } else {
+        writer
+            .write_all(&(payload.len() as u32).to_be_bytes())
+            .await
+            .map_err(map_write_io_error)?;
+        writer
+            .write_all(&payload)
+            .await
+            .map_err(map_write_io_error)?;
+    }
     writer.flush().await.map_err(map_write_io_error)?;
     Ok(())
 }
 
-/// Read a single 4-byte big-endian length-prefixed UTF-8 JSON envelope frame.
+/// Read a bounded control envelope or raw dataset chunk.
 ///
-/// Returns `Ok(None)` only on clean EOF at the frame boundary. Truncated length
-/// prefixes or truncated payloads return `Err(IpcError::Truncated)`. Zero-length
-/// and oversized frames fail closed before payload buffer allocation.
+/// Clean EOF is allowed at the frame boundary. A partial frame, missing raw
+/// bytes, oversized payload, or invalid binary metadata closes the stream.
 pub async fn read_frame<R>(reader: &mut R) -> Result<Option<IpcEnvelope>, IpcError>
 where
     R: AsyncRead + Unpin,
 {
     let mut header = [0_u8; 4];
-    let mut filled = 0;
-    while filled < header.len() {
-        let count = reader
-            .read(&mut header[filled..])
-            .await
-            .map_err(|error| IpcError::Io(error.kind()))?;
-        if count == 0 {
-            if filled == 0 {
-                return Ok(None);
-            }
-            return Err(IpcError::Truncated);
-        }
-        filled += count;
+    let first = reader
+        .read(&mut header)
+        .await
+        .map_err(|error| IpcError::Io(error.kind()))?;
+    if first == 0 {
+        return Ok(None);
     }
+    read_frame_bytes(reader, &mut header[first..]).await?;
 
-    let len = u32::from_be_bytes(header) as usize;
-    if len == 0 {
+    let wire_length = u32::from_be_bytes(header);
+    let raw = wire_length & RAW_UPLOAD_FRAME != 0;
+    let length = (wire_length & !RAW_UPLOAD_FRAME) as usize;
+    if length == 0 {
         return Err(IpcError::ZeroLengthFrame);
     }
-    if len > MAX_IPC_FRAME_BYTES {
+    if !raw {
+        if length > MAX_IPC_FRAME_BYTES {
+            return Err(IpcError::FrameTooLarge);
+        }
+        let mut json = vec![0; length];
+        read_frame_bytes(reader, &mut json).await?;
+        let envelope = serde_json::from_slice(&json).map_err(|_| IpcError::InvalidPayload)?;
+        if matches!(
+            envelope,
+            IpcEnvelope::Request {
+                op: IpcOperation::DatasetUploadChunk { .. },
+                ..
+            }
+        ) {
+            return Err(IpcError::InvalidPayload);
+        }
+        return Ok(Some(envelope));
+    }
+    if length <= 4 || length > 4 + MAX_UPLOAD_METADATA_BYTES + MAX_IPC_CHUNK_BYTES {
         return Err(IpcError::FrameTooLarge);
     }
+    let mut metadata_header = [0; 4];
+    read_frame_bytes(reader, &mut metadata_header).await?;
+    let metadata_length = u32::from_be_bytes(metadata_header) as usize;
+    let data_length = (length - 4)
+        .checked_sub(metadata_length)
+        .ok_or(IpcError::InvalidPayload)?;
+    if !(1..=MAX_UPLOAD_METADATA_BYTES).contains(&metadata_length)
+        || !(1..=MAX_IPC_CHUNK_BYTES).contains(&data_length)
+    {
+        return Err(IpcError::InvalidPayload);
+    }
+    let mut json = vec![0; metadata_length];
+    read_frame_bytes(reader, &mut json).await?;
+    let mut envelope = serde_json::from_slice(&json).map_err(|_| IpcError::InvalidPayload)?;
+    let IpcEnvelope::Request {
+        op: IpcOperation::DatasetUploadChunk { data, .. },
+        ..
+    } = &mut envelope
+    else {
+        return Err(IpcError::InvalidPayload);
+    };
+    data.resize(data_length, 0);
+    read_frame_bytes(reader, data).await?;
+    Ok(Some(envelope))
+}
 
-    let mut payload = vec![0_u8; len];
-    reader.read_exact(&mut payload).await.map_err(|error| {
+async fn read_frame_bytes<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    buffer: &mut [u8],
+) -> Result<(), IpcError> {
+    reader.read_exact(buffer).await.map_err(|error| {
         if error.kind() == std::io::ErrorKind::UnexpectedEof {
             IpcError::Truncated
         } else {
             IpcError::Io(error.kind())
         }
     })?;
-
-    serde_json::from_slice(&payload)
-        .map(Some)
-        .map_err(|_| IpcError::InvalidPayload)
+    Ok(())
 }
 
 /// Encode binary bytes as standard RFC 4648 base64 without line breaks.
@@ -1268,6 +1412,33 @@ pub(crate) fn base64_decode(input: &str, max_decoded_len: usize) -> Result<Vec<u
 pub type LocalIpcTransport = LocalIpcClient;
 
 type PendingMap = HashMap<u64, oneshot::Sender<Result<IpcOutcome, IpcError>>>;
+struct PendingIpcRequest {
+    shared: Arc<LocalIpcShared>,
+    id: u64,
+    response: oneshot::Receiver<Result<IpcOutcome, IpcError>>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl PendingIpcRequest {
+    async fn wait(mut self, timeout: Duration) -> Result<IpcOutcome, IpcError> {
+        match tokio::time::timeout(timeout, &mut self.response).await {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(_)) => Err(IpcError::PipeClosed),
+            Err(_) => Err(IpcError::Timeout),
+        }
+    }
+}
+
+impl Drop for PendingIpcRequest {
+    fn drop(&mut self) {
+        self.shared
+            .pending
+            .lock()
+            .expect("pending map lock")
+            .remove(&self.id);
+    }
+}
+
 type ShutdownWaiter = Arc<Mutex<Option<oneshot::Sender<Result<ShutdownAck, IpcError>>>>>;
 
 const CHILD_EXIT_GRACE: Duration = Duration::from_secs(2);
@@ -1275,6 +1446,7 @@ const CHILD_REAP_POLL: Duration = Duration::from_millis(5);
 
 struct LocalIpcShared {
     inflight: Arc<Semaphore>,
+    upload_window: tokio::sync::Mutex<()>,
     pending: Arc<Mutex<PendingMap>>,
     shutdown_waiter: ShutdownWaiter,
     events_tx: broadcast::Sender<IpcEvent>,
@@ -1364,7 +1536,7 @@ impl Drop for LocalIpcSession {
     }
 }
 
-/// Multiplexed, bounded local IPC client over an inherited child pipe or async stream.
+/// Multiplexed, bounded local IPC client for the private companion socket.
 #[derive(Clone)]
 pub struct LocalIpcClient {
     session: Arc<LocalIpcSession>,
@@ -1386,6 +1558,48 @@ impl fmt::Debug for LocalIpcClient {
             .field("has_ready", &self.session.shared.ready.is_some())
             .finish_non_exhaustive()
     }
+}
+
+/// Spawn a companion with only the child endpoint of an unnamed Unix pair.
+///
+/// Call from an active Tokio runtime. The caller owns the process, its piped
+/// stderr, and the parent endpoint for the handshake and subsequent IPC.
+#[cfg(unix)]
+pub fn spawn_companion_socket(
+    mut command: Command,
+) -> Result<(Child, tokio::net::UnixStream), IpcError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    let map_io = |error: std::io::Error| IpcError::Io(error.kind());
+    let (parent, endpoint) = UnixStream::pair().map_err(map_io)?;
+    parent.set_nonblocking(true).map_err(map_io)?;
+    let parent = tokio::net::UnixStream::from_std(parent).map_err(map_io)?;
+    let descriptor = endpoint.as_raw_fd();
+    command
+        .arg("--ipc-fd")
+        .arg(descriptor.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    // The pair starts close-on-exec. In the child alone, make its endpoint
+    // inheritable until the companion immediately claims it. Do not reuse
+    // this command with its captured descriptor on a later spawn.
+    // SAFETY: the callback only calls async-signal-safe fcntl on the live
+    // endpoint and returns an OS error without touching shared process state.
+    unsafe {
+        command.pre_exec(move || {
+            let flags = libc::fcntl(descriptor, libc::F_GETFD);
+            if flags < 0 || libc::fcntl(descriptor, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command.spawn().map_err(map_io)?;
+    drop(endpoint);
+    Ok((child, parent))
 }
 
 impl LocalIpcClient {
@@ -1425,39 +1639,9 @@ impl LocalIpcClient {
         .map_err(|error| error.cause)
     }
 
-    /// Attach to an already-spawned child process using its piped `stdin`, `stdout`, and optional `stderr`.
-    pub async fn from_child(
-        child: Child,
-        client_name: impl Into<String>,
-        client_version: impl Into<String>,
-    ) -> Result<Self, IpcError> {
-        Self::attach_child(child, client_name, client_version)
-            .await
-            .map_err(|error| error.cause)
-    }
-
-    async fn attach_child(
-        mut child: Child,
-        client_name: impl Into<String>,
-        client_version: impl Into<String>,
-    ) -> Result<Self, IpcStartupError> {
-        let stdin = child.stdin.take().ok_or(IpcError::PipeClosed)?;
-        let stdout = child.stdout.take().ok_or(IpcError::PipeClosed)?;
-        let stderr = child.stderr.take();
-        Self::connect_with_child(
-            stdout,
-            stdin,
-            stderr,
-            Some(child),
-            client_name.into(),
-            client_version.into(),
-        )
-        .await
-    }
-
-    /// Spawn a child command with piped stdio (`kill_on_drop(true)`) and complete the handshake.
+    /// Spawn a child with an inherited endpoint of a private Unix socket pair.
     pub async fn spawn_command(
-        command: &mut Command,
+        command: Command,
         client_name: impl Into<String>,
         client_version: impl Into<String>,
     ) -> Result<Self, IpcError> {
@@ -1466,21 +1650,35 @@ impl LocalIpcClient {
             .map_err(|error| error.cause)
     }
 
-    /// Spawn a child command and retain bounded stderr if attachment fails.
+    /// Spawn a child and retain bounded stderr if attachment fails.
+    #[cfg(unix)]
     pub async fn spawn_command_with_diagnostics(
-        command: &mut Command,
+        command: Command,
         client_name: impl Into<String>,
         client_version: impl Into<String>,
     ) -> Result<Self, IpcStartupError> {
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let child = command
-            .spawn()
-            .map_err(|error| IpcError::Io(error.kind()))?;
-        Self::attach_child(child, client_name, client_version).await
+        let (mut child, parent) = spawn_companion_socket(command)?;
+        let stderr = child.stderr.take();
+        let (reader, writer) = parent.into_split();
+        Self::connect_with_child(
+            reader,
+            writer,
+            stderr,
+            Some(child),
+            client_name.into(),
+            client_version.into(),
+        )
+        .await
+    }
+
+    /// Report a missing Unix socket implementation on unsupported hosts.
+    #[cfg(not(unix))]
+    pub async fn spawn_command_with_diagnostics(
+        _command: Command,
+        _client_name: impl Into<String>,
+        _client_version: impl Into<String>,
+    ) -> Result<Self, IpcStartupError> {
+        Err(IpcError::Io(std::io::ErrorKind::Unsupported).into())
     }
 
     async fn connect_with_child<R, W, E>(
@@ -1512,11 +1710,16 @@ impl LocalIpcClient {
             };
             if ack.protocol_version < IPC_MIN_PROTOCOL_VERSION
                 || ack.protocol_version > IPC_PROTOCOL_VERSION
+                || ack.min_protocol_version > ack.protocol_version
                 || (!ack.compatible && ack.protocol_version != IPC_PROTOCOL_VERSION)
             {
                 return Err(IpcError::UnsupportedVersion(ack.protocol_version));
             }
-            if !ack.compatible {
+            if !ack.compatible
+                || ack.transport != IPC_TRANSPORT
+                || ack.dataset_upload_chunk_bytes != MAX_IPC_CHUNK_BYTES
+                || ack.dataset_upload_window != IPC_UPLOAD_WINDOW
+            {
                 return Err(IpcError::HandshakeFailed);
             }
             Ok(ack)
@@ -1528,7 +1731,7 @@ impl LocalIpcClient {
         {
             Ok(ack) => ack,
             Err(cause) => {
-                // Stdout may reach EOF before the drain task sees buffered stderr.
+                // The socket may reach EOF before the drain task sees buffered stderr.
                 // Bound reaping and draining by the existing startup deadline.
                 if let Some(child) = child.as_mut() {
                     let _ = child.start_kill();
@@ -1551,13 +1754,16 @@ impl LocalIpcClient {
             }
         };
 
-        let (outbound_tx, outbound_rx) = mpsc::channel(MAX_IPC_QUEUE_DEPTH);
+        // Leave one slot for best-effort cancellation after a caller drops
+        // its upload, even when normal in-flight traffic fills the queue.
+        let (outbound_tx, outbound_rx) = mpsc::channel(MAX_IPC_QUEUE_DEPTH + 1);
         let (events_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let shutdown_waiter = Arc::new(Mutex::new(None));
 
         let shared = Arc::new(LocalIpcShared {
             inflight: Arc::new(Semaphore::new(MAX_IPC_INFLIGHT)),
+            upload_window: tokio::sync::Mutex::new(()),
             pending: Arc::clone(&pending),
             shutdown_waiter: Arc::clone(&shutdown_waiter),
             events_tx: events_tx.clone(),
@@ -1642,11 +1848,71 @@ impl LocalIpcClient {
         registration: Option<RegisteredContext>,
         op: IpcOperation,
     ) -> Result<IpcOutcome, IpcError> {
+        self.enqueue(registration, op)
+            .await?
+            .wait(self.request_timeout)
+            .await
+    }
+
+    pub(crate) fn cancel_upload(&self, registration: Option<RegisteredContext>, upload_id: String) {
+        let Some(sender) = self.session.clone_outbound_tx() else {
+            return;
+        };
+        let request_id = self
+            .session
+            .shared
+            .next_request_id
+            .fetch_add(1, Ordering::Relaxed);
+        let _ = sender.try_send(IpcEnvelope::Request {
+            request_id,
+            registration,
+            op: IpcOperation::DatasetUploadCancel { upload_id },
+        });
+    }
+
+    /// Queue a bounded window in byte order, then check cumulative acknowledgments.
+    pub(crate) async fn upload_window(
+        &self,
+        registration: Option<RegisteredContext>,
+        chunks: Vec<(IpcOperation, u64)>,
+    ) -> Result<(), ClientError> {
+        if !(1..=IPC_UPLOAD_WINDOW).contains(&chunks.len()) {
+            return Err(ClientError::InvalidRequest);
+        }
+        let _window = self.session.shared.upload_window.lock().await;
+        let mut pending = Vec::with_capacity(chunks.len());
+        for (op, expected) in chunks {
+            let request = self
+                .enqueue(registration.clone(), op)
+                .await
+                .map_err(ClientError::from)?;
+            pending.push((request, expected));
+        }
+        for (request, expected) in pending {
+            let outcome = request
+                .wait(self.request_timeout)
+                .await
+                .map_err(ClientError::from)?;
+            match outcome {
+                IpcOutcome::Ok(IpcPayload::DatasetUploadProgress { received_bytes })
+                    if received_bytes == expected => {}
+                IpcOutcome::Err { status, .. } => return Err(ClientError::Status(status)),
+                _ => return Err(ClientError::InvalidResponse),
+            }
+        }
+        Ok(())
+    }
+
+    async fn enqueue(
+        &self,
+        registration: Option<RegisteredContext>,
+        op: IpcOperation,
+    ) -> Result<PendingIpcRequest, IpcError> {
         if self.is_closed() {
             return Err(IpcError::PipeClosed);
         }
 
-        let _permit = match self.backpressure {
+        let permit = match self.backpressure {
             BackpressurePolicy::FailFast => self
                 .session
                 .shared
@@ -1689,6 +1955,12 @@ impl LocalIpcClient {
             }
             pending.insert(request_id, tx);
         }
+        let pending = PendingIpcRequest {
+            shared: Arc::clone(&self.session.shared),
+            id: request_id,
+            response: rx,
+            _permit: permit,
+        };
 
         let frame = IpcEnvelope::Request {
             request_id,
@@ -1709,29 +1981,8 @@ impl LocalIpcClient {
             }
         };
 
-        if let Err(err) = enqueue_result {
-            self.session
-                .shared
-                .pending
-                .lock()
-                .expect("pending map lock")
-                .remove(&request_id);
-            return Err(err);
-        }
-
-        match tokio::time::timeout(self.request_timeout, rx).await {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(_)) => Err(IpcError::PipeClosed),
-            Err(_) => {
-                self.session
-                    .shared
-                    .pending
-                    .lock()
-                    .expect("pending map lock")
-                    .remove(&request_id);
-                Err(IpcError::Timeout)
-            }
-        }
+        enqueue_result?;
+        Ok(pending)
     }
 
     /// Execute a typed operation and translate `IpcOutcome` into `IpcPayload` or `ClientError`.
@@ -1763,7 +2014,9 @@ impl LocalIpcClient {
                 serde_json::to_value(upload).map_err(|_| ClientError::InvalidResponse)?
             }
             IpcPayload::Empty => serde_json::Value::Null,
-            IpcPayload::ConfigurationExport { .. } | IpcPayload::LogExport { .. } => {
+            IpcPayload::DatasetUploadProgress { .. }
+            | IpcPayload::ConfigurationExport { .. }
+            | IpcPayload::LogExport { .. } => {
                 return Err(ClientError::InvalidResponse);
             }
         };
@@ -2083,6 +2336,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn raw_upload_requires_tagged_binary_framing() {
+        let frame = IpcEnvelope::Request {
+            request_id: 1,
+            registration: None,
+            op: IpcOperation::DatasetUploadChunk {
+                upload_id: "test-upload".into(),
+                offset: 0,
+                data: vec![0, 0xff, 8],
+            },
+        };
+        let mut raw = Vec::new();
+        write_frame(&mut raw, &frame).await.unwrap();
+        assert_eq!(raw[0] & 0x80, 0x80);
+        assert_eq!(
+            read_frame(&mut raw.as_slice()).await.unwrap(),
+            Some(frame.clone())
+        );
+
+        let json = serde_json::to_vec(&frame).unwrap();
+        let mut encoded = (json.len() as u32).to_be_bytes().to_vec();
+        encoded.extend_from_slice(&json);
+        assert_eq!(
+            read_frame(&mut encoded.as_slice()).await,
+            Err(IpcError::InvalidPayload)
+        );
+        raw.pop();
+        assert_eq!(
+            read_frame(&mut raw.as_slice()).await,
+            Err(IpcError::Truncated)
+        );
+    }
+
+    #[tokio::test]
     async fn frame_codec_round_trips_and_rejects_zero_oversize_and_truncated_frames() {
         let (mut client_side, mut server_side) = tokio::io::duplex(4096);
         let envelope = IpcEnvelope::Hello(IpcHello::new("desktop".into(), "0.2.1".into()));
@@ -2357,6 +2643,7 @@ mod tests {
         let server_task = tokio::spawn(async move {
             let mut assembled = Vec::new();
             let mut chunk_count = 0usize;
+            let mut acknowledgments = Vec::new();
             loop {
                 let frame = read_frame(&mut server).await.unwrap().unwrap();
                 let IpcEnvelope::Request {
@@ -2387,23 +2674,24 @@ mod tests {
                     IpcOperation::DatasetUploadChunk {
                         upload_id,
                         offset,
-                        data_b64,
+                        data,
                     } => {
                         assert_eq!(upload_id, "ipc-up-1");
                         assert_eq!(offset as usize, assembled.len());
-                        let bytes = base64_decode(&data_b64, MAX_IPC_CHUNK_BYTES).unwrap();
-                        assert!(!bytes.is_empty() && bytes.len() <= MAX_IPC_CHUNK_BYTES);
-                        assembled.extend_from_slice(&bytes);
+                        assert!(!data.is_empty() && data.len() <= MAX_IPC_CHUNK_BYTES);
+                        assembled.extend_from_slice(&data);
                         chunk_count += 1;
-                        write_frame(
-                            &mut server,
-                            &IpcEnvelope::Response {
-                                request_id,
-                                outcome: IpcOutcome::Ok(IpcPayload::Empty),
-                            },
-                        )
-                        .await
-                        .unwrap();
+                        acknowledgments.push(IpcEnvelope::Response {
+                            request_id,
+                            outcome: IpcOutcome::Ok(IpcPayload::DatasetUploadProgress {
+                                received_bytes: assembled.len() as u64,
+                            }),
+                        });
+                        if chunk_count >= 2 {
+                            for ack in acknowledgments.drain(..) {
+                                write_frame(&mut server, &ack).await.unwrap();
+                            }
+                        }
                     }
                     IpcOperation::DatasetUploadFinish { upload_id } => {
                         assert_eq!(upload_id, "ipc-up-1");
@@ -2847,15 +3135,14 @@ mod tests {
         frame.extend_from_slice(&ack_bytes);
         std::fs::write(&ack_path, &frame).unwrap();
 
-        let mut cmd = Command::new("sh");
+        let mut cmd = Command::new("python3");
         cmd.args([
             "-c",
-            "echo $$ > \"$2\"; cat \"$1\"; exec sleep 60",
-            "sh",
+            "import os,pathlib,socket,sys,time; sock=socket.socket(fileno=int(sys.argv[4])); pathlib.Path(sys.argv[2]).write_text(str(os.getpid())); sock.sendall(pathlib.Path(sys.argv[1]).read_bytes()); time.sleep(60)",
             ack_path.to_str().unwrap(),
             pid_path.to_str().unwrap(),
         ]);
-        let client = LocalIpcClient::spawn_command(&mut cmd, "reap-test", "1.0.0")
+        let client = LocalIpcClient::spawn_command(cmd, "reap-test", "1.0.0")
             .await
             .unwrap();
 
@@ -2907,15 +3194,14 @@ mod tests {
         frame.extend_from_slice(&ack_bytes);
         std::fs::write(&ack_path, &frame).unwrap();
 
-        let mut cmd = Command::new("sh");
+        let mut cmd = Command::new("python3");
         cmd.args([
             "-c",
-            "echo $$ > \"$2\"; cat \"$1\"; exec sleep 60",
-            "sh",
+            "import os,pathlib,socket,sys,time; sock=socket.socket(fileno=int(sys.argv[4])); pathlib.Path(sys.argv[2]).write_text(str(os.getpid())); sock.sendall(pathlib.Path(sys.argv[1]).read_bytes()); time.sleep(60)",
             ack_path.to_str().unwrap(),
             pid_path.to_str().unwrap(),
         ]);
-        let client = LocalIpcClient::spawn_command(&mut cmd, "shutdown-reap-test", "1.0.0")
+        let client = LocalIpcClient::spawn_command(cmd, "shutdown-reap-test", "1.0.0")
             .await
             .unwrap();
         let pid = std::fs::read_to_string(&pid_path)

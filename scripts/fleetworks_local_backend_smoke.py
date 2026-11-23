@@ -2,9 +2,8 @@
 """Docker-free synthetic end-to-end smoke test for the Fleetworks local-IPC companion backend.
 
 Spawns `argos-api-host --role local-ipc --state-dir <private-0o700-dir>` over
-inherited length-delimited binary stdin/stdout frames (NEVER HTTP over pipes and
-NEVER opening TCP/UDP sockets), verifies protocol version negotiation, zero
-open sockets on the child PID, bounded error/capability handling, actor
+an inherited Unix socket pair. Verifies protocol version negotiation, zero
+network sockets on the child PID, bounded error/capability handling, actor
 catalog upload + seed + reindex + clean Shutdown/restart resume preserving the
 exact same job_id without duplicates, and actor search visibility.
 
@@ -13,13 +12,13 @@ or launching the GUI window; GUI verification remains separate.
 """
 
 import argparse
-import base64
 import collections
 import hashlib
 import json
 import os
 import platform
 import shutil
+import socket
 import stat
 import struct
 import subprocess
@@ -29,9 +28,14 @@ import threading
 import time
 from pathlib import Path
 
-IPC_PROTOCOL_VERSION = 1
-IPC_MIN_PROTOCOL_VERSION = 1
+IPC_PROTOCOL_VERSION = 2
+IPC_MIN_PROTOCOL_VERSION = 2
 MAX_IPC_FRAME_BYTES = 4 * 1024 * 1024
+IPC_BINARY_FLAG = 1 << 31
+IPC_UPLOAD_METADATA_BYTES = 16 * 1024
+IPC_UPLOAD_CHUNK_BYTES = 256 * 1024
+IPC_UPLOAD_WINDOW = 4
+IPC_SOCKET_TIMEOUT_SECONDS = 60
 MAX_STDERR_TAIL_BYTES = 16 * 1024
 NATIVE_CONTRACT_API_VERSION = 1
 CONNECT_CONTRACT_VERSION = 2
@@ -81,6 +85,16 @@ def encode_frame(envelope, *, max_bytes=MAX_IPC_FRAME_BYTES):
     return struct.pack(">I", len(payload)) + payload
 
 
+def encode_upload_frame(envelope, chunk):
+    if not 0 < len(chunk) <= IPC_UPLOAD_CHUNK_BYTES:
+        raise ValueError("IPC upload chunk length is out of bounds")
+    metadata = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+    size = 4 + len(metadata) + len(chunk)
+    if len(metadata) > IPC_UPLOAD_METADATA_BYTES or size > MAX_IPC_FRAME_BYTES:
+        raise ValueError("IPC upload frame length is out of bounds")
+    return struct.pack(">II", IPC_BINARY_FLAG | size, len(metadata)) + metadata + chunk
+
+
 def _read_exact(stream, count):
     chunks = []
     remaining = count
@@ -93,20 +107,67 @@ def _read_exact(stream, count):
     return b"".join(chunks)
 
 
-def read_frame(stream, *, max_bytes=MAX_IPC_FRAME_BYTES):
-    """Read one bounded 4-byte BE length-prefixed JSON frame; returns None on clean EOF."""
+def read_wire_frame(stream, *, max_bytes=MAX_IPC_FRAME_BYTES, allow_upload=False):
+    """Read one bounded v2 frame and return the original wire bytes and metadata."""
     header = _read_exact(stream, 4)
     if not header:
         return None
     if len(header) < 4:
         raise ValueError("Truncated IPC frame length prefix")
-    (length,) = struct.unpack(">I", header)
+    (prefix,) = struct.unpack(">I", header)
+    binary = bool(prefix & IPC_BINARY_FLAG)
+    length = prefix & ~IPC_BINARY_FLAG
+    if binary and not allow_upload:
+        raise ValueError("Unexpected IPC upload frame")
     if length == 0 or length > max_bytes:
         raise ValueError(f"Out-of-bounds IPC frame length: {length}")
     payload = _read_exact(stream, length)
     if len(payload) != length:
         raise ValueError("Truncated IPC frame payload")
-    return json.loads(payload.decode("utf-8"))
+    if binary:
+        if len(payload) < 4:
+            raise ValueError("Truncated IPC upload metadata length")
+        (metadata_length,) = struct.unpack(">I", payload[:4])
+        if (not 0 < metadata_length < len(payload) - 4 or metadata_length > IPC_UPLOAD_METADATA_BYTES
+                or len(payload) - 4 - metadata_length > IPC_UPLOAD_CHUNK_BYTES):
+            raise ValueError("Invalid IPC upload payload lengths")
+        metadata = payload[4:4 + metadata_length]
+    else:
+        metadata = payload
+    return header + payload, json.loads(metadata)
+
+
+def read_frame(stream, *, max_bytes=MAX_IPC_FRAME_BYTES):
+    frame = read_wire_frame(stream, max_bytes=max_bytes)
+    return frame[1] if frame is not None else None
+
+
+def spawn_ipc_child(command, **options):
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        with child:
+            fd = child.fileno()
+            process = subprocess.Popen([*command, "--ipc-fd", str(fd)], pass_fds=(fd,),
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, **options)
+        return process, parent
+    except BaseException:
+        parent.close()
+        raise
+
+
+def transport_attestation(stream, hello):
+    """Bind the actual socket endpoint to the compatible packaged companion handshake."""
+    if (stream.family != socket.AF_UNIX or stream.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM
+            or stream.getsockname() not in ("", b"") or stream.getpeername() not in ("", b"")):
+        raise ValueError("Expected an unnamed connected Unix stream for Embedded IPC")
+    fields = {"transport": "embedded-unix-socket", "protocol_version": IPC_PROTOCOL_VERSION,
+              "min_protocol_version": IPC_MIN_PROTOCOL_VERSION, "dataset_upload_chunk_bytes": IPC_UPLOAD_CHUNK_BYTES,
+              "dataset_upload_window": IPC_UPLOAD_WINDOW}
+    if hello.get("compatible") is not True or any(
+        type(hello.get(key)) is not type(value) or hello[key] != value for key, value in fields.items()
+    ):
+        raise ValueError("Packaged companion handshake did not attest the expected Embedded socket")
+    return {**{key: hello[key] for key in fields}, "socket_family": "unix", "socket_type": "stream"}
 
 
 def clean_child_environment():
@@ -186,21 +247,27 @@ def read_process_rss_bytes(pid, *, runner=None):
 class LocalIpcSession:
     """Managed child `argos-api-host --role local-ipc` process speaking binary IPC frames."""
 
-    def __init__(self, binary, state_dir, *, client_name="fleetworks-local-smoke", client_version="0.2.1"):
+    def __init__(self, binary, state_dir, *, client_name="fleetworks-local-smoke", client_version="0.2.1",
+                 log_filter=None):
         self.binary = Path(binary)
         self.state_dir = Path(state_dir)
         self.client_name = client_name
         self.client_version = client_version
         self._next_request_id = 1
         self.observed_events = []
+        self.last_shutdown_ack = None
         self._stderr_tail = collections.deque(maxlen=256)
-        self.proc = subprocess.Popen(
+        environment = clean_child_environment()
+        if log_filter is not None:
+            environment["RUST_LOG"] = log_filter
+        self.proc, self.socket = spawn_ipc_child(
             [str(self.binary), "--role", "local-ipc", "--state-dir", str(self.state_dir)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=clean_child_environment(),
+            env=environment,
         )
+        self.socket.settimeout(IPC_SOCKET_TIMEOUT_SECONDS)
+        self.reader = self.socket.makefile("rb")
+        self.transport_attestation = None
         self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
         self._stderr_thread.start()
 
@@ -216,7 +283,7 @@ class LocalIpcSession:
                 self._stderr_tail.append(text[:512])
 
     def stderr_excerpt(self):
-        return "\n".join(self._stderr_tail)[-MAX_STDERR_TAIL_BYTES:]
+        return "\n".join(list(self._stderr_tail))[-MAX_STDERR_TAIL_BYTES:]
 
     def hello(self, *, protocol_version=IPC_PROTOCOL_VERSION, min_protocol_version=IPC_MIN_PROTOCOL_VERSION):
         envelope = {
@@ -228,14 +295,16 @@ class LocalIpcSession:
                 "client_version": self.client_version,
             },
         }
-        self.proc.stdin.write(encode_frame(envelope))
-        self.proc.stdin.flush()
-        reply = read_frame(self.proc.stdout)
+        self.socket.sendall(encode_frame(envelope))
+        reply = read_frame(self.reader)
         if not reply or reply.get("frame") != "hello_ack":
             raise ValueError(f"Expected hello_ack frame, got {reply!r}; stderr:\n{self.stderr_excerpt()}")
-        return reply["body"]
+        body = reply["body"]
+        if body.get("compatible") is True:
+            self.transport_attestation = transport_attestation(self.socket, body)
+        return body
 
-    def request(self, op, *, registration=None):
+    def send_request(self, op, *, registration=None, chunk=None):
         req_id = self._next_request_id
         self._next_request_id += 1
         envelope = {
@@ -246,21 +315,29 @@ class LocalIpcSession:
                 "op": op,
             },
         }
-        started = time.monotonic()
-        self.proc.stdin.write(encode_frame(envelope))
-        self.proc.stdin.flush()
+        self.socket.sendall(encode_frame(envelope) if chunk is None else encode_upload_frame(envelope, chunk))
+        return req_id
+
+    def receive_response(self):
         while True:
-            frame = read_frame(self.proc.stdout)
+            frame = read_frame(self.reader)
             if frame is None:
-                raise ValueError(f"Companion pipe closed while awaiting response {req_id}; stderr:\n{self.stderr_excerpt()}")
+                raise ValueError(f"Companion socket closed while awaiting a response; stderr:\n{self.stderr_excerpt()}")
             kind = frame.get("frame")
             if kind == "event":
                 self.observed_events.append(frame.get("body"))
                 continue
-            if kind == "response" and frame.get("body", {}).get("request_id") == req_id:
-                latency_ms = round((time.monotonic() - started) * 1000.0, 2)
-                return frame["body"]["outcome"], latency_ms
-            raise ValueError(f"Unexpected IPC frame {frame!r} while waiting for request {req_id}")
+            if kind == "response":
+                return frame["body"]["request_id"], frame["body"]["outcome"]
+            raise ValueError("Unexpected companion frame while awaiting a response")
+
+    def request(self, op, *, registration=None, chunk=None):
+        started = time.monotonic()
+        expected = self.send_request(op, registration=registration, chunk=chunk)
+        req_id, outcome = self.receive_response()
+        if req_id != expected:
+            raise ValueError(f"Unexpected IPC response ID {req_id} while waiting for {expected}")
+        return outcome, round((time.monotonic() - started) * 1000.0, 2)
 
     def request_json(self, op, *, registration=None):
         outcome, latency_ms = self.request(op, registration=registration)
@@ -271,21 +348,96 @@ class LocalIpcSession:
             raise ValueError(f"Expected JSON/dataset IPC payload, got {data!r}")
         return data["value"], latency_ms
 
+    def upload_dataset_bytes(self, source, upload_id, registration):
+        """Upload bounded raw chunks and check that control traffic shares the live socket."""
+        offset = 0
+        control_ms = None
+        while True:
+            pending = {}
+            for _ in range(IPC_UPLOAD_WINDOW):
+                chunk = source.read(IPC_UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                operation = {"op": "dataset_upload_chunk", "args": {"upload_id": upload_id, "offset": offset}}
+                req_id = self.send_request(operation, registration=registration, chunk=chunk)
+                offset += len(chunk)
+                pending[req_id] = offset
+            if not pending:
+                return offset, control_ms
+            control = None
+            if control_ms is None:
+                started = time.monotonic()
+                control = self.send_request({"op": "workstation_readiness"}, registration=registration)
+                pending[control] = None
+            while pending:
+                req_id, outcome = self.receive_response()
+                if req_id not in pending or outcome.get("outcome") != "ok":
+                    raise ValueError("Unexpected response while uploading a dataset")
+                expected = pending.pop(req_id)
+                data = outcome["data"]
+                if req_id == control:
+                    if data.get("payload") != "json" or not data.get("value", {}).get("deployment_id"):
+                        raise ValueError("Readiness failed while transferring a dataset")
+                    control_ms = round((time.monotonic() - started) * 1000, 2)
+                elif data.get("payload") != "dataset_upload_progress" or data.get("value", {}).get("received_bytes") != expected:
+                    raise ValueError("Companion returned an unexpected cumulative upload offset")
+
+    def verify_upload_cancel(self, dataset_bytes, registration):
+        """Cancel after sending a partial raw chunk and before consuming its response."""
+        ticket, _ = self.request_json({"op": "dataset_upload_start", "args": {
+            "kind": "actor_catalog", "sha256": hashlib.sha256(dataset_bytes).hexdigest(),
+            "size_bytes": len(dataset_bytes),
+        }}, registration=registration)
+        upload_id = ticket["upload_path"].rstrip("/").rsplit("/", 1)[-1]
+        partial = dataset_bytes[:len(dataset_bytes) // 2]
+        chunk = self.send_request({"op": "dataset_upload_chunk", "args": {"upload_id": upload_id, "offset": 0}},
+                                  registration=registration, chunk=partial)
+        started = time.monotonic()
+        cancel = self.send_request({"op": "dataset_upload_cancel", "args": {"upload_id": upload_id}},
+                                   registration=registration)
+        replies = {}
+        for _ in range(2):
+            req_id, outcome = self.receive_response()
+            if req_id in replies:
+                raise ValueError("Unexpected duplicate response while canceling dataset transfer")
+            replies[req_id] = outcome
+            if req_id == cancel:
+                elapsed_ms = round((time.monotonic() - started) * 1000, 2)
+        if replies.get(cancel) != {"outcome": "ok", "data": {"payload": "empty"}}:
+            raise ValueError("Companion did not acknowledge dataset cancellation")
+        chunk_ack = {"outcome": "ok", "data": {
+            "payload": "dataset_upload_progress", "value": {"received_bytes": len(partial)},
+        }}
+        if replies.get(chunk) != chunk_ack and not upload_destination_closed(replies.get(chunk, {})):
+            raise ValueError("Outstanding chunk reported an unexpected result during dataset cancellation")
+        result, _ = self.request({"op": "dataset_upload_finish", "args": {"upload_id": upload_id}},
+                                 registration=registration)
+        if not upload_destination_closed(result):
+            raise ValueError("Canceled upload remained available for publication")
+        return {"status": "canceled", "partial_chunk_bytes": len(partial), "cancel_ms": elapsed_ms}
+
     def shutdown(self, reason="smoke_complete", *, timeout=20):
-        self.proc.stdin.write(encode_frame({"frame": "shutdown", "body": {"reason": reason}}))
-        self.proc.stdin.flush()
+        self.socket.settimeout(timeout)
+        self.socket.sendall(encode_frame({"frame": "shutdown", "body": {"reason": reason}}))
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            frame = read_frame(self.proc.stdout)
+            frame = read_frame(self.reader)
             if frame is None:
                 raise ValueError("EOF before receiving shutdown_ack")
             if frame.get("frame") == "event":
                 self.observed_events.append(frame.get("body"))
                 continue
             if frame.get("frame") == "shutdown_ack":
+                self.last_shutdown_ack = frame.get("body")
+                if (
+                    not isinstance(self.last_shutdown_ack, dict)
+                    or self.last_shutdown_ack.get("checkpointed") is not True
+                ):
+                    raise ValueError("Companion did not acknowledge a checkpointed shutdown")
+                # The companion closes its side after writing the final ack.
                 exit_code = self.proc.wait(timeout=10)
                 self._stderr_thread.join(timeout=2)
-                return frame["body"], exit_code
+                return self.last_shutdown_ack, exit_code
         raise TimeoutError("Timed out waiting for shutdown_ack")
 
     def close_unconditionally(self):
@@ -295,12 +447,16 @@ class LocalIpcSession:
                 self.proc.wait(timeout=5)
         except OSError:
             pass
-        for handle in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
+        for handle in (self.reader, self.socket, self.proc.stderr):
             try:
                 if handle is not None:
                     handle.close()
             except OSError:
                 pass
+
+
+def upload_destination_closed(outcome):
+    return outcome.get("outcome") == "err" and outcome.get("data", {}).get("status") == 404
 
 
 def validate_native_contract(capabilities):
@@ -481,7 +637,9 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True, run_rust_probe=True
             if not readiness.get("deployment_id"):
                 raise ValueError(f"Workstation readiness missing deployment_id: {readiness!r}")
 
-            # Stage synthetic actor catalog CSV via chunked binary IPC.
+            canceled_upload = session1.verify_upload_cancel(DEFAULT_CSV, registration)
+
+            # Stage synthetic actor catalog CSV using one binary upload frame.
             csv_digest = hashlib.sha256(DEFAULT_CSV).hexdigest()
             ticket, lat = session1.request_json(
                 {
@@ -502,14 +660,16 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True, run_rust_probe=True
                     "args": {
                         "upload_id": upload_id,
                         "offset": 0,
-                        "data_b64": base64.b64encode(DEFAULT_CSV).decode("ascii"),
                     },
                 },
                 registration=registration,
+                chunk=DEFAULT_CSV,
             )
             rpc_latencies_ms.append(lat)
-            if chunk_outcome.get("outcome") != "ok":
-                raise ValueError(f"dataset_upload_chunk failed: {chunk_outcome!r}")
+            if chunk_outcome != {"outcome": "ok", "data": {
+                "payload": "dataset_upload_progress", "value": {"received_bytes": len(DEFAULT_CSV)},
+            }}:
+                raise ValueError("Unexpected cumulative acknowledgement for the synthetic upload")
             finished_upload, lat = session1.request_json(
                 {"op": "dataset_upload_finish", "args": {"upload_id": upload_id}},
                 registration=registration,
@@ -553,19 +713,36 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True, run_rust_probe=True
                     raise TimeoutError(f"Seed job {seed_job_id} did not complete within 30s; rows={jobs!r}")
                 time.sleep(0.1)
 
-            # Dispatch ReindexActors, then immediately trigger graceful Shutdown before it finishes.
-            reindex_receipt, lat = session1.request_json(
-                {
-                    "op": "reindex_actors",
-                    "args": {
-                        "request_id": "smoke-reindex-1",
-                        "context": mutation_context,
-                    },
-                },
-                registration=registration,
-            )
-            rpc_latencies_ms.append(lat)
+            # Reuse the same request as normal index observations settle. A caught-up
+            # generation is accepted without creating a job.
+            reindex_request = {
+                "op": "reindex_actors",
+                "args": {"request_id": "smoke-reindex-1", "context": mutation_context},
+            }
+            deadline = time.monotonic() + 30.0
+            while True:
+                outcome, lat = session1.request(reindex_request, registration=registration)
+                rpc_latencies_ms.append(lat)
+                data = outcome.get("data", {})
+                if outcome.get("outcome") == "ok" and data.get("payload") == "json":
+                    reindex_receipt = data["value"]
+                    break
+                if not (
+                    data.get("status") == 422
+                    and data.get("message", "").startswith("Actor index status is still checking or catching up.")
+                ):
+                    raise ValueError(f"IPC reindex admission failed: {outcome!r}")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Actor index status did not settle before reindex admission")
+                time.sleep(0.1)
+
             reindex_job_id = reindex_receipt["job_id"]
+            reindex_already_completed = reindex_receipt.get("already_completed", False)
+            if reindex_already_completed:
+                if reindex_job_id or not reindex_receipt.get("reused"):
+                    raise ValueError("Completed reindex must reuse coverage without creating a job")
+            elif not reindex_job_id:
+                raise ValueError("Accepted reindex is missing its job ID")
             rss1 = read_process_rss_bytes(session1.proc.pid) or 0
             peak_rss_bytes = max(peak_rss_bytes, rss1)
 
@@ -575,7 +752,7 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True, run_rust_probe=True
         finally:
             session1.close_unconditionally()
 
-        # 3. Restart on the EXACT SAME state directory and verify same job_id resumes with zero duplicates.
+        # 3. Verify the same state directory retains the admitted job or completed reuse.
         session2 = LocalIpcSession(binary, live_dir)
         try:
             ack2 = session2.hello()
@@ -622,6 +799,14 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True, run_rust_probe=True
                     row for row in jobs2.get("rows", [])
                     if row.get("operation") == "actor_reindex"
                 ]
+                if reindex_already_completed:
+                    if reindex_rows:
+                        raise ValueError(f"Reusing the index created reindex jobs: {reindex_rows!r}")
+                    replay, lat = session2.request_json(reindex_request, registration=registration2)
+                    rpc_latencies_ms.append(lat)
+                    if replay != reindex_receipt:
+                        raise ValueError("Completed reindex receipt changed after restart")
+                    break
                 if len(reindex_rows) != 1:
                     raise ValueError(
                         f"Expected exactly 1 actor_reindex job after restart (no duplicates), found {len(reindex_rows)}: {reindex_rows!r}"
@@ -638,23 +823,24 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True, run_rust_probe=True
                     raise TimeoutError(f"Resumed reindex job {reindex_job_id} timed out: {reindex_rows[0]!r}")
                 time.sleep(0.1)
 
-            search_resp, lat = session2.request_json(
-                {
-                    "op": "actors_search",
-                    "args": {
-                        "query": "Harbor Beacon",
-                        "mode": "discovery",
-                        "limit": 10,
+            deadline = time.monotonic() + 30.0
+            while True:
+                search_resp, lat = session2.request_json(
+                    {
+                        "op": "actors_search",
+                        "args": {"query": "Harbor Beacon", "mode": "discovery", "limit": 10},
                     },
-                },
-                registration=registration2,
-            )
-            rpc_latencies_ms.append(lat)
-            hits = search_resp.get("rows", [])
-            if search_resp.get("index", {}).get("state") != "ready":
-                raise ValueError(f"Actor search index not ready after restart completion: {search_resp!r}")
-            if not any(hit.get("label") == "Harbor Beacon Collective" for hit in hits):
-                raise ValueError(f"Seeded actor missing from local search results: {hits!r}")
+                    registration=registration2,
+                )
+                rpc_latencies_ms.append(lat)
+                hits = search_resp.get("rows", [])
+                if search_resp.get("index", {}).get("state") == "ready" and any(
+                    hit.get("label") == "Harbor Beacon Collective" for hit in hits
+                ):
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"Seeded actor was not searchable after restart: {search_resp!r}")
+                time.sleep(0.1)
 
             rss2 = read_process_rss_bytes(session2.proc.pid) or 0
             peak_rss_bytes = max(peak_rss_bytes, rss2)
@@ -674,7 +860,9 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True, run_rust_probe=True
             "status": "pass",
             "non_gui_synthetic_smoke": True,
             "docker_required": False,
-            "transport": "length_delimited_stdin_stdout_ipc",
+            "transport": session1.transport_attestation["transport"],
+            "transport_attestation": session1.transport_attestation,
+            "canceled_upload": canceled_upload,
             "zero_network_sockets_verified": bool(check_sockets),
             "socket_check_method": socket_check_1["method"],
             "incompatible_version_rejected": True,
@@ -685,7 +873,8 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True, run_rust_probe=True
             "capabilities": capabilities,
             "rust_client_probe": rust_client_probe,
             "seed_job_id": seed_job_id,
-            "restart_resume_job_id": reindex_job_id,
+            "restart_resume_job_id": reindex_job_id or None,
+            "reindex_already_completed": reindex_already_completed,
             "shutdown_ack_1": shutdown_ack,
             "shutdown_ack_2": shutdown_ack2,
             "search_hits": len(hits),
@@ -699,6 +888,55 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True, run_rust_probe=True
             cleanup_dir.cleanup()
 
 
+def is_ci_bundled_catalog_app(app, output):
+    environment = os.environ
+    return (app is not None and output is not None and environment.get("GITHUB_ACTIONS") == "true"
+            and environment.get("GITHUB_EVENT_NAME") == "pull_request"
+            and environment.get("LINUX_TARGET") == "x86_64-unknown-linux-gnu"
+            and environment.get("LINUX_PROFILE") == "debug")
+
+
+def run_ci_bundled_catalog(app, output, *, stage_only=False):
+    # The Linux native package step has already verified and extracted this exact archive.
+    if not is_ci_bundled_catalog_app(app, output):
+        raise ValueError("Full bundled catalog verification requires a Linux x86-64 debug PR package and output path")
+    environment = os.environ
+    revision = environment["EXPECTED_HEAD"]
+    run_id = environment["GITHUB_RUN_ID"]
+    run_attempt = environment["GITHUB_RUN_ATTEMPT"]
+    stem = "bundled-catalog-stage" if stage_only else "bundled-catalog"
+    evidence = output.with_name(f"{stem}-x86_64-unknown-linux-gnu.json")
+    script = Path(__file__).resolve().with_name("fleetworks_qa_smoke.py")
+    result = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="fleetworks-catalog-home-") as home, evidence.open("w") as report:
+            command = [
+                "/usr/bin/sudo", "--non-interactive", "--", "/usr/bin/unshare", "--net",
+                "--setgid", str(os.getgid()), "--setuid", str(os.getuid()), "--",
+                "/usr/bin/env", "-i", f"HOME={home}", "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+                "/usr/bin/python3", "-B", str(script), "catalog", "--app", str(app.resolve()),
+                "--revision", revision, "--run-id", run_id, "--run-attempt", run_attempt,
+            ]
+            if stage_only:
+                command.append("--stage-only")
+            completed = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=report,
+                                       timeout=(5 if stage_only else 45) * 60, check=False)
+        result = json.loads(evidence.read_text())
+        if (completed.returncode != 0 or not isinstance(result, dict)
+                or result.get("source_sha") != revision or result.get("run_id") != run_id
+                or result.get("run_attempt") != run_attempt or not isinstance(result.get("bundled_catalog"), dict)
+                or result["bundled_catalog"].get("scope") != ("stage_only" if stage_only else "full_catalog")
+                or result["bundled_catalog"].get("status") != "passed"):
+            raise ValueError("offline bundled catalog smoke did not pass")
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        if not isinstance(result, dict) or not isinstance(result.get("bundled_catalog"), dict):
+            evidence.write_text(json.dumps({
+                "source_sha": revision, "run_id": run_id, "run_attempt": run_attempt,
+                "bundled_catalog": {"status": "failed", "stage": "offline_launch", "failure_type": type(error).__name__},
+            }, indent=2) + "\n", encoding="utf-8")
+        raise
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", type=Path, help="Path to argos-api-host executable")
@@ -707,6 +945,8 @@ def main():
     parser.add_argument("--rust-probe-bin", type=Path, help="Optional prebuilt local_ipc_probe Rust binary")
     parser.add_argument("--skip-rust-probe", action="store_true", help="Skip the compiled Rust LocalIpcClient probe")
     parser.add_argument("--output", type=Path, help="Optional file path to write JSON smoke summary")
+    parser.add_argument("--full-bundled-catalog", action="store_true",
+                        help="Also run the full offline catalog import on a verified Linux debug PR package")
     args = parser.parse_args()
     try:
         binary = resolve_companion_binary(host=args.host, app=args.app)
@@ -723,7 +963,16 @@ def main():
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered + "\n", encoding="utf-8")
-    print(rendered)
+    print(rendered, flush=True)
+    if args.full_bundled_catalog or is_ci_bundled_catalog_app(args.app, args.output):
+        try:
+            if args.full_bundled_catalog:
+                run_ci_bundled_catalog(args.app, args.output)
+            else:
+                run_ci_bundled_catalog(args.app, args.output, stage_only=True)
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+            print(f"fleetworks-local-backend-smoke: {error}", file=sys.stderr)
+            return 1
     return 0
 
 

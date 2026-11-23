@@ -1,4 +1,4 @@
-//! Actual purpose/context/privacy gateway plus genuine disposable Natural fit.
+//! Retirement and protected readback for historical Natural training.
 #![cfg(all(feature = "embedded", feature = "classifier"))]
 
 #[path = "../../argos-osint-core/tests/fixtures/classifier/activation_training.rs"]
@@ -6,7 +6,6 @@ mod training;
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use argos_osint_api::classifier_activation::ActivationArtifacts;
@@ -18,7 +17,6 @@ use argos_osint_core::config_commit::CommitFile;
 use argos_osint_core::config_commit::ConfigLock;
 use argos_osint_core::storage::bootstrap;
 use argos_osint_core::storage::classifier_activation;
-use argos_osint_core::storage::classifier_activation::ActivationWork;
 use argos_osint_core::storage::connect_registry;
 use argos_osint_core::storage::connect_registry::RegistryAuthority;
 use argos_osint_core::storage::job_dispatch;
@@ -40,7 +38,6 @@ use fleetworks_contracts::classifier_activation::ActivationRequest;
 use fleetworks_contracts::classifier_activation::CandidatePreview;
 use fleetworks_contracts::classifier_activation::SyntheticBaselineConsent;
 use fleetworks_contracts::classifier_activation::ACTIVATION_PATH;
-use fleetworks_contracts::classifier_activation::ACTIVATION_RESULT_PATH;
 use fleetworks_contracts::classifier_activation::CANDIDATE_DETAIL_PATH;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
 use fleetworks_contracts::context::CredentialPurpose;
@@ -170,8 +167,7 @@ async fn call(
     )
 }
 #[tokio::test]
-async fn explicit_activation_enforces_permissions_source_privacy_revision_and_exact_accepted_replay(
-) {
+async fn natural_retirement_preserves_scoped_candidate_history() {
     let temporary = tempfile::tempdir().expect("disposable backend");
     let root = temporary
         .path()
@@ -384,6 +380,7 @@ async fn explicit_activation_enforces_permissions_source_privacy_revision_and_ex
     let preview: CandidatePreview =
         serde_json::from_value(body).expect("actual scoped hash/prior preview");
     assert_eq!(preview.candidate, trained.candidate);
+    assert!(!preview.activation_supported);
     let request = ActivationRequest::new(
         "activate-once".into(),
         MutationContext::new(&creator).with_configuration_revision(revision),
@@ -405,92 +402,33 @@ async fn explicit_activation_enforces_permissions_source_privacy_revision_and_ex
         .0,
         StatusCode::SERVICE_UNAVAILABLE
     );
-    assert_eq!(
-        call(
-            &unconfigured,
-            "POST",
-            ACTIVATION_PATH,
-            NATIVE,
-            Some(&creator),
-            serde_json::to_value(&request).expect("typed request"),
-        )
-        .await
-        .0,
-        StatusCode::SERVICE_UNAVAILABLE
-    );
-    let (status, receipt) = call(
-        &app,
-        "POST",
-        ACTIVATION_PATH,
-        NATIVE,
-        Some(&creator),
-        serde_json::to_value(&request).expect("typed request"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::ACCEPTED);
-    let job_id = receipt["job_id"]
-        .as_str()
-        .expect("durable activation job")
-        .to_owned();
-    let (status,_)=call(&app,"POST","/api/v1/profile/accounts/upsert",NATIVE,Some(&creator),json!({"expected_revision":revision,"account_id":"local","provider":"local","base_url":"http://127.0.0.1:11434/v1","model":"","api_key":null})).await;
-    assert_eq!(status, StatusCode::OK);
-    let (status, repeated) = call(
-        &app,
-        "POST",
-        ACTIVATION_PATH,
-        NATIVE,
-        Some(&creator),
-        serde_json::to_value(&request).expect("same frozen request"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(repeated["job_id"], job_id);
-    assert_eq!(repeated["origin"], receipt["origin"]);
-    let mut stale = request.clone();
-    stale.request_id = "new-stale-request".into();
-    assert_eq!(
-        call(
-            &app,
-            "POST",
-            ACTIVATION_PATH,
-            NATIVE,
-            Some(&creator),
-            serde_json::to_value(stale).expect("stale new request")
-        )
-        .await
-        .0,
-        StatusCode::CONFLICT
-    );
-    let lease = claim(&repo, classifier_activation::POOL).await;
-    let result = classifier_activation::execute_claimed(
-        &repo,
-        root,
-        &lease.task,
-        Arc::new(AtomicBool::new(false)),
-    )
-    .await
-    .expect("actual claimed activation");
-    let ActivationWork::Complete { result_ref } = result else {
-        panic!("genuine activation must complete");
-    };
-    job_dispatch::finish_delivery(
-        repo.db(),
-        &lease,
-        DeliveryOutcome::Complete {
-            result_ref: &result_ref,
-        },
-        Utc::now(),
-    )
-    .await
-    .expect("actual terminal activation");
-    let result_path = format!("{ACTIVATION_RESULT_PATH}?job_id={job_id}");
-    assert_eq!(
-        call(&app, "GET", &result_path, NATIVE, Some(&other), json!({}))
+    let payload = serde_json::to_value(&request).expect("typed request");
+    for app in [&app, &unconfigured] {
+        assert_eq!(
+            call(
+                app,
+                "POST",
+                ACTIVATION_PATH,
+                NATIVE,
+                Some(&creator),
+                payload.clone()
+            )
             .await
             .0,
-        StatusCode::NOT_FOUND
-    );
-    let (status, result) = call(&app, "GET", &result_path, NATIVE, Some(&creator), json!({})).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(result["state"], "activated");
+            StatusCode::GONE
+        );
+        assert_eq!(
+            call(
+                app,
+                "POST",
+                ACTIVATION_PATH,
+                READONLY,
+                Some(&creator),
+                payload.clone()
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+    }
 }

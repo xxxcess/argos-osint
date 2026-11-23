@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="workstation-readiness-title workstation-readiness-desc">
 <title id="workstation-readiness-title">Readiness, CSV inputs and durable native maintenance</title>
-<desc id="workstation-readiness-desc">Readiness is a bounded observation through configured owners, never a download, seed, train, indexing or service startup side effect. Native maintenance checks CSV columns locally before any network request, streams bytes to a gateway-issued URL, then confirms a durable job only after backend validation and staging. Shared database tickets survive gateway restart until five-minute expiry; replicas must also share the durable staging volume. Actor imports add/update stable IDs, retain absent actors and preserve existing/manual aliases. Build actor index asks for confirmation, saves its request ID before the POST, reconciles uncertain delivery read-only and refreshes readiness once when the job ends. Readiness may carry an operator-chosen backend display name that is never derived from the host. If the native file chooser cannot open, a typed local CSV path goes through the same checks. Natural training, activation and verified Rust-BERT inference remain separate facts.</desc>
+<desc id="workstation-readiness-desc">Readiness uses bounded observations from configured owners. Seed and index work require explicit confirmation. Startup validates the bundled actor catalog when the connected backend authorizes seeding. The operator can select a local file instead. Native maintenance checks CSV columns before transferring bytes to the connected backend. A durable job requires backend staging, validation and operator confirmation. Shared database tickets survive gateway restart until five-minute expiry; replicas must also share the durable staging volume. Actor imports add/update stable IDs, retain absent actors and preserve existing/manual aliases. Build actor index asks for confirmation, saves its request ID before the POST, reconciles uncertain delivery read-only and refreshes readiness once when the job ends. Readiness may carry an operator-chosen backend display name that is never derived from the host. If the native file chooser cannot open, a typed local CSV path goes through the same checks. The startup wizard walks through the actor catalog, reader-visible index, and a health checklist that includes Atlas BERT inference. Historical Natural job results preserve their original engine and completion details.</desc>
 <style>text{font-family:Geist,Arial,sans-serif;fill:#242424}.zone{font-size:14px;letter-spacing:1.4px;fill:#666}.label{font-size:20px;font-weight:600}.note{font-size:16px;fill:#555}.small{font-size:14px;fill:#666}.node{fill:#fff;stroke:#aaa;stroke-width:1}.focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}.wire{fill:none;stroke:#555;stroke-width:2;marker-end:url(#arrow)}.lane{fill:#fafafa;stroke:#ddd;stroke-width:1}</style>
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/></marker></defs>
 <rect width="1200" height="720" fill="#fff"/>
@@ -12,8 +12,8 @@
 <rect x="432" y="88" width="332" height="148" rx="6" class="node"/>
 <text x="448" y="120" class="label">Backend-owned observations</text>
 <text x="448" y="152" class="note">Catalog and reader-visible index</text>
-<text x="448" y="178" class="note">Natural candidate vs activation</text>
-<text x="448" y="204" class="note">Rust-BERT inference separately</text>
+<text x="448" y="178" class="note">Atlas BERT inference status</text>
+<text x="448" y="204" class="note">Verified model observation</text>
 <text x="448" y="226" class="small">Display name: optional, not host-derived</text>
 <rect x="824" y="88" width="336" height="148" rx="6" class="node"/>
 <text x="840" y="120" class="label">Partial and stale states</text>
@@ -22,19 +22,19 @@
 <text x="840" y="204" class="note">Optional failure is local to action</text>
 <path d="M 372 160 H 432" class="wire"/>
 <path d="M 764 160 H 824" class="wire"/>
-<text x="40" y="300" class="zone">DB SEED &amp; TRAIN · CSV PICKERS AND DURABLE CONFIRMATION</text><rect x="40" y="344" width="332" height="148" rx="6" class="node"/>
-<text x="56" y="376" class="label">Choose + check locally</text>
-<text x="56" y="408" class="note">Actor or training CSV header</text>
+<text x="40" y="300" class="zone">STARTUP DATA SETUP · CSV SOURCES AND DURABLE CONFIRMATION</text><rect x="40" y="344" width="332" height="148" rx="6" class="node"/>
+<text x="56" y="376" class="label">Validate actor CSV</text>
+<text x="56" y="408" class="note">Bundled default or local path</text>
 <text x="56" y="434" class="note">Bounded required-column check</text>
-<text x="56" y="460" class="note">Invalid → no request / worker</text>
-<text x="56" y="482" class="small">No chooser? Type a local .csv path</text>
+<text x="56" y="460" class="note">Invalid CSV blocks upload</text>
+<text x="56" y="482" class="small">Show source and validated row count</text>
 <rect x="432" y="344" width="332" height="148" rx="6" class="focus"/>
-<text x="448" y="376" class="label">Gateway upload worker</text>
-<text x="448" y="408" class="note">Durable ticket → PUT gateway</text>
+<text x="448" y="376" class="label">Upload to connected backend</text>
+<text x="448" y="408" class="note">Gateway ticket or framed IPC</text>
 <text x="448" y="434" class="note">Recheck schema / hash / size</text>
-<text x="448" y="460" class="note">Shared durable staging volume</text>
+<text x="448" y="460" class="note">Distributed shared staging volume</text>
 <rect x="824" y="344" width="336" height="148" rx="6" class="node"/>
-<text x="840" y="376" class="label">Confirm → seed / train</text>
+<text x="840" y="376" class="label">Confirm actor seed</text>
 <text x="840" y="408" class="note">Merge IDs / keep prior aliases</text>
 <text x="840" y="434" class="note">Exact revision; fresh 0 is valid</text>
 <text x="840" y="460" class="note">Receipt means queued, not done</text>

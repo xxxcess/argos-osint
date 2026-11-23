@@ -73,12 +73,6 @@ pub fn observed(state: &mut State) {
             "inference_not_observed",
             "No real inference receipt has been observed. Model assets or training alone do not prove inference readiness.",
         ),
-        check(
-            ReadinessCheckId::ClassifierTraining,
-            ReadinessState::NotApplicable,
-            "optional_natural_training",
-            "Natural classifier training is optional and has not been requested.",
-        ),
     ];
     let mut readiness =
         WorkstationReadiness::new("synthetic-deployment".into(), OBSERVED.into(), checks);
@@ -88,6 +82,38 @@ pub fn observed(state: &mut State) {
     state.readiness = Load::Ready(readiness);
     state.readiness_received_at = Some(0.0);
     state.page = Page::Workstation;
+}
+
+pub fn mixed_status_checks(state: &mut State) {
+    observed(state);
+    if let Load::Ready(readiness) = &mut state.readiness {
+        readiness
+            .checks
+            .retain(|probe| probe.id != ReadinessCheckId::ClassifierInference);
+        for probe in &mut readiness.checks {
+            *probe = match probe.id {
+                ReadinessCheckId::Jobs => check(
+                    probe.id,
+                    ReadinessState::NotReady,
+                    "process_not_ready",
+                    "The Jobs service reported that its dispatcher was not ready.",
+                ),
+                ReadinessCheckId::ActorSearch => check(
+                    probe.id,
+                    ReadinessState::Running,
+                    "index_catching_up",
+                    "The actor index reader is catching up with committed data.",
+                ),
+                _ => continue,
+            };
+        }
+        readiness.checks.push(check(
+            ReadinessCheckId::Control,
+            ReadinessState::Unavailable,
+            "owner_unavailable",
+            "The Control service is unavailable in this configuration.",
+        ));
+    }
 }
 
 pub fn connecting(state: &mut State) {
@@ -184,19 +210,21 @@ pub fn partial_seed_progress(state: &mut State) {
     }
 }
 
-pub fn training(state: &mut State) {
+pub fn inference_verified(state: &mut State) {
     observed(state);
+    state.workstation_status_checks_open = true;
     if let Load::Ready(readiness) = &mut state.readiness {
-        for check in &mut readiness.checks {
-            if check.id == ReadinessCheckId::ClassifierTraining {
-                *check = self::check(
-                    ReadinessCheckId::ClassifierTraining,
-                    ReadinessState::Running,
-                    "training_running",
-                    "A Natural candidate is training on the backend. The prior active model remains unchanged; activation is a separate action.",
-                );
-                check.job_ids = vec!["synthetic-training-job".into()];
-            }
+        if let Some(check) = readiness
+            .checks
+            .iter_mut()
+            .find(|check| check.id == ReadinessCheckId::ClassifierInference)
+        {
+            *check = self::check(
+                ReadinessCheckId::ClassifierInference,
+                ReadinessState::Ready,
+                "model_verified",
+                "Rust-BERT inference owner reports a verified active model.",
+            );
         }
     }
 }

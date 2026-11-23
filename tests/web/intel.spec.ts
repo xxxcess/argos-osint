@@ -2597,13 +2597,9 @@ test.describe("revamp connection scene", () => {
       page.getByRole("status", { name: "Checking local API…" }),
     ).toBeVisible();
     await expect(page.locator("canvas")).toHaveCount(1);
-    await expect
-      .poll(() =>
-        page
-          .locator("#intel-landing-status")
-          .evaluate((node) => Number(getComputedStyle(node).opacity)),
-      )
-      .toBeGreaterThan(0.95);
+    const statusMessage = page.locator("#intel-landing-status");
+    await expect(statusMessage).toHaveCSS("opacity", "1");
+    await expect(statusMessage).toHaveCSS("animation-name", "none");
     const stage = (await page.locator("#intel-landing").boundingBox())!;
     const canvas = (await page.locator("canvas").boundingBox())!;
     const bar = (await page.locator("#intel-status-bar").boundingBox())!;
@@ -2622,6 +2618,12 @@ test.describe("revamp connection scene", () => {
     ).toBeLessThanOrEqual(1);
     expect(Math.abs(canvas.width - stage.width)).toBeLessThanOrEqual(1);
     expect(Math.abs(canvas.height - stage.height)).toBeLessThanOrEqual(1);
+    const status = (await statusMessage.boundingBox())!;
+    const scale = await page
+      .locator("html")
+      .evaluate((element) => Number(getComputedStyle(element).zoom));
+    const markBottom = canvas.y + canvas.height * 0.59;
+    expect(status.y - markBottom).toBeGreaterThanOrEqual(12 * scale - 1);
 
     await page.screenshot({
       path: `${captureDir}/landing-orbit.png`,
@@ -2630,48 +2632,42 @@ test.describe("revamp connection scene", () => {
     await expect(
       page.getByRole("button", { name: "Retry connection checks" }),
     ).toHaveCount(0);
-    // Advance a real scene through arrival and acceleration for the retained video.
-    await page.waitForTimeout(1000);
     ready.resolve();
-    for (const [index, label] of [
-      "Local API reachable",
-      "Intel service identified",
-      "API compatible",
-      "Storage ready",
-      "Workspace readiness passed",
-    ].entries()) {
-      await expect(
-        page.getByRole("status", { name: label, exact: true }),
-      ).toBeVisible({ timeout: 5000 });
-      await expect(
-        page
-          .getByRole("list", { name: "Connection checks" })
-          .getByRole("listitem"),
-      ).toHaveCount(index + 1);
-      await expect(
-        page.getByRole("button", { name: "Open Intel", exact: true }),
-      ).toHaveCount(0);
-    }
-    await expect(
-      page.getByRole("status", {
-        name: "All connections healthy",
-        exact: true,
-      }),
-    ).toBeVisible({ timeout: 5000 });
-    await page.screenshot({
-      path: `${captureDir}/landing-core-green.png`,
-      fullPage: true,
-    });
-    await expect(
-      page.getByRole("status", { name: "Workspace ready", exact: true }),
-    ).toBeVisible({ timeout: 5000 });
-    await page.screenshot({
-      path: `${captureDir}/landing-core-blue.png`,
-      fullPage: true,
-    });
     await expect(
       page.getByRole("button", { name: "Open Intel", exact: true }),
-    ).toBeVisible({ timeout: 10000 });
+    ).toBeVisible({ timeout: 2000 });
+  });
+  test("authenticated readiness admits Home before an orbit timer fires", async ({
+    page,
+  }) => {
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await page.addInitScript(() => {
+      const timers: Window = window;
+      const schedule = timers.setTimeout.bind(timers);
+      // Freeze just the orbit sequence. Query notifications and React's
+      // scheduler still need ordinary browser time to deliver readiness.
+      timers.setTimeout = (handler, delay, ...args) =>
+        schedule(handler, delay === 3000 ? 60_000 : delay, ...args);
+    });
+    await fixtures(page);
+    const ready = deferred();
+    await page.route("**/api/v1/health/ready", async (route) => {
+      await ready.promise;
+      await route.fallback();
+    });
+    await page.goto("/");
+    await expect(page.locator("#intel-landing")).toBeVisible();
+    const launch = page.getByRole("button", {
+      name: "Open Intel",
+      exact: true,
+    });
+    await expect(launch).toHaveCount(0);
+    ready.resolve();
+    await expect(launch).toBeVisible({ timeout: 2000 });
+    await launch.click();
+    await expect(
+      page.getByRole("heading", { name: "Intelligence bulletin" }),
+    ).toBeVisible();
   });
   test("landing fallback honors reduced motion without WebGL", async ({
     page,
@@ -2712,9 +2708,18 @@ test.describe("revamp connection scene", () => {
   });
 });
 
-test("bulletin skeleton reserves the loaded card height", async ({ page }) => {
+test("bulletin skeleton reserves the loaded image card height", async ({
+  page,
+}) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await fixtures(page);
+  const image = "http://images.fixture.test/skeleton.svg";
+  await page.route(image, (route) =>
+    route.fulfill({
+      contentType: "image/svg+xml",
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120"><rect width="120" height="120" fill="#243f50"/></svg>',
+    }),
+  );
+  await fixtures(page, true, image, { image_url: image });
   const ready = deferred();
   await page.route(/\/api\/v1\/articles\?/, async (route) => {
     await ready.promise;
@@ -2730,6 +2735,62 @@ test("bulletin skeleton reserves the loaded card height", async ({ page }) => {
   expect(
     Math.abs((await card.boundingBox())!.height - height),
   ).toBeLessThanOrEqual(1);
+});
+
+test.describe("coarse pointer at the narrowest Bulletin width", () => {
+  test.use({ hasTouch: true, viewport: { width: 320, height: 1000 } });
+  test("keeps the first text-only article close and primary controls reachable", async ({
+    page,
+  }) => {
+    await fixtures(page, true, undefined, {
+      title: "Short retained article",
+      description: "",
+      source_name: "",
+      source_domain: "",
+      author: "",
+    });
+    await gotoBulletin(page);
+    const card = page
+      .getByRole("button", { name: "Open Focus Brief: Short retained article" })
+      .first();
+    await expect(card).toBeVisible();
+    const [box, scale] = await Promise.all([
+      card.boundingBox(),
+      page
+        .locator("html")
+        .evaluate((element) => Number(getComputedStyle(element).zoom)),
+    ]);
+    expect(box!.y).toBeLessThanOrEqual(270);
+    expect(box!.height).toBeLessThan(154 * scale);
+    await expect(card.getByRole("img")).toHaveCount(0);
+
+    const workstation = page.getByRole("group", {
+      name: "Workstation actions",
+    });
+    const feed = page.getByRole("group", { name: "Feed controls" });
+    const category = page.getByRole("group", { name: "Categories" });
+    const controls = [
+      workstation.getByRole("button", { name: "Backend", exact: true }),
+      workstation.getByRole("button", { name: "Bulletin", exact: true }),
+      workstation.getByRole("button", { name: "Background jobs", exact: true }),
+      page.getByRole("textbox", { name: "Search articles and actors" }),
+      category.getByRole("button", {
+        name: "Politics & Governance",
+        exact: true,
+      }),
+      feed.getByRole("button", { name: /^Retained day/ }),
+      feed.getByRole("button", { name: "Latest", exact: true }),
+      feed.getByRole("button", { name: "Hottest", exact: true }),
+      feed.getByRole("button", { name: "Refresh feed", exact: true }),
+    ];
+    for (const control of controls) {
+      await expect(control).toBeVisible();
+      const target = (await control.boundingBox())!;
+      expect(target.width).toBeGreaterThanOrEqual(44);
+      expect(target.height).toBeGreaterThanOrEqual(44);
+    }
+    await page.screenshot({ path: `${captureDir}/bulletin-coarse-320.png` });
+  });
 });
 
 for (const width of [1440, 390]) {

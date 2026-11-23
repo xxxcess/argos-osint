@@ -59,6 +59,7 @@ mod native {
     use fleetworks_desktop::backend::ProfileSnapshot;
     use fleetworks_desktop::backend::ReadKind;
     use fleetworks_desktop::backend::ToolCatalog;
+    use fleetworks_desktop::backend::ToolCredentialMetadata;
     use fleetworks_desktop::backend::ToolDefinition;
     use fleetworks_desktop::brain::ActorDossier;
     use fleetworks_desktop::configuration::ConfigurationSaved;
@@ -264,7 +265,19 @@ mod native {
     }
 
     fn tools_ready(state: &mut State) {
-        connected(state);
+        registered(state);
+        state.backend.profile = Load::Ready(ProfileSnapshot {
+            configuration_revision: 1,
+            configuration_format: 4,
+            accounts: Vec::new(),
+            tool_credentials: vec![ToolCredentialMetadata {
+                provider: "newsdata".into(),
+                primary_present: true,
+                fallback_present: false,
+            }],
+            setup_required: false,
+            portable_schema_version: 4,
+        });
         state.backend.tools = Load::Ready(ToolCatalog {
             tools: vec![ToolDefinition {
                 id: "synthetic-tool".into(),

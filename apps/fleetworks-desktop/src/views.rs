@@ -662,7 +662,7 @@ pub(crate) fn setup_gateway_content(
     if state.connected() {
         body = body.children(crate::readiness_cards::primary_issue(
             state,
-            true,
+            crate::readiness_cards::PrimaryIssueScope::GatewaySetup,
             preferences,
             kit,
         ));
@@ -1088,15 +1088,15 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
             let active_operation = workstation_active_operation(state, preferences, kit);
             let issue = crate::readiness_cards::primary_issue(
                 state,
-                !prefer_actor && active_operation.is_none(),
+                crate::readiness_cards::PrimaryIssueScope::Workstation {
+                    include_other_blockers: !prefer_actor && active_operation.is_none(),
+                },
                 preferences,
                 kit,
             );
-            body = body.child(
-                issue
-                    .or(active_operation)
-                    .unwrap_or_else(|| actor_search_summary_card(state, preferences, kit, actor)),
-            );
+            body = body
+                .child(actor_search_summary_card(state, preferences, kit, actor))
+                .children(issue.or(active_operation));
         }
         if state.confirm_maintenance_dialog {
             if let Some(confirmation) = &state.maintenance.confirmation {

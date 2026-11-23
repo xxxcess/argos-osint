@@ -17,11 +17,43 @@ import time
 from zipfile import BadZipFile, ZipFile
 
 sys.dont_write_bytecode = True
+SCRIPT_CHECKOUT = Path(__file__).resolve().parents[1]
+
+
+def source_checkout():
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--source-dir", type=Path)
+    selection, _ = parser.parse_known_args()
+    if selection.source_dir is None:
+        return SCRIPT_CHECKOUT
+
+    checkout = selection.source_dir.expanduser().resolve()
+
+    def git_path(directory, option):
+        path = subprocess.check_output(
+            ["git", "-C", str(directory), "rev-parse", "--path-format=absolute", option],
+            text=True, timeout=15,
+        ).strip()
+        return Path(path).resolve()
+
+    try:
+        if git_path(checkout, "--show-toplevel") != checkout:
+            parser.error("--source-dir must be the root of a Fleetworks worktree")
+        if git_path(checkout, "--git-common-dir") != git_path(SCRIPT_CHECKOUT, "--git-common-dir"):
+            parser.error("--source-dir must be a worktree of this Fleetworks repository")
+    except (OSError, subprocess.SubprocessError) as error:
+        parser.error(f"could not select --source-dir: {error}")
+    if not all((checkout / "scripts" / helper).is_file()
+               for helper in ("fleetworks_candidate.py", "fleetworks_qa_pack.py")):
+        parser.error("--source-dir is missing the Fleetworks packaging helpers")
+    return checkout
+
+
+ROOT = source_checkout()
+sys.path.insert(0, str(ROOT / "scripts"))
 import fleetworks_candidate as native
 import fleetworks_qa_pack as qa
 
-
-ROOT = native.ROOT
 REPO = "xxxcess/argos-osint"
 DEFAULT_OUTPUT = ROOT / ".agent-scratch" / "native-quick-start"
 COMPANION = "Contents/MacOS/argos-api-host"
@@ -489,7 +521,9 @@ def install_inbox(identity, target, profile, state):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument("--source-dir", type=Path,
+                        help="Build from this local worktree of the same repository")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--app-artifact", type=int, help="Open this verified macOS debug app Actions artifact")
     mode.add_argument("--reuse-bundle", action="store_true",
@@ -518,8 +552,10 @@ def main():
                 and not output.is_relative_to(profile),
                 "Select a dedicated profile directory outside the app output")
         shared = repo_family_root()
+        source_build = args.app_artifact is None and not args.reuse_bundle
         with quick_start_lock(shared):
-            require_no_other_app(output / native.NATIVE_APP)
+            if not source_build:
+                require_no_other_app(output / native.NATIVE_APP)
             if profile.exists():
                 require_private_profile(profile)
             output.parent.mkdir(parents=True, exist_ok=True)

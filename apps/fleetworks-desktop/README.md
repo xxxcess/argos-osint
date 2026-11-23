@@ -28,7 +28,7 @@ Use the [quick-start script](../../scripts/fleetworks_quick_start.py) from the r
 python3 scripts/fleetworks_quick_start.py
 ```
 
-The script builds Fleetworks Desktop and its Embedded companion from the current checkout for Intel or Apple Silicon macOS. It uses locked dependencies and the shared `target/agents/debug` cache. It reuses its own validated source bundle at the same clean revision. It keeps one app under `.agent-scratch/native-quick-start/` and opens it with a private profile under `.agent-scratch/native-quick-start-profile/`. Updates preserve that profile. Close the app before replacing its bundle.
+The script builds Fleetworks Desktop and its Embedded companion from the current checkout for Intel or Apple Silicon macOS. It uses locked dependencies and the shared `target/agents/debug` cache. It reuses its own validated source bundle at the same clean revision. It keeps one app under `.agent-scratch/native-quick-start/` and opens it with a private profile under `.agent-scratch/native-quick-start-profile/`. Updates preserve that profile. Close the app before replacing its bundle. Pass `--source-dir PATH` to build another local worktree of this repository, including its uncommitted source edits. A build to a separate output can finish while the older app is open.
 
 - Use `--reuse-bundle` to open a validated, compatible clean bundle without an app build or download. Use `--output` and `--profile-dir` to select existing paths.
 - Use `--app-artifact ID` to verify and open a specific macOS debug app from a successful matching Fleetworks GitHub Actions run. Add `--rebuild-desktop` to build the desktop from source and use the verified hosted companion.

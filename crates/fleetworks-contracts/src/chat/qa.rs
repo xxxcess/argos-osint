@@ -281,6 +281,19 @@ pub enum QaTurnNotice {
     ObservationUnavailable,
 }
 
+/// A conversational reply that asks for input or explains supported assistance.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaConversationReply {
+    Acknowledgement,
+    Help,
+    ContextNeeded,
+    FollowUpNeedsTopic,
+    #[serde(other)]
+    Unknown,
+}
+
 /// Exact unit of a frozen metric reading. Percentages are stored in tenths of a percent.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -364,6 +377,8 @@ pub struct QaTurn {
     pub findings: Vec<QaFinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<QaTurnNotice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<QaConversationReply>,
     pub cursor: u64,
 }
 
@@ -387,6 +402,7 @@ impl QaTurn {
             state: QaTurnState::Queued,
             findings: Vec::new(),
             notice: None,
+            conversation: None,
             cursor: 0,
         }
     }
@@ -480,5 +496,24 @@ mod tests {
             serde_json::from_value::<QaSettings>(current).unwrap(),
             settings
         );
+    }
+
+    #[test]
+    fn conversational_reply_preserves_the_legacy_notice() {
+        let mut turn = QaTurn::queued("turn".into(), "request".into(), "Can you help?".into());
+        turn.state = QaTurnState::InsufficientContext;
+        turn.notice = Some(QaTurnNotice::Greeting);
+        let old = serde_json::to_value(&turn).unwrap();
+        assert!(old.get("conversation").is_none());
+        assert_eq!(serde_json::from_value::<QaTurn>(old).unwrap(), turn);
+
+        turn.conversation = Some(QaConversationReply::Help);
+        let mut payload = serde_json::to_value(&turn).unwrap();
+        assert_eq!(payload["notice"], "greeting");
+        assert_eq!(payload["conversation"], "help");
+        payload["conversation"] = "future_reply".into();
+        let decoded = serde_json::from_value::<QaTurn>(payload).unwrap();
+        assert_eq!(decoded.conversation, Some(QaConversationReply::Unknown));
+        assert_eq!(decoded.notice, turn.notice);
     }
 }

@@ -2,6 +2,7 @@
 
 use chrono::Utc;
 use fleetworks_contracts::chat::ChatSourceReference;
+use fleetworks_contracts::chat::QaConversationReply;
 use fleetworks_contracts::chat::QaEvent;
 use fleetworks_contracts::chat::QaFinding;
 use fleetworks_contracts::chat::QaMeasurement;
@@ -164,6 +165,8 @@ pub struct FrozenEvidence {
     pub answer_mode: AnswerMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<QaTurnNotice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<QaConversationReply>,
     pub request: QaWorkerRequest,
     pub sources: Vec<Source>,
     pub sampled_at_ms: i64,
@@ -207,6 +210,8 @@ struct Exchange {
     turn: QaTurn,
     events: Vec<QaEvent>,
     evidence: Option<FrozenEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolved_question: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, SurrealValue)]
@@ -693,6 +698,8 @@ pub async fn admit(
                 turn: QaTurn::queued(id.clone(), request.request_id.clone(), request.question.clone()),
                 events: Vec::new(),
                 evidence: Some(evidence.clone()),
+                resolved_question: (request.question != evidence.request.question)
+                    .then(|| evidence.request.question.clone()),
             };
             let payload = serde_json::to_string(&exchange).map_err(|_| abort("invalid_store"))?;
             jobs::run(&tx, tx.query(
@@ -713,6 +720,7 @@ pub async fn admit(
                 };
                 let terminal = if findings.is_empty() {
                     exchange.turn.notice = evidence.notice.or(Some(QaTurnNotice::ObservationUnavailable));
+                    exchange.turn.conversation = evidence.conversation;
                     QaTurnState::InsufficientContext
                 } else {
                     for finding in findings {
@@ -748,6 +756,25 @@ pub async fn latest(
     repo: &Repository,
     actor: &Actor,
 ) -> Result<Option<(QaTurn, Vec<QaEvent>)>, TxError> {
+    Ok(latest_exchange(repo, actor)
+        .await?
+        .map(|exchange| (exchange.turn, exchange.events)))
+}
+
+/// Use the last cited question's resolved topic, never its old observations.
+pub async fn last_answered_prompt(
+    repo: &Repository,
+    actor: &Actor,
+) -> Result<Option<String>, TxError> {
+    Ok(latest_exchange(repo, actor)
+        .await?
+        .filter(|exchange| {
+            exchange.turn.state == QaTurnState::Answered && !exchange.turn.findings.is_empty()
+        })
+        .map(|exchange| exchange.resolved_question.unwrap_or(exchange.turn.question)))
+}
+
+async fn latest_exchange(repo: &Repository, actor: &Actor) -> Result<Option<Exchange>, TxError> {
     let key = actor.key()?;
     Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
         let key = &key;
@@ -763,8 +790,7 @@ pub async fn latest(
             let Some(row) = exchange_in(&tx, &turn_id).await? else {
                 return Ok(None);
             };
-            let exchange = decode(&row.payload)?;
-            Ok(Some((exchange.turn, exchange.events)))
+            decode(&row.payload).map(Some)
         }
     })
     .await?

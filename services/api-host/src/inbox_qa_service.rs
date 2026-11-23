@@ -954,6 +954,7 @@ mod tests {
         let evidence = FrozenEvidence {
             answer_mode: AnswerMode::Model,
             notice: None,
+            conversation: None,
             request: QaWorkerRequest::new(
                 "turn".into(),
                 "snapshot".into(),
@@ -980,6 +981,7 @@ mod tests {
         let evidence = FrozenEvidence {
             answer_mode: AnswerMode::Grounded,
             notice: None,
+            conversation: None,
             request: QaWorkerRequest::new(
                 "turn".into(),
                 "snapshot".into(),

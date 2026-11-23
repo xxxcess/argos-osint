@@ -181,8 +181,10 @@ def legacy_turn(turn):
     return {**turn, "findings": [legacy_finding(finding) for finding in turn["findings"]]}
 
 
-def grounded_turn(request, context, case, question, *, legacy_request=None):
+def grounded_turn(request, context, case, question, *, legacy_request=None, source=None):
     payload = {"request_id": f"inbox-qa-smoke-{case}", "context": context, "question": question}
+    if source is not None:
+        payload["source"] = source
     accepted = request("turns", payload, expected=(200, 201, 202))
     require(accepted["state"] in TERMINAL, f"{case} did not finish within admission")
     query = {"turn_id": accepted["turn_id"], "after": 0, "wait_seconds": 0}
@@ -388,7 +390,10 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
         return grounded_turn(request, context, case, question,
                              legacy_request=legacy_request if check_legacy else None)
 
-    gateway = ask("gateway", "What is the state of the gateway?")
+    gateway = grounded_turn(
+        request, context, "gateway", "What does this mean?",
+        source={"kind": "readiness", "id": "gateway"},
+    )
     require(cited_finding(gateway, "readiness", "gateway")["text"]
             == "Gateway is ready. An authenticated gateway request succeeded.",
             "gateway answer did not report the observed ready state")
@@ -415,6 +420,13 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
     require(datetime.fromisoformat(readings["memory_follow_up"]["observed_at"])
             > datetime.fromisoformat(readings["memory"]["observed_at"]),
             "memory follow-up reused the previous observation timestamp")
+    preceding = readings["memory_follow_up"]
+    for index, question in enumerate(("And now?", "Has that changed?"), start=1):
+        turn = ask(f"conversational-follow-up-{index}", question, check_legacy=True)
+        measured = cited_metric(turn, "memory", "memory usage", embedded_mode=embedded_mode)
+        require(turn["question"] == question and observed(measured) > observed(preceding),
+                "a conversational follow-up changed the displayed prompt or reused a metric sample")
+        preceding = measured
     resources = ask("resources", "What is our resource usage?")
     require(resources["state"] == "answered"
             and {part["source"]["id"] for part in resources["findings"]} == {"cpu", "memory", "disk"}
@@ -425,10 +437,14 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
     greeting = ask("greeting", "hi", check_legacy=True)
     require(greeting.get("notice") == "greeting" and not greeting["findings"],
             "greeting did not receive a friendly reply without citations")
-    unsupported = ask("unsupported", "What is the current GPU temperature?")
+    help_turn = ask("help", "What can you help with?", check_legacy=True)
+    require(help_turn.get("conversation") == "help" and not help_turn["findings"],
+            "the assistant did not explain how to start a task")
+    unsupported = ask("general-context", "What is the capital of Japan?", check_legacy=True)
     require(unsupported["state"] == "insufficient_context" and not unsupported["findings"]
-            and unsupported.get("notice") == "out_of_scope",
-            "unsupported measurement did not receive a scope notice")
+            and unsupported.get("notice") == "out_of_scope"
+            and unsupported.get("conversation") == "context_needed",
+            "the assistant did not ask for grounding context")
     if verify_other_jobs is not None:
         verify_other_jobs()
 
@@ -448,7 +464,7 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
             "model_pid_count": len(active), "warm_model_rss_bytes": worker_rss_bytes,
             "fresh_observation": True, "terminal_events": terminal_events, "terminal_state": snapshot["state"],
             "grounded_readiness": True, "live_metrics": True, "unsupported_context": True,
-            "resource_snapshot": True, "greeting": True,
+            "resource_snapshot": True, "greeting": True, "conversational_follow_ups": True,
             "frozen_samples": readings, "legacy_http_evidence": legacy_request is not None}
 
 

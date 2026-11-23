@@ -21,10 +21,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use fleetworks_contracts::chat::{
-    ChatSourceKind, ChatSourceReference, QaAvailabilityReason, QaCancelRequest, QaEventPage,
-    QaEventQuery, QaFinding, QaPhase, QaSettings, QaSettingsUpdate, QaStartupStage, QaTurn,
-    QaTurnNotice, QaTurnRequest, QA_CANCEL_PATH, QA_EVENTS_PATH, QA_EVIDENCE_HEADER,
-    QA_EVIDENCE_VERSION, QA_LATEST_PATH, QA_SETTINGS_PATH, QA_TURNS_PATH,
+    ChatSourceKind, ChatSourceReference, QaAvailabilityReason, QaCancelRequest,
+    QaConversationReply, QaEventPage, QaEventQuery, QaFinding, QaPhase, QaSettings,
+    QaSettingsUpdate, QaStartupStage, QaTurn, QaTurnNotice, QaTurnRequest, QA_CANCEL_PATH,
+    QA_EVENTS_PATH, QA_EVIDENCE_HEADER, QA_EVIDENCE_VERSION, QA_LATEST_PATH, QA_SETTINGS_PATH,
+    QA_TURNS_PATH,
 };
 use fleetworks_contracts::context::{CredentialPurpose, MutationContext, Permission};
 use fleetworks_contracts::qa_worker::{QaPassage, QaWorkerEvent, QaWorkerRequest};
@@ -680,13 +681,38 @@ pub(crate) async fn submit_request(
         ));
     }
     let deadline = Instant::now() + Duration::from_secs(4);
+    let follow_up = if question::classify(&request.question) == Question::FollowUp {
+        tokio::time::timeout_at(deadline, store::last_answered_prompt(&state.repo, &actor))
+            .await
+            .map_err(|_| current_health_unavailable())?
+            .map_err(storage_error)?
+            .filter(|previous| {
+                matches!(
+                    question::classify(previous),
+                    Question::Readiness(_)
+                        | Question::ReadinessExplanation(_)
+                        | Question::Metric(_)
+                        | Question::HostResources
+                        | Question::JobsSummary
+                        | Question::Summary
+                )
+            })
+            .map(|question| {
+                let mut resolved = request.clone();
+                resolved.question = question;
+                resolved
+            })
+    } else {
+        None
+    };
+    let evidence_request = follow_up.as_ref().unwrap_or(&request);
     loop {
         let evidence = snapshot(
             state,
             context,
             target,
             &actor,
-            &request,
+            evidence_request,
             setting.generation,
             deadline,
         )
@@ -802,6 +828,7 @@ async fn snapshot(
     };
     let mut answer_mode = store::AnswerMode::Grounded;
     let mut notice = None;
+    let mut conversation = None;
     match intent {
         Question::Readiness(check) | Question::ReadinessExplanation(check) => {
             if let Some((sample, fact)) = health.as_ref().and_then(|sample| {
@@ -869,6 +896,45 @@ async fn snapshot(
                 }
             }
         }
+        Question::ExplainSelected => {
+            if let Some(source) = source {
+                if source.kind == ChatSourceKind::Readiness {
+                    if let Some((sample, fact)) = health.as_ref().and_then(|sample| {
+                        sample
+                            .facts
+                            .iter()
+                            .find(|fact| fact.id == source.id)
+                            .map(|fact| (sample, fact))
+                    }) {
+                        let observed_at =
+                            chrono::DateTime::from_timestamp_millis(sample.sampled_at_ms)
+                                .ok_or_else(current_health_unavailable)?;
+                        push(
+                            source.clone(),
+                            readiness::label(fact).to_owned(),
+                            readiness::answer(fact),
+                            observed_at,
+                            None,
+                            false,
+                        );
+                    }
+                } else if let Some((label, status, at)) = selected_activity {
+                    if status != "unknown" && at.timestamp_millis() > boundary {
+                        push(
+                            source.clone(),
+                            label.into(),
+                            format!("{label} is {status}."),
+                            at,
+                            None,
+                            false,
+                        );
+                    }
+                }
+            } else {
+                notice = Some(QaTurnNotice::OutOfScope);
+                conversation = Some(QaConversationReply::ContextNeeded);
+            }
+        }
         Question::Summary => {
             if let Some(sample) = health.filter(|sample| !sample.facts.is_empty()) {
                 answer_mode = store::AnswerMode::Model;
@@ -902,13 +968,29 @@ async fn snapshot(
             }
         }
         Question::Greeting => notice = Some(QaTurnNotice::Greeting),
-        Question::Unsupported => notice = Some(QaTurnNotice::OutOfScope),
+        Question::Acknowledgement => {
+            notice = Some(QaTurnNotice::Greeting);
+            conversation = Some(QaConversationReply::Acknowledgement);
+        }
+        Question::Help => {
+            notice = Some(QaTurnNotice::Greeting);
+            conversation = Some(QaConversationReply::Help);
+        }
+        Question::FollowUp => {
+            notice = Some(QaTurnNotice::OutOfScope);
+            conversation = Some(QaConversationReply::FollowUpNeedsTopic);
+        }
+        Question::Unsupported => {
+            notice = Some(QaTurnNotice::OutOfScope);
+            conversation = Some(QaConversationReply::ContextNeeded);
+        }
     }
     let sampled_at_ms = earliest.unwrap_or_else(chrono::Utc::now).timestamp_millis();
     let turn_id = store::accepted_turn_id(actor, request, generation).map_err(storage_error)?;
     Ok(store::FrozenEvidence {
         answer_mode,
         notice,
+        conversation,
         request: QaWorkerRequest::new(turn_id.clone(), turn_id, request.question.clone(), passages),
         sources,
         sampled_at_ms,

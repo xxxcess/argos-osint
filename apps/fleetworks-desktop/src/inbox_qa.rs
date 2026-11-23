@@ -7,6 +7,7 @@ use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::chat::QaAvailabilityReason;
 use fleetworks_contracts::chat::QaCancelRequest;
+use fleetworks_contracts::chat::QaConversationReply;
 use fleetworks_contracts::chat::QaEventPage;
 use fleetworks_contracts::chat::QaEventQuery;
 use fleetworks_contracts::chat::QaPhase;
@@ -949,17 +950,26 @@ fn answer_state(turn: &QaTurn) -> (chat_ui::TurnState, &'static str) {
             "",
         ),
     };
-    let detail = match turn.notice {
-        Some(QaTurnNotice::Greeting) => {
-            "Hi! Try asking if actor search is ready, how much memory is in use, or which jobs are running."
+    let context_needed = "What would you like to work through? Point me to a source, or select a related job, news cycle, or status check.";
+    let detail = match turn.conversation {
+        Some(QaConversationReply::Acknowledgement) => "Of course. What else can I help with?",
+        Some(QaConversationReply::Help) => {
+            "Try “Is actor search ready?” or “How much memory is in use?” Select a job to ask about its status."
         }
-        Some(QaTurnNotice::OutOfScope) => {
-            "I can answer questions about this workstation’s health, readiness, resource usage, and jobs."
+        Some(QaConversationReply::ContextNeeded) => context_needed,
+        Some(QaConversationReply::FollowUpNeedsTopic) => {
+            "What would you like me to check again? Try “What’s the current memory usage?” or select the job you mean."
         }
-        Some(QaTurnNotice::ObservationUnavailable) => {
-            "I couldn’t obtain the relevant current measurement for that question."
-        }
-        _ => fallback,
+        _ => match turn.notice {
+            Some(QaTurnNotice::Greeting) => {
+                "Hi! How can I help? You can ask about actor search, memory usage, or running jobs."
+            }
+            Some(QaTurnNotice::OutOfScope) => context_needed,
+            Some(QaTurnNotice::ObservationUnavailable) => {
+                "I couldn’t get a current reading for that. Try again in a moment."
+            }
+            _ => fallback,
+        },
     };
     (stage, detail)
 }
@@ -1123,8 +1133,8 @@ pub(crate) fn footer(state: &State, kit: &Kit, preferences: ViewPreferences) -> 
         return footer_layer(hint("This registration can view answers. Sending a question requires interactive access.", kit), preferences);
     }
     let input = rune_kit::TextArea::new(&qa.draft)
-        .label("Ask about workstation health")
-        .placeholder("Ask about workstation health")
+        .label("Question for the Inbox assistant")
+        .placeholder("Ask a question")
         .auto_grow(2, 6)
         .wrap_anywhere()
         .disabled(qa.pending.is_some())
@@ -1439,18 +1449,42 @@ mod tests {
     #[test]
     fn informational_notices_keep_the_answer_and_composer_available() {
         let mut runtime = active_drawer((640.0, 480.0));
-        for (index, (notice, copy)) in [
+        for (index, (notice, conversation, copy)) in [
+            (QaTurnNotice::Greeting, None, "How can I help?"),
             (
-                QaTurnNotice::Greeting,
-                "Try asking if actor search is ready",
+                QaTurnNotice::OutOfScope,
+                Some(QaConversationReply::Acknowledgement),
+                "What else can I help with?",
             ),
             (
                 QaTurnNotice::OutOfScope,
-                "health, readiness, resource usage, and jobs",
+                Some(QaConversationReply::Help),
+                "Select a job to ask about its status",
+            ),
+            (
+                QaTurnNotice::OutOfScope,
+                None,
+                "What would you like to work through?",
+            ),
+            (
+                QaTurnNotice::OutOfScope,
+                Some(QaConversationReply::ContextNeeded),
+                "select it and tell me what you’d like to know",
+            ),
+            (
+                QaTurnNotice::OutOfScope,
+                Some(QaConversationReply::FollowUpNeedsTopic),
+                "What’s the current memory usage?",
             ),
             (
                 QaTurnNotice::ObservationUnavailable,
-                "relevant current measurement",
+                None,
+                "Try again in a moment.",
+            ),
+            (
+                QaTurnNotice::ObservationUnavailable,
+                Some(QaConversationReply::Unknown),
+                "Try again in a moment.",
             ),
         ]
         .into_iter()
@@ -1460,11 +1494,15 @@ mod tests {
                 let mut reply = turn(QaTurnState::InsufficientContext, 1);
                 reply.turn_id = format!("fixture-notice-{index}");
                 reply.notice = Some(notice);
+                reply.conversation = conversation;
                 state.inbox_qa.adopt(Some(reply));
             });
             runtime.frame(1.0 + index as f64 / 4.0);
             let tree = runtime.accessibility_json().to_string();
-            assert!(tree.contains(copy));
+            assert!(
+                tree.contains(copy),
+                "missing reply for {notice:?} {conversation:?}"
+            );
             assert!(!tree.contains("could not verify an answer"));
             assert!(runtime.find(REPLY).is_some());
             assert!(runtime.find(COMPOSER).is_some());

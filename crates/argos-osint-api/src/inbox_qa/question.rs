@@ -4,6 +4,10 @@ use fleetworks_contracts::readiness::ReadinessCheckId;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Question {
     Greeting,
+    Acknowledgement,
+    Help,
+    FollowUp,
+    ExplainSelected,
     Readiness(ReadinessCheckId),
     ReadinessExplanation(ReadinessCheckId),
     Metric(Metric),
@@ -24,6 +28,18 @@ pub(super) enum Metric {
     RetryingJobs,
 }
 
+const GREETINGS: &[&str] = &[
+    "hi there",
+    "hello there",
+    "hey there",
+    "good morning",
+    "good afternoon",
+    "good evening",
+    "hi",
+    "hello",
+    "hey",
+];
+
 /// Match the whole question so additional subjects or qualifiers cannot silently change its scope.
 pub(super) fn classify(question: &str) -> Question {
     let normalized = question
@@ -33,31 +49,52 @@ pub(super) fn classify(question: &str) -> Question {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    let question = normalized.trim_end_matches(['?', '.', '!']).trim_end();
-    if matches!(
-        question,
-        "hi" | "hello"
-            | "hey"
-            | "hi there"
-            | "hello there"
-            | "hey there"
-            | "good morning"
-            | "good afternoon"
-            | "good evening"
-    ) {
+    let question = trim_sentence_end(&normalized);
+    if GREETINGS.contains(&question) {
         return Question::Greeting;
     }
-    let question = strip_any_prefix(
+    let question = GREETINGS
+        .iter()
+        .find_map(|salutation| {
+            let rest = question.strip_prefix(*salutation)?;
+            strip_any_prefix(rest, &[", ", "! ", ". ", " "])
+        })
+        .or_else(|| {
+            strip_any_prefix(
+                question,
+                &["thanks, ", "thanks! ", "thank you, ", "thank you! "],
+            )
+        })
+        .unwrap_or(question);
+    let question = strip_any_prefix(question, &["please, ", "please "]).unwrap_or(question);
+    if let Some(intent) = conversational_intent(question) {
+        return intent;
+    }
+    let question = strip_any_suffix(
         question,
-        &["hi, ", "hi! ", "hello, ", "hello! ", "hey, ", "hey! "],
+        &[
+            ", please",
+            " please",
+            ", thanks",
+            " thanks",
+            ", thank you",
+            " thank you",
+        ],
+    )
+    .map_or(question, trim_sentence_end);
+    if let Some(intent) = conversational_intent(question) {
+        return intent;
+    }
+    let question = strip_any_suffix(
+        question,
+        &[" right now", " currently", " at the moment", " now"],
     )
     .unwrap_or(question);
-    let question = strip_any_prefix(question, &["please, ", "please "]).unwrap_or(question);
-    let question = strip_any_suffix(question, &[" right now", " currently", " at the moment"])
-        .unwrap_or(question);
+    let request =
+        strip_any_prefix(question, &["could you please ", "can you please "]).unwrap_or(question);
     let query = strip_article(
         strip_any_prefix(
-            question,
+            request,
             &[
                 "what is ",
                 "what's ",
@@ -65,6 +102,9 @@ pub(super) fn classify(question: &str) -> Question {
                 "can you tell me ",
                 "can you show me ",
                 "can you check ",
+                "could you tell me ",
+                "could you show me ",
+                "could you check ",
                 "give me a ",
                 "show me ",
                 "tell me ",
@@ -72,7 +112,7 @@ pub(super) fn classify(question: &str) -> Question {
                 "check ",
             ],
         )
-        .unwrap_or(question),
+        .unwrap_or(request),
     );
 
     let current_query = strip_any_prefix(query, &["current ", "live "]).unwrap_or(query);
@@ -112,6 +152,62 @@ pub(super) fn classify(question: &str) -> Question {
     Question::Unsupported
 }
 
+fn conversational_intent(question: &str) -> Option<Question> {
+    let intent = match question {
+        "how are you" | "how are you doing" | "how's it going" => Question::Greeting,
+        "thanks" | "thank you" | "thanks a lot" | "thank you so much" | "many thanks" | "ok"
+        | "okay" | "got it" | "understood" | "makes sense" | "great" => Question::Acknowledgement,
+        "help"
+        | "help me"
+        | "can you help"
+        | "could you help"
+        | "i need help"
+        | "help with setup"
+        | "workstation help"
+        | "how do i get started"
+        | "how do i use this"
+        | "how do i set up this workstation"
+        | "how do i set up my workstation"
+        | "what can you do"
+        | "what can i ask"
+        | "what can i ask you"
+        | "what can i ask about"
+        | "what should i ask"
+        | "what can you help me with"
+        | "what can you help with" => Question::Help,
+        "and now"
+        | "what about now"
+        | "how about now"
+        | "has that changed"
+        | "has it changed"
+        | "any change"
+        | "any changes"
+        | "is that still true"
+        | "is it still the same"
+        | "check again"
+        | "can you check again"
+        | "could you check again" => Question::FollowUp,
+        "what does this mean"
+        | "what does this status mean"
+        | "what is this"
+        | "summarize this"
+        | "can you summarize this"
+        | "explain this"
+        | "can you explain this"
+        | "what is happening here"
+        | "what's happening here"
+        | "what is going on here"
+        | "what's going on here"
+        | "tell me about this" => Question::ExplainSelected,
+        _ => return None,
+    };
+    Some(intent)
+}
+
+fn trim_sentence_end(value: &str) -> &str {
+    value.trim_end_matches(['?', '.', '!']).trim_end()
+}
+
 fn metric(query: &str) -> Option<Metric> {
     if let Some(metric) = host_usage(query) {
         return Some(metric);
@@ -126,7 +222,14 @@ fn metric(query: &str) -> Option<Metric> {
         .strip_prefix("workstation ")
         .unwrap_or(jobs_query);
     match (jobs_query, count_subject.is_some()) {
-        ("queued job count" | "job queue depth", _)
+        (
+            "queued job count"
+            | "job queue depth"
+            | "are any jobs queued"
+            | "are there any queued jobs"
+            | "are there any jobs in the queue",
+            _,
+        )
         | (
             "queued jobs"
             | "jobs are queued"
@@ -136,7 +239,13 @@ fn metric(query: &str) -> Option<Metric> {
             | "jobs are waiting in the queue",
             true,
         ) => Some(Metric::QueuedJobs),
-        ("running job count" | "are jobs running" | "are any jobs running", _)
+        (
+            "running job count"
+            | "are jobs running"
+            | "are any jobs running"
+            | "are there any jobs running",
+            _,
+        )
         | (
             "running jobs"
             | "jobs are running"
@@ -144,7 +253,7 @@ fn metric(query: &str) -> Option<Metric> {
             | "jobs are in progress",
             true,
         ) => Some(Metric::RunningJobs),
-        ("retrying job count", _)
+        ("retrying job count" | "are any jobs retrying" | "are any jobs waiting to retry", _)
         | (
             "retrying jobs"
             | "jobs are retrying"
@@ -221,6 +330,9 @@ fn host_usage(query: &str) -> Option<Metric> {
             " utilization",
             " utilisation",
             " consumption",
+            " usage percentage",
+            " in use",
+            " used",
         ],
     )
     .and_then(host_resource)
@@ -230,20 +342,27 @@ fn host_usage(query: &str) -> Option<Metric> {
 
     let usage = strip_any_prefix(
         host_query,
-        &["how much ", "what percent of ", "what percentage of "],
+        &[
+            "how much of ",
+            "how much ",
+            "what percent of ",
+            "what percentage of ",
+        ],
     )?;
     if let Some(usage) = strip_any_suffix(
         usage,
         &[
             " is in use",
             " is being used",
+            " is currently in use",
+            " is currently being used",
             " is used",
             " are we using",
             " we are using",
             " we're using",
         ],
     ) {
-        return host_resource(strip_article(usage));
+        return host_resource(strip_any_prefix(usage, &["the ", "our "]).unwrap_or(usage));
     }
     let usage = strip_any_suffix(usage, &[" are we at", " we are at", " we're at"])?;
     let resource = strip_any_suffix(
@@ -256,8 +375,8 @@ fn host_usage(query: &str) -> Option<Metric> {
 
 fn host_resource(resource: &str) -> Option<Metric> {
     match resource {
-        "cpu" | "processor" => Some(Metric::Cpu),
-        "memory" | "ram" => Some(Metric::Memory),
+        "cpu" | "processor" | "system cpu" => Some(Metric::Cpu),
+        "memory" | "ram" | "system memory" => Some(Metric::Memory),
         "disk" | "disk space" => Some(Metric::Disk),
         _ => None,
     }
@@ -368,6 +487,24 @@ fn readiness(question: &str, query: &str) -> Option<ReadinessCheckId> {
 }
 
 fn summary(question: &str, query: &str) -> bool {
+    if matches!(
+        question,
+        "how's everything"
+            | "how is everything"
+            | "how is everything doing"
+            | "how is everything looking"
+            | "is everything okay"
+            | "is everything ok"
+            | "what needs attention"
+            | "does anything need attention"
+            | "is anything wrong"
+            | "any problems with this workstation"
+            | "any problems with the workstation"
+            | "are there any problems with this workstation"
+            | "is anything wrong with this workstation"
+    ) {
+        return true;
+    }
     let query = strip_any_prefix(question, &["summarize ", "summarise "]).unwrap_or(query);
     let query = strip_article(query);
     let query = strip_any_prefix(query, &["overall ", "current "]).unwrap_or(query);
@@ -428,8 +565,29 @@ mod tests {
 
     #[test]
     fn recognizes_standalone_greetings() {
-        for question in ["hi", "  Hello there! ", "Good morning."] {
+        for question in ["hi", "  Hello there! ", "Good morning.", "Hi, how are you?"] {
             assert_eq!(classify(question), Question::Greeting, "{question}");
+        }
+    }
+
+    #[test]
+    fn recognizes_conversational_intents_without_inferring_a_subject() {
+        for (question, intent) in [
+            ("Thanks a lot!", Question::Acknowledgement),
+            ("Okay, thanks.", Question::Acknowledgement),
+            ("Got it!", Question::Acknowledgement),
+            ("Can you help?", Question::Help),
+            ("What can I ask you?", Question::Help),
+            ("How do I set up this workstation?", Question::Help),
+            ("And now?", Question::FollowUp),
+            ("Thanks, has that changed?", Question::FollowUp),
+            ("Could you check again?", Question::FollowUp),
+            ("What does this mean?", Question::ExplainSelected),
+            ("Explain this, please.", Question::ExplainSelected),
+            ("What is happening here?", Question::ExplainSelected),
+            ("Tell me about this.", Question::ExplainSelected),
+        ] {
+            assert_eq!(classify(question), intent, "{question}");
         }
     }
 
@@ -484,8 +642,20 @@ mod tests {
         for (question, metric) in [
             ("What's the API host CPU usage?", Metric::Cpu),
             ("How much CPU are we using?", Metric::Cpu),
+            ("How much of the CPU is being used?", Metric::Cpu),
+            ("What is the CPU usage percentage now?", Metric::Cpu),
             ("What is the current memory usage?", Metric::Memory),
             ("Hi! What is the memory usage?", Metric::Memory),
+            (
+                "Hi there, could you please check RAM usage?",
+                Metric::Memory,
+            ),
+            ("Hello what's our memory usage, please?", Metric::Memory),
+            ("What is the RAM usage? Thanks!", Metric::Memory),
+            (
+                "How much system memory is currently in use?",
+                Metric::Memory,
+            ),
             ("how much memory consumption we are at", Metric::Memory),
             ("What's our RAM consumption right now?", Metric::Memory),
             ("How much memory is in use?", Metric::Memory),
@@ -501,6 +671,9 @@ mod tests {
             ),
             ("How many jobs are running?", Metric::RunningJobs),
             ("Are jobs running?", Metric::RunningJobs),
+            ("Are there any jobs running?", Metric::RunningJobs),
+            ("Are there any jobs in the queue?", Metric::QueuedJobs),
+            ("Are any jobs waiting to retry?", Metric::RetryingJobs),
             ("How many jobs are in the queue?", Metric::QueuedJobs),
             ("How many jobs are in progress?", Metric::RunningJobs),
             (
@@ -585,6 +758,9 @@ mod tests {
             "What is the health of this workstation?",
             "Give me a workstation status update.",
             "Is the workstation ready?",
+            "How's everything?",
+            "What needs attention?",
+            "Any problems with this workstation?",
         ] {
             assert_eq!(classify(question), Question::Summary, "{question}");
         }
@@ -615,6 +791,11 @@ mod tests {
             "What is the memory usage? Include gateway status.",
             "Hi! What is the weather?",
             "Good morning, how is the weather?",
+            "How's everything in Boston?",
+            "Could you check again and show the GPU temperature?",
+            "What did you mean by today's weather?",
+            "Can you help me set up my phone?",
+            "Explain this and tell me about this computer's GPU.",
         ] {
             assert_eq!(classify(question), Question::Unsupported, "{question}");
         }

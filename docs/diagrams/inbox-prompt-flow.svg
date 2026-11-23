@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 896" role="img" aria-labelledby="inbox-prompt-flow-title inbox-prompt-flow-desc">
   <title id="inbox-prompt-flow-title">Inbox prompt flow</title>
-  <desc id="inbox-prompt-flow-desc">The native Inbox composer submits a registered turn to the Embedded companion over a private Unix socket or to the paired Distributed gateway over HTTPS. Both use shared QA admission to check permissions and capture fresh, scoped readiness, host metrics and Jobs counts. Exact facts and fixed notices answer immediately. Readiness summaries use a durable queue and a sandboxed BERT worker that receives bounded passages. The coordinator verifies cited selections against the snapshot and can use complete fresh readiness observations when a summary returns no usable selection. The backend commits the canonical turn and ordered events. Inbox resumes from a cursor or fetches the latest turn, with timestamped citations under a collapsed Sources control.</desc>
+  <desc id="inbox-prompt-flow-desc">The native Inbox composer submits a registered turn to the Embedded companion over a private Unix socket or to the paired Distributed gateway over HTTPS. Both use shared QA admission to check permissions and capture fresh, scoped readiness, host metrics and Jobs counts. Exact facts, guidance and context requests answer immediately. Readiness summaries use a durable queue and a sandboxed BERT worker that receives bounded passages. The coordinator verifies cited selections against the snapshot and can use complete fresh readiness observations when a summary returns no usable selection. The backend commits the canonical turn and ordered events. Inbox resumes from a cursor or fetches the latest turn, with timestamped citations under a collapsed Sources control.</desc>
   <style>
     text{font-family:Geist,Arial,sans-serif;fill:#242424}
     .label{font-size:22px;font-weight:600}
@@ -59,7 +59,7 @@
     <rect x="80" y="384" width="448" height="88" rx="6" class="node"/>
     <text x="100" y="412" class="label">Immediate answer</text>
     <text x="100" y="436" class="note">Grounded facts from the scoped snapshot</text>
-    <text x="100" y="460" class="note">Greeting, scope limit or unavailable notice</text>
+    <text x="100" y="460" class="note">Small talk, help or context request</text>
   </g>
   <g data-card="true">
     <rect x="592" y="384" width="448" height="88" rx="6" class="node"/>

@@ -611,6 +611,7 @@ mod tests {
     use super::classify;
     use super::Metric;
     use super::Question;
+    use super::StatusChecks;
     use fleetworks_contracts::readiness::ReadinessCheckId;
 
     #[test]

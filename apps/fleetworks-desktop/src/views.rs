@@ -561,13 +561,25 @@ pub(crate) fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
     let preferences = state
         .accessibility
         .for_view(state.fixture, cx.is_reduced_motion());
-    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
-    let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
     let size = if state.startup.active() {
         cx.layout_size("startup").or(Some([640.0, 480.0]))
     } else {
         cx.layout_size("page-content")
     };
+    scroll(
+        setup_gateway_content(state, kit, preferences, size),
+        "gateway-setup-body",
+    )
+}
+
+pub(crate) fn setup_gateway_content(
+    state: &State,
+    kit: &Kit,
+    preferences: ViewPreferences,
+    size: Option<[f32; 2]>,
+) -> El {
+    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
+    let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
     let narrow = size.is_some_and(|size| size[0] < 520.0);
     // A short window also takes the compact group edge so every setup control stays reachable.
     let compact = narrow || size.is_some_and(|size| size[1] < 560.0);
@@ -712,7 +724,7 @@ pub(crate) fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
             .child(url_card)
             .child(pairing_status(state, preferences, kit));
     }
-    scroll(body, "gateway-setup-body")
+    body
 }
 
 fn pairing_status(
@@ -1133,7 +1145,7 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                 .key("workstation-setup-gateway")
                 .icon(&icons::KEY)
                 .finish(MetalFinish::Gunmetal)
-                .on_press(|state: &mut State| state.setup_gateway = true)
+                .on_press(State::open_connection_settings)
                 .build(kit, preferences, pointer_ref),
         );
     }
@@ -1141,15 +1153,7 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
     let mut diagnostics = rune::col()
         .gap(8.0)
         .key("gateway-backend-card")
-        .child(line(connection_status(state), kit))
-        .child(quiet(
-            format!(
-                "Fleetworks {} · {}",
-                env!("CARGO_PKG_VERSION"),
-                std::env::consts::ARCH
-            ),
-            kit,
-        ));
+        .child(line(connection_status(state), kit));
     if let Load::Failed(error) = &state.registration.receipt {
         diagnostics = diagnostics.child(quiet(error.clone(), kit).role("alert"));
     }
@@ -1813,18 +1817,15 @@ fn actor_search_summary_card(
     let busy_submit =
         state.maintenance.busy() || matches!(state.maintenance.receipt, Load::Loading);
 
-    let mut status_slot = rune::row()
-        .center_y()
-        .gap(6.0)
-        .child(ui_components::status_pill(
-            summary.status_label,
-            None,
-            summary.tone,
-            kit,
-        ));
-    if let Some(reason) = summary.unsynced_reason {
-        status_slot = status_slot.child(unsynced_glyph("actor-search-unsynced", reason, kit));
-    }
+    let (status_label, tone) =
+        if summary.status_label == "Ready" && summary.unsynced_reason.is_some() {
+            ("Unsynced", StatusTone::Warn)
+        } else {
+            (summary.status_label, summary.tone)
+        };
+    let status_slot = rune::row().w(132.0).center_y().child(
+        ui_components::status_pill(status_label, None, tone, kit).key("actor-search-status-tag"),
+    );
 
     let relevant_job = active_actor_reindex(state)
         .map(|job| job.id.as_str())
@@ -1870,7 +1871,8 @@ fn actor_search_summary_card(
     };
     let primary = primary
         .finish(MetalFinish::Gunmetal)
-        .build(kit, preferences, pointer_ref);
+        .build(kit, preferences, pointer_ref)
+        .w(146.0);
     let primary = if summary.needs_seed {
         primary.on_key(|state: &mut State, event, tx| {
             if event.key != rune::Key::Enter || event.mods != rune::Mods::default() {
@@ -1884,6 +1886,18 @@ fn actor_search_summary_card(
     } else {
         primary
     };
+    let details_toggle = ActionButton::new(if state.maintenance.reindex_details_open {
+        "Hide details"
+    } else {
+        "Details"
+    })
+    .key("workstation-index-details-toggle")
+    .finish(MetalFinish::ObsidianPill)
+    .on_press(|state: &mut State| {
+        state.maintenance.reindex_details_open = !state.maintenance.reindex_details_open;
+    })
+    .build(kit, preferences, pointer_ref)
+    .w(96.0);
     let mut card_body = rune::col()
         .padding(10.0)
         .gap(6.0)
@@ -1894,31 +1908,12 @@ fn actor_search_summary_card(
                 .gap(6.0)
                 .center_y()
                 .flex_wrap()
-                .child(heading(
-                    if summary.needs_seed {
-                        "Actor catalog"
-                    } else {
-                        "Actor search"
-                    },
-                    kit,
-                ))
+                .child(heading("Actor search", kit).min_w(104.0))
                 .child(status_slot)
-                .child(primary),
+                .child(primary)
+                .child(details_toggle),
         );
-
-    let has_index_details = !summary.can_search
-        || relevant_job.is_some()
-        || state.maintenance.pending_reindex.is_some()
-        || state
-            .maintenance
-            .operation_job(MaintenanceOperation::ReindexActors)
-            .is_some()
-        || matches!(
-            &state.maintenance.receipt,
-            Load::Ready(receipt)
-                if receipt.operation == MaintenanceOperation::ReindexActors && !receipt.already_completed
-        );
-    if has_index_details || state.maintenance.reindex_details_open {
+    if state.maintenance.reindex_details_open {
         let mut details_col = rune::col().gap(4.0).child(quiet(summary.next_action, kit));
         if summary.building {
             let stage = summary.stage.as_deref().unwrap_or(summary.status_label);
@@ -1940,41 +1935,26 @@ fn actor_search_summary_card(
         if let Some(reason) = disabled_reason {
             details_col = details_col.child(quiet(reason, kit));
         }
-        card_body = card_body.child(
-            ActionButton::new(if state.maintenance.reindex_details_open {
-                "Hide details"
-            } else {
-                "Details"
-            })
-            .key("workstation-index-details-toggle")
-            .finish(MetalFinish::ObsidianPill)
-            .on_press_tx(move |state: &mut State, tx| {
-                state.maintenance.reindex_details_open = !state.maintenance.reindex_details_open;
-                if !state.maintenance.reindex_details_open && !has_index_details {
-                    tx.focus("workstation-search-actors", tx.focus_visible());
-                }
-            })
-            .build(kit, preferences, pointer_ref),
-        );
-        if state.maintenance.reindex_details_open {
-            card_body =
-                card_body.child(
-                    details_col
-                        .children((summary.can_search && relevant_job.is_some()).then(|| {
-                            workstation_search_action().build(kit, preferences, pointer_ref)
-                        }))
-                        .children(crate::backend_views::actor_index_receipt_banner(
-                            state,
-                            preferences,
-                            kit,
-                        ))
-                        .children(crate::backend_views::unresolved_actor_reindex_banner(
-                            state,
-                            preferences,
-                            kit,
-                        )),
-                );
+        if let Some(reason) = summary.unsynced_reason {
+            details_col = details_col.child(quiet(reason.to_owned(), kit));
         }
+        card_body = card_body.child(
+            details_col
+                .children(
+                    (summary.can_search && relevant_job.is_some())
+                        .then(|| workstation_search_action().build(kit, preferences, pointer_ref)),
+                )
+                .children(crate::backend_views::actor_index_receipt_banner(
+                    state,
+                    preferences,
+                    kit,
+                ))
+                .children(crate::backend_views::unresolved_actor_reindex_banner(
+                    state,
+                    preferences,
+                    kit,
+                )),
+        );
     }
 
     material::glass(
@@ -2998,7 +2978,7 @@ mod tests {
         );
         assert!(!rt.state.maintenance.reindex_details_open);
 
-        // Hero card renders distinct status badges & single-sentence guidance across backend states.
+        let details_position = rt.find("workstation-index-details-toggle").unwrap();
         let scenarios = [
             (
                 ReadinessState::NotReady,
@@ -3081,7 +3061,15 @@ mod tests {
             rt.frame(clock);
             let tree = rt.accessibility_json().to_string();
             assert!(tree.contains("Connected"));
-            assert!(tree.contains(label), "missing hero state {label}");
+            let status = rt
+                .elements()
+                .into_iter()
+                .find(|element| element.path.ends_with("actor-search-status-tag"))
+                .expect("actor search status tag");
+            assert_eq!(status.label.as_deref(), Some(label));
+            let position = rt.find("workstation-index-details-toggle").unwrap();
+            assert!((position.0 - details_position.0).abs() < 0.5);
+            assert!((position.1 - details_position.1).abs() < 0.5);
             if cat_state == ReadinessState::NotReady {
                 assert!(rt.find("workstation-open-seed").is_some());
                 assert!(rt.find("workstation-build-actor-index").is_none());
@@ -3240,10 +3228,8 @@ mod tests {
             (1280.0, 800.0),
             &mut clock,
         );
-        assert!(rt.find("workstation-index-details-toggle").is_none());
-        assert!(rt.elements().iter().any(|element| {
-            element.key.as_deref() == Some("workstation-search-actors") && element.focused
-        }));
+        assert!(rt.find("workstation-index-details-toggle").is_some());
+        assert!(!rt.state.maintenance.reindex_details_open);
         click_within(
             &mut rt,
             "workstation-search-actors",

@@ -919,6 +919,43 @@ async fn catalog_dossier_recovers_unique_legacy_actor_associations_without_other
         .unwrap()
         .unwrap();
     assert_eq!(redirected.loaded_claims, 0);
+
+    repo.db()
+        .query(
+            "CREATE memory:payload_only SET text = 'Payload-only claim', memory_kind = 'claim',
+             source_json = '{}', payload_json = $payload;",
+        )
+        .bind((
+            "payload",
+            serde_json::json!({
+                "kind": "claim",
+                "payload": {"actors": [{
+                    "actor_id": "fixture-actor-0",
+                    "role": "subject",
+                    "binding_state": "confirmed"
+                }]}
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let payload_only = argos_osint_core::storage::actor_dossier::read(&repo, "fixture-actor-0")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(payload_only.loaded_claims, 1);
+    assert_eq!(payload_only.claims[0].node.id, "payload_only");
+    assert_eq!(
+        payload_only.claims[0]
+            .relationship
+            .actor_reference
+            .as_ref()
+            .unwrap()
+            .role,
+        "subject"
+    );
 }
 
 #[tokio::test]

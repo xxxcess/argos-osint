@@ -541,6 +541,10 @@ impl State {
     pub(crate) fn finish_gateway_setup(&mut self, tx: &mut Tx) {
         if !self.startup.active() {
             self.setup_gateway = false;
+            if self.settings_open {
+                self.settings_open = false;
+                tx.focus("open-workstation-settings", tx.by_keys());
+            }
             return;
         }
         if !self.connected() || self.registration.context.is_none() {

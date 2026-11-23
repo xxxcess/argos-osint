@@ -1,6 +1,6 @@
 //! The native command panel: a typed list of known navigation and utility actions.
 //!
-//! Cmd/Ctrl+K or the toolbar button opens it. It filters a fixed list, never runs arbitrary text,
+//! Cmd/Ctrl+K opens it. It filters a fixed list, never runs arbitrary text,
 //! and never starts work: an action that could accept work (seed, index, train) only navigates to
 //! the page whose existing review step owns it. Only this panel owns the overlay while it is open.
 
@@ -145,7 +145,7 @@ impl State {
             || self.connection_profiles.confirmation.is_some()
     }
 
-    /// Open from Cmd/Ctrl+K or the toolbar. This panel becomes the only overlay.
+    /// Open from Cmd/Ctrl+K. This panel becomes the only overlay.
     pub(crate) fn open_command_panel(&mut self) {
         if self.startup.active() || self.has_active_confirmation_dialog() {
             return;
@@ -163,10 +163,7 @@ impl State {
         self.commands.close();
         match command {
             Command::Go(page) => self.navigate(page),
-            Command::SetupGateway => {
-                self.navigate(Page::Workstation);
-                self.setup_gateway = true;
-            }
+            Command::SetupGateway => self.open_connection_settings(),
             Command::OpenSettings => self.settings_open = true,
             Command::OpenInbox => self.open_inbox(),
             Command::ToggleAssistant => {
@@ -198,52 +195,6 @@ fn on_field_key(state: &mut State, event: &KeyEvent) -> bool {
         _ => return false,
     }
     true
-}
-
-pub(crate) const TOOLBAR_COMMAND_COMPACT_WIDTH: f32 = 88.0;
-pub(crate) const TOOLBAR_COMMAND_LABELED_WIDTH: f32 = 192.0;
-
-/// The toolbar button.
-pub(crate) fn toolbar_button(kit: &Kit, compact: bool, preferences: ViewPreferences) -> El {
-    let shortcut = if cfg!(target_os = "macos") {
-        "⌘K"
-    } else {
-        "Ctrl+K"
-    };
-    let width = if compact {
-        TOOLBAR_COMMAND_COMPACT_WIDTH
-    } else {
-        TOOLBAR_COMMAND_LABELED_WIDTH
-    };
-    let button = rune_kit::Button::new("Run a command")
-        .variant(rune_kit::ButtonVariant::Ghost)
-        .icon(&icons::COMMAND)
-        .shortcut(shortcut)
-        .label_with(move |font, color| {
-            let mut label = rune::row().gap(8.0).center_y();
-            if !compact {
-                label = label.child(
-                    rune::text("Run a command")
-                        .key("command-toolbar-label")
-                        .font(font)
-                        .color(color),
-                );
-            }
-            label.child(
-                rune::text(shortcut)
-                    .font(font)
-                    .color(theme::hex(theme::TEXT_SECONDARY)),
-            )
-        })
-        .on_press(|state: &mut State| state.open_command_panel())
-        .build(kit)
-        .key("command-open")
-        .w(width)
-        .shrink()
-        .h(28.0)
-        .px(11.0)
-        .radius(999.0);
-    material::glass_control(button, preferences)
 }
 
 /// The command overlay, pushed to `layers` while it is open. It keeps the modal contract of a
@@ -364,7 +315,7 @@ pub(crate) fn view(
         panel = panel.box_shadow(shadow);
     }
     let panel = material::glass(panel, GlassSurface::Overlay, preferences)
-        .focus_return("command-open")
+        .focus_return("connection-editor")
         .modal(true, |state: &mut State| state.commands.close())
         .modal_click_outside(true);
     layers.push(
@@ -472,7 +423,7 @@ mod tests {
         assert!(state.maintenance.confirmation.is_none());
         state.open_command_panel();
         state.run_command(Command::SetupGateway);
-        assert!(state.setup_gateway);
+        assert!(state.settings_open);
     }
 
     #[test]
@@ -525,7 +476,7 @@ mod tests {
             },
         );
         runtime.frame(0.0);
-        assert!(runtime.find("command-open").is_some());
+        assert!(runtime.find("command-open").is_none());
         assert!(runtime.find("command-list").is_none());
 
         runtime.update(|state, _| state.open_command_panel());
@@ -714,16 +665,16 @@ mod tests {
             runtime.pointer_up(x, y);
             runtime.frame(now);
         };
-        for (step, (width, sidebar, labeled_metrics, labeled_command)) in [
-            (1180.0, 188.0, true, false),
-            (1203.0, 188.0, true, false),
-            (1205.0, 188.0, true, true),
-            (1099.0, 188.0, false, false),
-            (1101.0, 188.0, true, false),
-            (1180.0, 340.0, false, false),
-            (819.0, 340.0, false, false),
-            (821.0, 340.0, false, false),
-            (640.0, 340.0, false, false),
+        for (step, (width, sidebar)) in [
+            (1180.0, 188.0),
+            (1203.0, 188.0),
+            (1205.0, 188.0),
+            (1099.0, 188.0),
+            (1101.0, 188.0),
+            (1180.0, 340.0),
+            (819.0, 340.0),
+            (821.0, 340.0),
+            (640.0, 340.0),
         ]
         .into_iter()
         .enumerate()
@@ -733,29 +684,16 @@ mod tests {
             runtime.set_viewport((width, 812.0), 1.0);
             runtime.frame(now);
             runtime.frame(now + 0.5);
-            let command = bounds(&runtime, "command-open");
             let telemetry = bounds(&runtime, "toolbar-telemetry");
             let assistant = bounds(&runtime, "assistant-toggle");
             let bell = bounds(&runtime, "inbox-toggle");
-            assert!(
-                command[0] + command[2] <= assistant[0],
-                "{width} / {sidebar}"
-            );
             assert!(
                 assistant[0] + assistant[2] <= telemetry[0],
                 "{width} / {sidebar}"
             );
             assert!(bell[0] + bell[2] <= width + 0.5);
-            assert_eq!(
-                runtime.find("command-toolbar-label").is_some(),
-                labeled_command
-            );
-            assert_eq!(
-                runtime.find("toolbar-telemetry/CPU").is_some(),
-                labeled_metrics
-            );
-
-            let telemetry_key = if labeled_metrics {
+            assert!(runtime.find("command-open").is_none());
+            let telemetry_key = if runtime.find("toolbar-telemetry/CPU").is_some() {
                 "toolbar-telemetry/CPU"
             } else {
                 "telemetry-summary"
@@ -765,14 +703,6 @@ mod tests {
                 !runtime.state.commands.open,
                 "telemetry opened Commands at {width}"
             );
-            click(&mut runtime, "command-open", now + 0.7);
-            assert!(runtime.state.commands.open);
-            runtime.key(KeyEvent {
-                key: Key::Escape,
-                mods: rune::Mods::default(),
-            });
-            runtime.frame(now + 0.8);
-            assert!(!runtime.state.commands.open);
             runtime.key(KeyEvent {
                 key: Key::Command('k'),
                 mods: rune::Mods {
@@ -792,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn typing_in_the_same_frame_as_toolbar_and_ctrl_k_open_is_preserved() {
+    fn typing_in_the_same_frame_as_ctrl_k_open_is_preserved() {
         let mut state = crate::tests::registered_fixture();
         state.page = Page::Workstation;
         let mut runtime = rune::Runtime::new(
@@ -806,25 +736,6 @@ mod tests {
         );
         runtime.on_key = crate::app::spec().on_key;
         runtime.frame(0.0);
-
-        let (x, y) = runtime.find("command-open").expect("toolbar button");
-        runtime.pointer_down(x, y);
-        runtime.pointer_up(x, y);
-        runtime.key(KeyEvent {
-            key: Key::Text("jobs".into()),
-            mods: rune::Mods::default(),
-        });
-        runtime.frame(2.0 / 60.0);
-        assert_eq!(runtime.state.commands.query.text, "jobs");
-        assert!(runtime.find("command-0").is_some());
-        assert!(runtime.find("command-1").is_none());
-        runtime.key(KeyEvent {
-            key: Key::Enter,
-            mods: rune::Mods::default(),
-        });
-        runtime.frame(3.0 / 60.0);
-        assert!(!runtime.state.commands.open);
-        assert_eq!(runtime.state.page, Page::Jobs);
 
         runtime.key(KeyEvent {
             key: Key::Command('k'),

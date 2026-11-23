@@ -12,7 +12,7 @@ use std::time::Instant;
 use argos_osint_core::brain::MemorySource;
 use argos_osint_core::brain_topology::{CycleScope, TopologyOptions, TopologySeed};
 use argos_osint_core::storage::tx::{query_round_trips, reset_query_round_trips};
-use argos_osint_core::storage::{memories, topology};
+use argos_osint_core::storage::{actor_dossier, memories, topology};
 use support::*;
 
 /// Memories seeded before the measured section.
@@ -81,5 +81,35 @@ async fn topology_snapshot_round_trip_budget() {
         round_trips >= 2,
         "round-trip counter saw only attempt granularity ({round_trips}); \
          statement batches through jobs::run/topology::stmt are uncounted"
+    );
+
+    // Keep these measurements in one test because the counter is global.
+    let repo = server.repo("argos", "perf_actor_dossier").await;
+    repo.db()
+        .query(
+            "CREATE memory:connected SET text = 'Connected', memory_kind = 'actor' RETURN NONE;
+             CREATE brain_actor:connected SET display_name = 'Connected', created_at = '', updated_at = '' RETURN NONE;
+             FOR $i IN 0..1024 {
+                 LET $id = string::concat('connected_claim_', <string>$i);
+                 CREATE type::record('memory', $id) SET text = $id, memory_kind = 'claim' RETURN NONE;
+                 CREATE type::record('brain_memory_actor_ref', $id)
+                     SET memory_id = $id, actor_id = 'connected', role = 'subject' RETURN NONE;
+             };",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let before = query_round_trips();
+    let dossier = actor_dossier::read(&repo, "connected")
+        .await
+        .unwrap()
+        .expect("connected actor's dossier");
+    let dossier_round_trips = query_round_trips() - before;
+    assert_eq!(dossier.loaded_claims, 99);
+    assert!(dossier.truncated);
+    assert!(
+        dossier_round_trips <= 64,
+        "bounded dossier read used {dossier_round_trips} round trips for 1024 references"
     );
 }

@@ -10,9 +10,7 @@ use super::jobs::{rid, run, take};
 use super::repo::Repository;
 use super::tx::{run_tx, RetryPolicy};
 use crate::actor_catalog::Actor;
-use crate::brain_topology::{
-    TopologyEdge, TopologyEdgeKind, TopologyNode, TopologyNodeKind, TopologyOptions, TopologySeed,
-};
+use crate::brain_topology::{TopologyEdge, TopologyEdgeKind, TopologyNode, TopologyNodeKind};
 use crate::store::AtlasArticleRow;
 
 #[derive(SurrealValue)]
@@ -130,15 +128,7 @@ pub async fn read(repo: &Repository, requested: &str) -> Result<Option<ActorDoss
     }
     aliases.sort();
     aliases.dedup();
-    let snapshot = super::topology::topology_snapshot(
-        repo,
-        &TopologySeed::Actor(id.clone()),
-        &TopologyOptions {
-            depth: 1,
-            ..Default::default()
-        },
-    )
-    .await?;
+    let snapshot = super::topology::dossier_snapshot(repo, &id).await?;
     let mut claims = Vec::new();
     let mut briefs = Vec::new();
     let mut inferences = Vec::new();

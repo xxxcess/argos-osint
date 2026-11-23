@@ -113,7 +113,7 @@ impl Page {
             Self::Seed => "Actor Maintenance",
             Self::Atlas => "News Cycles",
             Self::Brain => "Brain Search",
-            Self::Tools => "OSINT Tools",
+            Self::Tools => "Tool Box",
             Self::Models => "Model Assignments",
             Self::Profile => "Profile",
             Self::Workstation => "Workstation Status",
@@ -127,7 +127,7 @@ impl Page {
             Self::Seed => "Actors",
             Self::Atlas => "Cycles",
             Self::Brain => "Brain",
-            Self::Tools => "Tools",
+            Self::Tools => "Tool Box",
             Self::Models => "Models",
             Self::Profile => "Profile",
             Self::Workstation => "Status",
@@ -1444,7 +1444,7 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
     if event.is_command('k') && !event.mods.shift {
         if state.commands.open {
             state.commands.close();
-            tx.focus("command-open", false);
+            tx.focus("connection-editor", false);
         } else if !state.has_active_confirmation() {
             state.open_command_panel();
         }
@@ -1453,7 +1453,7 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
     if event.key == Key::Escape {
         if state.commands.open {
             state.commands.close();
-            tx.focus("command-open", false);
+            tx.focus("connection-editor", false);
             return true;
         }
         if state.confirm_maintenance_dialog || state.maintenance.confirmation.is_some() {
@@ -1500,7 +1500,12 @@ pub fn spec() -> AppSpec<State> {
         min_size: Some((640.0, 480.0)),
         poll: Some(poll),
         on_key: Some(on_key),
-        ..AppSpec::new("Fleetworks", (1440.0, 860.0), State::default, view)
+        ..AppSpec::new(
+            crate::workstation_settings::PRODUCT_NAME,
+            (1440.0, 860.0),
+            State::default,
+            view,
+        )
     }
 }
 
@@ -1565,25 +1570,6 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                     .child(ui_components::status_dot(connection_tone, preferences)),
             )
             .child(
-                Button::new(match &state.connection.status {
-                    ConnectionStatus::Connected => "Gateway connected",
-                    ConnectionStatus::Connecting => "Connecting…",
-                    ConnectionStatus::Failed(_) => "Connection fault",
-                    ConnectionStatus::Disconnected => "Gateway disconnected",
-                })
-                .variant(ButtonVariant::Ghost)
-                .icon(&icons::SERVER)
-                .on_press(|state: &mut State| {
-                    if state.connected() {
-                        state.navigate(Page::Workstation);
-                    } else {
-                        state.setup_gateway = true;
-                    }
-                })
-                .build(&kit)
-                .key("gateway-status-header"),
-            )
-            .child(
                 SidebarHeader::new("Workstation")
                     .build(&kit)
                     .key("sidebar-workstation-heading"),
@@ -1625,9 +1611,8 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
             sidebar = sidebar.child(
                 SidebarRow::new("Setup Gateway")
                     .icon(&icons::KEY)
-                    .selected(state.setup_gateway)
-                    .on_select(|state: &mut State, _| state.setup_gateway = true)
-                    .build(row_kit(state.setup_gateway))
+                    .on_select(|state: &mut State, _| state.open_connection_settings())
+                    .build(&kit)
                     .key("nav-setup"),
             );
         }
@@ -1799,6 +1784,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     if !state.assistant.enabled
         && state.connected()
         && !state.setup_gateway
+        && state.page != Page::Tools
         && cx
             .layout_with("main-area", |rect| rect[2] >= 1120.0)
             .unwrap_or(false)
@@ -1931,9 +1917,6 @@ fn workstation_toolbar(
     assistant_placement: crate::assistant::Placement,
     tone: StatusTone,
 ) -> Toolbar {
-    use crate::command_panel::TOOLBAR_COMMAND_COMPACT_WIDTH;
-    use crate::command_panel::TOOLBAR_COMMAND_LABELED_WIDTH;
-
     const TRAILING_GAP: f32 = 6.0;
     const TOOLBAR_EDGE_INSET: f32 = 12.0;
     const TOOLBAR_FLOW_GAP: f32 = 8.0;
@@ -1943,6 +1926,7 @@ fn workstation_toolbar(
     const TELEMETRY_COMPACT: f32 = 76.0;
     const TELEMETRY_LABELED: f32 = 244.0;
     const ASSISTANT_WIDTH: f32 = 24.0;
+    const TITLE_MINIMUM: f32 = 110.0;
 
     // Match the outer padding and the two 8pt flow gaps on either side of the
     // Rune Kit toolbar's flexible spacer. When the sidebar is open the toolbar
@@ -1985,51 +1969,25 @@ fn workstation_toolbar(
         };
         gateway + bell_width + TRAILING_GAP + assistant + metrics
     };
-    let fits = |command, gateway, telemetry| {
-        let half_room = (width - command) / 2.0;
-        half_room >= leading_inset + TOOLBAR_FLOW_GAP
-            && half_room >= trailing_width(gateway, telemetry) + TRAILING_CLEARANCE
-    };
+    let available = width - leading_inset - TRAILING_CLEARANCE;
+    let fits = |gateway, telemetry| available >= TITLE_MINIMUM + trailing_width(gateway, telemetry);
     let telemetry_width = if !state.connected() {
         0.0
-    } else if fits(
-        TOOLBAR_COMMAND_COMPACT_WIDTH,
-        GATEWAY_ICON,
-        TELEMETRY_LABELED,
-    ) {
+    } else if fits(GATEWAY_ICON, TELEMETRY_LABELED) {
         TELEMETRY_LABELED
-    } else if width
-        >= leading_inset
-            + TOOLBAR_COMMAND_COMPACT_WIDTH
-            + trailing_width(GATEWAY_ICON, TELEMETRY_COMPACT)
-            + TRAILING_CLEARANCE
-    {
+    } else if fits(GATEWAY_ICON, TELEMETRY_COMPACT) {
         TELEMETRY_COMPACT
     } else {
         // Before the compact rail is measured, the full rail can consume this space.
         0.0
     };
-    let wide_gateway = fits(
-        TOOLBAR_COMMAND_LABELED_WIDTH,
-        GATEWAY_LABELED,
-        telemetry_width,
-    );
+    let wide_gateway = fits(GATEWAY_LABELED, telemetry_width);
     let gateway_width = if wide_gateway {
         GATEWAY_LABELED
     } else {
         GATEWAY_ICON
     };
-    let compact_command = !fits(
-        TOOLBAR_COMMAND_LABELED_WIDTH,
-        gateway_width,
-        telemetry_width,
-    ) || (state.connected() && telemetry_width == TELEMETRY_COMPACT);
-    let command_width = if compact_command {
-        TOOLBAR_COMMAND_COMPACT_WIDTH
-    } else {
-        TOOLBAR_COMMAND_LABELED_WIDTH
-    };
-    let title_width = ((width - command_width) / 2.0 - leading_inset).max(0.0);
+    let title_width = (available - trailing_width(gateway_width, telemetry_width)).max(0.0);
     let title_page = if state.connected() {
         state.page
     } else {
@@ -2041,22 +1999,14 @@ fn workstation_toolbar(
         (false, true) => title_page.compact_title(),
         (false, false) => title_page.title(),
     };
-    let leading = rune::row()
-        .shrink()
-        .center_y()
-        .child(
-            rune::row().w(title_width).pr(8.0).shrink().child(
-                rune::text(title)
-                    .font(kit.ty.ui_medium)
-                    .color(kit.c.text_base)
-                    .truncate(),
-            ),
-        )
-        .child(crate::command_panel::toolbar_button(
-            kit,
-            compact_command,
-            preferences,
-        ));
+    let leading = rune::row().shrink().center_y().child(
+        rune::row().w(title_width).pr(8.0).shrink().child(
+            rune::text(title)
+                .font(kit.ty.ui_medium)
+                .color(kit.c.text_base)
+                .truncate(),
+        ),
+    );
     let mut trailing = rune::row().gap(TRAILING_GAP).center_y();
     if show_assistant {
         let toggle = crate::assistant::toggle(
@@ -2112,7 +2062,7 @@ fn gateway_toolbar_button(
             }
             content
         })
-        .on_press(|state: &mut State| state.setup_gateway = true)
+        .on_press(State::open_connection_settings)
         .build(kit)
         .key("connection-editor")
         .h(28.0)
@@ -2276,7 +2226,7 @@ fn compact_icon_rail(
     } else {
         rail = rail.child(
             nav_icon(&icons::KEY, "Setup Gateway", state.setup_gateway)
-                .on_press(|state: &mut State| state.setup_gateway = true)
+                .on_press(State::open_connection_settings)
                 .key("nav-setup"),
         );
     }

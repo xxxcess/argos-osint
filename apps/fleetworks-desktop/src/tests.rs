@@ -80,7 +80,13 @@ fn real_shell_navigation_works_offline_without_boundary_effects() {
     disconnected.pointer_down(x, y);
     disconnected.pointer_up(x, y);
     disconnected.frame(1.0 / 60.0);
-    assert!(disconnected.state.setup_gateway);
+    assert!(disconnected.state.settings_open);
+    assert!(!disconnected.state.setup_gateway);
+    disconnected.key(rune::KeyEvent {
+        key: rune::Key::Escape,
+        mods: rune::Mods::default(),
+    });
+    disconnected.frame(1.5 / 60.0);
 
     let (x, y) = disconnected
         .find("nav-workstation")
@@ -117,7 +123,7 @@ fn real_shell_navigation_works_offline_without_boundary_effects() {
     connected.frame(0.0);
     assert!(connected.find("sidebar-context-footer").is_none());
     assert!(connected.find("deployment").is_none());
-    assert!(connected.find("gateway-status-header").is_some());
+    assert!(connected.find("gateway-status-header").is_none());
     assert!(connected.find("connect-id").is_none());
     assert!(connected.find("workstation-registered").is_some());
     let connected_tree = connected.accessibility_json().to_string();
@@ -610,7 +616,8 @@ fn compact_connected_setup_readiness_toggle(kind: fleetworks_workstation::native
     runtime.pointer_down(x, y);
     runtime.pointer_up(x, y);
     runtime.frame(2.0 / 60.0);
-    assert!(runtime.state.setup_gateway);
+    assert!(runtime.state.settings_open);
+    assert!(!runtime.state.setup_gateway);
     assert!(runtime.state.connected());
     assert!(runtime.state.registration.context.is_some());
 

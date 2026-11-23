@@ -521,14 +521,15 @@ pub async fn memory_record_edges(
 }
 
 #[derive(Debug, Clone, SurrealValue)]
-struct MentionRow {
-    origin_kind: String,
-    origin_scope: String,
-    origin_id: String,
-    origin_revision: String,
-    spans_json: String,
-    native_input_revision: String,
-    publication_batch: String,
+pub(super) struct MentionRow {
+    pub(super) actor_id: String,
+    pub(super) origin_kind: String,
+    pub(super) origin_scope: String,
+    pub(super) origin_id: String,
+    pub(super) origin_revision: String,
+    pub(super) spans_json: String,
+    pub(super) native_input_revision: String,
+    pub(super) publication_batch: String,
 }
 
 /// MentionedIn edges of one actor, from `brain_actor_mention` (pinned to
@@ -582,6 +583,7 @@ pub async fn actor_mention_edges(
     .value;
     let mut out = Vec::new();
     for m in rows {
+        let actor_id = &m.actor_id;
         let to = if m.origin_kind == "article" {
             let mut r = db
                 .query("RETURN record::exists(type::record('atlas_article', $key))")
@@ -619,7 +621,7 @@ pub async fn actor_mention_edges(
 
 /// One actor's mentions; pinned to `brain_actor_mention_actor`.
 pub const ACTOR_MENTIONS_SURQL: &str =
-    "SELECT origin_kind, origin_scope, origin_id, origin_revision, spans_json,(native_input_revision ?? '') AS native_input_revision,(publication_batch ?? '') AS publication_batch
+    "SELECT actor_id, origin_kind, origin_scope, origin_id, origin_revision, spans_json,(native_input_revision ?? '') AS native_input_revision,(publication_batch ?? '') AS publication_batch
     FROM brain_actor_mention WHERE actor_id = $a
     ORDER BY origin_kind, origin_scope, origin_id, origin_revision";
 

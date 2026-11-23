@@ -81,16 +81,21 @@ on run arguments
         set frontmost of targetApp to true
         repeat while (current date) < deadline
             if (count windows of targetApp) > 0 then
-                repeat with controlRef in entire contents of window 1 of targetApp
-                    if (role of controlRef as text) is "AXButton" then
-                        set labelText to name of controlRef as text
-                        if labelText is "Embedded. Run on this PC" then
-                            click controlRef
-                            exit repeat
-                        else if labelText is "Start Embedded Backend" then
-                            click controlRef
-                            return
+                set contentsList to entire contents of window 1 of targetApp
+                repeat with controlRef in contentsList
+                    set labelText to missing value
+                    try
+                        set controlItem to contents of controlRef
+                        if (value of attribute "AXRole" of controlItem) is "AXButton" then
+                            set labelText to value of attribute "AXTitle" of controlItem
                         end if
+                    end try
+                    if labelText is "Embedded. Run on this PC" then
+                        perform action "AXPress" of controlItem
+                        exit repeat
+                    else if labelText is "Start Embedded Backend" then
+                        perform action "AXPress" of controlItem
+                        return
                     end if
                 end repeat
             end if
@@ -462,15 +467,25 @@ def require_private_profile(profile):
             "The isolated profile must be a private directory owned by the current user")
 
 
+def app_profile_matches(pid, profile):
+    invocation = f" {command('ps', 'eww', '-p', str(pid), '-o', 'command=')} "
+    return all(f" {key}={profile} " in invocation for key in ("HOME", "CFFIXED_USER_HOME"))
+
+
+def start_companion(app, pid, state):
+    subprocess.run(["osascript", "-", str(pid)], input=EMBEDDED_BUTTONS, text=True, check=True, timeout=30)
+    wait_for(lambda: embedded_running(app, pid, state), "The Embedded companion did not start for this profile")
+
+
 def open_app(app, profile, *, start_embedded):
     pid = app_pid(app)
     state = profile / ".fleetworks" / "local-backend" / "embedded"
     if pid is not None:
         if executable_pid(app / COMPANION) is not None:
             require(embedded_running(app, pid, state), "This app already uses a different Embedded profile")
-        require(not start_embedded or embedded_running(app, pid, state),
-                "This app is already open without Embedded running in the requested profile. "
-                "Start it in that profile or close the app before relaunching")
+        elif start_embedded:
+            require(app_profile_matches(pid, profile), "Close this app before opening with the requested profile")
+            start_companion(app, pid, state)
         print(f"Using running app {app}")
         return pid, state
     require_no_other_app(app)
@@ -480,8 +495,7 @@ def open_app(app, profile, *, start_embedded):
                    check=True, timeout=30)
     pid = wait_for(lambda: app_pid(app), "Fleetworks did not appear after launching")
     if start_embedded and not embedded_running(app, pid, state):
-        subprocess.run(["osascript", "-", str(pid)], input=EMBEDDED_BUTTONS, text=True, check=True, timeout=30)
-        wait_for(lambda: embedded_running(app, pid, state), "The Embedded companion did not start for this profile")
+        start_companion(app, pid, state)
     print(f"Opened {app}")
     return pid, state
 

@@ -14,6 +14,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 import fleetworks_verify as planner
 
 
+class BuildProviderTests(unittest.TestCase):
+    def test_github_owns_unset_and_explicit_github_routes(self):
+        for provider in ("", "github"):
+            for request in ("", "auto"):
+                with self.subTest(provider=provider, request=request):
+                    self.assertEqual(ci.build_providers(provider, request), ("buildx", "buildx"))
+
+    def test_depot_restores_automatic_builds_and_manual_overrides_stay_scoped(self):
+        self.assertEqual(ci.build_providers("depot", "auto"), ("depot", "depot"))
+        self.assertEqual(ci.build_providers("github", "depot"), ("buildx", "depot"))
+        self.assertEqual(ci.build_providers("depot", "buildx"), ("depot", "buildx"))
+
+    def test_unknown_provider_and_manual_builder_are_errors(self):
+        with self.assertRaisesRegex(ValueError, "FLEETWORKS_CI_PROVIDER"):
+            ci.build_providers("unknown", "auto")
+        with self.assertRaisesRegex(ValueError, "Image builder"):
+            ci.build_providers("github", "unknown")
+
+
 class VerificationPassTests(unittest.TestCase):
     def scopes(self, *paths):
         with patch.object(planner, "git_paths", return_value=[*paths, ""]):

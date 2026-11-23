@@ -18,6 +18,9 @@ on:
       arch:
         type: string
         required: true
+      image-builder:
+        type: string
+        default: buildx
       release-version:
         type: string
         default: ""
@@ -119,7 +122,7 @@ jobs:
           PACK_ATTEMPT: ${{ steps.pack.outputs.attempt }}
           APP_ATTEMPT: ${{ steps.app.outputs.attempt }}
           PROFILE: ${{ steps.app.outputs.profile }}
-          DEPOT_NATIVE_RELEASE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/nightly' && vars.DEPOT_NIGHTLY_NATIVE_ENABLED == 'true' }}
+          DEPOT_NATIVE_RELEASE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/nightly' && vars.FLEETWORKS_CI_PROVIDER == 'depot' && vars.DEPOT_NIGHTLY_NATIVE_ENABLED == 'true' }}
           QA_NIGHTLY_RELEASE: ${{ inputs.release-asset && github.event_name == 'push' && github.ref == 'refs/heads/nightly' }}
         shell: bash
         run: |
@@ -228,7 +231,7 @@ jobs:
           retention-days: 14
 
   distributed:
-    name: Paired Distributed inference with isolated Depot image
+    name: Paired Distributed inference with isolated image
     if: inputs.runtime == 'distributed'
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 85
@@ -238,6 +241,7 @@ jobs:
       id-token: write
     env:
       QA_PLATFORM: linux/${{ inputs.arch }}
+      IMAGE_BUILDER: ${{ inputs.image-builder }}
       DEPOT_REVIEW_PROJECT_ID: ${{ vars.DEPOT_REVIEW_PROJECT_ID }}
     steps:
       - *checkout
@@ -245,10 +249,11 @@ jobs:
       - *download_pack
       - *pack_layout
       - name: Install pinned Depot CLI
+        if: env.IMAGE_BUILDER == 'depot'
         uses: depot/setup-action@91bc8495a33ebfc504ffc89e5674379ccf23c29c # v1
         with:
           version: 2.103.29
-      - name: Build the exact QA image and backend closure on Depot
+      - name: Build the exact QA image and backend closure
         env:
           PACK_ATTEMPT: ${{ steps.pack.outputs.attempt }}
         shell: bash
@@ -266,14 +271,28 @@ jobs:
             --manifest-sha256 "$(jq -er .manifest_sha256 "$pack/digests.json")" \
             --output "$pack/verified"
           tag="qa-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          project="${DEPOT_REVIEW_PROJECT_ID:?Depot Inbox QA review requires DEPOT_REVIEW_PROJECT_ID}"
+          case "$IMAGE_BUILDER" in
+            buildx)
+              bake=(docker buildx bake)
+              build=(docker buildx build)
+              ;;
+            depot)
+              project="${DEPOT_REVIEW_PROJECT_ID:?Depot Inbox QA review requires DEPOT_REVIEW_PROJECT_ID}"
+              bake=(depot bake --project "$project" --build-platform "$QA_PLATFORM")
+              build=(depot build --project "$project" --build-platform "$QA_PLATFORM")
+              ;;
+            *)
+              echo '::error::Inbox QA Distributed requires a selected image builder'
+              exit 1
+              ;;
+          esac
           VERSION="$(cat version.txt)" IMAGE_TAG="$tag" \
-            depot bake --project "$project" --build-platform "$QA_PLATFORM" --load \
-              -f deploy/docker-bake.hcl --set "*.platforms=$QA_PLATFORM" backend
+            "${bake[@]}" --load -f deploy/docker-bake.hcl --set "*.platforms=$QA_PLATFORM" backend
           model_image="fleetworks-inbox-qa:$tag"
-          depot build --project "$project" --build-platform "$QA_PLATFORM" --platform "$QA_PLATFORM" \
-            --load --file deploy/Dockerfile.inbox-qa --build-context "qa_pack=$pack/verified" \
-            --label "org.opencontainers.image.revision=$FLEETWORKS_HEAD" --tag "$model_image" .
+          "${build[@]}" --platform "$QA_PLATFORM" --load --file deploy/Dockerfile.inbox-qa \
+            --build-context "qa_pack=$pack/verified" --label "org.opencontainers.image.revision=$FLEETWORKS_HEAD" \
+            --tag "$model_image" .
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$model_image")" = "$FLEETWORKS_HEAD"
           for image in "fleetworks-runtime:$tag" "fleetworks-surrealdb:$tag" "fleetworks-search-index:$tag" "$model_image"; do
             test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = "$QA_PLATFORM"
           done

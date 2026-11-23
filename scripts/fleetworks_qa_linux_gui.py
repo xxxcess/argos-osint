@@ -17,6 +17,9 @@ from fleetworks_local_backend_smoke import check_zero_bound_sockets, resolve_com
 from fleetworks_qa_pack import install_gated_fixture
 
 SUMMARY_QUESTION = "What is the current workstation readiness?"
+MEMORY_QUESTION = "What's our RAM consumption right now?"
+SOURCES_TOGGLE = "inbox-qa-sources-toggle"
+SOURCES_CONTENT = "inbox-qa-sources"
 TERMINAL = {"answered", "insufficient_context", "failed", "canceled"}
 BUNDLED_ACTOR_ROWS = 94_987
 
@@ -177,6 +180,17 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
 
         wait_for(activate, app, key)
 
+    def sources_ready(expanded):
+        toggle = find(SOURCES_TOGGLE, button=True)
+        if screen_bounds(toggle, atspi) is None:
+            return None
+        sources = find(SOURCES_CONTENT)
+        citation = find("chat-citation-0")
+        if expanded:
+            return citation if sources is not None and screen_bounds(citation, atspi) is not None else None
+        require(sources is None and citation is None, "a new turn's citations were visible before expanding Sources")
+        return toggle
+
     button("startup-local")
     button("connect-local")
     button("gateway-setup-done")
@@ -231,7 +245,7 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
 
     started = submit(SUMMARY_QUESTION, timeout=110)
 
-    def first_frame(expected_admissions):
+    def first_frame(expected_admissions, *, expanded):
         records = read_journal(journal)
         admitted = [row for row in records if row.get("op") == "qa_turn_submit"]
         if len(admitted) < expected_admissions:
@@ -242,20 +256,27 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
                 "the turn finished before the barrier was released")
         if not pages or pages[-1]["state"] != "running" or len(pages[-1]["findings"]) != 1:
             return None
-        citation = find("chat-citation-0")
         stop = find("inbox-qa-stop", button=True)
-        if screen_bounds(citation, atspi) is None or screen_bounds(stop, atspi) is None:
+        if screen_bounds(stop, atspi) is None:
+            return None
+        sources = sources_ready(expanded)
+        if sources is None:
             return None
         require(find("chat-citation-1") is None, "the drawer showed another citation before release")
         companions = [row["companion_pid"] for row in records if "companion_pid" in row]
         require(len(companions) == 1, "expected one IPC companion")
-        return pages[-1], companions[0], citation.name
+        return pages[-1], companions[0], sources.name if expanded else None
 
-    early, companion, citation_name = wait_for(lambda: first_frame(1), app,
-                                                "an early citation and enabled Stop", timeout=16)
+    wait_for(lambda: first_frame(1, expanded=False), app,
+             "collapsed Sources for the first finding and enabled Stop", timeout=16)
     first_ms = round((time.monotonic() - started) * 1000, 1)
+    subprocess.run(["scrot", "--overwrite", str(output / "first-finding-sources-collapsed.png")], check=True, timeout=5)
+    button(SOURCES_TOGGLE)
+    early, companion, citation_name = wait_for(lambda: first_frame(1, expanded=True), app,
+                                                "an early citation and enabled Stop", timeout=4)
     subprocess.run(["scrot", "--overwrite", str(output / "first-finding.png")], check=True, timeout=5)
-    wait_for(lambda: first_frame(1), app, "the early citation and enabled Stop while completion is held", timeout=2)
+    wait_for(lambda: first_frame(1, expanded=True), app,
+             "the early citation and enabled Stop while completion is held", timeout=2)
     release_gate(companion, worker)
 
     def completed_frame():
@@ -268,7 +289,8 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         final = settled_turn(pages, early, "answered")
         if find("inbox-qa-stop") is not None:
             return None
-        if screen_bounds(find("chat-citation-0", label=citation_name), atspi) is None:
+        citation = sources_ready(expanded=True)
+        if citation is None or citation.name != citation_name:
             return None
         count = len(final["findings"])
         require(all(find(f"chat-citation-{i}") is not None for i in range(count))
@@ -279,9 +301,9 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
     completion_ms = round((time.monotonic() - started) * 1000, 1)
     subprocess.run(["scrot", "--overwrite", str(output / "completed-turn.png")], check=True, timeout=5)
 
-    submit("What is the current memory usage?")
+    submit(MEMORY_QUESTION)
 
-    def grounded_memory():
+    def grounded_memory(*, expanded):
         admitted = [row for row in read_journal(journal) if row.get("op") == "qa_turn_submit"]
         if len(admitted) < 2:
             return None
@@ -297,22 +319,33 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
             return None
         expected_text = f"The API host memory usage is {whole}.{tenths}%."
         expected_citation = f"Host metric: API host memory usage · {sample['observed_at']}"
-        citation = find("chat-citation-0", label=expected_citation)
-        if screen_bounds(citation, atspi) is None or not any(
+        if not any(
             node.name == expected_text and screen_bounds(node, atspi) is not None
             for node in descendants(answer)
         ):
+            return None
+        sources = sources_ready(expanded)
+        if sources is None or (expanded and sources.name != expected_citation):
             return None
         require(find("chat-citation-1") is None and find("inbox-qa-stop") is None,
                 "the completed memory answer showed unrelated evidence or an unfinished turn")
         return sample
 
-    memory = wait_for(grounded_memory, app, "grounded memory reading and its original timestamp", timeout=16)
+    wait_for(lambda: grounded_memory(expanded=False), app,
+             "grounded memory reading with collapsed Sources", timeout=16)
+    button(SOURCES_TOGGLE)
+    memory = wait_for(lambda: grounded_memory(expanded=True), app,
+                      "grounded memory reading and its original timestamp", timeout=4)
     subprocess.run(["scrot", "--overwrite", str(output / "grounded-memory.png")], check=True, timeout=5)
 
     submit(SUMMARY_QUESTION)
-    pending, cancel_companion, _ = wait_for(lambda: first_frame(3), app,
-                                              "a separate Running turn with its first citation", timeout=16)
+    wait_for(lambda: first_frame(3, expanded=False), app,
+             "a separate Running turn with collapsed Sources", timeout=16)
+    button(SOURCES_TOGGLE)
+    pending, cancel_companion, cancel_citation_name = wait_for(
+        lambda: first_frame(3, expanded=True), app,
+        "a separate Running turn with its first citation", timeout=4,
+    )
     require(cancel_companion == companion and pending["turn_id"] != final["turn_id"],
             "Stop used a different companion or the completed turn")
     position = wait_for(lambda: screen_bounds(find("inbox-qa-stop", button=True), atspi), app,
@@ -334,6 +367,9 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         require(stopped[0]["state"] == "canceled" and stopped[0]["cursor"] == canceled["cursor"]
                 and canceled["cursor"] == pending["cursor"] + 1,
                 "Stop did not add exactly one terminal cursor to the held turn")
+        citation = sources_ready(expanded=True)
+        if citation is None or citation.name != cancel_citation_name:
+            return None
         return canceled
 
     canceled = wait_for(canceled_frame, app, "the retained canceled turn after clicking Stop", timeout=12)
@@ -345,6 +381,8 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         "runtime": receipts[0]["transport"], "transport_attestation": receipts[0],
         "target": digests["target"], "source_sha": digests["source_sha"],
         "graphical": "x11", "first_citation_while_running": True,
+        "sources_default_collapsed": True, "sources_retained_after_completion": True,
+        "sources_retained_after_cancel": True,
         "stop_enabled_before_release": True, "same_turn": True,
         "terminal_state": final["state"], "terminal_events": final["terminal_events"],
         "stop_while_running": True, "cancelled_terminal_state": canceled["state"],

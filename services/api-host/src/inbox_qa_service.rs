@@ -12,7 +12,11 @@ use argos_osint_core::storage::job_dispatch::{
     self, DeliveryClaim, DeliveryFinish, DeliveryLease, DeliveryOutcome, Envelope,
 };
 use argos_osint_core::storage::repo::Repository;
+use chrono::DateTime;
 use chrono::Utc;
+use fleetworks_contracts::chat::ChatSourceKind;
+use fleetworks_contracts::chat::QA_MAX_FINDINGS;
+use fleetworks_contracts::chat::QA_MAX_WORDS;
 use fleetworks_contracts::chat::{QaAvailabilityReason, QaFinding, QaTurnState};
 use fleetworks_contracts::qa_worker::{QaWorkerEvent, QaWorkerOutcome, QaWorkerSequence};
 use sha2::{Digest, Sha256};
@@ -653,10 +657,9 @@ async fn grounded_events(
     sender: mpsc::Sender<QaWorkerEvent>,
     now_ms: i64,
 ) -> Result<()> {
-    let age = now_ms.saturating_sub(evidence.sampled_at_ms);
     let turn_id = &evidence.request.turn_id;
     let (sequence, outcome) = match evidence.request.passages.as_slice() {
-        [passage] if (0..=store::MAX_EVIDENCE_AGE_MS).contains(&age) => {
+        [passage] if observation_is_fresh(evidence.sampled_at_ms, now_ms) => {
             sender
                 .send(QaWorkerEvent::Finding {
                     turn_id: turn_id.clone(),
@@ -719,6 +722,69 @@ fn cited_finding(
     Ok(Some(source.finding(complete.to_owned(), 0, end)))
 }
 
+fn observation_is_fresh(observed_ms: i64, now_ms: i64) -> bool {
+    (0..=store::MAX_EVIDENCE_AGE_MS).contains(&now_ms.saturating_sub(observed_ms))
+}
+
+fn readiness_fallback(evidence: &FrozenEvidence, now_ms: i64) -> Vec<QaFinding> {
+    if !matches!(evidence.answer_mode, AnswerMode::Model)
+        || !observation_is_fresh(evidence.sampled_at_ms, now_ms)
+    {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+    for source in &evidence.sources {
+        if source.reference.kind != ChatSourceKind::Readiness || !source.whole_passage {
+            continue;
+        }
+        let Ok(at) = DateTime::parse_from_rfc3339(&source.observed_at) else {
+            continue;
+        };
+        if !observation_is_fresh(at.timestamp_millis(), now_ms) {
+            continue;
+        }
+        let Some(passage) = evidence
+            .request
+            .passages
+            .iter()
+            .find(|passage| passage.source_id == source.opaque_id)
+        else {
+            continue;
+        };
+        let Ok(end) = u32::try_from(passage.text.chars().count()) else {
+            continue;
+        };
+        let Some(complete) =
+            validated_summary_finding(&passage.text, &source.label, 0, end, &passage.text)
+        else {
+            continue;
+        };
+        let Some(state) = complete.strip_prefix(source.label.as_str()) else {
+            continue;
+        };
+        let priority = if state.starts_with(" is ready.") {
+            1
+        } else if state.starts_with(" readiness is not applicable.") {
+            2
+        } else {
+            0
+        };
+        candidates.push((priority, source, complete, end));
+    }
+    candidates.sort_by_key(|(priority, _, _, _)| *priority);
+
+    let mut remaining_words = QA_MAX_WORDS;
+    candidates
+        .into_iter()
+        .filter_map(|(_, source, complete, end)| {
+            remaining_words = remaining_words.checked_sub(complete.split_whitespace().count())?;
+            Some(source.finding(complete.to_owned(), 0, end))
+        })
+        .take(QA_MAX_FINDINGS)
+        .collect()
+}
+
 #[derive(Default)]
 struct Publication {
     sequence: QaWorkerSequence,
@@ -748,8 +814,37 @@ impl Publication {
                 (QaTurnState::Running, Some(finding))
             }
             QaWorkerEvent::Complete { outcome, .. } => {
+                let had_finding = self.has_finding;
+                if !had_finding
+                    && matches!(
+                        outcome,
+                        QaWorkerOutcome::Answered | QaWorkerOutcome::InsufficientContext
+                    )
+                {
+                    // Keep the worker sequence intact and publish complete observations
+                    // through the same lease checks as streamed findings.
+                    for finding in readiness_fallback(evidence, Utc::now().timestamp_millis()) {
+                        let now_ms = Utc::now().timestamp_millis();
+                        if !observation_is_fresh(evidence.sampled_at_ms, now_ms) {
+                            break;
+                        }
+                        if !DateTime::parse_from_rfc3339(&finding.observed_at)
+                            .is_ok_and(|at| observation_is_fresh(at.timestamp_millis(), now_ms))
+                        {
+                            continue;
+                        }
+                        if !store::publish(repo, lease, QaTurnState::Running, Some(finding)).await?
+                        {
+                            return Ok(RunResult::Fenced);
+                        }
+                        self.has_finding = true;
+                    }
+                }
                 let state = match outcome {
                     QaWorkerOutcome::Answered if self.has_finding => QaTurnState::Answered,
+                    QaWorkerOutcome::InsufficientContext if !had_finding && self.has_finding => {
+                        QaTurnState::Answered
+                    }
                     QaWorkerOutcome::Answered | QaWorkerOutcome::InsufficientContext => {
                         QaTurnState::InsufficientContext
                     }
@@ -775,15 +870,105 @@ impl Publication {
 
 #[cfg(test)]
 mod tests {
+    use fleetworks_contracts::chat::ChatSourceReference;
     use fleetworks_contracts::qa_worker::QaPassage;
     use fleetworks_contracts::qa_worker::QaWorkerRequest;
 
     use super::*;
 
+    #[test]
+    fn summary_fallback_keeps_complete_fresh_readiness_facts_in_priority_order() {
+        let now = 10_000;
+        let rows = [
+            (
+                "Gateway",
+                "Gateway is ready.",
+                "gateway",
+                ChatSourceKind::Readiness,
+                now,
+            ),
+            (
+                "Actor catalog",
+                "Actor catalog is not ready. No seed was verified — check setup.",
+                "actor_catalog",
+                ChatSourceKind::Readiness,
+                now,
+            ),
+            (
+                "Classifier service",
+                "Classifier service readiness is unknown.",
+                "classifier",
+                ChatSourceKind::Readiness,
+                now,
+            ),
+            (
+                "Brain service",
+                "Brain service readiness is unknown.",
+                "brain",
+                ChatSourceKind::Readiness,
+                now - store::MAX_EVIDENCE_AGE_MS - 1,
+            ),
+            (
+                "Actor search",
+                "Actor search is degraded.",
+                "actor_search",
+                ChatSourceKind::Readiness,
+                now,
+            ),
+            (
+                "API host CPU usage",
+                "API host CPU usage is 11.0%.",
+                "cpu",
+                ChatSourceKind::HostMetric,
+                now,
+            ),
+        ];
+        let sources = rows
+            .iter()
+            .map(|(label, _, id, kind, observed_at)| store::Source {
+                opaque_id: (*id).into(),
+                reference: ChatSourceReference::new(*kind, (*id).into()).unwrap(),
+                label: (*label).into(),
+                observed_at: DateTime::from_timestamp_millis(*observed_at)
+                    .unwrap()
+                    .to_rfc3339(),
+                measurement: None,
+                whole_passage: true,
+            })
+            .collect();
+        let passages = rows
+            .iter()
+            .map(|(_, text, id, _, _)| QaPassage::new((*id).into(), (*text).into()))
+            .collect();
+        let evidence = FrozenEvidence {
+            answer_mode: AnswerMode::Model,
+            notice: None,
+            request: QaWorkerRequest::new(
+                "turn".into(),
+                "snapshot".into(),
+                "Summarize workstation health.".into(),
+                passages,
+            ),
+            sources,
+            sampled_at_ms: now,
+        };
+
+        let findings = readiness_fallback(&evidence, now);
+        assert_eq!(findings.len(), QA_MAX_FINDINGS);
+        for (finding, index) in findings.iter().zip([1, 2, 4]) {
+            assert_eq!(finding.source.id, rows[index].2);
+            assert_eq!(finding.text, rows[index].1);
+            assert_eq!(finding.start, 0);
+            assert_eq!(finding.end as usize, finding.text.chars().count());
+        }
+        assert!(readiness_fallback(&evidence, now + store::MAX_EVIDENCE_AGE_MS + 1).is_empty());
+    }
+
     #[tokio::test]
     async fn grounded_turn_publishes_fresh_facts_and_withholds_stale_ones() {
         let evidence = FrozenEvidence {
             answer_mode: AnswerMode::Grounded,
+            notice: None,
             request: QaWorkerRequest::new(
                 "turn".into(),
                 "snapshot".into(),

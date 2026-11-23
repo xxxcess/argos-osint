@@ -35,60 +35,81 @@ pub(super) enum HostSubject {
     ConnectedGateway,
 }
 
-pub(super) async fn collect(
+/// Capture the available measurements from the authorized host and Jobs scope.
+pub(super) async fn collect_snapshot(
     state: &ApiState,
     context: &ResolvedRequest,
-    sampler: &SharedSampler,
-    metric: Metric,
+    sampler: Option<&SharedSampler>,
     boundary: i64,
     deadline: Instant,
     subject: HostSubject,
-) -> Option<Fact> {
+) -> Vec<(Metric, Fact)> {
     if Instant::now() >= deadline {
-        return None;
+        return Vec::new();
     }
-    match metric {
-        Metric::Cpu | Metric::Memory | Metric::Disk => {
-            if !context.permits(Permission::ReadBackend) {
-                return None;
+    let (mut facts, jobs) = tokio::join!(
+        async {
+            if let Some(sampler) = sampler.filter(|_| context.permits(Permission::ReadBackend)) {
+                observe_host(sampler, boundary, deadline, subject).await
+            } else {
+                Vec::new()
             }
-            observe_host(sampler, metric, boundary, deadline, subject).await
-        }
-        Metric::QueuedJobs | Metric::RunningJobs | Metric::RetryingJobs => {
-            tokio::time::timeout_at(deadline, observe_jobs(state, context, metric, boundary))
-                .await
-                .ok()
-                .flatten()
-        }
-    }
+        },
+        tokio::time::timeout_at(deadline, observe_jobs(state, context, boundary)),
+    );
+    facts.extend(jobs.ok().flatten().unwrap_or_default());
+    let now = Utc::now();
+    facts.retain(|(_, fact)| fresh(fact.observed_at, boundary, now));
+    facts
 }
 
 async fn observe_host(
     sampler: &SharedSampler,
-    metric: Metric,
     boundary: i64,
     deadline: Instant,
     subject: HostSubject,
-) -> Option<Fact> {
+) -> Vec<(Metric, Fact)> {
+    let mut observations = [
+        (Metric::Cpu, None),
+        (Metric::Memory, None),
+        (Metric::Disk, None),
+    ];
     for can_retry in [true, true, false] {
-        let disk_required_after = matches!(metric, Metric::Disk)
-            .then(|| boundary.max(Utc::now().timestamp_millis() - MAX_EVIDENCE_AGE_MS));
+        if Instant::now() >= deadline {
+            break;
+        }
+        let needs_disk = observations
+            .iter()
+            .any(|(metric, fact)| *metric == Metric::Disk && fact.is_none());
+        let disk_required_after =
+            needs_disk.then(|| boundary.max(Utc::now().timestamp_millis() - MAX_EVIDENCE_AGE_MS));
         let sample =
             host_metrics::sample_timed(sampler.clone(), disk_required_after, deadline).await;
+        let retry_floor = Instant::now() + Duration::from_millis(100);
         let next_sample_at = if let Some(sample) = sample {
-            if let Some(fact) = host_fact(&sample, metric, boundary, Utc::now(), subject) {
-                return Some(fact);
+            let now = Utc::now();
+            for (metric, fact) in &mut observations {
+                if fact.is_none() {
+                    *fact = host_fact(&sample, *metric, boundary, now, subject);
+                }
             }
-            Instant::from_std(sample.next_sample_at)
+            // A retained disk reading can precede a new CPU baseline.
+            Instant::from_std(sample.next_sample_at).max(retry_floor)
         } else {
-            Instant::now() + Duration::from_millis(100)
+            retry_floor
         };
-        if !can_retry || next_sample_at >= deadline {
+        if !can_retry
+            || observations.iter().all(|(_, fact)| fact.is_some())
+            || next_sample_at >= deadline
+        {
             break;
         }
         tokio::time::sleep_until(next_sample_at).await;
     }
-    None
+    observations
+        .into_iter()
+        .filter_map(|(metric, fact)| fact.map(|fact| (metric, fact)))
+        .collect()
 }
 
 fn host_fact(
@@ -135,9 +156,8 @@ fn host_fact(
 async fn observe_jobs(
     state: &ApiState,
     context: &ResolvedRequest,
-    metric: Metric,
     boundary: i64,
-) -> Option<Fact> {
+) -> Option<Vec<(Metric, Fact)>> {
     // The same registered cohort and top-level buckets used by Workstation
     // Status. This path fetches aggregate counts without retrieving any rows.
     let scope = activity::scope_for_request(&state.repo, context, None)
@@ -153,25 +173,49 @@ async fn observe_jobs(
     let counts = jobs_view::activity_job_counts(state.repo.db(), context.scope_id(), &scope)
         .await
         .ok()?;
-    if !fresh(observed_at, boundary, Utc::now()) {
-        return None;
-    }
-    let (id, label, count) = match metric {
-        Metric::QueuedJobs => ("queued", "Queued workstation jobs", counts.queued),
-        Metric::RunningJobs => ("running", "Running workstation jobs", counts.active),
-        Metric::RetryingJobs => ("retrying", "Retrying workstation jobs", counts.retrying),
-        _ => return None,
-    };
-    let count = u64::try_from(count).ok()?;
-    let noun = if count == 1 { "job" } else { "jobs" };
-    Some(Fact {
-        kind: ChatSourceKind::JobCount,
-        id,
-        label,
-        text: format!("This workstation has {count} {id} {noun}."),
-        observed_at,
-        measurement: QaMeasurement::new(count, QaMeasurementUnit::Jobs, label.to_owned()),
-    })
+    Some(
+        [
+            (
+                Metric::QueuedJobs,
+                "queued",
+                "Queued workstation jobs",
+                counts.queued,
+            ),
+            (
+                Metric::RunningJobs,
+                "running",
+                "Running workstation jobs",
+                counts.active,
+            ),
+            (
+                Metric::RetryingJobs,
+                "retrying",
+                "Retrying workstation jobs",
+                counts.retrying,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(metric, id, label, count)| {
+            let count = u64::try_from(count).ok()?;
+            let noun = if count == 1 { "job" } else { "jobs" };
+            Some((
+                metric,
+                Fact {
+                    kind: ChatSourceKind::JobCount,
+                    id,
+                    label,
+                    text: format!("This workstation has {count} {id} {noun}."),
+                    observed_at,
+                    measurement: QaMeasurement::new(
+                        count,
+                        QaMeasurementUnit::Jobs,
+                        label.to_owned(),
+                    ),
+                },
+            ))
+        })
+        .collect(),
+    )
 }
 
 fn fresh(observed_at: DateTime<Utc>, boundary: i64, now: DateTime<Utc>) -> bool {
@@ -415,9 +459,24 @@ mod tests {
             (first, 1, "This workstation has 1 running job."),
             (second, 0, "This workstation has 0 running jobs."),
         ] {
-            let fact = observe_jobs(&state, request, Metric::RunningJobs, 0)
-                .await
-                .unwrap();
+            let facts = collect_snapshot(
+                &state,
+                request,
+                None,
+                0,
+                Instant::now() + Duration::from_secs(4),
+                HostSubject::Embedded,
+            )
+            .await;
+            assert_eq!(facts.len(), 3);
+            let observation = |metric| {
+                &facts
+                    .iter()
+                    .find(|(observed, _)| *observed == metric)
+                    .unwrap()
+                    .1
+            };
+            let fact = observation(Metric::RunningJobs);
             let scope = activity::scope_for_request(&state.repo, request, None)
                 .await
                 .unwrap();
@@ -425,6 +484,17 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(dashboard.active, expected);
+            assert_eq!(
+                observation(Metric::QueuedJobs).measurement.value,
+                dashboard.queued as u64
+            );
+            assert_eq!(
+                observation(Metric::RetryingJobs).measurement.value,
+                dashboard.retrying as u64
+            );
+            assert!(facts
+                .iter()
+                .all(|(_, observation)| observation.observed_at == fact.observed_at));
             assert_eq!(
                 fact.measurement,
                 QaMeasurement::new(

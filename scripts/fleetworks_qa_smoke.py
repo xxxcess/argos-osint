@@ -410,14 +410,25 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
     for source_id, metric_question, label in questions:
         metric = ask(source_id, metric_question, check_legacy=source_id == "memory")
         readings[source_id] = cited_metric(metric, source_id, label, embedded_mode=embedded_mode)
-    memory_again = ask("memory-follow-up", "What is the current memory usage?")
+    memory_again = ask("memory-follow-up", "How much memory consumption we are at?")
     readings["memory_follow_up"] = cited_metric(memory_again, "memory", "memory usage", embedded_mode=embedded_mode)
     require(datetime.fromisoformat(readings["memory_follow_up"]["observed_at"])
             > datetime.fromisoformat(readings["memory"]["observed_at"]),
             "memory follow-up reused the previous observation timestamp")
+    resources = ask("resources", "What is our resource usage?")
+    require(resources["state"] == "answered"
+            and {part["source"]["id"] for part in resources["findings"]} == {"cpu", "memory", "disk"}
+            and len(resources["findings"]) == 3
+            and all(part["source"]["kind"] == "host_metric" and part.get("measurement")
+                    for part in resources["findings"]),
+            "resource summary did not cite exact CPU, memory and disk observations")
+    greeting = ask("greeting", "hi", check_legacy=True)
+    require(greeting.get("notice") == "greeting" and not greeting["findings"],
+            "greeting did not receive a friendly reply without citations")
     unsupported = ask("unsupported", "What is the current GPU temperature?")
-    require(unsupported["state"] == "insufficient_context" and not unsupported["findings"],
-            "unsupported measurement received an answer")
+    require(unsupported["state"] == "insufficient_context" and not unsupported["findings"]
+            and unsupported.get("notice") == "out_of_scope",
+            "unsupported measurement did not receive a scope notice")
     if verify_other_jobs is not None:
         verify_other_jobs()
 
@@ -437,6 +448,7 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
             "model_pid_count": len(active), "warm_model_rss_bytes": worker_rss_bytes,
             "fresh_observation": True, "terminal_events": terminal_events, "terminal_state": snapshot["state"],
             "grounded_readiness": True, "live_metrics": True, "unsupported_context": True,
+            "resource_snapshot": True, "greeting": True,
             "frozen_samples": readings, "legacy_http_evidence": legacy_request is not None}
 
 

@@ -256,6 +256,16 @@ impl QaTurnState {
     }
 }
 
+/// A fixed reply without an evidence citation, separate from the turn lifecycle.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaTurnNotice {
+    Greeting,
+    OutOfScope,
+    ObservationUnavailable,
+}
+
 /// Exact unit of a frozen metric reading. Percentages are stored in tenths of a percent.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -337,6 +347,8 @@ pub struct QaTurn {
     pub question: String,
     pub state: QaTurnState,
     pub findings: Vec<QaFinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<QaTurnNotice>,
     pub cursor: u64,
 }
 
@@ -359,6 +371,7 @@ impl QaTurn {
             question,
             state: QaTurnState::Queued,
             findings: Vec::new(),
+            notice: None,
             cursor: 0,
         }
     }

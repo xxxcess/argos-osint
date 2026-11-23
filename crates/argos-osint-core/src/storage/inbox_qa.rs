@@ -6,6 +6,7 @@ use fleetworks_contracts::chat::QaEvent;
 use fleetworks_contracts::chat::QaFinding;
 use fleetworks_contracts::chat::QaMeasurement;
 use fleetworks_contracts::chat::QaTurn;
+use fleetworks_contracts::chat::QaTurnNotice;
 use fleetworks_contracts::chat::QaTurnRequest;
 use fleetworks_contracts::chat::QaTurnState;
 use fleetworks_contracts::chat::QA_MAX_FINDINGS;
@@ -152,7 +153,7 @@ pub const MAX_EVIDENCE_AGE_MS: i64 = 5_000;
 pub enum AnswerMode {
     #[default]
     Model,
-    /// Zero passages means insufficient context. One passage is a complete answer.
+    /// Publish complete, measured facts without model selection.
     Grounded,
 }
 
@@ -161,6 +162,8 @@ pub enum AnswerMode {
 pub struct FrozenEvidence {
     #[serde(default)]
     pub answer_mode: AnswerMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<QaTurnNotice>,
     pub request: QaWorkerRequest,
     pub sources: Vec<Source>,
     pub sampled_at_ms: i64,
@@ -596,23 +599,27 @@ async fn boundary_in(tx: &Tx, key: &str, generation: i64) -> Result<i64, TxError
     Ok(own.max(jobs::take::<Option<i64>>(&mut global, 0)?.unwrap_or_default()))
 }
 
-fn grounded_finding(evidence: &FrozenEvidence) -> Result<Option<QaFinding>, TxError> {
+fn grounded_findings(evidence: &FrozenEvidence) -> Result<Vec<QaFinding>, TxError> {
     evidence
         .request
         .validate()
         .map_err(|_| abort("invalid_part"))?;
-    match (
-        evidence.request.passages.as_slice(),
-        evidence.sources.as_slice(),
-    ) {
-        ([], []) => Ok(None),
-        ([passage], [source]) if passage.source_id == source.opaque_id => {
+    let passages = &evidence.request.passages;
+    if passages.len() != evidence.sources.len() || passages.len() > QA_MAX_FINDINGS {
+        return Err(abort("invalid_part"));
+    }
+    passages
+        .iter()
+        .zip(&evidence.sources)
+        .map(|(passage, source)| {
+            if passage.source_id != source.opaque_id {
+                return Err(abort("invalid_part"));
+            }
             let end =
                 u32::try_from(passage.text.chars().count()).map_err(|_| abort("invalid_part"))?;
-            Ok(Some(source.finding(passage.text.clone(), 0, end)))
-        }
-        _ => Err(abort("invalid_part")),
-    }
+            Ok(source.finding(passage.text.clone(), 0, end))
+        })
+        .collect()
 }
 
 /// Atomically accept evidence, latest exchange and the work needed to answer it.
@@ -697,19 +704,21 @@ pub async fn admit(
             if matches!(evidence.answer_mode, AnswerMode::Grounded) {
                 // Exact facts need no worker lease. Publish the canonical turn and its
                 // events in the admission transaction so Off need not race settlement.
-                let finding = if (0..=MAX_EVIDENCE_AGE_MS)
+                let findings = if (0..=MAX_EVIDENCE_AGE_MS)
                     .contains(&now_ms().saturating_sub(evidence.sampled_at_ms))
                 {
-                    grounded_finding(evidence)?
+                    grounded_findings(evidence)?
                 } else {
-                    None
+                    Vec::new()
                 };
-                let terminal = if finding.is_some() {
-                    append_in(&tx, key, state.generation, &mut exchange, QaTurnState::Running, finding)
-                        .await?;
-                    QaTurnState::Answered
-                } else {
+                let terminal = if findings.is_empty() {
+                    exchange.turn.notice = evidence.notice.or(Some(QaTurnNotice::ObservationUnavailable));
                     QaTurnState::InsufficientContext
+                } else {
+                    for finding in findings {
+                        append_in(&tx, key, state.generation, &mut exchange, QaTurnState::Running, Some(finding)).await?;
+                    }
+                    QaTurnState::Answered
                 };
                 append_in(&tx, key, state.generation, &mut exchange, terminal, None).await?;
                 return Ok(exchange.turn);

@@ -21,9 +21,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use fleetworks_contracts::chat::{
     ChatSourceKind, ChatSourceReference, QaAvailabilityReason, QaCancelRequest, QaEventPage,
-    QaEventQuery, QaFinding, QaPhase, QaSettings, QaSettingsUpdate, QaTurn, QaTurnRequest,
-    QA_CANCEL_PATH, QA_EVENTS_PATH, QA_EVIDENCE_HEADER, QA_EVIDENCE_VERSION, QA_LATEST_PATH,
-    QA_SETTINGS_PATH, QA_TURNS_PATH,
+    QaEventQuery, QaFinding, QaPhase, QaSettings, QaSettingsUpdate, QaTurn, QaTurnNotice,
+    QaTurnRequest, QA_CANCEL_PATH, QA_EVENTS_PATH, QA_EVIDENCE_HEADER, QA_EVIDENCE_VERSION,
+    QA_LATEST_PATH, QA_SETTINGS_PATH, QA_TURNS_PATH,
 };
 use fleetworks_contracts::context::{CredentialPurpose, MutationContext, Permission};
 use fleetworks_contracts::qa_worker::{QaPassage, QaWorkerEvent, QaWorkerRequest};
@@ -31,6 +31,7 @@ use futures_util::StreamExt;
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::time::Instant;
 
+use self::question::{Metric, Question};
 use crate::actor_search::SearchClient;
 use crate::host_metrics::SharedSampler;
 use crate::request_context::{ContextFailure, ResolvedRequest};
@@ -607,7 +608,8 @@ async fn snapshot(
     })?;
     let boundary = store::freshness_boundary(&state.repo, actor)
         .await
-        .map_err(storage_error)?;
+        .map_err(storage_error)?
+        .max(chrono::Utc::now().timestamp_millis() - 1);
     let intent = question::classify(&request.question);
     let source = request.source.as_ref();
     let mut selected_activity = None;
@@ -615,7 +617,10 @@ async fn snapshot(
         match source.kind {
             ChatSourceKind::Job | ChatSourceKind::Cycle => {
                 let observed_at = chrono::Utc::now();
-                let (label, status) = activity_fact(state, context, source).await?;
+                let (label, status) =
+                    tokio::time::timeout_at(deadline, activity_fact(state, context, source))
+                        .await
+                        .map_err(|_| current_health_unavailable())??;
                 selected_activity = Some((label, status, observed_at));
             }
             ChatSourceKind::Readiness => {}
@@ -623,14 +628,8 @@ async fn snapshot(
         }
     }
 
-    let needs_health = matches!(
-        intent,
-        question::Question::Readiness(_)
-            | question::Question::ReadinessExplanation(_)
-            | question::Question::Summary
-    ) || source.is_some_and(|source| source.kind == ChatSourceKind::Readiness);
-    let health = if needs_health {
-        let observed = tokio::time::timeout_at(deadline, async {
+    let health_probe = async {
+        tokio::time::timeout_at(deadline, async {
             loop {
                 if let Some(sample) = target.observe(state, generation, boundary, true).await? {
                     return Ok::<_, ApiError>(sample);
@@ -639,47 +638,61 @@ async fn snapshot(
             }
         })
         .await
-        .map_err(|_| current_health_unavailable())
-        .and_then(|result| result);
-        if matches!(intent, question::Question::Summary)
-            || source.is_some_and(|source| source.kind == ChatSourceKind::Readiness)
-        {
-            Some(observed?)
-        } else {
-            observed.ok()
-        }
-    } else {
-        None
+        .map_err(|_| current_health_unavailable())?
     };
+    let subject = if target.embedded {
+        metrics::HostSubject::Embedded
+    } else {
+        metrics::HostSubject::ConnectedGateway
+    };
+    // Keep one current, authorized projection for the turn. Select the relevant
+    // facts only after the host, Jobs and readiness observations have settled.
+    let (health, measurements) = tokio::join!(
+        health_probe,
+        metrics::collect_snapshot(
+            state,
+            context,
+            target.sampler.as_ref(),
+            boundary,
+            deadline,
+            subject,
+        ),
+    );
     if let Some(source) = source.filter(|source| source.kind == ChatSourceKind::Readiness) {
-        if !health
-            .as_ref()
-            .is_some_and(|sample| sample.facts.iter().any(|fact| fact.id == source.id))
-        {
+        let sample = health.as_ref().map_err(|_| current_health_unavailable())?;
+        if !sample.facts.iter().any(|fact| fact.id == source.id) {
             return Err(crate::missing());
         }
     }
+    let health = health.ok();
 
     let mut passages = Vec::new();
     let mut sources = Vec::new();
-    let mut push = |reference, label, text, observed_at, measurement, whole_passage| {
+    let mut earliest = None::<chrono::DateTime<chrono::Utc>>;
+    let mut push = |reference,
+                    label,
+                    text,
+                    observed_at: chrono::DateTime<chrono::Utc>,
+                    measurement,
+                    whole_passage| {
+        earliest = Some(earliest.map_or(observed_at, |prior| prior.min(observed_at)));
         let opaque_id = format!("passage-{}", passages.len());
         passages.push(QaPassage::new(opaque_id.clone(), text));
         sources.push(store::Source {
             opaque_id,
             reference,
             label,
-            observed_at,
+            observed_at: observed_at.to_rfc3339(),
             measurement,
             whole_passage,
         });
     };
-    let mut sampled_at_ms = chrono::Utc::now().timestamp_millis();
     let mut answer_mode = store::AnswerMode::Grounded;
+    let mut notice = None;
     match intent {
-        question::Question::Readiness(check) | question::Question::ReadinessExplanation(check) => {
+        Question::Readiness(check) | Question::ReadinessExplanation(check) => {
             if let Some((sample, fact)) = health.as_ref().and_then(|sample| {
-                let explanation = matches!(intent, question::Question::ReadinessExplanation(_));
+                let explanation = matches!(intent, Question::ReadinessExplanation(_));
                 sample
                     .facts
                     .iter()
@@ -697,59 +710,56 @@ async fn snapshot(
                     reference,
                     readiness::label(fact).to_owned(),
                     readiness::answer(fact),
-                    at.to_rfc3339(),
+                    at,
                     None,
                     false,
                 );
-                sampled_at_ms = sample.sampled_at_ms;
             }
         }
-        question::Question::Metric(metric) => {
-            if let Some(sampler) = &target.sampler {
-                let subject = if target.embedded {
-                    metrics::HostSubject::Embedded
-                } else {
-                    metrics::HostSubject::ConnectedGateway
-                };
-                let fact =
-                    metrics::collect(state, context, sampler, metric, boundary, deadline, subject)
-                        .await;
-                sampled_at_ms = chrono::Utc::now().timestamp_millis();
-                if let Some(fact) = fact {
-                    let reference = ChatSourceReference::new(fact.kind, fact.id.into())
-                        .map_err(|_| crate::bad())?;
-                    push(
-                        reference,
-                        fact.label.into(),
-                        fact.text,
-                        fact.observed_at.to_rfc3339(),
-                        Some(fact.measurement),
-                        false,
-                    );
-                    sampled_at_ms = fact.observed_at.timestamp_millis();
-                }
+        Question::Metric(_) | Question::HostResources | Question::JobsSummary => {
+            let relevant = |metric| match (intent, metric) {
+                (Question::Metric(requested), metric) => requested == metric,
+                (Question::HostResources, Metric::Cpu | Metric::Memory | Metric::Disk)
+                | (
+                    Question::JobsSummary,
+                    Metric::QueuedJobs | Metric::RunningJobs | Metric::RetryingJobs,
+                ) => true,
+                _ => false,
+            };
+            for (_, fact) in measurements
+                .into_iter()
+                .filter(|(metric, _)| relevant(*metric))
+            {
+                let reference = ChatSourceReference::new(fact.kind, fact.id.into())
+                    .map_err(|_| crate::bad())?;
+                push(
+                    reference,
+                    fact.label.into(),
+                    fact.text,
+                    fact.observed_at,
+                    Some(fact.measurement),
+                    false,
+                );
             }
         }
-        question::Question::ContextStatus(kind) => {
+        Question::ContextStatus(kind) => {
             if let (Some(source), Some((label, status, at))) = (source, selected_activity) {
                 if source.kind == kind && status != "unknown" && at.timestamp_millis() > boundary {
                     push(
                         source.clone(),
                         label.into(),
                         format!("{label} is {status}."),
-                        at.to_rfc3339(),
+                        at,
                         None,
                         false,
                     );
-                    sampled_at_ms = at.timestamp_millis();
                 }
             }
         }
-        question::Question::Summary => {
-            if let Some(sample) = health {
+        Question::Summary => {
+            if let Some(sample) = health.filter(|sample| !sample.facts.is_empty()) {
                 answer_mode = store::AnswerMode::Model;
-                sampled_at_ms = sample.sampled_at_ms;
-                let at = chrono::DateTime::from_timestamp_millis(sampled_at_ms)
+                let at = chrono::DateTime::from_timestamp_millis(sample.sampled_at_ms)
                     .ok_or_else(current_health_unavailable)?;
                 for fact in &sample.facts {
                     let reference =
@@ -759,7 +769,7 @@ async fn snapshot(
                         reference,
                         readiness::label(fact).to_owned(),
                         readiness::answer(fact),
-                        at.to_rfc3339(),
+                        at,
                         None,
                         true,
                     );
@@ -771,19 +781,21 @@ async fn snapshot(
                         source.clone(),
                         label.into(),
                         format!("{label} is {status}."),
-                        observed_at.to_rfc3339(),
+                        observed_at,
                         None,
                         true,
                     );
-                    sampled_at_ms = sampled_at_ms.min(observed_at.timestamp_millis());
                 }
             }
         }
-        question::Question::Unsupported => {}
+        Question::Greeting => notice = Some(QaTurnNotice::Greeting),
+        Question::Unsupported => notice = Some(QaTurnNotice::OutOfScope),
     }
+    let sampled_at_ms = earliest.unwrap_or_else(chrono::Utc::now).timestamp_millis();
     let turn_id = store::accepted_turn_id(actor, request, generation).map_err(storage_error)?;
     Ok(store::FrozenEvidence {
         answer_mode,
+        notice,
         request: QaWorkerRequest::new(turn_id.clone(), turn_id, request.question.clone(), passages),
         sources,
         sampled_at_ms,

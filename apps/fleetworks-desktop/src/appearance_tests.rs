@@ -100,7 +100,7 @@ fn material_and_matte_keep_actual_toolbar_and_navigation_hit_bounds_on_all_pages
         assert!(satin.find("nav-seed").is_none());
         assert!(matte.find("nav-seed").is_none());
         let page_tab = (page != Page::Seed).then(|| format!("nav-{}", page.key()));
-        for key in ["connection-editor".to_owned(), "nav-workstation".to_owned()]
+        for key in ["inbox-toggle".to_owned(), "nav-workstation".to_owned()]
             .into_iter()
             .chain(page_tab)
         {

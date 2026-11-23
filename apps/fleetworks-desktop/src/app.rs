@@ -122,20 +122,6 @@ impl Page {
         }
     }
 
-    fn compact_title(self) -> &'static str {
-        match self {
-            Self::Seed => "Actors",
-            Self::Atlas => "Cycles",
-            Self::Brain => "Brain",
-            Self::Tools => "Tool Box",
-            Self::Models => "Models",
-            Self::Profile => "Profile",
-            Self::Workstation => "Status",
-            Self::Workspaces => "Workspaces",
-            Self::Jobs => "Jobs",
-        }
-    }
-
     pub fn key(self) -> &'static str {
         match self {
             Self::Seed => "seed",
@@ -459,6 +445,14 @@ impl State {
 
     pub(crate) fn reveal_control(&mut self, key: &str) {
         self.reveal = Some(key.to_owned());
+    }
+
+    pub(crate) fn shell_focus_anchor(&self) -> &'static str {
+        if self.sidebar.is_open() {
+            "open-workstation-settings"
+        } else {
+            "inbox-toggle"
+        }
     }
     /// An effects-disabled state for development/test views, never a real user home.
     pub fn fixture() -> Self {
@@ -1444,7 +1438,7 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
     if event.is_command('k') && !event.mods.shift {
         if state.commands.open {
             state.commands.close();
-            tx.focus("connection-editor", false);
+            tx.focus(state.shell_focus_anchor(), false);
         } else if !state.has_active_confirmation() {
             state.open_command_panel();
         }
@@ -1453,7 +1447,7 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
     if event.key == Key::Escape {
         if state.commands.open {
             state.commands.close();
-            tx.focus("connection-editor", false);
+            tx.focus(state.shell_focus_anchor(), false);
             return true;
         }
         if state.confirm_maintenance_dialog || state.maintenance.confirmation.is_some() {
@@ -1471,7 +1465,7 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         }
         if state.setup_gateway {
             state.setup_gateway = false;
-            tx.focus("connection-editor", false);
+            tx.focus(state.shell_focus_anchor(), false);
             return true;
         }
     }
@@ -1647,15 +1641,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     let assistant_placement = assistant_room.map_or(crate::assistant::Placement::Hidden, |room| {
         state.assistant.preference.placement(room)
     });
-    let toolbar = workstation_toolbar(
-        state,
-        cx,
-        &kit,
-        preferences,
-        sidebar_el.is_some(),
-        assistant_placement,
-        connection_tone,
-    );
+    let toolbar = workstation_toolbar(state, cx, &kit, preferences, assistant_placement);
 
     let any_busy = state.connection.status == ConnectionStatus::Connecting
         || state.pairing.busy()
@@ -1913,161 +1899,35 @@ fn workstation_toolbar(
     cx: &Cx<State>,
     kit: &rune_kit::Kit,
     preferences: ViewPreferences,
-    has_sidebar: bool,
     assistant_placement: crate::assistant::Placement,
-    tone: StatusTone,
 ) -> Toolbar {
-    const TRAILING_GAP: f32 = 6.0;
-    const TOOLBAR_EDGE_INSET: f32 = 12.0;
-    const TOOLBAR_FLOW_GAP: f32 = 8.0;
-    const TRAILING_CLEARANCE: f32 = TOOLBAR_EDGE_INSET + 2.0 * TOOLBAR_FLOW_GAP;
-    const GATEWAY_ICON: f32 = 32.0;
-    const GATEWAY_LABELED: f32 = 152.0;
-    const TELEMETRY_COMPACT: f32 = 76.0;
-    const TELEMETRY_LABELED: f32 = 244.0;
-    const ASSISTANT_WIDTH: f32 = 24.0;
-    const TITLE_MINIMUM: f32 = 110.0;
-
-    // Match the outer padding and the two 8pt flow gaps on either side of the
-    // Rune Kit toolbar's flexible spacer. When the sidebar is open the toolbar
-    // starts at its inner edge, and SplitView supplies the standard leading pad.
-    let open_sidebar = has_sidebar && state.sidebar.is_open();
-    let shell_width = cx.layout_size("app-shell").map_or(640.0, |size| size[0]);
-    let width = shell_width
-        - if open_sidebar {
-            state.sidebar.shown_width()
-        } else {
-            0.0
-        };
-    let leading_inset = if open_sidebar {
-        TOOLBAR_EDGE_INSET
-    } else {
-        let lights = cx.titlebar_inset();
-        let edge = if lights > 0.0 {
-            lights + 8.0
-        } else {
-            TOOLBAR_EDGE_INSET
-        };
-        edge + if has_sidebar { 32.0 } else { 0.0 }
-    };
     let show_assistant = state.assistant.enabled && state.connected() && !state.setup_gateway;
     let bell_width = if state.inbox.unread() == 0 {
         38.0
     } else {
         66.0
     };
-    let trailing_width = |gateway, telemetry| {
-        let assistant = if show_assistant {
-            ASSISTANT_WIDTH + TRAILING_GAP
-        } else {
-            0.0
-        };
-        let metrics = if telemetry > 0.0 {
-            telemetry + TRAILING_GAP
-        } else {
-            0.0
-        };
-        gateway + bell_width + TRAILING_GAP + assistant + metrics
-    };
-    let available = width - leading_inset - TRAILING_CLEARANCE;
-    let fits = |gateway, telemetry| available >= TITLE_MINIMUM + trailing_width(gateway, telemetry);
-    let telemetry_width = if !state.connected() {
-        0.0
-    } else if fits(GATEWAY_ICON, TELEMETRY_LABELED) {
-        TELEMETRY_LABELED
-    } else if fits(GATEWAY_ICON, TELEMETRY_COMPACT) {
-        TELEMETRY_COMPACT
-    } else {
-        // Before the compact rail is measured, the full rail can consume this space.
-        0.0
-    };
-    let wide_gateway = fits(GATEWAY_LABELED, telemetry_width);
-    let gateway_width = if wide_gateway {
-        GATEWAY_LABELED
-    } else {
-        GATEWAY_ICON
-    };
-    let title_width = (available - trailing_width(gateway_width, telemetry_width)).max(0.0);
-    let title_page = if state.connected() {
-        state.page
-    } else {
-        Page::Workstation
-    };
-    let title = match (state.setup_gateway, title_width < 140.0) {
-        (true, true) => "Setup",
-        (true, false) => "Setup Gateway",
-        (false, true) => title_page.compact_title(),
-        (false, false) => title_page.title(),
-    };
-    let leading = rune::row().shrink().center_y().child(
-        rune::row().w(title_width).pr(8.0).shrink().child(
-            rune::text(title)
-                .font(kit.ty.ui_medium)
-                .color(kit.c.text_base)
-                .truncate(),
-        ),
-    );
-    let mut trailing = rune::row().gap(TRAILING_GAP).center_y();
+    let mut trailing = rune::row().gap(6.0).center_y();
     if show_assistant {
         let toggle = crate::assistant::toggle(
             assistant_placement != crate::assistant::Placement::Hidden,
             kit,
         )
-        .w(ASSISTANT_WIDTH);
+        .w(24.0);
         trailing = trailing.child(material::glass_control(toggle, preferences));
     }
-    if telemetry_width > 0.0 {
+    if state.connected() {
+        // Leave room for the other controls and native window chrome in narrow bands.
+        let compact = cx.layout_size("toolbar").is_none_or(|size| size[0] < 420.0);
+        let width = if compact { 76.0 } else { 244.0 };
         trailing = trailing.child(material::glass(
-            toolbar_telemetry(state, kit, telemetry_width == TELEMETRY_COMPACT).w(telemetry_width),
+            toolbar_telemetry(state, kit, compact).w(width),
             GlassSurface::Control,
             preferences,
         ));
     }
-    let gateway = gateway_toolbar_button(state, kit, !wide_gateway, tone).w(gateway_width);
-    Toolbar::new().leading(leading).trailing(
-        trailing
-            .child(material::glass_control(gateway, preferences))
-            .child(crate::inbox::toolbar_item(state, kit, preferences).w(bell_width)),
-    )
-}
-
-fn gateway_toolbar_button(
-    state: &State,
-    kit: &rune_kit::Kit,
-    compact: bool,
-    tone: StatusTone,
-) -> El {
-    let status = match state.connection.status {
-        ConnectionStatus::Connected => "Gateway connected",
-        ConnectionStatus::Connecting => "Gateway connecting",
-        ConnectionStatus::Failed(_) => "Gateway fault",
-        ConnectionStatus::Disconnected => "Gateway disconnected",
-    };
-    let label = if state.connection.status == ConnectionStatus::Disconnected {
-        "Setup Gateway"
-    } else {
-        status
-    };
-    Button::new(format!("{status}. Open gateway setup"))
-        .variant(ButtonVariant::Ghost)
-        .help("Setup Gateway")
-        .label_with(move |font, _| {
-            let mut content = rune::row().gap(5.0).center_y().child(
-                rune::icon(&icons::SERVER, 14.0)
-                    .color(tone.fg())
-                    .a11y_hidden(),
-            );
-            if !compact {
-                content = content.child(rune::text(label).font(font).color(tone.fg()));
-            }
-            content
-        })
-        .on_press(State::open_connection_settings)
-        .build(kit)
-        .key("connection-editor")
-        .h(28.0)
-        .px(8.0)
-        .radius(999.0)
+    Toolbar::new()
+        .trailing(trailing.child(crate::inbox::toolbar_item(state, kit, preferences).w(bell_width)))
 }
 
 fn toolbar_telemetry(state: &State, kit: &rune_kit::Kit, compact: bool) -> El {

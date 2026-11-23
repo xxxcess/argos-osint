@@ -59,6 +59,7 @@ fn real_shell_navigation_works_offline_without_boundary_effects() {
     assert!(disconnected.find("nav-workstation").is_some());
     assert!(disconnected.find("nav-setup").is_some());
     assert!(disconnected.find("workstation-setup-gateway").is_some());
+    assert!(disconnected.find("connection-editor").is_none());
     assert!(disconnected.find("host-resources-card").is_none());
     assert!(disconnected.find("local-client-scope").is_some());
     assert!(disconnected.find("resource-scope").is_none());
@@ -124,11 +125,12 @@ fn real_shell_navigation_works_offline_without_boundary_effects() {
     assert!(connected.find("sidebar-context-footer").is_none());
     assert!(connected.find("deployment").is_none());
     assert!(connected.find("gateway-status-header").is_none());
+    assert!(connected.find("connection-editor").is_none());
     assert!(connected.find("connect-id").is_none());
     assert!(connected.find("workstation-registered").is_some());
     let connected_tree = connected.accessibility_json().to_string();
     assert!(!connected_tree.contains("Connect ID"));
-    assert!(connected_tree.contains("Gateway connected"));
+    assert!(!connected_tree.contains("Gateway connected"));
     assert!(connected_tree.contains("synthetic-deployment"));
     let hidden_connect_id = connected
         .state
@@ -611,11 +613,17 @@ fn compact_connected_setup_readiness_toggle(kind: fleetworks_workstation::native
     runtime.frame(1.0 / 60.0);
     assert!(!runtime.state.setup_gateway);
     let (x, y) = runtime
-        .find("connection-editor")
-        .expect("reopen Setup Gateway");
+        .find("open-workstation-settings")
+        .expect("open Settings");
     runtime.pointer_down(x, y);
     runtime.pointer_up(x, y);
     runtime.frame(2.0 / 60.0);
+    let (x, y) = runtime
+        .find("settings-category-connection")
+        .expect("reopen Connection settings");
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(2.5 / 60.0);
     assert!(runtime.state.settings_open);
     assert!(!runtime.state.setup_gateway);
     assert!(runtime.state.connected());

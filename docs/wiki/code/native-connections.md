@@ -10,7 +10,7 @@ A cold launch opens **Choose a backend** with **Embedded** and **Distributed** a
 
 Choosing a tile opens **Setup Gateway** with that backend selected. The Distributed URL is prefilled when one is saved. Quiet Orbit carries its current pose into the setup header and stays docked through connection and registration. Use **Start Embedded Backend** or **Connect** to proceed. **Back** returns focus to the selected tile without replaying launch. **Done** opens the data setup sequence below the centered mark. The dots identify actor seeding, actor indexing, and workstation checks. Each stage has its own confirmation, progress, and outcome. The wizard skips work already verified by the Embedded backend and lets you review those stages. Use **Reset** to choose a different actor CSV or review the index's current catalog source again. Reset clears the setup input and retains imported data, models, index coverage, and completed hashes. Unsupported or optional work can be left for later. **Backend inference** shows where Inbox answers run and the current setting. Finish setup with inference Off or when provisioning is unavailable. **Settings → Connection** shows the same setting. The last step shows a compact health checklist with green checks for verified readiness and red Xs for confirmed failures. The Atlas BERT row reports the inference status supplied by the connected backend. Missing or stale observations appear as pending. Select **Open Workstation** to enter Workstation Status and settle the mark into the sidebar. Reduced Motion places the static mark directly in each destination.
 
-After startup, open **Settings → Connection** from the sidebar or gateway control to revisit the current backend, switch backend types or run the connection steps in the popup.
+After startup, open **Settings → Connection** from the sidebar to revisit the current backend, switch backend types or run the connection steps in the popup.
 
 A launch with `--api-origin` or `--api-token-file` skips the chooser. The `backend-choice` fixture exercises the production chooser with synthetic effects. The startup controls are in `apps/fleetworks-desktop/src/startup.rs` and the scene is in `apps/fleetworks-desktop/src/orbit.rs`.
 
@@ -51,7 +51,7 @@ The contextual **Assistant** dock is built and tested but **disabled** (`Assista
 
 ## Command panel
 
-Cmd/Ctrl+K opens a fixed list of navigation actions for pages, Connection settings, Inbox and the contextual Assistant when enabled. Typing filters the list. Arrow keys move, Enter opens the selection, and Escape returns focus to the gateway control. Actions that could accept work, such as seed or index, only open their page, where the existing review step still applies. While the panel is open it is the only overlay.
+Cmd/Ctrl+K opens a fixed list of navigation actions for pages, Connection settings, Inbox and the contextual Assistant when enabled. Typing filters the list. Arrow keys move, Enter opens the selection, and Escape returns focus to Settings, or to Inbox when the sidebar is collapsed. Actions that could accept work, such as seed or index, only open their page, where the existing review step still applies. While the panel is open it is the only overlay.
 
 <a id="pairing-and-keychain-agreed-target"></a>
 

@@ -198,7 +198,7 @@ fn retained_profile_switch_confirms_dirty_drafts_and_native_setup_has_no_profile
         .to_string()
         .contains("synthetic-unsaved-key"));
     let (x, y) = runtime
-        .find("connection-editor")
+        .find("nav-setup")
         .expect("allowlisted Setup Gateway action");
     runtime.pointer_down(x, y);
     runtime.pointer_up(x, y);

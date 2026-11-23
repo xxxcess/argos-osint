@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Usage](../concepts/usage.md)
 
-The native macOS app connects to an independently running gateway. Its six sidebar destinations share the selected deployment's resources within the caller's permissions; a protected installation identifies workstation request origin and activity. The sidebar opens Workstation Status. The gateway control opens Settings → Connection. Intel Web uses a separately provisioned relay credential and a server-issued registered session. Direct Docker Compose owns backend deployment. Venture, the six terminal clients and legacy `argos` are retired; installed-app and matching-hardware evidence remain separate.
+The native macOS app connects to an independently running gateway. Its six sidebar destinations share the selected deployment's resources within the caller's permissions; a protected installation identifies workstation request origin and activity. The sidebar opens Workstation Status. The sidebar Settings dialog provides the Connection tab. Intel Web uses a separately provisioned relay credential and a server-issued registered session. Direct Docker Compose owns backend deployment. Venture, the six terminal clients and legacy `argos` are retired; installed-app and matching-hardware evidence remain separate.
 
 | Surface | Source | Contract |
 | --- | --- | --- |

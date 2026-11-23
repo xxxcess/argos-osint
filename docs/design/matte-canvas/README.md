@@ -24,7 +24,7 @@ Approved **Glass Canvas** visual target for the native client and shared web pai
 | Initial unresolved content or pending list tail | Steady skeleton base with a restrained translated cool sheen |
 | Long record lists | Continuous scrolling over bounded, opaque cursor requests; no routine page-number or Previous/Next chrome |
 
-The deep-space backdrop is `#060709`. Build primary surfaces, chrome, cards, controls, and floating overlays as **layered smoked/frosted glass** with static liquid-metal hairline rim highlights, warm molten-core active accents, cyan interactive cues, and fractured crescent-moon textures derived from the logo. Keep desktop chrome calm and structured (slim left rail, centered glass command trigger pill, compact top-right telemetry & bell-badge strip, hairline-grouped glass settings rows, floating notification card stack). Preserve accessible ≥ 4.5:1 text contrast, crisp keyboard focus and essential input boundaries, and avoid resting animation wake loops or pointer-lighting loops.
+The deep-space backdrop is `#060709`. Build primary surfaces, chrome, cards, controls, and floating overlays as **layered smoked/frosted glass** with static liquid-metal hairline rim highlights, warm molten-core active accents, cyan interactive cues, and fractured crescent-moon textures derived from the logo. Keep desktop chrome calm and structured (slim left rail, empty native toolbar title area, compact top-right telemetry & bell-badge strip, hairline-grouped glass settings rows, floating notification card stack). Preserve accessible ≥ 4.5:1 text contrast, crisp keyboard focus and essential input boundaries, and avoid resting animation wake loops or pointer-lighting loops.
 
 ## Approved screens
 

@@ -3304,7 +3304,7 @@ mod tests {
             }
             assert!(rt.find("nav-workstation").is_some());
             assert!(rt.find("nav-jobs").is_some());
-            assert!(rt.find("connection-editor").is_some());
+            assert!(rt.find("inbox-toggle").is_some());
             let jobs_tree = rt.accessibility_json().to_string();
             assert!(jobs_tree.contains("1 job") && !jobs_tree.contains("1 jobs"));
 

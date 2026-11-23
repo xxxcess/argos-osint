@@ -314,7 +314,7 @@ pub(crate) fn view(
         panel = panel.box_shadow(shadow);
     }
     let panel = material::glass(panel, GlassSurface::Overlay, preferences)
-        .focus_return("connection-editor")
+        .focus_return(state.shell_focus_anchor())
         .modal(true, |state: &mut State| state.commands.close())
         .modal_click_outside(true);
     layers.push(
@@ -627,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn populated_telemetry_has_separate_hit_bounds_from_the_command_trigger() {
+    fn right_toolbar_controls_keep_the_leading_band_empty_at_supported_widths() {
         use crate::app::Load;
         use crate::workstation_dashboard::HostMetrics;
 
@@ -686,10 +686,20 @@ mod tests {
             let telemetry = bounds(&runtime, "toolbar-telemetry");
             let assistant = bounds(&runtime, "assistant-toggle");
             let bell = bounds(&runtime, "inbox-toggle");
+            let elements = runtime.elements();
+            let toolbar = elements
+                .iter()
+                .find(|element| element.key.as_deref() == Some("toolbar"))
+                .expect("toolbar");
+            let leading = format!("{}/leading/", toolbar.path);
+            assert!(elements
+                .iter()
+                .all(|element| !element.path.starts_with(&leading)));
             assert!(
                 assistant[0] + assistant[2] <= telemetry[0],
                 "{width} / {sidebar}"
             );
+            assert!(telemetry[0] + telemetry[2] <= bell[0]);
             assert!(bell[0] + bell[2] <= width + 0.5);
             assert!(runtime.find("command-open").is_none());
             let telemetry_key = if runtime.find("toolbar-telemetry/CPU").is_some() {
@@ -717,6 +727,9 @@ mod tests {
             });
             runtime.frame(now + 1.0);
             assert!(!runtime.state.commands.open);
+            assert!(runtime.elements().iter().any(|element| {
+                element.key.as_deref() == Some("open-workstation-settings") && element.focused
+            }));
         }
     }
 

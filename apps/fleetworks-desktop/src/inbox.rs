@@ -1523,10 +1523,10 @@ mod tests {
         state.inbox.observe(1.0, obs(1, Link::Connected));
         let mut runtime = runtime(state, (640.0, 480.0));
         let (toolbar, _) = runtime.presented("toolbar").expect("toolbar geometry");
-        let (editor, _) = runtime
-            .presented("connection-editor")
-            .expect("connection editor geometry");
-        assert!(editor[0] >= toolbar[0] && editor[0] + editor[2] <= toolbar[0] + toolbar[2]);
+        let (bell, _) = runtime
+            .presented("inbox-toggle")
+            .expect("Inbox bell geometry");
+        assert!(bell[0] >= toolbar[0] && bell[0] + bell[2] <= toolbar[0] + toolbar[2]);
 
         for (step, close) in [
             "inbox-toggle-close",
@@ -1641,7 +1641,7 @@ mod tests {
             for key in [
                 "toolbar-glass",
                 rail,
-                "connection-editor",
+                "toolbar-telemetry",
                 "inbox-toggle",
                 "inbox-body",
                 "inbox-filter",

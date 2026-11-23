@@ -1,5 +1,5 @@
 {
   "events": [
-    { "t": 0.1, "type": "down", "key": "connection-editor" }
+    { "t": 0.1, "type": "down", "key": "inbox-toggle" }
   ]
 }

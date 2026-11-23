@@ -1031,80 +1031,6 @@ fn tools_overview(state: &State, preferences: ViewPreferences, kit: &Kit) -> El 
     body
 }
 
-#[cfg(test)]
-mod tools_tests {
-    use rune::Env;
-    use rune::Runtime;
-
-    use crate::app;
-    use crate::app::Load;
-    use crate::app::Page;
-    use crate::backend::ProfileSnapshot;
-    use crate::backend::ToolCatalog;
-    use crate::backend::ToolCredentialMetadata;
-    use crate::backend::ToolDefinition;
-
-    #[test]
-    fn tool_box_keeps_provider_controls_in_the_responsive_overview() {
-        for (size, wide) in [((640.0, 480.0), false), ((1440.0, 860.0), true)] {
-            let mut state = crate::tests::registered_fixture();
-            state.page = Page::Tools;
-            state.backend.profile = Load::Ready(ProfileSnapshot {
-                configuration_revision: 1,
-                configuration_format: 4,
-                accounts: Vec::new(),
-                tool_credentials: vec![ToolCredentialMetadata {
-                    provider: "newsdata".into(),
-                    primary_present: true,
-                    fallback_present: false,
-                }],
-                setup_required: false,
-                portable_schema_version: 4,
-            });
-            state.backend.tools = Load::Ready(ToolCatalog {
-                tools: vec![ToolDefinition {
-                    id: "fixture".into(),
-                    name: "Fixture tool".into(),
-                    category: "News".into(),
-                    description: "Synthetic tool".into(),
-                    inputs: Vec::new(),
-                    restrictions: String::new(),
-                    timeout_seconds: 1,
-                }],
-            });
-            let mut runtime = Runtime::new(
-                state,
-                app::view,
-                size,
-                Env {
-                    system_dark: true,
-                    scale: 1.0,
-                },
-            );
-            runtime.frame(0.0);
-            runtime.frame(1.0 / 60.0);
-
-            let overview = runtime.find("tool-box-overview-title").unwrap();
-            let catalog = runtime.find("tool-fixture").unwrap();
-            assert_eq!(runtime.find("tool-box-overview-scroll").is_some(), wide);
-            if wide {
-                assert!(overview.0 > catalog.0);
-            } else {
-                assert!(overview.1 < catalog.1);
-            }
-            let (x, y) = runtime.find("tool-key-open-newsdata").unwrap();
-            assert!((0.0..size.0).contains(&x) && (0.0..size.1).contains(&y));
-            runtime.pointer_down(x, y);
-            runtime.pointer_up(x, y);
-            runtime.frame(2.0 / 60.0);
-            assert!(runtime.state.tool_key_dialog);
-            assert_eq!(runtime.state.configuration.tool_provider.text, "newsdata");
-            assert!(runtime.find("tool-key-primary").is_some());
-            assert!(runtime.find("tool-key-fallback").is_some());
-        }
-    }
-}
-
 fn tool_key_dialog(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Vec<El>) {
     if !state.tool_key_dialog {
         return;
@@ -3420,4 +3346,78 @@ fn jobs_tail(
         ));
     }
     footer
+}
+
+#[cfg(test)]
+mod tools_tests {
+    use rune::Env;
+    use rune::Runtime;
+
+    use crate::app;
+    use crate::app::Load;
+    use crate::app::Page;
+    use crate::backend::ProfileSnapshot;
+    use crate::backend::ToolCatalog;
+    use crate::backend::ToolCredentialMetadata;
+    use crate::backend::ToolDefinition;
+
+    #[test]
+    fn tool_box_keeps_provider_controls_in_the_responsive_overview() {
+        for (size, wide) in [((640.0, 480.0), false), ((1440.0, 860.0), true)] {
+            let mut state = crate::tests::registered_fixture();
+            state.page = Page::Tools;
+            state.backend.profile = Load::Ready(ProfileSnapshot {
+                configuration_revision: 1,
+                configuration_format: 4,
+                accounts: Vec::new(),
+                tool_credentials: vec![ToolCredentialMetadata {
+                    provider: "newsdata".into(),
+                    primary_present: true,
+                    fallback_present: false,
+                }],
+                setup_required: false,
+                portable_schema_version: 4,
+            });
+            state.backend.tools = Load::Ready(ToolCatalog {
+                tools: vec![ToolDefinition {
+                    id: "fixture".into(),
+                    name: "Fixture tool".into(),
+                    category: "News".into(),
+                    description: "Synthetic tool".into(),
+                    inputs: Vec::new(),
+                    restrictions: String::new(),
+                    timeout_seconds: 1,
+                }],
+            });
+            let mut runtime = Runtime::new(
+                state,
+                app::view,
+                size,
+                Env {
+                    system_dark: true,
+                    scale: 1.0,
+                },
+            );
+            runtime.frame(0.0);
+            runtime.frame(1.0 / 60.0);
+
+            let overview = runtime.find("tool-box-overview-title").unwrap();
+            let catalog = runtime.find("tool-fixture").unwrap();
+            assert_eq!(runtime.find("tool-box-overview-scroll").is_some(), wide);
+            if wide {
+                assert!(overview.0 > catalog.0);
+            } else {
+                assert!(overview.1 < catalog.1);
+            }
+            let (x, y) = runtime.find("tool-key-open-newsdata").unwrap();
+            assert!((0.0..size.0).contains(&x) && (0.0..size.1).contains(&y));
+            runtime.pointer_down(x, y);
+            runtime.pointer_up(x, y);
+            runtime.frame(2.0 / 60.0);
+            assert!(runtime.state.tool_key_dialog);
+            assert_eq!(runtime.state.configuration.tool_provider.text, "newsdata");
+            assert!(runtime.find("tool-key-primary").is_some());
+            assert!(runtime.find("tool-key-fallback").is_some());
+        }
+    }
 }

@@ -15,6 +15,8 @@ python3 scripts/fleetworks_qa_pack.py install \
 
 Use the Embedded companion’s state directory for the selected installation. The pack parent and the state directory must be owned by the current user. The state directory is private. Enable inference after import. To replace a pack, turn inference Off first, import into a new version directory, and then turn it on.
 
+Quick Start reports the active artifact download and the installer reports verification. The companion reports model loading and activation when inference starts. These stages appear in **Backend inference** and Inbox. Download and verification progress comes from the active install in that private profile. The status clears when the installer exits.
+
 The Embedded worker requires Linux Landlock ABI 3 or newer, or macOS Seatbelt. The companion starts it with access to the verified pack and the system loader. If the host lacks the required sandbox, Inbox and Connection settings report that Embedded inference is unsupported on that host. Expand the details for the Landlock requirement. Missing packs, invalid packs, and worker startup failures have their own messages.
 
 The app and companion are released independently of the optional QA archive. Pack construction uses CPU Torch 2.1.0, Rust-BERT 0.22.0, and the cased DistilBERT SQuAD checkpoint. Prepare dependencies on a connected build host. The release smoke runs with an empty model cache and disabled networking.

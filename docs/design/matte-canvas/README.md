@@ -32,7 +32,7 @@ The deep-space backdrop is `#060709`. Build primary surfaces, chrome, cards, con
 
 ![Baseline workstation overview layout](mockups/01-workstation-status.png)
 
-One resources group, a compact client/gateway band and a readiness grid, rendered with Glass Canvas surfaces. The last verified health and freshness are separate. The context rail is omitted when it would duplicate visible information.
+The production Workstation takes its material cues from this reference. Use one compact registration band and three sections for Services, Status checks and Diagnostics. Keep actor search and scoped job activity easy to scan, with health and observation freshness displayed distinctly.
 
 ### Setup Gateway
 

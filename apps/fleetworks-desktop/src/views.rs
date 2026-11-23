@@ -24,7 +24,6 @@ use crate::app::Load;
 use crate::app::Page;
 use crate::app::SeedStage;
 use crate::app::State;
-use crate::app::WorkstationInspector;
 use crate::brain::Association;
 use crate::connection::ConnectionStatus;
 use crate::icons;
@@ -970,32 +969,58 @@ fn registration_status(state: &State, kit: &Kit) -> El {
     }
 }
 
-fn workstation_registration_pill(state: &State, kit: &Kit) -> El {
-    let (label, tone) = if state.registration.context.is_some() {
-        ("Workstation registered", StatusTone::Ok)
+fn workstation_registration_tag(state: &State, kit: &Kit) -> El {
+    let (backend, icon) = if state.is_local_backend() {
+        ("Embedded", &icons::WORKSTATION)
     } else {
+        ("Distributed", &icons::SERVER)
+    };
+    let registration = if state.connected() {
+        state.registration.context.as_ref()
+    } else {
+        None
+    };
+    let (label, tone) = if let Some(context) = registration {
+        (context.registration_id.as_str(), StatusTone::Ok)
+    } else if state.connected() {
         match state.registration.receipt {
             Load::Pending | Load::Loading => ("Registering…", StatusTone::Info),
             Load::Failed(_) => ("Registration failed", StatusTone::Err),
             _ => ("Unregistered", StatusTone::Neutral),
         }
+    } else {
+        ("Unregistered", StatusTone::Neutral)
     };
-    ui_components::status_pill(label, Some(&icons::SHIELD_CHECK), tone, kit).key(
-        if state.registration.context.is_some() {
-            "workstation-registered"
+    rune::row()
+        .key("workstation-registration-tag")
+        .role("status")
+        .label(if registration.is_some() {
+            format!("{backend} registration ID {label}")
         } else {
-            "workstation-registration"
-        },
-    )
-}
-
-fn metric_tone(value: Option<f32>) -> StatusTone {
-    match value {
-        Some(v) if v >= 85.0 => StatusTone::Err,
-        Some(v) if v >= 65.0 => StatusTone::Warn,
-        Some(_) => StatusTone::Ok,
-        None => StatusTone::Neutral,
-    }
+            format!("{backend} · {label}")
+        })
+        .min_w(0.0)
+        .max_w(520.0)
+        .shrink()
+        .min_h(22.0)
+        .center_y()
+        .gap(6.0)
+        .px(8.0)
+        .py(3.0)
+        .radius(6.0)
+        .fill(tone.bg().alpha(kit.c.bg_button_neutral.a))
+        .border(1.0, tone.border())
+        .child(rune::icon(icon, 14.0).color(tone.fg()).a11y_hidden())
+        .child(
+            rune::text(format!("{backend} · {label}"))
+                .min_w(0.0)
+                .shrink()
+                .font(kit.ty.small_medium)
+                .color(tone.fg())
+                .wrap_anywhere()
+                .selectable(registration.is_some())
+                .a11y_hidden(),
+        )
 }
 
 fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -> El {
@@ -1010,18 +1035,12 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
         ConnectionStatus::Failed(_) => ("Offline", StatusTone::Err),
         ConnectionStatus::Disconnected => ("Disconnected", StatusTone::Neutral),
     };
-    let backend = if state.is_local_backend() {
-        "Embedded"
-    } else {
-        "Distributed"
-    };
     let deployment = state
         .connection
         .capabilities
         .as_ref()
         .and_then(|capabilities| capabilities.deployment_id.as_deref())
         .filter(|id| state.connected() && !id.is_empty());
-    let identity = deployment.map_or_else(|| backend.to_owned(), |id| format!("{backend} · {id}"));
     let transport_kind = if state.is_local_backend() {
         "IPC"
     } else if state.connection.origin.text.starts_with("https://") {
@@ -1030,43 +1049,41 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
         "HTTP"
     };
     let mut body = rune::col().gap(10.0).child(
-        rune::row()
+        rune::col()
             .key("workstation-status-header")
+            .role("region")
+            .label("Workstation Status")
             .w_full()
-            .flex_wrap()
-            .center_y()
-            .gap(6.0)
-            .child(
-                heading(identity, kit)
-                    .key("workstation-backend-mode")
-                    .min_w(0.0)
-                    .shrink()
-                    .wrap_anywhere(),
-            )
-            .child(
-                ui_components::status_pill(
-                    format!("{transport_kind} · {}", transport.0),
-                    None,
-                    transport.1,
-                    kit,
-                )
-                .key("connection-status")
-                .label(format!("Transport: {}", transport.0))
-                .description(transport_kind),
-            )
             .child(
                 rune::row()
-                    .key("workstation-registration-state")
-                    .child(workstation_registration_pill(state, kit)),
+                    .w_full()
+                    .min_w(0.0)
+                    .flex_wrap()
+                    .center_y()
+                    .gap(6.0)
+                    .child(workstation_registration_tag(state, kit))
+                    .child(
+                        ui_components::status_pill(
+                            format!("{transport_kind} · {}", transport.0),
+                            None,
+                            transport.1,
+                            kit,
+                        )
+                        .key("connection-status")
+                        .label(format!("Transport: {}", transport.0))
+                        .description(transport_kind),
+                    ),
             ),
     );
-    let wide_dashboard = cx
-        .layout_size("page-content")
-        .is_some_and(|size| size[0] >= 780.0);
+    let mut services = rune::col()
+        .key("workstation-services")
+        .w_full()
+        .gap(8.0)
+        .child(heading("Services", kit).role("heading"));
     if state.connected() {
         if state.registration.context.is_none() {
             if state.can_register() {
-                body = body.child(
+                services = services.child(
                     ActionButton::new("Retry registration")
                         .key("workstation-register")
                         .finish(MetalFinish::Gunmetal)
@@ -1095,7 +1112,7 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                 kit,
             );
             let show_actor_action = issue.is_none() && active_operation.is_none();
-            body = body
+            services = services
                 .child(actor_search_summary_card(
                     state,
                     preferences,
@@ -1104,6 +1121,9 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                     show_actor_action,
                 ))
                 .children(issue.or(active_operation));
+            if state.permission(Permission::ReadWorkstationActivity) {
+                services = services.child(workstation_job_counts(state, preferences, kit));
+            }
         }
         if state.confirm_maintenance_dialog {
             if let Some(confirmation) = &state.maintenance.confirmation {
@@ -1128,26 +1148,8 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                     .build(kit, layers);
             }
         }
-        let strip = if wide_dashboard {
-            rune::row()
-        } else {
-            rune::col()
-        };
-        let metric_strip = strip
-            .key("workstation-metric-strip")
-            .w_full()
-            .gap(10.0)
-            .child(workstation_host_resources(state, preferences, kit, layers).grow(1.0))
-            .child(workstation_job_counts(state, preferences, kit).grow(1.0));
-        body = body
-            .child(metric_strip)
-            .child(crate::readiness_cards::workstation_section(
-                state,
-                preferences,
-                kit,
-            ));
     } else {
-        body = body.child(
+        services = services.child(
             ActionButton::new("Setup Gateway")
                 .key("workstation-setup-gateway")
                 .icon(&icons::KEY)
@@ -1156,11 +1158,20 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                 .build(kit, preferences, pointer_ref),
         );
     }
+    body = body.child(services);
+    if state.connected() {
+        body = body.child(crate::readiness_cards::workstation_section(
+            state,
+            preferences,
+            kit,
+        ));
+    }
 
     let mut diagnostics = rune::col()
         .gap(8.0)
         .key("gateway-backend-card")
-        .child(line(connection_status(state), kit));
+        .child(line(connection_status(state), kit))
+        .children(deployment.map(|id| quiet(format!("Deployment {id}"), kit)));
     if let Load::Failed(error) = &state.registration.receipt {
         diagnostics = diagnostics.child(quiet(error.clone(), kit).role("alert"));
     }
@@ -1203,159 +1214,6 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
         ),
         "workstation-body",
     )
-}
-
-fn workstation_host_resources(
-    state: &State,
-    preferences: ViewPreferences,
-    kit: &Kit,
-    layers: &mut Vec<El>,
-) -> El {
-    let metrics = match &state.host_metrics {
-        Load::Ready(metrics) => Some(metrics),
-        _ => None,
-    };
-    let metric_rows = [
-        (
-            WorkstationInspector::Cpu,
-            "workstation-tile-cpu",
-            "CPU",
-            metrics.and_then(|metrics| metrics.cpu_percent),
-            &icons::CPU,
-        ),
-        (
-            WorkstationInspector::Memory,
-            "workstation-tile-memory",
-            "Memory",
-            metrics.and_then(|metrics| metrics.memory_percent),
-            &icons::MEMORY,
-        ),
-        (
-            WorkstationInspector::Disk,
-            "workstation-tile-disk",
-            "Disk",
-            metrics.and_then(|metrics| metrics.disk_percent),
-            &icons::DISK,
-        ),
-    ];
-    let has_last_known = state.host_metrics_error.is_some()
-        && metric_rows
-            .iter()
-            .any(|(_, _, _, value, _)| metric_percent(*value).is_some());
-    let pending = matches!(state.host_metrics, Load::Pending | Load::Loading);
-    let mut tiles = rune::row().key("host-resources-card").w_full().gap(6.0);
-    for (inspector, key, name, value, glyph) in metric_rows {
-        let valid = metric_percent(value);
-        let description = if valid.is_some() && has_last_known {
-            "Last known API host reading. Open for details."
-        } else {
-            "API host reading. Open for details."
-        };
-        let tile = ui_components::metric_ring_tile(
-            key,
-            name,
-            valid,
-            glyph,
-            metric_tone(valid.map(|value| value as f32)),
-            state.workstation_inspector == Some(inspector),
-            preferences,
-            kit,
-        )
-        .description(description)
-        .min_w(0.0)
-        .grow(1.0)
-        .on_press(move |state: &mut State| state.workstation_inspector = Some(inspector));
-        tiles = tiles.child(tile);
-        if state.workstation_inspector == Some(inspector) {
-            workstation_metric_inspector(state, name, valid, preferences, kit, layers);
-        }
-    }
-    rune::col()
-        .key("workstation-host-metrics")
-        .min_w(0.0)
-        .gap(4.0)
-        .child(
-            rune::row()
-                .center_y()
-                .gap(6.0)
-                .child(heading("API host resources", kit))
-                .children(pending.then(|| {
-                    quiet("Checking", kit)
-                        .key("host-metrics-loading")
-                        .role("status")
-                        .label("Reading API host resources")
-                }))
-                .children(has_last_known.then(|| {
-                    unsynced_glyph(
-                        "host-metrics-unsynced",
-                        "Last known API host readings. Open a metric for details.",
-                        kit,
-                    )
-                })),
-        )
-        .child(tiles)
-}
-
-fn metric_percent(value: Option<f64>) -> Option<f64> {
-    value.filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
-}
-
-fn workstation_metric_inspector(
-    state: &State,
-    name: &str,
-    reading: Option<f64>,
-    preferences: ViewPreferences,
-    kit: &Kit,
-    layers: &mut Vec<El>,
-) {
-    let mut detail = rune::col().gap(8.0).child(line(
-        reading.map_or_else(
-            || "Observed reading: unavailable".to_owned(),
-            |value| format!("Observed reading: {value:.1}%"),
-        ),
-        kit,
-    ));
-    if let Load::Ready(metrics) = &state.host_metrics {
-        detail = detail
-            .children(
-                metrics
-                    .platform
-                    .as_ref()
-                    .map(|platform| quiet(format!("Platform: {platform}"), kit)),
-            )
-            .children(
-                metrics
-                    .chipset
-                    .as_ref()
-                    .map(|chipset| quiet(format!("Architecture: {chipset}"), kit)),
-            );
-    }
-    if let Some(notice) = state.host_metrics_stale_notice() {
-        detail = detail.child(quiet(notice, kit).role("status"));
-    } else if let Load::Failed(error) = &state.host_metrics {
-        detail = detail.child(quiet(error.clone(), kit).role("alert"));
-    }
-    ui_components::modal_prompt(
-        "workstation-telemetry",
-        format!("{name} Telemetry"),
-        "Measurements describe the API host; unreported metrics remain unavailable.",
-        true,
-        440.0,
-        |state: &mut State| state.workstation_inspector = None,
-        detail,
-        Some(
-            ActionButton::new("Close")
-                .finish(MetalFinish::GoldCta)
-                .on_press(|state: &mut State| state.workstation_inspector = None)
-                .build(
-                    kit,
-                    preferences,
-                    (!preferences.matte()).then_some(&state.pointer_offset),
-                ),
-        ),
-        kit,
-        layers,
-    );
 }
 
 fn workstation_job_counts(
@@ -1413,7 +1271,11 @@ fn workstation_job_counts(
                 .grow(1.0)
                 .padding(7.0)
                 .gap(1.0)
-                .child(quiet(name, kit).selectable(false).a11y_hidden())
+                .child(
+                    quiet(format!("{name} jobs"), kit)
+                        .selectable(false)
+                        .a11y_hidden(),
+                )
                 .child(
                     rune::text(value.unwrap_or_else(|| "—".to_owned()))
                         .font(kit.ty.body_medium)
@@ -1430,21 +1292,17 @@ fn workstation_job_counts(
     }
     rune::col()
         .key("workstation-jobs-counts")
+        .role("group")
+        .label("Workstation jobs")
         .min_w(0.0)
         .gap(4.0)
-        .child(
-            rune::row()
-                .center_y()
-                .gap(6.0)
-                .child(heading("Workstation jobs", kit))
-                .children(last_known.then(|| {
-                    unsynced_glyph(
-                        "workstation-jobs-unsynced",
-                        "Last known workstation job counts. Open Jobs & Logs for details.",
-                        kit,
-                    )
-                })),
-        )
+        .children(last_known.then(|| {
+            unsynced_glyph(
+                "workstation-jobs-unsynced",
+                "Last known workstation job counts. Open Jobs & Logs for details.",
+                kit,
+            )
+        }))
         .child(tiles)
 }
 
@@ -2399,10 +2257,8 @@ mod tests {
             }
             assert!(runtime.find("workstation-diagnostics/trigger").is_some());
             assert!(runtime.find("gateway-backend-card").is_none());
-            assert!(
-                runtime.find("workstation-metric-strip").is_none(),
-                "disconnected workstation must hide remote activity and metrics at {size:?}"
-            );
+            assert!(runtime.find("workstation-services").is_some());
+            assert!(runtime.find("workstation-jobs-counts").is_none());
             assert!(!tree.contains("6 checks"));
             assert!(!tree.contains("Workstation activity: registration required"));
             assert!(!tree.contains("Permitted shared backend reads"));
@@ -2455,9 +2311,10 @@ mod tests {
             connected.frame(0.0);
             let connected_tree = connected.accessibility_json().to_string();
             for label in [
-                "Distributed",
+                "Workstation Status",
+                "Services",
+                "Distributed registration ID synthetic-registration",
                 "Transport: Connected",
-                "Workstation registered",
             ] {
                 assert!(
                     connected_tree.contains(label),
@@ -2465,10 +2322,32 @@ mod tests {
                 );
             }
             assert!(connected.find("workstation-status-header").is_some());
-            assert!(connected.find("workstation-metric-strip").is_some());
-            assert!(connected.find("host-resources-card").is_some());
-            assert!(connected.find("workstation-host-metrics/trigger").is_none());
-            let mut clock = 0.0;
+            assert!(connected.find("workstation-services").is_some());
+            assert!(connected.find("workstation-jobs-counts").is_some());
+            assert!(connected.find("host-resources-card").is_none());
+            assert!(connected.find("toolbar-telemetry").is_some());
+
+            connected.update(|state, _| state.navigate(Page::Brain));
+            connected.frame(1.0 / 60.0);
+            let elements = connected.elements();
+            let home = elements
+                .iter()
+                .find(|element| element.key.as_deref() == Some("nav-workstation"))
+                .expect("brand Home button");
+            assert_eq!(home.role, "button");
+            assert_eq!(home.label.as_deref(), Some("Home"));
+            let logo_path = format!("{}/startup-rail-mark-slot", home.path);
+            assert!(elements.iter().any(|element| element.path == logo_path));
+            assert!(connected.find("sidebar-workstation-heading").is_none());
+            connected.update(|_, tx| tx.focus("nav-workstation", true));
+            connected.frame(2.0 / 60.0);
+            connected.key(KeyEvent {
+                key: Key::Enter,
+                mods: Mods::default(),
+            });
+            connected.frame(3.0 / 60.0);
+            assert_eq!(connected.state.page, Page::Workstation);
+            let mut clock = 3.0 / 60.0;
             assert!(connected.find("gateway-backend-card").is_none());
             click_within(
                 &mut connected,
@@ -2477,6 +2356,10 @@ mod tests {
                 &mut clock,
             );
             assert!(connected.find("gateway-backend-card").is_some());
+            assert!(connected
+                .accessibility_json()
+                .to_string()
+                .contains("Deployment synthetic-deployment"));
         }
     }
 

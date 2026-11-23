@@ -778,6 +778,18 @@ fn dismiss_area(key: &'static str) -> El {
         .on_press_tx(State::close_inbox)
 }
 
+pub(crate) fn enter_from_below(el: El, preferences: ViewPreferences) -> El {
+    if preferences.reduced_motion {
+        return el;
+    }
+    let mut transition = crate::app::surface_transition(false, rune::Transition::offset(0.0, 6.0));
+    transition.springs.exit = rune::Spring::NONE;
+    // Only insertion moves. The drawer still snaps retained layout and nested controls.
+    el.animated_changes()
+        .motion(rune::Spring::NONE)
+        .transition(transition)
+}
+
 fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
     let inbox = &state.inbox;
     let close = rune_kit::Button::new("Close")
@@ -829,7 +841,7 @@ fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
         }
         rows = rows.child(group_view(&group, state, kit, preferences));
     }
-    let exchange = crate::inbox_qa::exchange(state, kit);
+    let exchange = crate::inbox_qa::exchange(state, kit, preferences);
     let stick_bottom = exchange.is_some();
     let list = rune::col()
         .key("inbox-content")
@@ -841,6 +853,13 @@ fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
             rune::spacer()
                 .key("inbox-chat-space")
                 .min_h(8.0)
+                .a11y_hidden()
+        }))
+        .children(stick_bottom.then(|| {
+            rune::rule(1.0, theme::hex(theme::BORDER_CONTROL))
+                .key("inbox-chat-divider")
+                .w_full()
+                .mb(8.0)
                 .a11y_hidden()
         }))
         .children(exchange);
@@ -997,13 +1016,19 @@ fn group_view(group: &Group<'_>, state: &State, kit: &Kit, preferences: ViewPref
     } else {
         theme::BORDER_SUBTLE
     });
-    let card = rune::col().key("card").w_full().radius(8.0).child(header);
+    let card = rune::col()
+        .key("card")
+        .w_full()
+        .radius(8.0)
+        .instant_changes()
+        .transition(rune::Transition::none())
+        .child(header);
     // The popover samples the backdrop once. Its stacked cards share the elevated tint
     // and rim without repeatedly blurring the same scene.
     let mut card = material::glass(card, GlassSurface::Overlay, preferences).backdrop_blur(0.0);
     if expanded {
         for item in &group.items {
-            card = card.child(row(item, state, kit));
+            card = card.child(row(item, state, kit, preferences));
         }
     }
     let mut entry = rune::col().key(key).w_full().child(card);
@@ -1027,7 +1052,11 @@ fn group_view(group: &Group<'_>, state: &State, kit: &Kit, preferences: ViewPref
             );
         }
     }
-    entry
+    if expanded {
+        entry
+    } else {
+        enter_from_below(entry, preferences)
+    }
 }
 
 fn status_dot(tone: StatusTone) -> El {
@@ -1038,17 +1067,21 @@ fn status_dot(tone: StatusTone) -> El {
         .a11y_hidden()
 }
 
-fn row(item: &Item, state: &State, kit: &Kit) -> El {
+fn row(item: &Item, state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
     let id = item.id;
     let expanded = state.inbox.selected == Some(id);
     let row_key = format!("inbox-item-{id}-row");
     let toggle_key = row_key.clone();
     let age = age_label(state.clock, item.at);
-    let mut entry = rune::col()
+    let entry = rune::col()
         .key(format!("inbox-item-{id}"))
         .w_full()
         .px(10.0)
-        .border_sides([1.0, 0.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE))
+        .border_sides([1.0, 0.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE));
+    let mut content = rune::col()
+        .w_full()
+        .instant_changes()
+        .transition(rune::Transition::none())
         .child(
             rune::row()
                 .key(row_key)
@@ -1102,7 +1135,7 @@ fn row(item: &Item, state: &State, kit: &Kit) -> El {
                 ),
         );
     if !expanded {
-        return entry;
+        return enter_from_below(entry.child(content), preferences);
     }
     let action = item.topic.action().filter(|_| {
         !matches!(item.topic, Topic::Job(_))
@@ -1146,7 +1179,7 @@ fn row(item: &Item, state: &State, kit: &Kit) -> El {
                 .key(format!("inbox-item-{id}-action")),
         )
     });
-    entry = entry.child(
+    content = content.child(
         rune::col()
             .key(format!("inbox-item-{id}-detail"))
             .gap(5.0)
@@ -1160,7 +1193,7 @@ fn row(item: &Item, state: &State, kit: &Kit) -> El {
             )
             .children(action),
     );
-    entry
+    enter_from_below(entry.child(content), preferences)
 }
 
 fn seed_drawer(inbox: &mut Inbox, now: f64) {
@@ -1511,6 +1544,43 @@ mod tests {
         runtime.elements().into_iter().any(|element| {
             element.key.as_deref() == Some(key) && element.focused && !element.exiting
         })
+    }
+
+    #[test]
+    fn new_notification_rises_in_its_slot_without_moving_existing_rows() {
+        for reduced_motion in [false, true] {
+            let mut state = crate::tests::registered_fixture();
+            state.accessibility.fixture_override =
+                Some(crate::accessibility::FixtureAccessibility {
+                    reduced_motion,
+                    ..Default::default()
+                });
+            state.seed_inbox_qa_drawer_fixture();
+            state.inbox.expanded.insert(Topic::Connection);
+            let mut runtime = runtime(state, (640.0, 480.0));
+            let first = runtime.presented("inbox-item-1-row").unwrap().0;
+            runtime.update(|state, _| {
+                state.inbox.push(
+                    Topic::Connection,
+                    "Connection".into(),
+                    "Connecting".into(),
+                    "The workstation started connecting to the backend.".into(),
+                    state.clock + 1.0,
+                    StatusTone::Info,
+                );
+            });
+            runtime.frame(0.0);
+            let entering = runtime.presented("inbox-item-2-row").unwrap().0;
+            assert_eq!(runtime.presented("inbox-item-1-row").unwrap().0, first);
+            runtime.frame(0.5);
+            let settled = runtime.presented("inbox-item-2-row").unwrap().0;
+            assert_eq!(runtime.presented("inbox-item-1-row").unwrap().0, first);
+            if reduced_motion {
+                assert_eq!(entering, settled);
+            } else {
+                assert!(entering[1] > settled[1] + 1.0);
+            }
+        }
     }
 
     #[test]

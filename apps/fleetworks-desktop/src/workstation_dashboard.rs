@@ -636,7 +636,7 @@ impl State {
         }
     }
 
-    /// Text for the stale marker, or `None` while the tiles are current.
+    /// Observation age and refresh error for retained toolbar telemetry.
     pub fn host_metrics_stale_notice(&self) -> Option<String> {
         let error = self.host_metrics_error.as_ref()?;
         let age = self

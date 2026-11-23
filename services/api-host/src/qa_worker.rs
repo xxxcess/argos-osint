@@ -28,6 +28,7 @@ use argos_osint_api::inbox_qa::CancellationToken;
 use argos_osint_api::inbox_qa::QaInference;
 use argos_osint_api::inbox_qa::QaInferenceFuture;
 use fleetworks_contracts::chat::QaAvailabilityReason;
+use fleetworks_contracts::chat::QaStartupStage;
 use fleetworks_contracts::qa_worker::qa_frame_len;
 use fleetworks_contracts::qa_worker::QaWorkerCommand;
 use fleetworks_contracts::qa_worker::QaWorkerEvent;
@@ -48,6 +49,7 @@ use tokio::net::UnixStream;
 use tokio::process::Child;
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
@@ -193,7 +195,7 @@ impl QaWorkerSupervisor {
             .transpose()
     }
 
-    async fn connect(&self) -> Result<WorkerSession> {
+    async fn connect(&self, progress: &(dyn Fn(QaStartupStage) + Sync)) -> Result<WorkerSession> {
         match &self.target {
             WorkerTarget::Distributed(socket) => {
                 let mut session = WorkerSession::socket(socket)
@@ -207,12 +209,14 @@ impl QaWorkerSupervisor {
             }
             WorkerTarget::EmbeddedState(state_dir) => {
                 let state_dir = state_dir.clone();
+                let (pointer_loaded, pointer_observed) = oneshot::channel();
                 let mut stage = WarmStage::new("pack_verification");
-                let verified = tokio::task::spawn_blocking(move || {
+                let verification = tokio::task::spawn_blocking(move || {
                     let pointer = match override_pack().map_err(pack_pointer_error)? {
                         Some(pointer) => pointer,
                         None => load_installed_pointer(&state_dir).map_err(pack_pointer_error)?,
                     };
+                    let _ = pointer_loaded.send(());
                     let invalid_pack = || WarmFailure(QaAvailabilityReason::PackInvalid);
                     let pack = verify_pack(&pointer).map_err(|error| {
                         warm_error("pack_verification", error.context(invalid_pack()))
@@ -221,8 +225,11 @@ impl QaWorkerSupervisor {
                         warm_error("sandbox_state_boundary", error.context(invalid_pack()))
                     })?;
                     Ok::<_, anyhow::Error>(pack)
-                })
-                .await;
+                });
+                if pointer_observed.await.is_ok() {
+                    progress(QaStartupStage::VerifyingPack);
+                }
+                let verified = verification.await;
                 stage.finish();
                 let pack = verified.map_err(|_| {
                     warm_error(
@@ -230,6 +237,7 @@ impl QaWorkerSupervisor {
                         anyhow!("QA pack verification did not finish"),
                     )
                 })??;
+                progress(QaStartupStage::LoadingModel);
                 WorkerSession::child(&pack)
             }
         }
@@ -239,12 +247,13 @@ impl QaWorkerSupervisor {
         &self,
         stopped: &mut watch::Receiver<()>,
         cancel: &CancellationToken,
+        progress: &(dyn Fn(QaStartupStage) + Sync),
     ) -> Result<WorkerSession> {
         let mut session = tokio::select! {
             biased;
             _ = stopped.changed() => return Err(anyhow!("QA worker is stopping")),
             _ = cancel.cancelled() => return Err(anyhow!("QA request was canceled")),
-            result = timeout(WARM_LIMIT, self.connect()) => result??,
+            result = timeout(WARM_LIMIT, self.connect(progress)) => result??,
         };
         let child_pid = session.child_id();
         let mut stage = WarmStage::new("worker_ready_frame");
@@ -284,6 +293,7 @@ impl QaWorkerSupervisor {
         slot: &mut Option<WorkerSession>,
         stopped: &mut watch::Receiver<()>,
         cancel: &CancellationToken,
+        progress: &(dyn Fn(QaStartupStage) + Sync),
     ) -> Result<()> {
         if let Some(session) = slot.as_mut() {
             let child_pid = session.child_id();
@@ -301,19 +311,25 @@ impl QaWorkerSupervisor {
         if let Some(old) = slot.take() {
             let _ = old.stop().await;
         }
-        *slot = Some(self.connect_ready(stopped, cancel).await?);
+        *slot = Some(self.connect_ready(stopped, cancel, progress).await?);
         Ok(())
+    }
+
+    pub(crate) async fn warm_with_progress(
+        &self,
+        progress: &(dyn Fn(QaStartupStage) + Sync),
+    ) -> Result<()> {
+        let mut stopped = self.stopping.subscribe();
+        let mut slot = self.session.lock().await;
+        let cancel = CancellationToken::new();
+        self.ensure_ready(&mut slot, &mut stopped, &cancel, progress)
+            .await
     }
 }
 
 impl QaInference for QaWorkerSupervisor {
     fn warm(&self) -> QaInferenceFuture<'_> {
-        Box::pin(async move {
-            let mut stopped = self.stopping.subscribe();
-            let mut slot = self.session.lock().await;
-            let cancel = CancellationToken::new();
-            self.ensure_ready(&mut slot, &mut stopped, &cancel).await
-        })
+        Box::pin(async move { self.warm_with_progress(&|_| {}).await })
     }
 
     fn ask(
@@ -326,7 +342,8 @@ impl QaInference for QaWorkerSupervisor {
             request.validate()?;
             let mut stopped = self.stopping.subscribe();
             let mut slot = self.session.lock().await;
-            self.ensure_ready(&mut slot, &mut stopped, &cancel).await?;
+            self.ensure_ready(&mut slot, &mut stopped, &cancel, &|_| {})
+                .await?;
             let session = slot
                 .as_mut()
                 .ok_or_else(|| anyhow!("QA worker unavailable"))?;

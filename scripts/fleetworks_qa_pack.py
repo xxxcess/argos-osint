@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import gzip
 import hashlib
 import json
@@ -41,6 +42,51 @@ MAX_MANIFEST = 64 * 1024
 def check(condition: bool, message: str) -> None:
     if not condition:
         raise ValueError(message)
+
+
+def private_state_dir(path: Path) -> Path:
+    info = path.lstat()
+    check(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
+          and not info.st_mode & 0o077, "companion state directory must be private and owned")
+    return path.resolve(strict=True)
+
+
+@contextmanager
+def pack_progress(state: Path | None, stage: str):
+    """Expose an advisory installation stage to this profile's running companion."""
+    if state is None:
+        yield
+        return
+    check(stage in {"downloading_pack", "verifying_pack"}, "invalid QA pack installation stage")
+    state = private_state_dir(state)
+    marker = state / "qa-pack-progress.json"
+    identity = None
+    try:
+        with tempfile.NamedTemporaryFile("w", dir=state, prefix=".qa-pack-progress-",
+                                         delete=False) as file:
+            staged = Path(file.name)
+            try:
+                json.dump({"stage": stage}, file)
+                file.write("\n")
+                file.flush()
+                info = os.fstat(file.fileno())
+                os.replace(staged, marker)
+                identity = (info.st_dev, info.st_ino)
+            finally:
+                staged.unlink(missing_ok=True)
+    except OSError:
+        # A progress display should not change archive verification or activation.
+        pass
+    try:
+        yield
+    finally:
+        if identity is not None:
+            try:
+                current = marker.lstat()
+                if (current.st_dev, current.st_ino) == identity:
+                    marker.unlink()
+            except OSError:
+                pass
 
 
 def sha256(path: Path) -> str:
@@ -219,13 +265,8 @@ def install(args: argparse.Namespace) -> dict:
     check(args.output.name not in {"", ".", ".."}, "QA pack requires a new installation directory")
     target = parent / args.output.name
     check(not target.exists() and not target.is_symlink(), "QA pack destination already exists")
-    state = args.state_dir
-    if state is not None:
-        info = state.lstat()
-        check(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
-              and not info.st_mode & 0o077, "companion state directory must be private and owned")
-        state = state.resolve(strict=True)
-    with tempfile.TemporaryDirectory(prefix=".qa-import-", dir=parent) as tmp:
+    state = private_state_dir(args.state_dir) if args.state_dir is not None else None
+    with pack_progress(state, "verifying_pack"), tempfile.TemporaryDirectory(prefix=".qa-import-", dir=parent) as tmp:
         # Extract the same bytes that were verified, even if the source archive is replaced.
         archive = Path(tmp) / "archive.tar.gz"
         with args.archive.open("rb") as source, archive.open("xb") as output:

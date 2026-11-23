@@ -1,40 +1,38 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="native-workstation-layout-title native-workstation-layout-desc">
 <title id="native-workstation-layout-title">Native workstation shell and settings composition</title>
-<desc id="native-workstation-layout-desc">A toolbar with a command button, an Inbox bell with an unread badge and an Assistant toggle. A compact left operations sidebar and the selected destination in the central scroll area. On wide windows a read-only context rail sits at the right; when the Assistant is turned on it docks there instead, with a pinned context, history and a glass composer. The Inbox popover opens below the toolbar bell and preserves the selected destination and Assistant. Jobs and Logs shows a paged list beside the selected job. Workstation Settings opens a centered category and content dialog. Narrow windows hide the right panel while keeping the same controls.</desc>
+<desc id="native-workstation-layout-desc">A toolbar with telemetry, an Inbox bell and an optional Assistant toggle. The brand avatar opens Workstation Status from the rail. The central scroll area groups Services, Status checks and Diagnostics. On wide windows a read-only context rail sits at the right; when the Assistant is turned on it docks there instead, with a pinned context, history and a glass composer. The Inbox popover opens below the toolbar bell and preserves the selected destination and Assistant. Jobs and Logs shows a paged list beside the selected job. Workstation Settings opens a centered category and content dialog. Narrow windows hide the right panel while keeping the same controls.</desc>
 <style>text{font-family:Geist,Arial,sans-serif;fill:#242424}.zone{font-size:13px;letter-spacing:1.2px;fill:#666}.label{font-size:20px;font-weight:600}.note{font-size:15px;fill:#444}.small{font-size:13px;fill:#666}.node{fill:#fff;stroke:#aaa;stroke-width:1}.focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}.lane{fill:#fafafa;stroke:#ddd;stroke-width:1}.pill{fill:#f4f4f4;stroke:#ccc;stroke-width:1}</style>
 <rect width="1200" height="720" fill="#fff"/>
 <rect x="32" y="38" width="1136" height="624" rx="6" fill="#fff" stroke="#777"/>
 <path d="M 32 98 H 1168 M 262 98 V 662 M 942 98 V 662" stroke="#bbb"/>
-<text x="52" y="72" class="label">Gateway status</text>
-<text x="290" y="72" class="note">Selected destination / resource scope / activity</text>
-<text x="880" y="72" class="small">Command · Inbox bell · Assistant toggle</text>
+<text x="880" y="72" class="small">Telemetry · Inbox bell · Assistant</text>
 <text x="52" y="129" class="zone">OPERATIONS SIDEBAR</text>
 <rect x="48" y="144" width="196" height="36" rx="6" class="focus"/>
-<text x="60" y="168" class="note">Workstation Status</text>
+<text x="60" y="168" class="note">Brand avatar · Home</text>
 <text x="52" y="209" class="zone">OPERATIONS</text>
 <text x="62" y="242" class="note">News Cycles</text>
 <text x="62" y="279" class="note">Brain Search</text>
-<text x="62" y="316" class="note">OSINT Tools</text>
+<text x="62" y="316" class="note">Tool Box</text>
 <text x="62" y="353" class="note">Model Assignments</text>
 <text x="62" y="390" class="note">Jobs &amp; Logs</text>
 <path d="M 48 600 H 244" stroke="#ddd"/>
 <text x="62" y="632" class="note">Settings</text>
 <text x="290" y="129" class="zone">SELECTED DESTINATION · SCROLLS INDEPENDENTLY</text>
 <rect x="282" y="144" width="640" height="168" rx="6" class="node"/>
-<text x="302" y="177" class="label">Workstation Status</text>
-<text x="302" y="208" class="note">Backend identity, transport and registration</text>
-<text x="302" y="237" class="small">First actionable issue → one guarded next step</text>
+<text x="302" y="177" class="note">Embedded · Registration ID</text>
+<text x="302" y="211" class="label">Services</text>
+<text x="302" y="237" class="note">Actor search and workstation jobs</text>
 <rect x="302" y="256" width="190" height="36" rx="6" class="pill"/>
 <text x="319" y="280" class="small">Seed actors…</text>
-<text x="520" y="280" class="small">CPU · memory · disk | queued · running · retrying</text>
+<text x="520" y="280" class="small">Jobs · Queued · Running · Retrying</text>
 <rect x="282" y="330" width="640" height="196" rx="6" class="node"/>
-<text x="302" y="362" class="label">Destination records</text>
-<text x="302" y="391" class="note">Compact bounded rows, selected detail and next-page control</text>
+<text x="302" y="362" class="label">Status checks</text>
+<text x="302" y="391" class="note">Service · Status · Action</text>
 <path d="M 302 408 H 902 M 302 446 H 902 M 302 484 H 902" stroke="#ddd"/>
-<text x="302" y="430" class="small">Status checks · Service | Status | Action</text>
-<text x="302" y="468" class="small">Status checks · Service | Status | Action</text>
-<text x="302" y="506" class="small">Status checks · Service | Status | Action</text>
-<text x="290" y="574" class="note">Jobs &amp; Logs: paged list beside the selected job, stacked on narrow windows</text>
+<text x="302" y="430" class="small">Actor search · Needs data</text>
+<text x="302" y="468" class="small">Gateway · Ready</text>
+<text x="302" y="506" class="small">Open a check for the observation and next action</text>
+<text x="302" y="574" class="label">Diagnostics</text>
 <text x="966" y="129" class="zone">CONTEXT RAIL OR ASSISTANT</text>
 <rect x="958" y="144" width="194" height="280" rx="6" class="lane"/>
 <text x="974" y="178" class="label">Overview</text>

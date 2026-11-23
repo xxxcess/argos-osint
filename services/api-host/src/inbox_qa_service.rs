@@ -17,7 +17,7 @@ use chrono::Utc;
 use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::QA_MAX_FINDINGS;
 use fleetworks_contracts::chat::QA_MAX_WORDS;
-use fleetworks_contracts::chat::{QaAvailabilityReason, QaFinding, QaTurnState};
+use fleetworks_contracts::chat::{QaAvailabilityReason, QaFinding, QaStartupStage, QaTurnState};
 use fleetworks_contracts::qa_worker::{QaWorkerEvent, QaWorkerOutcome, QaWorkerSequence};
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
@@ -196,6 +196,9 @@ impl Executor {
                             self.record_availability(setting.generation, None);
                             tracing::info!(qa_replica_stage = "ready", "Inbox QA replica ready");
                         } else {
+                            if let Some(availability) = &self.availability {
+                                availability.clear_stage(setting.generation);
+                            }
                             self.unload().await;
                         }
                     }
@@ -271,7 +274,12 @@ impl Executor {
         if !self.renew_replica(generation, false, "warm_lease").await {
             return false;
         }
-        let warm = timeout(WARM_TIMEOUT, self.model.warm());
+        let progress = |stage| {
+            if let Some(availability) = &self.availability {
+                availability.record_stage(generation, stage);
+            }
+        };
+        let warm = timeout(WARM_TIMEOUT, self.model.warm_with_progress(&progress));
         tokio::pin!(warm);
         let mut next = Instant::now() + CHECK;
         loop {
@@ -279,7 +287,10 @@ impl Executor {
                 () = stop.cancelled() => return false,
                 result = &mut warm => {
                     match result {
-                        Ok(Ok(())) => return self.renew_replica(generation, true, "ready_lease").await,
+                        Ok(Ok(())) => {
+                            progress(QaStartupStage::Activating);
+                            return self.renew_replica(generation, true, "ready_lease").await;
+                        }
                         Ok(Err(error)) => {
                             self.record_availability(generation, Some(crate::qa_worker::availability_reason(&error)));
                             tracing::warn!(qa_replica_stage = "warm_model", "Inbox QA model did not warm");

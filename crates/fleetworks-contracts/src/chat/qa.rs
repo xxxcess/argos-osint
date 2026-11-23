@@ -41,6 +41,17 @@ pub enum QaPhase {
     Unavailable,
 }
 
+/// The work currently preparing the optional Embedded inference model.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaStartupStage {
+    DownloadingPack,
+    VerifyingPack,
+    LoadingModel,
+    Activating,
+}
+
 /// Redacted recovery category for an unavailable Embedded inference worker.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,6 +79,9 @@ pub struct QaSettings {
     /// Present only when the selected Embedded companion diagnoses unavailability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub availability_reason: Option<QaAvailabilityReason>,
+    /// Optional progress from the private Embedded installer or current worker startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_stage: Option<QaStartupStage>,
 }
 
 impl QaSettings {
@@ -87,6 +101,7 @@ impl QaSettings {
             generation,
             can_manage,
             availability_reason: None,
+            startup_stage: None,
         }
     }
 }
@@ -448,5 +463,22 @@ mod tests {
                 settings
             );
         }
+    }
+
+    #[test]
+    fn embedded_startup_stage_is_optional_and_typed() {
+        let mut settings = QaSettings::new(false, QaPhase::Off, 1, 1, true);
+        let old = serde_json::to_value(settings).unwrap();
+        assert!(old.get("startup_stage").is_none());
+        assert_eq!(serde_json::from_value::<QaSettings>(old).unwrap(), settings);
+
+        settings.startup_stage = Some(QaStartupStage::DownloadingPack);
+        let current = serde_json::to_value(settings).unwrap();
+        assert_eq!(current["startup_stage"], "downloading_pack");
+        assert_eq!(current["phase"], "off");
+        assert_eq!(
+            serde_json::from_value::<QaSettings>(current).unwrap(),
+            settings
+        );
     }
 }

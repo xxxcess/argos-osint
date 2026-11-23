@@ -7,6 +7,7 @@ mod readiness;
 pub use readiness::validated_summary_finding;
 
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -21,9 +22,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use fleetworks_contracts::chat::{
     ChatSourceKind, ChatSourceReference, QaAvailabilityReason, QaCancelRequest, QaEventPage,
-    QaEventQuery, QaFinding, QaPhase, QaSettings, QaSettingsUpdate, QaTurn, QaTurnNotice,
-    QaTurnRequest, QA_CANCEL_PATH, QA_EVENTS_PATH, QA_EVIDENCE_HEADER, QA_EVIDENCE_VERSION,
-    QA_LATEST_PATH, QA_SETTINGS_PATH, QA_TURNS_PATH,
+    QaEventQuery, QaFinding, QaPhase, QaSettings, QaSettingsUpdate, QaStartupStage, QaTurn,
+    QaTurnNotice, QaTurnRequest, QA_CANCEL_PATH, QA_EVENTS_PATH, QA_EVIDENCE_HEADER,
+    QA_EVIDENCE_VERSION, QA_LATEST_PATH, QA_SETTINGS_PATH, QA_TURNS_PATH,
 };
 use fleetworks_contracts::context::{CredentialPurpose, MutationContext, Permission};
 use fleetworks_contracts::qa_worker::{QaPassage, QaWorkerEvent, QaWorkerRequest};
@@ -70,14 +71,20 @@ impl Default for CancellationToken {
     }
 }
 
-/// The selected Embedded companion's redacted startup diagnosis.
+/// The selected Embedded companion's redacted startup observation.
 #[derive(Clone)]
-pub struct QaRuntimeAvailability(watch::Sender<Option<AvailabilityFailure>>);
+pub struct QaRuntimeAvailability(watch::Sender<Option<GenerationAvailability>>);
 
 #[derive(Clone, Copy)]
-struct AvailabilityFailure {
+struct GenerationAvailability {
     generation: i64,
-    reason: Option<QaAvailabilityReason>,
+    observation: Option<StartupObservation>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartupObservation {
+    Progress(QaStartupStage),
+    Failure(QaAvailabilityReason),
 }
 
 impl Default for QaRuntimeAvailability {
@@ -89,18 +96,43 @@ impl Default for QaRuntimeAvailability {
 impl QaRuntimeAvailability {
     /// Report a failure or clear it after successful startup for an enablement generation.
     pub fn record(&self, generation: i64, reason: Option<QaAvailabilityReason>) {
-        self.0.send_modify(|failure| {
-            if failure.is_none_or(|previous| previous.generation <= generation) {
-                *failure = Some(AvailabilityFailure { generation, reason });
+        self.publish(generation, reason.map(StartupObservation::Failure));
+    }
+
+    /// Report progress of the current supervised worker startup attempt.
+    pub fn record_stage(&self, generation: i64, stage: QaStartupStage) {
+        self.publish(generation, Some(StartupObservation::Progress(stage)));
+    }
+
+    /// Clear abandoned progress while preserving the latest startup diagnosis.
+    pub fn clear_stage(&self, generation: i64) {
+        self.0.send_modify(|current| {
+            if let Some(current) = current.as_mut() {
+                if current.generation == generation
+                    && matches!(current.observation, Some(StartupObservation::Progress(_)))
+                {
+                    current.observation = None;
+                }
             }
         });
     }
 
-    fn reason(&self, generation: i64) -> Option<QaAvailabilityReason> {
+    fn publish(&self, generation: i64, observation: Option<StartupObservation>) {
+        self.0.send_modify(|current| {
+            if current.is_none_or(|previous| previous.generation <= generation) {
+                *current = Some(GenerationAvailability {
+                    generation,
+                    observation,
+                });
+            }
+        });
+    }
+
+    fn observe(&self, generation: i64) -> Option<StartupObservation> {
         self.0
             .borrow()
-            .filter(|failure| failure.generation == generation)
-            .and_then(|failure| failure.reason)
+            .filter(|current| current.generation == generation)
+            .and_then(|current| current.observation)
     }
 }
 
@@ -466,15 +498,22 @@ async fn settings_value(
     setting: store::Setting,
     availability: Option<&QaRuntimeAvailability>,
 ) -> Result<QaSettings, ApiError> {
-    let reason = availability.and_then(|availability| availability.reason(setting.generation));
+    let observation =
+        availability.and_then(|availability| availability.observe(setting.generation));
+    let (startup_stage, reason) = match observation {
+        Some(StartupObservation::Progress(stage)) => (Some(stage), None),
+        Some(StartupObservation::Failure(reason)) => (None, Some(reason)),
+        None => (None, None),
+    };
     let phase = if setting.enabled {
         if store::replica_present(&state.repo, setting.generation)
             .await
             .map_err(storage_error)?
         {
             QaPhase::Ready
-        } else if reason.is_none()
-            && chrono::Utc::now().timestamp_millis() - setting.changed_at_ms < 15_000
+        } else if startup_stage.is_some()
+            || reason.is_none()
+                && chrono::Utc::now().timestamp_millis() - setting.changed_at_ms < 15_000
         {
             QaPhase::Starting
         } else {
@@ -488,6 +527,16 @@ async fn settings_value(
     } else {
         QaPhase::Off
     };
+    let startup_stage = match phase {
+        QaPhase::Starting if startup_stage.is_some() => startup_stage,
+        QaPhase::Off | QaPhase::Starting | QaPhase::Unavailable if availability.is_some() => {
+            match state.workspace_root.as_deref() {
+                Some(root) => pack_progress(root).await,
+                None => None,
+            }
+        }
+        _ => None,
+    };
     context.revalidate(&state.repo).await?;
     let mut settings = QaSettings::new(
         setting.enabled,
@@ -499,7 +548,71 @@ async fn settings_value(
     if phase == QaPhase::Unavailable {
         settings.availability_reason = reason;
     }
+    settings.startup_stage = startup_stage;
     Ok(settings)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn pack_progress(root: &Path) -> Option<QaStartupStage> {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || read_pack_progress(&root))
+        .await
+        .ok()
+        .flatten()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+async fn pack_progress(_root: &Path) -> Option<QaStartupStage> {
+    None
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn read_pack_progress(root: &Path) -> Option<QaStartupStage> {
+    use std::fs::{self, OpenOptions};
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Marker {
+        stage: QaStartupStage,
+    }
+
+    const MAX_BYTES: u64 = 128;
+    const MAX_AGE: Duration = Duration::from_secs(15 * 60);
+
+    // SAFETY: geteuid has no arguments or memory side effects.
+    let uid = unsafe { libc::geteuid() };
+    let directory = fs::symlink_metadata(root).ok()?;
+    if !directory.is_dir() || directory.uid() != uid || directory.mode() & 0o777 != 0o700 {
+        return None;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(root.join("qa-pack-progress.json"))
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file()
+        || metadata.uid() != uid
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.nlink() != 1
+        || !(1..=MAX_BYTES).contains(&metadata.len())
+        || metadata.modified().ok()?.elapsed().ok()? > MAX_AGE
+    {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return None;
+    }
+    let marker: Marker = serde_json::from_slice(&bytes).ok()?;
+    matches!(
+        marker.stage,
+        QaStartupStage::DownloadingPack | QaStartupStage::VerifyingPack
+    )
+    .then_some(marker.stage)
 }
 
 pub(crate) async fn settings_request(
@@ -1172,25 +1285,82 @@ mod tests {
     #[test]
     fn reports_only_the_current_embedded_enablement_generation() {
         let availability = QaRuntimeAvailability::default();
-        assert_eq!(availability.reason(1), None);
+        assert_eq!(availability.observe(1), None);
 
         let supervisor = availability.clone();
         supervisor.record(1, Some(QaAvailabilityReason::PackMissing));
         assert_eq!(
-            availability.reason(1),
-            Some(QaAvailabilityReason::PackMissing)
+            availability.observe(1),
+            Some(StartupObservation::Failure(
+                QaAvailabilityReason::PackMissing
+            ))
         );
-        assert_eq!(availability.reason(2), None);
+        assert_eq!(availability.observe(2), None);
 
-        supervisor.record(2, Some(QaAvailabilityReason::SandboxUnsupported));
+        supervisor.record_stage(2, QaStartupStage::LoadingModel);
         supervisor.record(1, Some(QaAvailabilityReason::WorkerStartFailed));
         assert_eq!(
-            availability.reason(2),
-            Some(QaAvailabilityReason::SandboxUnsupported)
+            availability.observe(2),
+            Some(StartupObservation::Progress(QaStartupStage::LoadingModel))
         );
-        assert_eq!(availability.reason(1), None);
+        assert_eq!(availability.observe(1), None);
+        supervisor.clear_stage(2);
+        assert_eq!(availability.observe(2), None);
 
+        supervisor.record(2, Some(QaAvailabilityReason::SandboxUnsupported));
+        supervisor.clear_stage(2);
+        assert_eq!(
+            availability.observe(2),
+            Some(StartupObservation::Failure(
+                QaAvailabilityReason::SandboxUnsupported
+            ))
+        );
         supervisor.record(2, None);
-        assert_eq!(availability.reason(2), None);
+        assert_eq!(availability.observe(2), None);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn pack_progress_reads_only_private_fresh_installer_stages() {
+        use std::fs;
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        use std::time::SystemTime;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(read_pack_progress(root), None);
+
+        let marker = root.join("qa-pack-progress.json");
+        fs::write(&marker, br#"{"stage":"downloading_pack"}"#).unwrap();
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(read_pack_progress(root), None);
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_pack_progress(root),
+            Some(QaStartupStage::DownloadingPack)
+        );
+
+        fs::write(&marker, br#"{"stage":"verifying_pack"}"#).unwrap();
+        assert_eq!(
+            read_pack_progress(root),
+            Some(QaStartupStage::VerifyingPack)
+        );
+        fs::write(&marker, br#"{"stage":"loading_model"}"#).unwrap();
+        assert_eq!(read_pack_progress(root), None);
+
+        fs::write(&marker, br#"{"stage":"downloading_pack"}"#).unwrap();
+        let previous = root.join("previous-progress.json");
+        fs::rename(&marker, &previous).unwrap();
+        symlink(&previous, &marker).unwrap();
+        assert_eq!(read_pack_progress(root), None);
+        fs::remove_file(&marker).unwrap();
+        fs::rename(&previous, &marker).unwrap();
+
+        fs::File::open(&marker)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(16 * 60))
+            .unwrap();
+        assert_eq!(read_pack_progress(root), None);
     }
 }

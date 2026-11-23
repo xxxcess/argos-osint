@@ -238,9 +238,9 @@ fn material_and_matte_preserve_interactive_hit_bounds_and_a11y_on_status_and_see
         (
             Page::Workstation,
             vec![
-                "workstation-tile-cpu",
-                "workstation-tile-memory",
-                "workstation-tile-disk",
+                "nav-workstation",
+                "status-checks-toggle/trigger",
+                "workstation-diagnostics/trigger",
             ],
         ),
         (

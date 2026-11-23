@@ -66,6 +66,9 @@ struct Args {
     /// Private state directory for `--role local-ipc` (enforced `0o700`).
     #[arg(long, required_if_eq("role", "local-ipc"))]
     state_dir: Option<std::path::PathBuf>,
+    /// Inherited child endpoint of the private Embedded Unix socket pair.
+    #[arg(long = "ipc-fd", required_if_eq("role", "local-ipc"))]
+    local_ipc_fd: Option<i32>,
     /// Optional canonical absolute path to a supervised NLP helper command.
     #[arg(long)]
     nlp_cmd: Option<std::path::PathBuf>,
@@ -82,7 +85,7 @@ struct Args {
 enum Role {
     /// Existing local API host with its background workers.
     Combined,
-    /// Run the single-process embedded backend over stdin/stdout IPC without listeners.
+    /// Run the Embedded companion over an inherited Unix socket without a listener.
     LocalIpc,
     /// Authenticated Fleetworks API process.
     Api,
@@ -180,7 +183,6 @@ fn main() -> Result<()> {
     if args.role == Role::LocalIpc {
         configure_embedded_allocator();
     }
-    let runtime = tokio::runtime::Runtime::new()?;
     ensure_platform_name_is_bootstrap_only(&args)?;
     ensure!(
         args.role == Role::AtlasBertActivate
@@ -221,33 +223,48 @@ fn main() -> Result<()> {
             "--review-cycle requires Atlas BERT review export or recalibration"
         ),
     }
+    ensure!(
+        args.role == Role::LocalIpc || args.local_ipc_fd.is_none(),
+        "--ipc-fd requires --role local-ipc"
+    );
     if args.role == Role::LocalIpc {
-        ensure!(
-            args.file.is_none() && args.expected_sha256.is_none(),
-            "CSV worker options are incompatible with --role local-ipc"
-        );
-        let result = runtime.block_on(local_ipc::run(
-            args.state_dir.expect("required for local-ipc"),
-            args.nlp_cmd,
-            args.classifier_cmd,
-            shutdown_signal(),
-        ));
-        // `local_ipc::run` drops storage/index/lock/helpers before returning; bound teardown so
-        // an external parent that waits for child exit before closing stdin cannot hang on `read(0)`.
-        tracing::debug!(
-            target: "argos_api_host::local_ipc::embedded",
-            code = "embedded_backend_shutdown_phase",
-            phase = "runtime_shutdown_started",
-        );
-        runtime.shutdown_timeout(Duration::from_millis(100));
-        tracing::debug!(
-            target: "argos_api_host::local_ipc::embedded",
-            code = "embedded_backend_shutdown_phase",
-            phase = "runtime_shutdown_finished",
-        );
-        return result;
+        #[cfg(not(unix))]
+        anyhow::bail!("the Embedded companion requires Unix sockets");
+
+        #[cfg(unix)]
+        {
+            ensure!(
+                args.file.is_none() && args.expected_sha256.is_none(),
+                "CSV worker options are incompatible with --role local-ipc"
+            );
+            let socket = local_ipc::take_inherited_socket(
+                args.local_ipc_fd.expect("required for local-ipc"),
+            )?;
+            let runtime = tokio::runtime::Runtime::new()?;
+            let result = runtime.block_on(local_ipc::run(
+                socket,
+                args.state_dir.expect("required for local-ipc"),
+                args.nlp_cmd,
+                args.classifier_cmd,
+                shutdown_signal(),
+            ));
+            // Resource owners drop before runtime teardown. Bound any remaining
+            // blocking work so an external parent can promptly reap the companion.
+            tracing::debug!(
+                target: "argos_api_host::local_ipc::embedded",
+                code = "embedded_backend_shutdown_phase",
+                phase = "runtime_shutdown_started",
+            );
+            runtime.shutdown_timeout(Duration::from_millis(100));
+            tracing::debug!(
+                target: "argos_api_host::local_ipc::embedded",
+                code = "embedded_backend_shutdown_phase",
+                phase = "runtime_shutdown_finished",
+            );
+            return result;
+        }
     }
-    runtime.block_on(run_non_ipc(args))
+    tokio::runtime::Runtime::new()?.block_on(run_non_ipc(args))
 }
 
 async fn run_non_ipc(args: Args) -> Result<()> {
@@ -265,6 +282,7 @@ async fn run_non_ipc(args: Args) -> Result<()> {
         review_file,
         review_reference,
         state_dir,
+        local_ipc_fd: _,
         nlp_cmd,
         classifier_cmd,
         platform_display_name,
@@ -902,6 +920,8 @@ mod tests {
             "local-ipc",
             "--state-dir",
             "/tmp/fleetworks-state",
+            "--ipc-fd",
+            "3",
             "--nlp-cmd",
             "/usr/local/bin/nlp-helper",
             "--classifier-cmd",
@@ -909,6 +929,7 @@ mod tests {
         ])
         .expect("local-ipc CLI parses");
         assert_eq!(parsed.role, Role::LocalIpc);
+        assert_eq!(parsed.local_ipc_fd, Some(3));
         assert_eq!(
             parsed.state_dir,
             Some(std::path::PathBuf::from("/tmp/fleetworks-state"))
@@ -921,7 +942,14 @@ mod tests {
             parsed.classifier_cmd,
             Some(std::path::PathBuf::from("/usr/local/bin/classifier-helper"))
         );
-        assert!(Args::try_parse_from(["argos-api-host", "--role", "local-ipc"]).is_err());
+        assert!(Args::try_parse_from([
+            "argos-api-host",
+            "--role",
+            "local-ipc",
+            "--state-dir",
+            "/tmp/fleetworks-state",
+        ])
+        .is_err());
     }
 
     #[test]

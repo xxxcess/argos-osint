@@ -118,14 +118,14 @@ fn connection_status(state: &State) -> String {
         }
         ConnectionStatus::Connecting => {
             if state.is_local_backend() {
-                "Starting the embedded backend over stdio IPC…".into()
+                "Starting the embedded backend…".into()
             } else {
                 "Checking distributed gateway authentication and compatibility…".into()
             }
         }
         ConnectionStatus::Connected => {
             if state.is_local_backend() {
-                "Connected to the embedded backend over stdio IPC".into()
+                "Connected to the embedded backend".into()
             } else {
                 "Connected to a compatible distributed gateway".into()
             }
@@ -470,7 +470,7 @@ fn local_backend_setup_card(
             .child(ui_components::async_status_strip(
                 "connection-status",
                 "Connected to the embedded backend",
-                "Framed stdio IPC verified (no HTTP fallback)",
+                "Private Unix socket verified",
                 false,
                 StatusTone::Ok,
                 preferences,

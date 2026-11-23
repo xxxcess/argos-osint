@@ -38,6 +38,7 @@ BACKEND_IMAGES = {"runtime", "search-index", "surrealdb"}
 
 INBOX_QA_PATHS = {
     ".github/scripts/inbox_qa_artifact.py",
+    ".github/scripts/inbox_qa_smoke_receipt.py",
     ".github/workflows/fleetworks-inbox-qa-pack.yml",
     ".github/workflows/fleetworks-inbox-qa-smoke.yml",
     "apps/fleetworks-desktop/examples/native_fixture.rs",
@@ -106,6 +107,7 @@ def path_selection(planner, path):
         ".github/workflows/fleetworks-inbox-qa-pack.yml",
         ".github/workflows/fleetworks-inbox-qa-smoke.yml",
         ".github/scripts/inbox_qa_artifact.py",
+        ".github/scripts/inbox_qa_smoke_receipt.py",
     }:
         return set(), set()
     # Older trusted nightly planners do not yet classify the broker crate.

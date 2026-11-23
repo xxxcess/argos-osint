@@ -1692,25 +1692,19 @@ async fn run_shared_flow(
 }
 
 async fn verify_ipc_protocol_mismatch_exception(ipc_dir: &Path) {
-    let mut cmd = spawn_local_ipc_command(ipc_dir);
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .expect("spawn local-ipc for version mismatch check");
-    let mut stdin = child.stdin.take().expect("child stdin");
-    let mut stdout = child.stdout.take().expect("child stdout");
+    let (mut child, mut socket) =
+        fleetworks_contracts::ipc::spawn_companion_socket(spawn_local_ipc_command(ipc_dir))
+            .expect("spawn local-ipc for version mismatch check");
 
     let mut hello = IpcHello::new("parity-version-probe".to_owned(), "99.0.0".to_owned());
     hello.protocol_version = 99;
     hello.min_protocol_version = 99;
     let incompatible = IpcEnvelope::Hello(hello);
-    write_frame(&mut stdin, &incompatible)
+    write_frame(&mut socket, &incompatible)
         .await
         .expect("write incompatible hello");
 
-    let ack_frame = read_frame(&mut stdout)
+    let ack_frame = read_frame(&mut socket)
         .await
         .expect("read HelloAck frame")
         .expect("non-empty HelloAck frame");
@@ -1724,7 +1718,6 @@ async fn verify_ipc_protocol_mismatch_exception(ipc_dir: &Path) {
         }
         other => panic!("expected HelloAck, got {other:?}"),
     }
-    drop(stdin);
     let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
         .await
         .expect("child exits cleanly after incompatible HelloAck")
@@ -1785,9 +1778,9 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
         || create_private_dir("fleetworks-ipc-parity"),
         |owner| owner.home.path().to_owned(),
     );
-    let mut cmd1 = spawn_local_ipc_command(&ipc_root);
+    let cmd1 = spawn_local_ipc_command(&ipc_root);
     let ipc1 = Arc::new(
-        LocalIpcClient::spawn_command(&mut cmd1, "http-ipc-parity", "1.0.0")
+        LocalIpcClient::spawn_command(cmd1, "http-ipc-parity", "1.0.0")
             .await
             .expect("spawn argos-api-host --role local-ipc session 1"),
     );
@@ -1817,9 +1810,9 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
 
     // 3. Restart real `argos-api-host --role local-ipc` child on SAME state directory (no network storage)
     // and verify durable state, request_id -> job_id preservation, replay idempotency, and search visibility.
-    let mut cmd2 = spawn_local_ipc_command(&ipc_root);
+    let cmd2 = spawn_local_ipc_command(&ipc_root);
     let ipc2 = Arc::new(
-        LocalIpcClient::spawn_command(&mut cmd2, "http-ipc-parity-restart", "1.0.0")
+        LocalIpcClient::spawn_command(cmd2, "http-ipc-parity-restart", "1.0.0")
             .await
             .expect("spawn argos-api-host --role local-ipc session 2"),
     );

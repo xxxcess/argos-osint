@@ -153,24 +153,9 @@ struct PendingLocalUpload {
 
 impl Drop for PendingLocalUpload {
     fn drop(&mut self) {
-        let (Some(upload_id), Ok(runtime)) =
-            (self.upload_id.take(), tokio::runtime::Handle::try_current())
-        else {
-            return;
-        };
-        let ipc =
-            self.ipc.as_ref().clone().with_backpressure_policy(
-                crate::ipc::BackpressurePolicy::Wait(Duration::from_secs(5)),
-            );
-        let registration = self.registration.take();
-        runtime.spawn(async move {
-            let _ = ipc
-                .request_payload(
-                    registration,
-                    IpcOperation::DatasetUploadCancel { upload_id },
-                )
-                .await;
-        });
+        if let Some(upload_id) = self.upload_id.take() {
+            self.ipc.cancel_upload(self.registration.take(), upload_id);
+        }
     }
 }
 
@@ -553,36 +538,43 @@ impl Client {
                     upload_id: Some(upload_id.clone()),
                 };
                 let mut offset = 0_u64;
-                let mut buffer = vec![0_u8; crate::ipc::MAX_IPC_CHUNK_BYTES];
-                loop {
-                    let length = file
-                        .read(&mut buffer)
-                        .await
-                        .map_err(|_| ClientError::Transport)?;
-                    if length == 0 {
-                        if offset != size {
+                let mut finished = false;
+                while !finished {
+                    let mut chunks = Vec::with_capacity(crate::ipc::IPC_UPLOAD_WINDOW);
+                    for _ in 0..crate::ipc::IPC_UPLOAD_WINDOW {
+                        let mut data = vec![0; crate::ipc::MAX_IPC_CHUNK_BYTES];
+                        let length = file
+                            .read(&mut data)
+                            .await
+                            .map_err(|_| ClientError::Transport)?;
+                        if length == 0 {
+                            if offset != size {
+                                return Err(ClientError::InvalidRequest);
+                            }
+                            finished = true;
+                            break;
+                        }
+                        data.truncate(length);
+                        let next_offset = offset
+                            .checked_add(length as u64)
+                            .ok_or(ClientError::RequestTooLarge)?;
+                        if next_offset > size {
                             return Err(ClientError::InvalidRequest);
                         }
-                        break;
-                    }
-                    let next_offset = offset
-                        .checked_add(length as u64)
-                        .ok_or(ClientError::RequestTooLarge)?;
-                    if next_offset > size {
-                        return Err(ClientError::InvalidRequest);
-                    }
-                    let data_b64 = crate::ipc::base64_encode(&buffer[..length]);
-                    let _: serde_json::Value = ipc
-                        .request_json(
-                            self.registered_context.clone(),
+                        chunks.push((
                             IpcOperation::DatasetUploadChunk {
                                 upload_id: upload_id.clone(),
                                 offset,
-                                data_b64,
+                                data,
                             },
-                        )
-                        .await?;
-                    offset = next_offset;
+                            next_offset,
+                        ));
+                        offset = next_offset;
+                    }
+                    if !chunks.is_empty() {
+                        ipc.upload_window(self.registered_context.clone(), chunks)
+                            .await?;
+                    }
                 }
                 let uploaded = ipc
                     .request_json(

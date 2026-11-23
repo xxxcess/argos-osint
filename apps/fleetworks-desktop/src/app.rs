@@ -733,7 +733,7 @@ impl State {
         }
     }
 
-    /// Start or attach to the supervised local embedded companion backend over framed stdio IPC.
+    /// Start or attach to the supervised local embedded companion backend over the private Unix socket.
     pub fn connect_local(&mut self) {
         self.backend_kind = BackendKind::Local;
         self.connection_profiles.initial_selection_applied = true;

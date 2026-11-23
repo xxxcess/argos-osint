@@ -11,7 +11,7 @@ Service and evidence terms used across Fleetworks. See the [architecture](../cod
 | Name | Role |
 | --- | --- |
 | Fleetworks Desktop | API-only native macOS and Linux x86_64 hub; protected installation identity identifies workstation requests and registered activity |
-| Embedded | Backend type that runs a bundled companion and state directory on the workstation. The desktop uses framed stdio IPC. |
+| Embedded | Backend type that runs a bundled companion and state directory on the workstation. The desktop uses a private Unix socket. |
 | Distributed | Backend type that uses an operator-managed HTTP(S) gateway, including an isolated Docker Compose gateway on the workstation. |
 | Venture | Retired operator launcher; [historical disposition](../../archive/cli-retirement.md). Current deployment uses direct Docker Compose |
 | Intel | Web workspace for Bulletin, Focus Brief, Actor Dossier and Topology |

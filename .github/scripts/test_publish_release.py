@@ -78,7 +78,18 @@ class PublicationTests(unittest.TestCase):
                 "target": target, "source_sha": plan["head"], "version": plan["version"],
                 "model_revision": release.MODEL_REVISION, "archive": archive.name,
                 "archive_sha256": release.sha256(archive), "manifest_sha256": "e" * 64,
-                "status": "passed", "runtime": "embedded-stdio", "native_archive_sha256": native_digest,
+                "status": "passed", "runtime": "embedded-unix-socket", "native_archive_sha256": native_digest,
+                "transport_attestation": {
+                    "transport": "embedded-unix-socket",
+                    "socket_family": "unix",
+                    "socket_type": "stream",
+                    "protocol_version": 2,
+                    "min_protocol_version": 2,
+                    "dataset_upload_chunk_bytes": 262144,
+                    "dataset_upload_window": 4,
+                },
+                "terminal_state": "answered", "terminal_events": 1, "model_pid_count": 1,
+                "cancelled_terminal_state": "canceled", "cancelled_terminal_events": 1,
             }))
 
     def test_failed_or_untrusted_plan_cannot_call_publish_tools(self):
@@ -306,7 +317,9 @@ class PublicationTests(unittest.TestCase):
                     self.assertIn(str(asset), payload_calls[0])
 
     def test_invalid_inbox_qa_pairs_stop_publication(self):
-        for fault in ("missing", "archive", "source", "wrong_native", "untrusted"):
+        for fault in ("missing", "archive", "source", "wrong_native", "untrusted",
+                      "stdio", "missing_handshake", "wrong_family", "wrong_window",
+                      "missing_cancel", "duplicate_cancel", "boolean_count"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary)
                 plan = self.plan()
@@ -324,7 +337,24 @@ class PublicationTests(unittest.TestCase):
                     plan["event"] = "workflow_dispatch"
                 else:
                     evidence = json.loads(receipt.read_text())
-                    evidence["source_sha" if fault == "source" else "native_archive_sha256"] = "b" * 64
+                    if fault == "source":
+                        evidence["source_sha"] = "b" * 64
+                    elif fault == "wrong_native":
+                        evidence["native_archive_sha256"] = "b" * 64
+                    elif fault == "stdio":
+                        evidence["runtime"] = "embedded-stdio"
+                    elif fault == "missing_handshake":
+                        del evidence["transport_attestation"]
+                    elif fault == "wrong_family":
+                        evidence["transport_attestation"]["socket_family"] = "inet"
+                    elif fault == "wrong_window":
+                        evidence["transport_attestation"]["dataset_upload_window"] = 8
+                    elif fault == "missing_cancel":
+                        del evidence["cancelled_terminal_events"]
+                    elif fault == "duplicate_cancel":
+                        evidence["cancelled_terminal_events"] = 2
+                    elif fault == "boolean_count":
+                        evidence["terminal_events"] = True
                     receipt.write_text(json.dumps(evidence))
 
                 with mock.patch.object(release, "run") as run, \
@@ -332,6 +362,22 @@ class PublicationTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "Inbox QA"):
                         release.publish(plan, directory)
                     run.assert_not_called()
+
+    def test_graphical_receipt_requires_visible_citation_and_stop(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            plan = self.plan()
+            self.qa_pack_pairs(directory, plan)
+            target = "x86_64-unknown-linux-gnu"
+            receipt = next((directory / target).glob("*.digests.json"))
+            evidence = json.loads(receipt.read_text())
+            del evidence["model_pid_count"]
+            evidence.update(graphical="x11", first_citation_while_running=True, stop_while_running=True)
+            release.require_embedded_smoke(evidence, target=target, head=plan["head"], graphical=True)
+            for field in ("first_citation_while_running", "stop_while_running"):
+                with self.subTest(field=field), self.assertRaisesRegex(ValueError, "Inbox QA window"):
+                    release.require_embedded_smoke({**evidence, field: False}, target=target,
+                                                   head=plan["head"], graphical=True)
 
 
 if __name__ == "__main__":

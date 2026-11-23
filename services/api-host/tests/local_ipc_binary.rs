@@ -18,6 +18,7 @@ fn built_api_host_shows_role_help() {
     assert!(help.contains("--role <ROLE>"), "{help}");
     assert!(help.contains("bootstrap:"), "{help}");
     assert!(help.contains("--state-dir <STATE_DIR>"), "{help}");
+    assert!(help.contains("--ipc-fd <LOCAL_IPC_FD>"), "{help}");
 }
 
 #[tokio::test]
@@ -38,7 +39,7 @@ async fn built_local_ipc_binary_advertises_valid_contract_survives_restart_and_r
     let mut cmd1 = Command::new(BINARY);
     cmd1.args(["--role", "local-ipc", "--state-dir"])
         .arg(&state_dir);
-    let ipc1 = LocalIpcClient::spawn_command(&mut cmd1, "fleetworks-desktop-test", "0.2.1")
+    let ipc1 = LocalIpcClient::spawn_command(cmd1, "fleetworks-desktop-test", "0.2.1")
         .await
         .expect("spawn session 1 local-ipc binary");
     let hello_caps1 = ipc1
@@ -85,7 +86,7 @@ async fn built_local_ipc_binary_advertises_valid_contract_survives_restart_and_r
     let mut cmd2 = Command::new(BINARY);
     cmd2.args(["--role", "local-ipc", "--state-dir"])
         .arg(&state_dir);
-    let ipc2 = LocalIpcClient::spawn_command(&mut cmd2, "fleetworks-desktop-test", "0.2.1")
+    let ipc2 = LocalIpcClient::spawn_command(cmd2, "fleetworks-desktop-test", "0.2.1")
         .await
         .expect("reopen session 2 on same state_dir after shutdown");
     let hello_caps2 = ipc2
@@ -110,7 +111,7 @@ async fn built_local_ipc_binary_advertises_valid_contract_survives_restart_and_r
     let mut cmd3 = Command::new(BINARY);
     cmd3.args(["--role", "local-ipc", "--state-dir"])
         .arg(&state_dir);
-    let ipc3 = LocalIpcClient::spawn_command(&mut cmd3, "fleetworks-desktop-test", "0.2.1")
+    let ipc3 = LocalIpcClient::spawn_command(cmd3, "fleetworks-desktop-test", "0.2.1")
         .await
         .expect("reopen session 3 immediately after last LocalIpcClient drop");
     let hello_caps3 = ipc3

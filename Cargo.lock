@@ -2548,6 +2548,7 @@ version = "0.2.1"
 dependencies = [
  "csv",
  "futures-util",
+ "libc",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

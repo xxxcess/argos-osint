@@ -2,7 +2,6 @@
 """Exercise a real Inbox QA pack through a packaged companion or paired gateway."""
 
 import argparse
-import base64
 from datetime import datetime
 import hashlib
 from itertools import islice
@@ -12,6 +11,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -241,6 +241,44 @@ def cited_running_jobs(turn, active_jobs):
             "Inbox running-job count differs from the registered workstation dashboard")
 
 
+def cancel_running_embedded_turn(request, registration, model):
+    active = model()
+    require(len(active) == 1, "Expected one isolated model process before cancellation")
+    worker, = active
+    # Keep the actual packaged worker alive without letting it finish the separate turn.
+    os.kill(worker, signal.SIGSTOP)
+    try:
+        context = authorize(registration)
+        stopped = request("turns", {"request_id": "inbox-qa-smoke-cancel-running", "context": context,
+                                    "question": SUMMARY_QUESTION}, expected=(200, 201, 202))
+        turn_id = stopped["turn_id"]
+        query = {"turn_id": turn_id, "after": 0, "wait_seconds": 0}
+        running = until(lambda: request("events", query=query),
+                        lambda page: page["turn"]["state"] == "running",
+                        "QA turn did not enter Running before Stop", timeout=16)
+        require(not running["gap"] and running["turn"]["turn_id"] == turn_id,
+                "Running event belonged to a different turn or a gapped cursor")
+        require(model() == [worker], "The isolated worker changed before Stop")
+        canceled = request("cancel", {"context": context, "turn_id": turn_id})
+    finally:
+        if worker in model():
+            try:
+                os.kill(worker, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+    result = request("events", query=query)
+    terminal = [event for event in result["events"] if event["state"] in TERMINAL]
+    require(not result["gap"] and result["turn"] == canceled and canceled["turn_id"] == turn_id
+            and canceled["state"] == "canceled" and len(terminal) == 1
+            and terminal[0]["state"] == "canceled" and terminal[0]["sequence"] == canceled["cursor"]
+            and [event["sequence"] for event in result["events"]] == list(range(1, canceled["cursor"] + 1)),
+            "Stop did not retain exactly one canceled terminal event for the Running turn")
+    replay = request("events", query={**query, "after": canceled["cursor"]})
+    require(not replay["gap"] and not replay["events"] and replay["turn"] == canceled,
+            "Canceled terminal replay changed or duplicated an event")
+    return {"cancelled_terminal_events": len(terminal), "cancelled_terminal_state": canceled["state"]}
+
+
 def exercise(request, manage, registration, manager, model, readiness, running_jobs, *,
              embedded_mode=False, legacy_request=None, verify_other_jobs=None):
     """Run the same real QA lifecycle over the supplied transport."""
@@ -375,6 +413,7 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
             "unsupported measurement received an answer")
     if verify_other_jobs is not None:
         verify_other_jobs()
+    cancellation = cancel_running_embedded_turn(request, registration, model) if embedded_mode else {}
 
     started = time.monotonic()
     manage("settings", {"context": authorize(manager), "expected_revision": current["revision"], "enabled": False})
@@ -390,9 +429,9 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
     return {"model_warm_ms": ready_ms, "admission_ms": admission_ms, "first_cited_finding_ms": first_finding_ms,
             "completion_ms": completed_ms, "unload_ms": round((time.monotonic() - started) * 1000, 1),
             "model_pid_count": len(active), "warm_model_rss_bytes": worker_rss_bytes,
-            "fresh_observation": True, "terminal_events": terminal_events,
+            "fresh_observation": True, "terminal_events": terminal_events, "terminal_state": snapshot["state"],
             "grounded_readiness": True, "live_metrics": True, "unsupported_context": True,
-            "frozen_samples": readings, "legacy_http_evidence": legacy_request is not None}
+            "frozen_samples": readings, "legacy_http_evidence": legacy_request is not None, **cancellation}
 
 
 def embedded_tree(parent):
@@ -737,22 +776,20 @@ def finish_bundled_stage(call, upload_id, staging, size, evidence):
     return upload
 
 
-def stage_bundled_csv(call, directory, kind, pin, rows, *, staging, evidence):
+def stage_bundled_csv(call, transfer, directory, kind, pin, rows, *, staging, evidence):
     path = directory / pin["filename"]
     require(path.stat().st_size == pin["size_bytes"], "bundled dataset byte count changed")
     ticket = call("dataset_upload_start", {
         "kind": kind, "sha256": pin["sha256"], "size_bytes": pin["size_bytes"],
     })
     upload_id = ticket["upload_path"].rstrip("/").rsplit("/", 1)[-1]
-    offset = 0
     started = time.monotonic()
     with path.open("rb") as file:
-        while chunk := file.read(256 * 1024):
-            call("dataset_upload_chunk", {
-                "upload_id": upload_id, "offset": offset, "data_b64": base64.b64encode(chunk).decode("ascii"),
-            }, allow_non_json=True)
-            offset += len(chunk)
-    evidence.update(transfer_bytes=offset, transfer_ms=round((time.monotonic() - started) * 1000))
+        offset, control_ms = transfer(file, upload_id)
+    require(offset == pin["size_bytes"] and control_ms is not None,
+            "bundled binary upload or concurrent control request was incomplete")
+    evidence.update(transfer_bytes=offset, transfer_ms=round((time.monotonic() - started) * 1000),
+                    concurrent_readiness_ms=control_ms)
     upload = finish_bundled_stage(call, upload_id, staging, pin["size_bytes"], evidence)
     dataset = upload["dataset"]
     require(upload["row_count"] == rows and dataset["size_bytes"] == pin["size_bytes"]
@@ -785,6 +822,7 @@ def exercise_bundled_catalog(session, state, app, evidence, *, stage_only):
         next_stage("complete")
 
     require(session.hello()["compatible"], "packaged companion rejected the fixture protocol")
+    evidence["transport_attestation"] = session.transport_attestation
     embedded.check_zero_bound_sockets(session.proc.pid)
     evidence["rocksdb_options"] = persisted_rocksdb_options(state)
 
@@ -912,7 +950,10 @@ def exercise_bundled_catalog(session, state, app, evidence, *, stage_only):
     require(check("actor_catalog")["state"] != "ready", "fresh catalog reported ready without a seed")
     next_stage("actor_csv_validation")
     evidence["actor_staging"] = {}
-    dataset = stage_bundled_csv(call, directory, "actor_catalog", pins["actor_catalog"], CATALOG_ROWS,
+    def transfer(file, upload_id):
+        return session.upload_dataset_bytes(file, upload_id, registration)
+
+    dataset = stage_bundled_csv(call, transfer, directory, "actor_catalog", pins["actor_catalog"], CATALOG_ROWS,
                                 staging=state / "staged-datasets", evidence=evidence["actor_staging"])
     evidence["actor_validated_rows"] = CATALOG_ROWS
     require(check("actor_catalog")["state"] != "ready", "staged catalog reported ready without a seed")
@@ -1119,7 +1160,8 @@ def run_catalog(args):
     with tempfile.TemporaryDirectory(prefix="fleetworks-bundled-catalog-") as temporary:
         result = packaged_catalog_smoke(binary, app, Path(temporary) / "state", stage_only=args.stage_only)
     return {
-        "runtime": "embedded-stdio", "target": manifest["target"], "source_sha": args.revision,
+        "runtime": result.get("transport_attestation", {}).get("transport"),
+        "target": manifest["target"], "source_sha": args.revision,
         "run_id": args.run_id, "run_attempt": args.run_attempt, "companion_sha256": companion_sha,
         "bundled_catalog": result,
     }
@@ -1192,7 +1234,9 @@ def run_embedded(args):
         finally:
             session.close_unconditionally()
 
-        return {"runtime": "embedded-stdio", "target": digests["target"], **result}
+        return {"runtime": session.transport_attestation["transport"],
+                "transport_attestation": session.transport_attestation, "target": digests["target"],
+                "source_sha": digests["source_sha"], **result}
 
 
 def run_distributed(args):

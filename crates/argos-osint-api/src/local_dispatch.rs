@@ -161,6 +161,18 @@ pub struct LocalGateway {
 }
 
 impl LocalGateway {
+    /// Cancel every partial upload when the companion's sole connection ends.
+    pub async fn cancel_dataset_uploads(&self) {
+        let uploads = {
+            let mut sessions = self.upload_sessions.lock().await;
+            for entry in sessions.values() {
+                entry.cancelled.store(true, Ordering::Release);
+            }
+            std::mem::take(&mut *sessions)
+        };
+        drop(uploads);
+    }
+
     /// Construct a local IPC gateway over initialized storage and service clients.
     pub fn new(
         state: ApiState,
@@ -876,16 +888,10 @@ impl LocalGateway {
             IpcOperation::DatasetUploadChunk {
                 upload_id,
                 offset,
-                data_b64,
+                data,
             } => {
-                self.handle_dataset_upload_chunk(
-                    principal,
-                    registration,
-                    upload_id,
-                    offset,
-                    data_b64,
-                )
-                .await
+                self.handle_dataset_upload_chunk(principal, registration, upload_id, offset, data)
+                    .await
             }
             IpcOperation::DatasetUploadFinish { upload_id } => {
                 self.handle_dataset_upload_finish(principal, registration, upload_id)
@@ -1358,7 +1364,7 @@ impl LocalGateway {
         registration: Option<&RegisteredContext>,
         upload_id: String,
         offset: u64,
-        data_b64: String,
+        data: Vec<u8>,
     ) -> Result<IpcPayload, DispatchError> {
         let context = self
             .resolve(
@@ -1381,11 +1387,14 @@ impl LocalGateway {
                 "Native or Operator upload credential required",
             )
         })?;
-        let chunk = base64::decode(&data_b64, MAX_IPC_CHUNK_BYTES)
-            .map_err(|_| DispatchError::bad_request("Invalid dataset upload chunk payload"))?;
-        if chunk.is_empty() {
+        if data.is_empty() {
             return Err(DispatchError::bad_request(
                 "Dataset upload chunk must not be empty",
+            ));
+        }
+        if data.len() > MAX_IPC_CHUNK_BYTES {
+            return Err(DispatchError::bad_request(
+                "Dataset upload chunk exceeds the size limit",
             ));
         }
         let entry = self.dataset_upload_session(&upload_id, &binding).await?;
@@ -1398,7 +1407,7 @@ impl LocalGateway {
             ));
         }
         let next_offset = offset
-            .checked_add(chunk.len() as u64)
+            .checked_add(data.len() as u64)
             .ok_or_else(|| DispatchError::bad_request("Dataset upload offset overflow"))?;
         if next_offset > session.expected_size_bytes {
             return Err(DispatchError::new(
@@ -1411,12 +1420,14 @@ impl LocalGateway {
         let mut part = session.part.take().ok_or_else(|| {
             DispatchError::new(StatusCode::NOT_FOUND, "Dataset upload destination closed")
         })?;
-        part.write_chunk(&chunk).await.map_err(crate::internal)?;
+        part.write_chunk(&data).await.map_err(crate::internal)?;
         check_upload_live(&entry)?;
-        session.digest.update(&chunk);
+        session.digest.update(&data);
         session.written_bytes = next_offset;
         session.part = Some(part);
-        Ok(IpcPayload::Empty)
+        Ok(IpcPayload::DatasetUploadProgress {
+            received_bytes: next_offset,
+        })
     }
 
     async fn dataset_upload_session(
@@ -2323,11 +2334,26 @@ mod tests {
                 IpcOperation::DatasetUploadChunk {
                     upload_id: upload_id.clone(),
                     offset: 1,
-                    data_b64: base64::encode(csv_bytes),
+                    data: csv_bytes.to_vec(),
                 },
             )
             .await;
         assert!(matches!(bad_offset, IpcOutcome::Err { status: 409, .. }));
+
+        for data in [Vec::new(), vec![0; MAX_IPC_CHUNK_BYTES + 1]] {
+            let outcome = gateway
+                .dispatch(
+                    &principal,
+                    Some(&registration),
+                    IpcOperation::DatasetUploadChunk {
+                        upload_id: upload_id.clone(),
+                        offset: 0,
+                        data,
+                    },
+                )
+                .await;
+            assert!(matches!(outcome, IpcOutcome::Err { status: 400, .. }));
+        }
 
         // Valid chunk & finish succeed.
         for (offset, chunk) in [(0, &csv_bytes[..32]), (32, &csv_bytes[32..])] {
@@ -2338,11 +2364,15 @@ mod tests {
                     IpcOperation::DatasetUploadChunk {
                         upload_id: upload_id.clone(),
                         offset,
-                        data_b64: base64::encode(chunk),
+                        data: chunk.to_vec(),
                     },
                 )
                 .await;
-            assert!(matches!(chunk_ok, IpcOutcome::Ok(IpcPayload::Empty)));
+            assert!(matches!(
+                chunk_ok,
+                IpcOutcome::Ok(IpcPayload::DatasetUploadProgress { received_bytes })
+                    if received_bytes == offset + chunk.len() as u64
+            ));
         }
 
         let finish_ok = gateway
@@ -2419,11 +2449,15 @@ mod tests {
                     IpcOperation::DatasetUploadChunk {
                         upload_id: upload_id.clone(),
                         offset: 0,
-                        data_b64: base64::encode(csv_bytes),
+                        data: csv_bytes.to_vec(),
                     },
                 )
                 .await;
-            assert!(matches!(chunk, IpcOutcome::Ok(IpcPayload::Empty)));
+            assert!(matches!(
+                chunk,
+                IpcOutcome::Ok(IpcPayload::DatasetUploadProgress { received_bytes })
+                    if received_bytes == csv_bytes.len() as u64
+            ));
             let outcome = gateway
                 .dispatch(
                     &principal,

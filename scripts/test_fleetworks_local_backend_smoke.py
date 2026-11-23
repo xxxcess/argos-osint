@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import socket
 import stat
 import struct
 import subprocess
@@ -66,6 +67,17 @@ class LocalBackendSmokeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Provide exactly one"):
             resolve_companion_binary()
 
+    def test_observer_preserves_raw_upload_and_control_reader_rejects_it(self):
+        upload = {"frame": "request", "body": {"request_id": 7, "op": {
+            "op": "dataset_upload_chunk", "args": {"upload_id": "test", "offset": 0},
+        }}}
+        chunk = b"actor,data\n"
+        encoded = smoke.encode_upload_frame(upload, chunk)
+        self.assertTrue(encoded.endswith(chunk))
+        self.assertEqual(smoke.read_wire_frame(io.BytesIO(encoded), allow_upload=True), (encoded, upload))
+        with self.assertRaisesRegex(ValueError, "Unexpected IPC upload frame"):
+            read_frame(io.BytesIO(encoded))
+
     def test_socket_checker_detects_listening_sockets_and_cleans_env(self):
         self.assertEqual(parse_lsof_sockets("COMMAND PID USER FD TYPE\n"), [])
         self.assertEqual(
@@ -94,32 +106,39 @@ class LocalBackendSmokeTests(unittest.TestCase):
         state_db = self.root / "mock-state.json"
         mock_bin.write_text(
             f"""#!{sys.executable}
-import json, os, struct, sys
+import json, os, socket, struct, sys
 from pathlib import Path
 
 STATE_FILE = Path({str(state_db)!r})
+stream = socket.socket(fileno=int(sys.argv[sys.argv.index("--ipc-fd") + 1]))
+reader = stream.makefile("rb")
 
 def read_f():
-    hdr = sys.stdin.buffer.read(4)
+    hdr = reader.read(4)
     if not hdr:
         return None
     (n,) = struct.unpack(">I", hdr)
-    return json.loads(sys.stdin.buffer.read(n).decode("utf-8"))
+    if n & (1 << 31):
+        data = reader.read(n & ~(1 << 31))
+        (meta,) = struct.unpack(">I", data[:4])
+        frame = json.loads(data[4:4 + meta])
+        frame["chunk"] = data[4 + meta:]
+        return frame
+    return json.loads(reader.read(n))
 
 def write_f(obj):
     data = json.dumps(obj).encode("utf-8")
-    sys.stdout.buffer.write(struct.pack(">I", len(data)) + data)
-    sys.stdout.buffer.flush()
+    stream.sendall(struct.pack(">I", len(data)) + data)
 
 def ok(req_id, value):
     write_f({{"frame": "response", "body": {{"request_id": req_id, "outcome": {{"outcome": "ok", "data": {{"payload": "json", "value": value}}}}}}}})
 
-def err(req_id):
-    write_f({{"frame": "response", "body": {{"request_id": req_id, "outcome": {{"outcome": "err", "data": {{"status": 401, "code": "unregistered", "message": "unregistered"}}}}}}}})
+def err(req_id, status=401):
+    write_f({{"frame": "response", "body": {{"request_id": req_id, "outcome": {{"outcome": "err", "data": {{"status": status, "code": "rejected", "message": "rejected"}}}}}}}})
 
 hello = read_f()
-if hello["body"]["protocol_version"] != 1:
-    write_f({{"frame": "hello_ack", "body": {{"protocol_version": 1, "min_protocol_version": 1, "compatible": False, "reason": "unsupported"}}}})
+if hello["body"]["protocol_version"] != 2:
+    write_f({{"frame": "hello_ack", "body": {{"protocol_version": 2, "min_protocol_version": 2, "compatible": False, "reason": "unsupported"}}}})
     sys.exit(2)
 
 CAPS = {{
@@ -131,8 +150,11 @@ CAPS = {{
     "workspace_control": {{"version": 2, "purpose": "registration_and_activity"}},
     "resource_scopes": {EXPECTED_RESOURCE_SCOPES!r},
 }}
-write_f({{"frame": "hello_ack", "body": {{"protocol_version": 1, "min_protocol_version": 1, "compatible": True, "capabilities": CAPS, "ready": {{"status": "ready"}}}}}})
+write_f({{"frame": "hello_ack", "body": {{"protocol_version": 2, "min_protocol_version": 2, "compatible": True,
+    "transport": "embedded-unix-socket", "dataset_upload_chunk_bytes": 262144, "dataset_upload_window": 4,
+    "capabilities": CAPS, "ready": {{"status": "ready"}}}}}})
 state = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {{"jobs": []}}
+upload_active = False
 
 while True:
     frame = read_f()
@@ -144,7 +166,7 @@ while True:
                 job["state"] = "completed"
         STATE_FILE.write_text(json.dumps(state))
         write_f({{"frame": "shutdown_ack", "body": {{"checkpointed": True, "relinquished_leases": 1}}}})
-        if sys.stdin.buffer.read(1) != b"":
+        if reader.read(1) != b"":
             sys.exit(3)
         break
     req_id = frame["body"]["request_id"]
@@ -161,11 +183,22 @@ while True:
     elif op == "workstation_readiness":
         ok(req_id, {{"deployment_id": "dep-local-1", "registration": frame["body"].get("registration")}})
     elif op == "dataset_upload_start":
+        upload_active = True
         ok(req_id, {{"upload_path": "/api/v1/workstation/datasets/uploads/up-1", "expires_in_seconds": 60}})
     elif op == "dataset_upload_chunk":
+        assert args == {{"upload_id": "up-1", "offset": 0}} and frame["chunk"]
+        write_f({{"frame": "response", "body": {{"request_id": req_id, "outcome": {{"outcome": "ok", "data": {{
+            "payload": "dataset_upload_progress", "value": {{"received_bytes": len(frame["chunk"])}},
+        }}}}}}}})
+    elif op == "dataset_upload_cancel":
+        upload_active = False
         write_f({{"frame": "response", "body": {{"request_id": req_id, "outcome": {{"outcome": "ok", "data": {{"payload": "empty"}}}}}}}})
     elif op == "dataset_upload_finish":
-        ok(req_id, {{"dataset": {{"id": "ds-1", "kind": "actor_catalog", "sha256": "a" * 64, "size_bytes": 10}}}})
+        if upload_active:
+            ok(req_id, {{"dataset": {{"id": "ds-1", "kind": "actor_catalog", "sha256": "a" * 64, "size_bytes": 10}}}})
+            upload_active = False
+        else:
+            err(req_id, 404)
     elif op == "seed_actors":
         state["jobs"].append({{"id": "job-seed-1", "operation": "actor_seed", "state": "completed"}})
         ok(req_id, {{"job_id": "job-seed-1"}})
@@ -193,6 +226,8 @@ while True:
                 state_db.write_text(json.dumps({"jobs": [], "already_indexed": already_indexed}), encoding="utf-8")
                 summary = run_smoke(mock_bin, state_dir=self.root / f"smoke-run-{already_indexed}", check_sockets=False, run_rust_probe=False)
                 self.assertEqual(summary["status"], "pass")
+                self.assertEqual(summary["transport"], "embedded-unix-socket")
+                self.assertEqual(summary["canceled_upload"]["status"], "canceled")
                 self.assertEqual(summary["rust_client_probe"], {"status": "skipped"})
                 self.assertEqual(summary["restart_resume_job_id"], expected_job)
                 self.assertEqual(summary["reindex_already_completed"], already_indexed)
@@ -202,15 +237,14 @@ while True:
 
     def test_shutdown_retains_ack_when_the_process_wait_times_out(self):
         acknowledgement = {"checkpointed": True, "relinquished_leases": 1}
-        with mock.patch("fleetworks_local_backend_smoke.subprocess.Popen") as spawn:
-            process = spawn.return_value
-            process.stdin = io.BytesIO()
-            process.stdout = io.BytesIO(encode_frame({"frame": "shutdown_ack", "body": acknowledgement}))
-            process.stderr = io.BytesIO()
+        process, endpoint = mock.Mock(), mock.Mock()
+        endpoint.makefile.return_value = io.BytesIO(encode_frame({"frame": "shutdown_ack", "body": acknowledgement}))
+        process.stderr = io.BytesIO()
+        with mock.patch.object(smoke, "spawn_ipc_child", return_value=(process, endpoint)):
             session = LocalIpcSession(self.root / "synthetic-companion", self.root)
 
             def wait(*, timeout):
-                self.assertTrue(process.stdin.closed)
+                endpoint.shutdown.assert_called_once_with(socket.SHUT_WR)
                 self.assertEqual(session.last_shutdown_ack, acknowledgement)
                 raise subprocess.TimeoutExpired("synthetic-companion", timeout)
 

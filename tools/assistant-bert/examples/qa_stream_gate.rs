@@ -1,4 +1,4 @@
-//! Test-only checkpoint worker. Pause delivery after the first real cited finding.
+//! Test-only checkpoint worker. Pause each turn after its first real cited finding.
 
 #[allow(dead_code)]
 #[path = "../src/main.rs"]
@@ -34,18 +34,14 @@ fn block_release_signal() -> io::Result<libc::sigset_t> {
 fn main() -> anyhow::Result<()> {
     let blocked = block_release_signal()?;
     let mut output = BufWriter::new(io::stdout().lock());
-    let mut held_first_finding = false;
     worker::run(|reply| {
         worker::frame::write(&mut output, &reply)?;
-        if !held_first_finding
-            && matches!(
-                reply,
-                QaWorkerReply::Event {
-                    event: QaWorkerEvent::Finding { .. }
-                }
-            )
-        {
-            held_first_finding = true;
+        if matches!(
+            reply,
+            QaWorkerReply::Event {
+                event: QaWorkerEvent::Finding { sequence: 1, .. }
+            }
+        ) {
             let mut signal = 0;
             // SAFETY: The set is initialized and this process blocked SIGUSR1 before
             // creating its input reader. The stack output remains valid through sigwait.

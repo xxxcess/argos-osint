@@ -1,17 +1,95 @@
-//! Embedded single-process local backend served strictly over stdio IPC frames.
+//! Embedded backend served over an inherited Unix socket pair.
 //!
 //! Binds zero network listeners, directs all logging to `stderr`, validates
 //! private state-directory ownership (`0o700`) and single-writer locking,
 //! bootstraps embedded SurrealDB, Jobs SQLite/RocksDB, and Tantivy search
 //! in-process, and cleanly relinquishes active worker leases on shutdown.
 
+#[cfg(unix)]
 use std::future::Future;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::path::PathBuf;
 
+#[cfg(unix)]
 use anyhow::Result;
 
-/// Entry point for `--role local-ipc`. Runs entirely over stdin/stdout IPC frames.
+/// Claim the child endpoint before initializing the runtime or spawning helpers.
+#[cfg(unix)]
+pub(crate) fn take_inherited_socket(descriptor: i32) -> Result<UnixStream> {
+    use std::os::fd::FromRawFd;
+
+    use anyhow::ensure;
+
+    ensure!(
+        descriptor >= 3,
+        "Embedded socket must be a private inherited descriptor"
+    );
+    // SAFETY: fcntl checks the passed descriptor without accessing process memory.
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: the descriptor is open and this is the first owner in the child.
+    // Take it before runtime or helper setup to avoid descriptor reuse or inheritance.
+    let socket = unsafe { UnixStream::from_raw_fd(descriptor) };
+    // SAFETY: the owned descriptor stays open throughout this call.
+    if unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let mut socket_type: libc::c_int = 0;
+    let mut size = std::mem::size_of_val(&socket_type) as libc::socklen_t;
+    // SAFETY: the output pointers refer to initialized values of the supplied size.
+    let result = unsafe {
+        libc::getsockopt(
+            descriptor,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            std::ptr::from_mut(&mut socket_type).cast(),
+            &mut size,
+        )
+    };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    ensure!(
+        socket_type == libc::SOCK_STREAM
+            && socket.local_addr()?.is_unnamed()
+            && socket.peer_addr()?.is_unnamed(),
+        "Embedded transport requires a connected unnamed Unix stream pair"
+    );
+    socket.set_nonblocking(true)?;
+    Ok(socket)
+}
+
+#[cfg(all(test, unix))]
+mod socket_tests {
+    use std::os::fd::{AsRawFd, IntoRawFd};
+
+    use super::*;
+
+    #[test]
+    fn only_claims_a_connected_unnamed_unix_stream() {
+        let (parent, child) = UnixStream::pair().unwrap();
+        let fd = child.into_raw_fd();
+        let adopted = take_inherited_socket(fd).unwrap();
+        assert_eq!(adopted.as_raw_fd(), fd);
+        assert!(parent.peer_addr().unwrap().is_unnamed());
+        // SAFETY: adopted keeps its descriptor live for this query.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+
+        let file = std::fs::File::open("/dev/null").unwrap();
+        assert!(take_inherited_socket(file.into_raw_fd()).is_err());
+        assert!(take_inherited_socket(2).is_err());
+    }
+}
+
+/// Serve the inherited endpoint for the lifetime of the Embedded companion.
+#[cfg(unix)]
 pub(crate) async fn run(
+    socket: UnixStream,
     state_dir: PathBuf,
     nlp_cmd: Option<PathBuf>,
     classifier_cmd: Option<PathBuf>,
@@ -19,17 +97,18 @@ pub(crate) async fn run(
 ) -> Result<()> {
     #[cfg(not(feature = "embedded"))]
     {
-        let _ = (state_dir, nlp_cmd, classifier_cmd, signal);
-        anyhow::bail!("--role local-ipc requires the `embedded` feature");
+        let _ = (socket, state_dir, nlp_cmd, classifier_cmd, signal);
+        anyhow::bail!("--role local-ipc requires the embedded feature");
     }
 
     #[cfg(feature = "embedded")]
     {
-        embedded::run_embedded(state_dir, nlp_cmd, classifier_cmd, signal).await
+        let socket = tokio::net::UnixStream::from_std(socket)?;
+        embedded::run_embedded(socket, state_dir, nlp_cmd, classifier_cmd, signal).await
     }
 }
 
-#[cfg(feature = "embedded")]
+#[cfg(all(unix, feature = "embedded"))]
 mod embedded {
     use std::fs;
     use std::fs::File;
@@ -73,6 +152,7 @@ mod embedded {
     use argos_osint_core::storage::server;
     use fleetworks_contracts::actor_index::ActorIndexLimits;
     use fleetworks_contracts::context::Permission;
+    use fleetworks_contracts::context::RegisteredContext;
     use fleetworks_contracts::ipc::read_frame;
     use fleetworks_contracts::ipc::write_frame;
     use fleetworks_contracts::ipc::IpcEnvelope;
@@ -83,6 +163,7 @@ mod embedded {
     use fleetworks_contracts::ipc::IpcOutcome;
     use fleetworks_contracts::ipc::IPC_MIN_PROTOCOL_VERSION;
     use fleetworks_contracts::ipc::IPC_PROTOCOL_VERSION;
+    use fleetworks_contracts::ipc::IPC_UPLOAD_WINDOW;
     use fleetworks_contracts::ipc::MAX_IPC_INFLIGHT;
     use fleetworks_contracts::ipc::MAX_IPC_QUEUE_DEPTH;
     use fleetworks_jobs::queue::Queue;
@@ -112,6 +193,7 @@ mod embedded {
     const SOURCE_EPOCH_FILENAME: &str = "source-epoch";
     const NATIVE_QUEUE_NAME: &str = "fleetworks.native";
     const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    const SHUTDOWN_IO_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
     /// Advisory exclusive lock held for the lifetime of the local IPC backend.
     struct StateDirLock {
@@ -143,15 +225,15 @@ mod embedded {
     }
 
     pub(super) async fn run_embedded(
+        socket: tokio::net::UnixStream,
         state_dir: PathBuf,
         nlp_cmd: Option<PathBuf>,
         classifier_cmd: Option<PathBuf>,
         signal: impl Future<Output = ()>,
     ) -> Result<()> {
         let context = LocalBackendContext::open(state_dir, nlp_cmd, classifier_cmd, true).await?;
-        let stdin = tokio::io::stdin();
-        let stdout = tokio::io::stdout();
-        let result = context.serve(stdin, stdout, signal).await;
+        let (reader, writer) = socket.into_split();
+        let result = context.serve(reader, writer, signal).await;
         report_shutdown_phase("context_released");
         result
     }
@@ -699,6 +781,12 @@ mod embedded {
         )
     }
 
+    struct UploadChunkRequest {
+        request_id: u64,
+        registration: Option<RegisteredContext>,
+        op: IpcOperation,
+    }
+
     /// Serve local IPC frames over an `AsyncRead + AsyncWrite` pair until EOF,
     /// explicit `Shutdown` frame, or external `signal`.
     #[allow(clippy::too_many_arguments)]
@@ -758,13 +846,13 @@ mod embedded {
         ));
 
         let (outbound_tx, mut outbound_rx) = mpsc::channel::<IpcEnvelope>(MAX_IPC_QUEUE_DEPTH);
-        let writer_task = tokio::spawn(async move {
+        let mut writer_task = tokio::spawn(async move {
             while let Some(frame) = outbound_rx.recv().await {
                 if write_frame(&mut writer, &frame).await.is_err() {
                     break;
                 }
             }
-            let _ = writer.flush().await;
+            let _ = writer.shutdown().await;
         });
 
         let (inbound_tx, mut inbound_rx) = mpsc::channel(MAX_IPC_QUEUE_DEPTH);
@@ -777,6 +865,32 @@ mod embedded {
                 }
             }
         });
+
+        // Pipelined upload commands must reach the staging file in frame order.
+        // Control requests use a separate queue and remain actionable mid-upload.
+        let (upload_tx, mut upload_rx) = mpsc::channel::<UploadChunkRequest>(IPC_UPLOAD_WINDOW);
+        let upload_task = {
+            let gateway = Arc::clone(&gateway);
+            let principal = principal.clone();
+            let outbound = outbound_tx.clone();
+            tokio::spawn(async move {
+                while let Some(chunk) = upload_rx.recv().await {
+                    let outcome = gateway
+                        .dispatch(&principal, chunk.registration.as_ref(), chunk.op)
+                        .await;
+                    if outbound
+                        .send(IpcEnvelope::Response {
+                            request_id: chunk.request_id,
+                            outcome,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+        };
 
         let inflight = Arc::new(Semaphore::new(MAX_IPC_INFLIGHT));
         let mut request_tasks: JoinSet<()> = JoinSet::new();
@@ -803,6 +917,21 @@ mod embedded {
                         break;
                     };
                     match frame {
+                        Ok(Some(IpcEnvelope::Request {
+                            request_id, registration, op: op @ IpcOperation::DatasetUploadChunk { .. },
+                        })) => {
+                            if upload_tx.try_send(UploadChunkRequest { request_id, registration, op }).is_err() {
+                                let _ = outbound_tx.try_send(IpcEnvelope::Response {
+                                    request_id,
+                                    outcome: IpcOutcome::Err {
+                                        status: 503,
+                                        code: "ipc_upload_window_full".into(),
+                                        message: "Embedded dataset upload window reached".into(),
+                                        retry_after_seconds: Some(1),
+                                    },
+                                });
+                            }
+                        }
                         Ok(Some(IpcEnvelope::Request { request_id, registration, op })) => {
                             match Arc::clone(&inflight).try_acquire_owned() {
                                 Ok(permit) => {
@@ -867,6 +996,13 @@ mod embedded {
         drop(inbound_rx);
         reader_task.abort();
         let _ = reader_task.await;
+        gateway.cancel_dataset_uploads().await;
+        drop(upload_tx);
+        upload_task.abort();
+        let _ = upload_task.await;
+        if stream_broken {
+            writer_task.abort();
+        }
 
         let _ = worker_stop_tx.send(());
         let relinquished_leases = match worker_result {
@@ -884,7 +1020,17 @@ mod embedded {
             },
         };
 
-        while request_tasks.join_next().await.is_some() {}
+        if tokio::time::timeout(SHUTDOWN_IO_GRACE, async {
+            while request_tasks.join_next().await.is_some() {}
+        })
+        .await
+        .is_err()
+        {
+            request_tasks.shutdown().await;
+        }
+        // An accepted upload start may have finished while shutdown drained
+        // the remaining control requests.
+        gateway.cancel_dataset_uploads().await;
 
         if !stream_broken {
             let _ = outbound_tx.try_send(IpcEnvelope::Event(IpcEvent::ShutdownNotice {
@@ -892,17 +1038,27 @@ mod embedded {
                 relinquished_leases,
             }));
             if shutdown_requested {
-                let _ = outbound_tx
-                    .send(IpcEnvelope::ShutdownAck {
-                        checkpointed: true,
-                        relinquished_leases,
-                    })
-                    .await;
+                let ack = IpcEnvelope::ShutdownAck {
+                    checkpointed: true,
+                    relinquished_leases,
+                };
+                if tokio::time::timeout(SHUTDOWN_IO_GRACE, outbound_tx.send(ack))
+                    .await
+                    .is_err()
+                {
+                    writer_task.abort();
+                }
             }
         }
 
         drop(outbound_tx);
-        let _ = writer_task.await;
+        if tokio::time::timeout(SHUTDOWN_IO_GRACE, &mut writer_task)
+            .await
+            .is_err()
+        {
+            writer_task.abort();
+            let _ = writer_task.await;
+        }
         Ok(())
     }
 
@@ -935,34 +1091,6 @@ mod embedded {
         #[tokio::test]
         async fn local_engines_warm_without_helpers_or_training() {
             assert_eq!(warm_local_nlp().await, cfg!(feature = "nlp"));
-        }
-
-        fn test_base64_encode(input: &[u8]) -> String {
-            const ALPHABET: &[u8; 64] =
-                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            if input.is_empty() {
-                return String::new();
-            }
-            let mut out = Vec::with_capacity(input.len().div_ceil(3) * 4);
-            for chunk in input.chunks(3) {
-                let b0 = chunk[0];
-                let b1 = if chunk.len() > 1 { chunk[1] } else { 0 };
-                let b2 = if chunk.len() > 2 { chunk[2] } else { 0 };
-                let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
-                out.push(ALPHABET[((n >> 18) & 0x3f) as usize]);
-                out.push(ALPHABET[((n >> 12) & 0x3f) as usize]);
-                out.push(if chunk.len() > 1 {
-                    ALPHABET[((n >> 6) & 0x3f) as usize]
-                } else {
-                    b'='
-                });
-                out.push(if chunk.len() > 2 {
-                    ALPHABET[(n & 0x3f) as usize]
-                } else {
-                    b'='
-                });
-            }
-            String::from_utf8(out).expect("base64 ASCII")
         }
 
         #[cfg(unix)]
@@ -1024,7 +1152,8 @@ mod embedded {
             let context1 = LocalBackendContext::open(state_dir.clone(), None, None, false)
                 .await
                 .expect("open context");
-            let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+            let (server_io, client_io) =
+                tokio::net::UnixStream::pair().expect("private socket pair");
             let (server_read, server_write) = tokio::io::split(server_io);
             let (mut client_read, mut client_write) = tokio::io::split(client_io);
             let (_sig_tx, sig_rx) = oneshot::channel::<()>();
@@ -1055,7 +1184,8 @@ mod embedded {
             let context2 = LocalBackendContext::open(state_dir, None, None, false)
                 .await
                 .expect("reopen context");
-            let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+            let (server_io, client_io) =
+                tokio::net::UnixStream::pair().expect("private socket pair");
             let (server_read, server_write) = tokio::io::split(server_io);
             let (client_read, client_write) = tokio::io::split(client_io);
             let (_sig2_tx, sig2_rx) = oneshot::channel::<()>();
@@ -1112,7 +1242,8 @@ mod embedded {
             let context = LocalBackendContext::open(state_dir, None, None, false)
                 .await
                 .expect("open context");
-            let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+            let (server_io, client_io) =
+                tokio::net::UnixStream::pair().expect("private socket pair");
             let (server_read, server_write) = tokio::io::split(server_io);
             let (mut client_read, mut client_write) = tokio::io::split(client_io);
             let (_sig_tx, sig_rx) = oneshot::channel::<()>();
@@ -1247,17 +1378,22 @@ mod embedded {
                 .expect("upload id")
                 .to_owned();
 
-            let _chunk_empty = client
+            let chunk = client
                 .request_payload(
                     Some(registered.clone()),
                     IpcOperation::DatasetUploadChunk {
                         upload_id: upload_id.clone(),
                         offset: 0,
-                        data_b64: test_base64_encode(csv),
+                        data: csv.to_vec(),
                     },
                 )
                 .await
                 .expect("upload chunk");
+            assert!(
+                matches!(chunk, fleetworks_contracts::ipc::IpcPayload::DatasetUploadProgress {
+                received_bytes,
+            } if received_bytes == csv.len() as u64)
+            );
             let uploaded: DatasetUpload = client
                 .request_json(
                     Some(registered.clone()),
@@ -1280,7 +1416,8 @@ mod embedded {
             let context1 = LocalBackendContext::open(state_dir.clone(), None, None, false)
                 .await
                 .expect("open session 1");
-            let (server_io, client_io) = tokio::io::duplex(256 * 1024);
+            let (server_io, client_io) =
+                tokio::net::UnixStream::pair().expect("private socket pair");
             let (server_read, server_write) = tokio::io::split(server_io);
             let (client_read, client_write) = tokio::io::split(client_io);
             let (_sig1_tx, sig1_rx) = oneshot::channel::<()>();
@@ -1365,7 +1502,8 @@ mod embedded {
             let context2 = LocalBackendContext::open(state_dir, None, None, false)
                 .await
                 .expect("open session 2");
-            let (server2_io, client2_io) = tokio::io::duplex(256 * 1024);
+            let (server2_io, client2_io) =
+                tokio::net::UnixStream::pair().expect("private socket pair");
             let (server2_read, server2_write) = tokio::io::split(server2_io);
             let (client2_read, client2_write) = tokio::io::split(client2_io);
             let (_sig2_tx, sig2_rx) = oneshot::channel::<()>();

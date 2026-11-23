@@ -78,7 +78,7 @@ def install_gated_pack(home, args):
     manifest.write_text(json.dumps(contents, sort_keys=True) + "\n")
     digest = sha256(manifest)
     verify_directory(fixture, digests["target"], digest)
-    return worker, {"root": str(fixture), "manifest_sha256": digest}
+    return worker, {"root": str(fixture), "manifest_sha256": digest}, digests
 
 
 def companion_proxy(home, app):
@@ -139,10 +139,10 @@ def event_pages(records, turn_id):
     return [row for row in records if row.get("op") == "qa_events" and row.get("turn_id") == turn_id]
 
 
-def settled_turn(pages, first):
+def settled_turn(pages, first, expected_state):
     require(pages and all(not row["gap"] for row in pages), "fixture IPC event stream contained a cursor gap")
     final = pages[-1]
-    require(final["state"] == "answered", "same IPC turn did not finish answered")
+    require(final["state"] == expected_state, f"same IPC turn did not finish {expected_state}")
     events = {}
     for page in pages:
         for event in page["events"]:
@@ -152,16 +152,17 @@ def settled_turn(pages, first):
     require(sequence == list(range(1, final["cursor"] + 1)), "IPC events were not consecutive")
     ordered = [events[position] for position in sequence]
     terminal = [event for event in ordered if event["state"] in TERMINAL]
-    require(len(terminal) == 1 and terminal[0]["sequence"] == final["cursor"],
+    require(len(terminal) == 1 and terminal[0]["sequence"] == final["cursor"]
+            and terminal[0]["state"] == expected_state,
             "expected exactly one IPC terminal event")
     findings = [event["finding"] for event in ordered if event["finding"] is not None]
     require(findings == final["findings"] and len(set(findings)) == len(findings),
             "final exchange contains duplicate or missing findings")
     require(findings[:1] == first["findings"], "final exchange replaced its early finding")
-    return final
+    return {**final, "terminal_events": len(terminal)}
 
 
-def test_window(app, registry, atspi, home, worker, pointer, journal, output):
+def test_window(app, registry, atspi, home, worker, pointer, digests, journal, output):
     def find(key, *, button=False, label=None):
         # Match the process we launched, even if another application is registered.
         for window in registry.getDesktop(0):
@@ -244,13 +245,13 @@ def test_window(app, registry, atspi, home, worker, pointer, journal, output):
 
     started = submit(SUMMARY_QUESTION, timeout=110)
 
-    def first_frame():
+    def first_frame(expected_admissions):
         records = read_journal(journal)
         admitted = [row for row in records if row.get("op") == "qa_turn_submit"]
-        if not admitted:
+        if len(admitted) < expected_admissions:
             return None
-        require(len(admitted) == 1, "the UI submitted more than one exchange")
-        pages = event_pages(records, admitted[0]["turn_id"])
+        require(len(admitted) == expected_admissions, "the UI submitted more exchanges than expected")
+        pages = event_pages(records, admitted[-1]["turn_id"])
         require(not any(row["state"] in TERMINAL for row in pages),
                 "the turn finished before the barrier was released")
         if not pages or pages[-1]["state"] != "running" or len(pages[-1]["findings"]) != 1:
@@ -264,10 +265,11 @@ def test_window(app, registry, atspi, home, worker, pointer, journal, output):
         require(len(companions) == 1, "expected one IPC companion")
         return pages[-1], companions[0], citation.name
 
-    early, companion, citation_name = wait_for(first_frame, app, "an early citation and enabled Stop", timeout=16)
+    early, companion, citation_name = wait_for(lambda: first_frame(1), app,
+                                                "an early citation and enabled Stop", timeout=16)
     first_ms = round((time.monotonic() - started) * 1000, 1)
     subprocess.run(["scrot", "--overwrite", str(output / "first-finding.png")], check=True, timeout=5)
-    wait_for(first_frame, app, "the early citation and enabled Stop while completion is held", timeout=2)
+    wait_for(lambda: first_frame(1), app, "the early citation and enabled Stop while completion is held", timeout=2)
     release_gate(companion, worker)
 
     def completed_frame():
@@ -277,7 +279,7 @@ def test_window(app, registry, atspi, home, worker, pointer, journal, output):
             return None
         require(len([row for row in records if row.get("op") == "qa_turn_submit"]) == 1,
                 "the UI admitted another turn during completion")
-        final = settled_turn(pages, early)
+        final = settled_turn(pages, early, "answered")
         if find("inbox-qa-stop") is not None:
             return None
         if screen_bounds(find("chat-citation-0", label=citation_name), atspi) is None:
@@ -321,10 +323,46 @@ def test_window(app, registry, atspi, home, worker, pointer, journal, output):
 
     memory = wait_for(grounded_memory, app, "grounded memory reading and its original timestamp", timeout=16)
     subprocess.run(["scrot", "--overwrite", str(output / "grounded-memory.png")], check=True, timeout=5)
+
+    submit(SUMMARY_QUESTION)
+    pending, cancel_companion, _ = wait_for(lambda: first_frame(3), app,
+                                              "a separate Running turn with its first citation", timeout=16)
+    require(cancel_companion == companion and pending["turn_id"] != final["turn_id"],
+            "Stop used a different companion or the completed turn")
+    position = wait_for(lambda: screen_bounds(find("inbox-qa-stop", button=True), atspi), app,
+                        "enabled Stop on the held turn", timeout=2)
+    subprocess.run(["scrot", "--overwrite", str(output / "before-stop.png")], check=True, timeout=5)
+    x, y, width, height = position
+    subprocess.run(["xdotool", "mousemove", str(x + width // 2), str(y + height // 2), "click", "1"],
+                   check=True, timeout=5)
+
+    def canceled_frame():
+        records = read_journal(journal)
+        stopped = [row for row in records if row.get("op") == "qa_cancel"]
+        audits = [row for row in records if row.get("op") == "qa_cancel_audit"]
+        if not stopped or not audits or find("inbox-qa-stop") is not None:
+            return None
+        require(len(stopped) == len(audits) == 1 and stopped[0]["turn_id"] == audits[0]["turn_id"] == pending["turn_id"],
+                "Stop or the event audit targeted a different turn")
+        canceled = settled_turn([audits[0]], pending, "canceled")
+        require(stopped[0]["state"] == "canceled" and stopped[0]["cursor"] == canceled["cursor"]
+                and canceled["cursor"] == pending["cursor"] + 1,
+                "Stop did not add exactly one terminal cursor to the held turn")
+        return canceled
+
+    canceled = wait_for(canceled_frame, app, "the retained canceled turn after clicking Stop", timeout=12)
+    subprocess.run(["scrot", "--overwrite", str(output / "canceled-turn.png")], check=True, timeout=5)
     require_no_seed()
+    receipts = [row["transport_attestation"] for row in read_journal(journal) if "transport_attestation" in row]
+    require(len(receipts) == 1, "Expected one actual packaged companion handshake")
     result = {
-        "runtime": "embedded-stdio", "graphical": "x11", "first_citation_while_running": True,
-        "stop_enabled_before_release": True, "same_turn": True, "terminal_events": 1,
+        "runtime": receipts[0]["transport"], "transport_attestation": receipts[0],
+        "target": digests["target"], "source_sha": digests["source_sha"],
+        "graphical": "x11", "first_citation_while_running": True,
+        "stop_enabled_before_release": True, "same_turn": True,
+        "terminal_state": final["state"], "terminal_events": final["terminal_events"],
+        "stop_while_running": True, "cancelled_terminal_state": canceled["state"],
+        "cancelled_terminal_events": canceled["terminal_events"],
         "finding_count": len(final["findings"]), "duplicate_findings": 0,
         "first_finding_ms": first_ms, "completion_ms": completion_ms,
         "grounded_memory": memory,
@@ -358,7 +396,7 @@ def main():
         home = Path(directory).resolve()
         runtime = home / "run"
         runtime.mkdir(mode=0o700)
-        worker, pointer = install_gated_pack(home, args)
+        worker, pointer, digests = install_gated_pack(home, args)
         proxy, journal = companion_proxy(home, args.app)
         environment = {**os.environ, "HOME": str(home), "XDG_RUNTIME_DIR": str(runtime),
                        "XDG_CACHE_HOME": str(home / "cache"), "XDG_CONFIG_HOME": str(home / "config"),
@@ -370,7 +408,7 @@ def main():
         with subprocess.Popen([str(args.app.resolve() / "bin/fleetworks-desktop"), "--diagnostic",
                                "--local-backend-bin", str(proxy)], env=environment) as app:
             try:
-                test_window(app, pyatspi.Registry, pyatspi, home, worker, pointer, journal, output)
+                test_window(app, pyatspi.Registry, pyatspi, home, worker, pointer, digests, journal, output)
             except Exception:
                 if app.poll() is None:
                     try:

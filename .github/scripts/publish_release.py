@@ -12,6 +12,7 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 from fleetworks_qa_pack import MAX_COMPRESSED, MAX_MANIFEST, MODEL_REVISION
+from inbox_qa_smoke_receipt import require_embedded_smoke
 
 IDENTITY_FIELDS = ("head", "version", "tag", "channel", "prerelease", "native", "backend", "web", "bert", "image_tag", "image_targets")
 INBOX_QA_TARGETS = ("x86_64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin")
@@ -152,11 +153,12 @@ def inbox_qa_payload(plan, directory, native_digests):
         if (not isinstance(evidence, dict) or evidence.get("archive") != archive.name
                 or evidence.get("target") != target or evidence.get("source_sha") != plan["head"]
                 or evidence.get("version") != plan["version"] or evidence.get("model_revision") != MODEL_REVISION
-                or evidence.get("status") != "passed" or evidence.get("runtime") != "embedded-stdio"
+                or evidence.get("status") != "passed"
                 or any(not isinstance(evidence.get(key), str) or not re.fullmatch(r"[0-9a-f]{64}", evidence[key])
                        for key in ("archive_sha256", "manifest_sha256", "native_archive_sha256"))
                 or sha256(archive) != evidence["archive_sha256"]):
             raise ValueError("Inbox QA pack digest or packaged smoke provenance differs from the release plan")
+        require_embedded_smoke(evidence, target=target, head=plan["head"])
         if target.endswith("-apple-darwin") and evidence["native_archive_sha256"] != native_digests.get(target):
             raise ValueError("Inbox QA smoke used a different macOS archive from the release payload")
     return [*archives, *receipts]

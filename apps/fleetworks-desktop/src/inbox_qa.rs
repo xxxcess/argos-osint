@@ -4,7 +4,6 @@
 use std::time::Duration;
 
 use fleetworks_contracts::chat::ChatSourceKind;
-use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::chat::QaAvailabilityReason;
 use fleetworks_contracts::chat::QaCancelRequest;
 use fleetworks_contracts::chat::QaConversationReply;
@@ -664,7 +663,11 @@ impl State {
             self.inbox_qa.status = Some("Could not prepare the question. Try again.");
             return;
         };
-        let source = self.inbox_qa.source.as_ref().and_then(optional_source);
+        let source = self
+            .inbox_qa
+            .source
+            .as_ref()
+            .and_then(assistant::source_for);
         let Ok(request) = QaTurnRequest::new(
             request_id,
             MutationContext::new(context),
@@ -918,11 +921,6 @@ pub(crate) fn setup_choice(state: &State) -> bool {
 pub(crate) fn continue_setup(state: &mut State, tx: &mut Tx) {
     state.inbox_qa.startup_seen = true;
     tx.focus("startup-data-stage", true);
-}
-
-fn optional_source(context: &assistant::Context) -> Option<ChatSourceReference> {
-    assistant::source_for(context)
-        .filter(|source| matches!(source.kind, ChatSourceKind::Job | ChatSourceKind::Cycle))
 }
 
 fn citation_kind(kind: ChatSourceKind) -> &'static str {
@@ -1242,7 +1240,7 @@ pub(crate) fn footer(state: &State, kit: &Kit, preferences: ViewPreferences) -> 
         );
     } else {
         let current = assistant::current_context(state);
-        if optional_source(&current).is_some() {
+        if assistant::source_for(&current).is_some() {
             row = row.child(
                 ActionButton::new(format!("Include {}", current.kind.to_lowercase()))
                     .key("inbox-qa-pin-source")
@@ -1344,6 +1342,7 @@ fn footer_layer(content: El, preferences: ViewPreferences) -> El {
 
 #[cfg(test)]
 mod tests {
+    use fleetworks_contracts::chat::ChatSourceReference;
     use fleetworks_contracts::chat::QaFinding;
     use rune::Env;
     use rune::Ime;
@@ -1416,6 +1415,21 @@ mod tests {
                 .flatten()
                 .map(|child| accessibility_nodes_with_key(child, key))
                 .sum::<usize>()
+    }
+
+    #[test]
+    fn composer_can_include_the_selected_readiness_check() {
+        let mut runtime = active_drawer((640.0, 480.0));
+        let key = "inbox-qa-pin-source";
+        assert!(runtime.find(key).is_none());
+
+        runtime.update(|state, _| state.selected_readiness = Some("actor_search".into()));
+        runtime.frame(1.0);
+        assert!(runtime.find(key).is_some());
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("Include readiness"));
     }
 
     #[test]
@@ -1597,7 +1611,7 @@ mod tests {
             (
                 QaTurnNotice::OutOfScope,
                 Some(QaConversationReply::ContextNeeded),
-                "select it and tell me what you’d like to know",
+                "select a related job, news cycle, or status check",
             ),
             (
                 QaTurnNotice::OutOfScope,

@@ -203,7 +203,15 @@ fn retained_profile_switch_confirms_dirty_drafts_and_native_setup_has_no_profile
     runtime.pointer_down(x, y);
     runtime.pointer_up(x, y);
     runtime.frame(1.0 / 60.0);
-    assert!(runtime.state.setup_gateway);
+    assert!(runtime.state.settings_open);
+    assert_eq!(
+        runtime.state.settings_section,
+        crate::workstation_settings::SettingsSection::Connection
+    );
+    assert!(runtime.find("gateway-origin").is_some());
+    assert!(runtime
+        .find(&format!("connection-profile-{}", "b".repeat(64)))
+        .is_none());
     assert!(
         !runtime.state.configuration.account_api_key.text.is_empty(),
         "opening URL setup alone cannot discard an unrelated draft"

@@ -679,6 +679,7 @@ mod tests {
     use super::Metric;
     use super::Question;
     use super::StatusChecks;
+    use fleetworks_contracts::chat::ChatSourceKind;
     use fleetworks_contracts::readiness::ReadinessCheckId;
 
     #[test]

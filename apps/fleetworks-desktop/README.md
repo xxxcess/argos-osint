@@ -18,7 +18,7 @@ Open the repository root in RustRover and select **Build and open Fleetworks (Em
 python3 scripts/fleetworks_quick_start.py --start-embedded
 ```
 
-The launcher shares the repository's Cargo cache and keeps the app and its profile under separate `.agent-scratch/` directories. Close that app before replacing its bundle. Use `--help` for the optimized build profile, source worktree selection, and verified offline artifacts.
+The launcher shares the repository’s Cargo cache and keeps one app bundle per target and profile at `target/native/<platform>/<profile>/Fleetworks.app`. On Apple Silicon, the default is `target/native/aarch64-apple-darwin/debug/Fleetworks.app`. Use `--profile release` for the optimized app in the sibling `release` directory. The launcher prints the app path before building and keeps Embedded data in `.agent-scratch/native-quick-start-profile/`. Close a running bundle before replacing it. Use `--help` for worktree selection, custom paths, and verified offline artifacts.
 
 ### Build and backend options
 

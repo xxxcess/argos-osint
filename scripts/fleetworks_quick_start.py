@@ -55,7 +55,7 @@ import fleetworks_candidate as native
 import fleetworks_qa_pack as qa
 
 REPO = "xxxcess/argos-osint"
-DEFAULT_OUTPUT = ROOT / ".agent-scratch" / "native-quick-start"
+DEFAULT_PROFILE = ROOT / ".agent-scratch" / "native-quick-start-profile"
 APP_ARTIFACT_FAMILIES = {
     "debug": ("Fleetworks-macOS-Desktop-App-debug",),
     "release": ("Fleetworks-macOS-Desktop-App-release", "Fleetworks-macOS-Desktop-App"),
@@ -301,13 +301,19 @@ def rebuild_desktop(companion, info, target, output, shared, profile):
 def build_source(output, revision, shared, profile):
     share_agent_cache(shared)
     reserve_space(output.parent, native.MAX_NATIVE_UNPACKED_BYTES)
-    subprocess.run(
+    result = subprocess.run(
         [sys.executable, "-B", str(ROOT / "scripts" / "fleetworks_candidate.py"),
          "build-native", "--agent", "--target", "host", "--profile", profile,
          "--with-companion", "--revision", revision, "--workflow", SOURCE_WORKFLOW,
          "--run-id", f"local-{time.time_ns()}", "--run-attempt", "1", "--output", str(output)],
-        cwd=ROOT, stdout=subprocess.DEVNULL, check=True,
+        cwd=ROOT, stdout=subprocess.DEVNULL,
     )
+    if result.returncode:
+        free_mib = shutil.disk_usage(output.parent).free // 1024**2
+        raise ValueError(
+            f"The {profile} desktop and companion build failed (exit {result.returncode}). "
+            f"{free_mib:,} MiB remains on the build volume. See the build diagnostics above."
+        )
 
 
 def existing_app(output):
@@ -559,8 +565,9 @@ def main():
     parser.add_argument("--start-embedded", action="store_true",
                         help="Select and start Embedded through the app's macOS accessibility controls")
     parser.add_argument("--inbox-artifact", type=int, help="Install a verified offline Inbox model pack")
-    parser.add_argument("--output", type=Path, help="Managed output directory for the app bundle")
-    parser.add_argument("--profile-dir", type=Path, default=DEFAULT_OUTPUT.with_name("native-quick-start-profile"))
+    parser.add_argument("--output", type=Path,
+                        help="Managed bundle directory (default: target/native/<platform>/<profile>)")
+    parser.add_argument("--profile-dir", type=Path, default=DEFAULT_PROFILE)
     args = parser.parse_args()
     if args.rebuild_desktop and args.app_artifact is None:
         parser.error("--rebuild-desktop requires --app-artifact")
@@ -568,8 +575,8 @@ def main():
         info = native.detect()
         target = info.native_target
         require(target in native.DARWIN_NATIVE_TARGETS, "This quick start supports Intel and Apple Silicon macOS")
-        default_output = DEFAULT_OUTPUT if args.profile == "debug" else DEFAULT_OUTPUT.with_name("native-quick-start-release")
-        requested_output = args.output or default_output
+        shared = repo_family_root()
+        requested_output = args.output or shared / "target" / "native" / target / args.profile
         require(not requested_output.expanduser().is_symlink(), "The app output cannot be a symlink")
         output = native.native_output(requested_output, target, args.profile)
         require(not args.profile_dir.expanduser().is_symlink(), "The isolated profile cannot be a symlink")
@@ -579,7 +586,7 @@ def main():
                 and not profile.is_relative_to(output)
                 and not output.is_relative_to(profile),
                 "Select a dedicated profile directory outside the app output")
-        shared = repo_family_root()
+        print(f"Fleetworks {target} ({args.profile}): {output / native.NATIVE_APP}", flush=True)
         source_build = args.app_artifact is None and not args.reuse_bundle
         with quick_start_lock(shared):
             if not source_build:

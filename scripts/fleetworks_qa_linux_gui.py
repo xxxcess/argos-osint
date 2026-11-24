@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shlex
 import signal
 import socket
@@ -111,6 +112,15 @@ def query_text(node):
         return node.queryText()
     except NotImplementedError:
         # AccessKit exports the AT-SPI Text interface only when text runs exist.
+        return None
+
+
+def read_x11_clipboard():
+    try:
+        result = subprocess.run(["xclip", "-selection", "clipboard", "-out"], stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, check=False, timeout=1)
+        return result.stdout if result.returncode == 0 else None
+    except subprocess.TimeoutExpired:
         return None
 
 
@@ -328,21 +338,27 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
             require(field.queryComponent().grabFocus(), "Fleetworks composer rejected accessible focus")
             return None
 
-        field = wait_for(focus_composer, app, "focused editable QA composer", timeout=timeout)
-        empty = query_text(field)
-        require(empty is None or empty.characterCount == 0, "QA composer retained text before the next turn")
+        wait_for(focus_composer, app, "focused editable QA composer", timeout=timeout)
         subprocess.run(["xdotool", "type", "--clearmodifiers", question], check=True, timeout=5)
 
-        def typed_question():
+        def focused_with_send():
             field = shown_composer()
-            if field is None or not field.getState().contains(atspi.STATE_FOCUSED):
-                return None
-            text = query_text(field)
-            if text is not None and text.characterCount == len(question) and text.getText(0, len(question)) == question:
+            if field is not None and field.getState().contains(atspi.STATE_FOCUSED):
                 return find("inbox-qa-send", button=True)
             return None
 
-        wait_for(typed_question, app, "open Inbox with exact typed question and enabled Send")
+        wait_for(focused_with_send, app, "open Inbox with focused editable composer and enabled Send", timeout=8)
+        # Prove this copy came from the current editor even when the preceding turn
+        # used the same question. The display and its clipboard belong to this fixture.
+        sentinel = ("qa-copy-" + secrets.token_hex(8)).encode()
+        subprocess.run(["xclip", "-selection", "clipboard", "-in"], input=sentinel,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=3)
+        wait_for(lambda: True if read_x11_clipboard() == sentinel else None, app,
+                 "unique X11 clipboard sentinel", timeout=3)
+        subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+a", "ctrl+c"], check=True, timeout=5)
+        expected = question.encode()
+        wait_for(lambda: focused_with_send() if read_x11_clipboard() == expected else None, app,
+                 "exact question copied from the focused QA composer", timeout=5)
         submitted_at = time.monotonic()
         # Submit via the already-focused composer, using the same keyboard path as an operator.
         subprocess.run(["xdotool", "key", "--clearmodifiers", "Return"], check=True, timeout=5)
@@ -488,6 +504,7 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         "graphical": "x11", "first_citation_while_running": True,
         "assistant_open_paths": ["inbox_toolbar", "workstation_status"],
         "focused_editable_and_exact_typed_text": True,
+        "typed_question_verification": "x11_clipboard",
         "sources_default_collapsed": True, "sources_retained_after_completion": True,
         "sources_retained_after_cancel": True,
         "stop_enabled_before_release": True, "same_turn": True,

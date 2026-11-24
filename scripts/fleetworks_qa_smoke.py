@@ -180,22 +180,27 @@ def require_context(turn, *, inferred, window=CONTEXT_WINDOW_TOKENS):
     return usage
 
 
-def settled_turn(request, context, case, question, *, source=None, generated=False):
+def settled_turn(request, context, case, question, *, source=None, mode="direct"):
     payload = {"request_id": f"inbox-qa-smoke-{case}", "context": context, "question": question}
     if source is not None:
         payload["source"] = source
     accepted = request("turns", payload, expected=(200, 201, 202))
     query = {"turn_id": accepted["turn_id"], "after": 0, "wait_seconds": 0}
-    if generated:
+    inferred = mode != "direct"
+    if inferred:
         accepted = until(lambda: request("events", query=query)["turn"],
                          lambda turn: turn["state"] in TERMINAL,
-                         f"{case} did not complete the local dialogue turn", timeout=45)
-        require(accepted["state"] == "answered" and accepted.get("reply") and not accepted["findings"],
-                f"{case} did not produce bounded conversational text")
+                         f"{case} did not complete the local inference turn", timeout=45)
+        if mode == "dialogue":
+            require(accepted["state"] == "answered" and accepted.get("reply") and not accepted["findings"],
+                    f"{case} did not produce bounded conversational text")
+        else:
+            require(accepted["state"] == "answered" and accepted["findings"],
+                    f"{case} did not produce a grounded explanation")
     else:
         require(accepted["state"] in TERMINAL, f"{case} did not finish within admission")
-    usage = require_context(accepted, inferred=generated)
-    if generated:
+    usage = require_context(accepted, inferred=inferred)
+    if inferred:
         require(usage["model_windows"] == 1, f"{case} did not use a single model input window")
     page = request("events", query=query)
     require(page["turn"] == accepted and not page["gap"], f"{case} admission differed from its event snapshot")
@@ -424,8 +429,8 @@ def exercise(request, registration, model, readiness, running_jobs):
 
     context = authorize(registration)
 
-    def ask(case, question, *, generated=False):
-        return settled_turn(request, context, case, question, generated=generated)
+    def ask(case, question, *, mode="direct"):
+        return settled_turn(request, context, case, question, mode=mode)
 
     def check_status_group(question, group, prior_observation):
         status_turn = ask(f"{group}-status-checks", question)
@@ -449,7 +454,7 @@ def exercise(request, registration, model, readiness, running_jobs):
 
     gateway = settled_turn(
         request, context, "gateway", "What does this mean?",
-        source={"kind": "readiness", "id": "gateway"},
+        source={"kind": "readiness", "id": "gateway"}, mode="grounded",
     )
     gateway_finding = cited_finding(gateway, "readiness", "gateway")
     require(gateway_finding["text"]
@@ -491,7 +496,7 @@ def exercise(request, registration, model, readiness, running_jobs):
     require(datetime.fromisoformat(readings["memory_follow_up"]["observed_at"])
             > datetime.fromisoformat(readings["memory"]["observed_at"]),
             "memory follow-up reused the previous observation timestamp")
-    greeting = ask("greeting", "hi", generated=True)
+    greeting = ask("greeting", "hi", mode="dialogue")
     require(greeting.get("notice") == "greeting" and not greeting["findings"],
             "greeting did not receive a friendly reply without citations")
     worker, = model()
@@ -510,7 +515,7 @@ def exercise(request, registration, model, readiness, running_jobs):
             and all(part["source"]["kind"] == "host_metric" and part.get("measurement")
                     for part in resources["findings"]),
             "resource summary did not cite exact CPU, memory and disk observations")
-    help_turn = ask("help", "What can you help with?", generated=True)
+    help_turn = ask("help", "What can you help with?", mode="dialogue")
     require(help_turn.get("conversation") == "help" and not help_turn["findings"],
             "the assistant did not explain how to start a task")
     unsupported = ask("general-context", "What is the capital of Japan?")

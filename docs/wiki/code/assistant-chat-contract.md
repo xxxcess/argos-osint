@@ -74,7 +74,9 @@ Each exact host fact preserves its decimal value, unit, subject and observation 
 
 Explicit relationships and unambiguous facts resolve in the companion. When multiple eligible sources remain, the Assistant reports that triage is unavailable. The operator can narrow the subject in the composer. Decision models are not yet available in Workstation Settings.
 
-The [hosted scoring workflow](../../../.github/workflows/fleetworks-decision-qualification.yml) accepts an exact PR SHA through `Fleetworks` dispatch with `decision_qualification=linux` or `macos`. It verifies pinned Julia-1 and vLLM d3-edge assets, calibrates on a separate incident group, and records held-out precision, coverage, out-of-scope choices and warm eight-candidate p95. Its receipts describe isolated scoring. Release qualification also requires combined answer and navigation checks, resource measurements with FLAN and indexing active, and separate evidence for each native target. The Liquid pack also requires distribution license review.
+The [hosted scoring workflow](../../../.github/workflows/fleetworks-decision-qualification.yml) accepts an exact PR SHA through `Fleetworks` dispatch with `decision_qualification=linux` or `macos`. It verifies pinned Julia-1 and vLLM d3-edge assets, calibrates on a separate incident group, and records held-out precision, coverage, out-of-scope choices and warm eight-candidate p95. Its receipts describe isolated scoring. Julia uses the publisher’s October 19 Q8 snapshot because the later snapshot has a tokenizer metadata incompatibility with the pinned shared runtime. [Julia GGUF loading issue](https://github.com/ggml-org/llama.cpp/issues/32882)
+
+Release qualification also requires combined answer and navigation checks, resource measurements with FLAN and indexing active, and separate evidence for each native target. The Liquid pack also requires distribution license review.
 
 ### Operations
 

@@ -23,10 +23,10 @@
   "models": {
     "julia-1": {
       "repository": "ggml-org/Julia-1-GGUF",
-      "revision": "28ada03933a77bd332c197dc86fc2cb24e43b8f9",
+      "revision": "1e6b48a6983d7467f8eedc2cb0d21267b5fc052d",
       "file": "Julia-1-Q8_0.gguf",
-      "bytes": 168166400,
-      "sha256": "ff6cbbe856f1810a8b171528ea908d3b43b5742e73f0698689467559078f347d",
+      "bytes": 168166496,
+      "sha256": "1ea6a7e87156eeeda88cb7a36a61265b37ba7b993897b7289b99aea5b5e47069",
       "license": "Apache-2.0"
     },
     "liquid-d1-omni-600m": {

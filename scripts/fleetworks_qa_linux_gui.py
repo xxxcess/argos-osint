@@ -106,6 +106,14 @@ def app_roots(app, registry):
     return (node for node in registry.getDesktop(0) if node is not None and node.get_process_id() == app.pid)
 
 
+def query_text(node):
+    try:
+        return node.queryText()
+    except NotImplementedError:
+        # AccessKit exports the AT-SPI Text interface only when text runs exist.
+        return None
+
+
 def retain_focus_diagnostics(app, registry, atspi, output, error):
     from gi.repository import GLib
 
@@ -134,9 +142,11 @@ def retain_focus_diagnostics(app, registry, atspi, output, error):
                 row = {"depth": depth, "id": (node.get_accessible_id() or "")[:96], "role": node.getRoleName(),
                        "name": (node.name or "")[:120], "states": flags, "bounds": screen_bounds(node, atspi)}
                 if flags["editable"] and (flags["focused"] or row["name"] == COMPOSER_LABEL):
-                    edit = node.queryText()
-                    row["text"] = edit.getText(0, min(edit.characterCount, 256))
-                    row["text_characters"] = edit.characterCount
+                    edit = query_text(node)
+                    row["text_interface"] = edit is not None
+                    if edit is not None:
+                        row["text_characters"] = edit.characterCount
+                        row["text"] = edit.getText(0, min(row["text_characters"], 256))
                 evidence["nodes"].append(row)
             except (GLib.Error, NotImplementedError):
                 continue
@@ -319,15 +329,16 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
             return None
 
         field = wait_for(focus_composer, app, "focused editable QA composer", timeout=timeout)
-        require(field.queryText().characterCount == 0, "QA composer retained text before the next turn")
+        empty = query_text(field)
+        require(empty is None or empty.characterCount == 0, "QA composer retained text before the next turn")
         subprocess.run(["xdotool", "type", "--clearmodifiers", question], check=True, timeout=5)
 
         def typed_question():
             field = shown_composer()
             if field is None or not field.getState().contains(atspi.STATE_FOCUSED):
                 return None
-            text = field.queryText()
-            if text.characterCount == len(question) and text.getText(0, len(question)) == question:
+            text = query_text(field)
+            if text is not None and text.characterCount == len(question) and text.getText(0, len(question)) == question:
                 return find("inbox-qa-send", button=True)
             return None
 

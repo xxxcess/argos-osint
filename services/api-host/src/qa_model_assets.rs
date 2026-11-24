@@ -8,14 +8,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{ensure, Context, Result};
-use fleetworks_contracts::qa_worker::QaModelTarget;
+use fleetworks_contracts::qa_worker::{QaModelTarget, QA_MODEL_PINS};
 use reqwest::Client;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::sync::Mutex;
 
-const PINS: &str = include_str!("../../../scripts/fleetworks_qa_models.json");
 const BLOCK_BYTES: usize = 1024 * 1024;
 static PROVISIONING: Mutex<()> = Mutex::const_new(());
 
@@ -43,7 +42,7 @@ impl Drop for StagedAsset {
 }
 
 fn model_pin(target: QaModelTarget) -> Result<ModelPin> {
-    let mut pins: BTreeMap<String, ModelPin> = serde_json::from_str(PINS)?;
+    let mut pins: BTreeMap<String, ModelPin> = serde_json::from_str(QA_MODEL_PINS)?;
     let pin = pins
         .remove(target.slug())
         .context("unknown QA model target")?;

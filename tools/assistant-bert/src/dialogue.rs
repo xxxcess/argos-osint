@@ -33,6 +33,7 @@ use super::protocol::QaWorkerDialogue;
 use super::protocol::QA_CONTEXT_WINDOW_TOKENS;
 use super::protocol::QA_MAX_DIALOGUE_MESSAGE_BYTES;
 use super::protocol::QA_MAX_VISIBLE_WORDS;
+use super::protocol::QA_MODEL_PINS;
 
 const MAX_OPERATIONAL_PASSAGES: usize = 6;
 const LEGACY_OUTPUT_TOKENS: u16 = 48;
@@ -56,8 +57,7 @@ pub(super) fn verify(dir: &Path, target: QaModelTarget) -> Result<()> {
         fs::symlink_metadata(dir)?.is_dir() && dir.to_str().is_some(),
         "invalid QA generator directory"
     );
-    let pins: BTreeMap<String, ModelPin> =
-        serde_json::from_str(include_str!("../../../scripts/fleetworks_qa_models.json"))?;
+    let pins: BTreeMap<String, ModelPin> = serde_json::from_str(QA_MODEL_PINS)?;
     let model = pins
         .get(target.slug())
         .ok_or_else(|| anyhow!("QA generator pin is absent"))?;

@@ -13,6 +13,7 @@ pub const QA_WORKER_PROTOCOL: u16 = 1;
 pub const QA_CONTEXT_WINDOW_TOKENS: u16 = 256;
 pub const QA_CONTEXT_USAGE_ENV: &str = "FLEETWORKS_QA_CONTEXT_USAGE";
 pub const QA_STREAMING_ENV: &str = "FLEETWORKS_QA_STREAMING";
+pub const QA_MODEL_PINS: &str = include_str!("qa_models.json");
 pub const QA_MODEL_TARGET_ENV: &str = "FLEETWORKS_QA_MODEL_TARGET";
 pub const QA_DIALOGUE_ENV: &str = "FLEETWORKS_QA_DIALOGUE";
 pub const QA_MODEL_REVISION: &str = "564e9b582944a57a3e586bbb98fd6f0a4118db7f";

@@ -24,7 +24,8 @@ MODEL = {
     "model/rust_model.ot": "8a9f9b2f153ac9ff230aca4548fa3286be9d2f9ea4eb7e9169665b1a8e983f44",
 }
 DEFAULT_CHAT_MODEL = "flan-t5-small"
-CHAT_MODELS = json.loads(Path(__file__).with_name("fleetworks_qa_models.json").read_text(encoding="utf-8"))
+MODEL_REGISTRY = Path(__file__).resolve().parents[1] / "crates" / "fleetworks-contracts" / "src" / "qa_models.json"
+CHAT_MODELS = json.loads(MODEL_REGISTRY.read_text(encoding="utf-8"))
 CHAT_MODELS_BY_REVISION = {pin["revision"]: model for model, pin in CHAT_MODELS.items()}
 GENERATOR_FILES = {
     model: {f"model/generator/{name}": (file["bytes"], file["sha256"]) for name, file in pin["files"].items()}

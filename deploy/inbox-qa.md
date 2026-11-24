@@ -1,10 +1,10 @@
-# Deploy Inbox QA
+# Set up Embedded Inbox Assistant
 
-Inbox QA starts Off for every target. Native exposes the setting during setup and in **Settings → Gateway**. Embedded runs the worker under the local companion using private framed pipes. Distributed runs the worker behind the selected gateway and needs a provisioned executor and model pair. [QA API](../docs/wiki/code/assistant-chat-contract.md#inbox-qa-v2)
+Inbox Assistant starts Off. In an Embedded workstation, turn on **Backend inference** and use the **Assistant** section in Workstation Settings to choose a model. Settings show the model’s weight download size, provisioning progress, and readiness. The Inbox composer becomes available when the selected model is ready.
 
-## Embedded packs
+## Verified offline packs
 
-Use the offline pack and digest record for the app’s architecture. Obtain the digests from the trusted release or the exact CI artifact used for verification. The pack importer verifies the archive, manifest, native architecture, and pinned model assets before selecting the new pack.
+Use the offline pack and digest record for the app’s architecture. Obtain the digests from the trusted release or the exact CI artifact used for verification. The importer verifies the archive, manifest, native architecture, worker, libraries, and pinned model assets.
 
 ```sh
 python3 scripts/fleetworks_qa_pack.py install \
@@ -13,25 +13,14 @@ python3 scripts/fleetworks_qa_pack.py install \
   --output "$PRIVATE_PACK_PARENT/$PACK_VERSION" --state-dir "$EMBEDDED_STATE_DIR"
 ```
 
-Use the Embedded companion’s state directory for the selected installation. The pack parent and the state directory must be owned by the current user. The state directory is private. Enable inference after import. To replace a pack, turn inference Off first, import into a new version directory, and then turn it on.
+Use the Embedded companion’s state directory for the selected installation. The pack parent and the private state directory must belong to the current user. To replace a pack, turn the Assistant Off, import into a new version directory, then enable it.
 
-The Embedded worker requires Linux Landlock ABI 3 or newer, or macOS Seatbelt. The companion starts it with access to the verified pack and the system loader. If the host lacks the required sandbox, Inbox and Gateway settings report that Embedded inference is unsupported on that host. Expand the details for the Landlock requirement. Missing packs, invalid packs, and worker startup failures have their own messages.
+The default pack carries the verified worker, its runtime libraries and FLAN-T5 Small. Install it once on a fresh workstation. Selecting FLAN-T5 Base, GPT-2 Small, or GPT-2 Medium provisions the chosen model’s pinned assets in the workstation profile. The companion loads one model at a time. The [news classifier](../docs/wiki/code/classifier.md) uses its own model and configuration.
 
-The app and companion are released independently of the optional QA archive. Pack construction uses CPU Torch 2.1.0, Rust-BERT 0.22.0, and the cased DistilBERT SQuAD checkpoint. Prepare dependencies on a connected build host. The release smoke runs with an empty model cache and disabled networking.
+## Host requirements
 
-## Distributed review deployment
+The worker requires Linux Landlock ABI 3 or newer, or macOS Seatbelt. The companion starts it with read access to the verified pack, selected model assets, and system loader. Workstation Settings and Inbox show whether the pack is missing or invalid, the sandbox is unavailable, or the worker cannot start.
 
-Use the QA model image for the gateway’s Linux architecture. Prepare one empty socket directory with mode `0700` for the executor/model pair, owned by the isolated deployment UID. Select it with `FLEETWORKS_QA_SOCKET_DIR` and set `FLEETWORKS_QA_IMAGE` to the verified local image tag. Apply [`compose.inbox-qa.yml`](compose.inbox-qa.yml) after [`compose.native-review.yml`](compose.native-review.yml).
+The companion accepts `FLEETWORKS_QA_CPU_THREADS` from 1 to 4 and `FLEETWORKS_QA_MEMORY_MIB` from 512 to 6144. It uses one CPU thread by default and applies a resident-memory limit of 1,536 MiB for FLAN-T5 Small, 3,584 MiB for FLAN-T5 Base, 2,048 MiB for GPT-2 Small, and 4,608 MiB for GPT-2 Medium. The offline package smoke verifies the default pack with networking disabled.
 
-The executor uses the review deployment’s datastore and a dedicated credential for the `fleetworks.qa` Jobs queue. Provision a distinct random token in a private file and set `FLEETWORKS_QA_JOBS_TOKEN_HOST_FILE` to that file. The model container receives the shared socket directory, a read-only verified pack, and a small temporary filesystem. Its networking is disabled. Set a distinct `FLEETWORKS_QA_REPLICA_ID` per pair and retain it across restarts. A model listener serves one prediction slot. The supplied review overlay allocates one CPU and 1 GiB for the model container, plus half a CPU and 512 MiB for the executor. These are initial budgets for verification.
-
-Grant `manage_inbox_qa` explicitly to a registered configuration manager. A pairing operator that has this explicit grant also passes it to the workstations it approves. Pairing operators can issue ordinary Native access without the QA management grant. Enable QA after the pair is deployed. Use the gateway lifecycle state to confirm readiness and unload.
-
-Off fences new work immediately. The model listener reaps an unresponsive child when its 30-second session deadline expires. The gateway reports **Stopping** while a replica still owes unload confirmation. Retain the replica identity when recovering its executor so it can reconcile the prior model session.
-
-The smoke test uses the exact preloaded runtime, datastore, search, and QA image tags. It creates and tears down its own Compose project, pairs against its gateway, and exercises the same contract as the packaged Embedded test.
-
-```sh
-python3 -B scripts/fleetworks_qa_smoke.py distributed \
-  --name "$FRESH_REVIEW_NAME" --platform "$PLATFORM" --image "$FLEETWORKS_QA_IMAGE"
-```
+[Assistant contract](../docs/wiki/code/assistant-chat-contract.md) · [Hosted verification](../docs/wiki/code/ci.md)

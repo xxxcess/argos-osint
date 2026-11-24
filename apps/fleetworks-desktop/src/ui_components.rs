@@ -20,7 +20,6 @@ use rune_kit::IconButton;
 use rune_kit::IconButtonVariant;
 use rune_kit::Kit;
 use rune_kit::Progress;
-use rune_kit::ProgressCircle;
 use rune_kit::Spinner;
 use rune_kit::Switch;
 
@@ -388,66 +387,6 @@ pub(crate) fn glass_dialog<S: 'static>(
             .center()
             .child(panel),
     ]
-}
-
-/// Compact, interactive 0–100% telemetry dial.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn metric_ring_tile(
-    key: &str,
-    label: &str,
-    reading: Option<f64>,
-    glyph: &'static Icon,
-    tone: StatusTone,
-    active: bool,
-    preferences: ViewPreferences,
-    kit: &Kit,
-) -> El {
-    let value = reading.map(|value| format!("{value:.1}%"));
-    let accessible_label = format!("{label}: {}", value.as_deref().unwrap_or("Unavailable"));
-    let ring = match reading {
-        Some(value) => ProgressCircle::new((value / 100.0) as f32)
-            .size(26.0)
-            .build(kit),
-        None => el()
-            .size(26.0, 26.0)
-            .radius(999.0)
-            .fill(tone.bg())
-            .border(1.0, tone.border())
-            .center()
-            .child(icon(glyph, 14.0).color(tone.fg())),
-    };
-    let body = row()
-        .w_full()
-        .min_w(0.0)
-        .padding(7.0)
-        .gap(6.0)
-        .center_y()
-        .child(ring.a11y_hidden())
-        .child(
-            col()
-                .min_w(0.0)
-                .grow(1.0)
-                .gap(1.0)
-                .child(
-                    text(label)
-                        .font(kit.ty.small)
-                        .color(kit.c.text_muted)
-                        .wrap(),
-                )
-                .child(
-                    text(value.unwrap_or_else(|| "—".to_owned()))
-                        .font(kit.ty.body_medium)
-                        .color(kit.c.text_base),
-                )
-                .a11y_hidden(),
-        );
-
-    material::canvas_tile(body, active, preferences)
-        .key(key)
-        .role("button")
-        .label(accessible_label)
-        .focusable(true)
-        .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT))
 }
 
 /// Inline configuration toggle row backed by `rune_kit::Switch`.

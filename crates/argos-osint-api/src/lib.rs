@@ -362,9 +362,6 @@ fn router_with_access(
         .route("/api/v1/articles/counts", get(article_counts))
         .merge(brain_routes);
     let router = if mode == AccessMode::Bearer {
-        let target =
-            inbox_qa::QaTarget::new(services.readiness.clone(), services.search.clone(), false)
-                .with_metrics(sampler.clone());
         let tools_routes = tools::routes();
         let tools_routes = if let Some(tools) = services.tools {
             tools_routes.route_layer(middleware::from_fn_with_state(tools, tools::forward))
@@ -388,7 +385,6 @@ fn router_with_access(
             .merge(configuration_reset::routes())
             .merge(classifier_activation::routes())
             .merge(chat::routes())
-            .merge(inbox_qa::routes().layer(axum::Extension(target)))
             .route(
                 ATLAS_CYCLES_PATH,
                 get(cycle_history::list).post(operations::submit_atlas_cycle),
@@ -731,7 +727,6 @@ async fn capabilities(
         }
         let mut features: Vec<String> = features.into_iter().map(str::to_owned).collect();
         features.push("workstation-cycle-history-v1".into());
-        features.push(inbox_qa::FEATURE.into());
         let response = base_capabilities(
             &state.instance_id,
             features,

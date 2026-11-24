@@ -883,7 +883,6 @@ pub(crate) async fn qa_snapshot(
     owners: &ReadinessOwners,
     search: Option<&SearchClient>,
     observed_after_ms: i64,
-    _embedded: bool,
 ) -> Option<(chrono::DateTime<Utc>, Vec<QaReadinessFact>)> {
     // The protocol persists millisecond boundaries, so every independent check
     // must start strictly after the last terminal boundary.
@@ -925,6 +924,7 @@ fn qa_fact(check: &ReadinessCheck) -> Option<QaReadinessFact> {
     let id = check.id.as_str();
     let label = qa_readiness_label(id)?;
     let status = match check.state {
+        ReadinessState::NotReady if check.reason_code == "process_not_ready" => "failed",
         ReadinessState::NotReady => "not ready",
         ReadinessState::NotApplicable => "not applicable",
         state => state.as_str(),
@@ -1258,7 +1258,7 @@ mod tests {
         );
         assert_eq!(
             qa_fact(&classifier),
-            Some(("classifier", "Classifier service", "not ready", "")),
+            Some(("classifier", "Classifier service", "failed", "")),
         );
     }
 

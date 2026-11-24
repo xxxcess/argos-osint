@@ -49,7 +49,9 @@ python3 scripts/fleetworks_verify.py dispatch full --ref <branch>
 
 ## GitHub Actions and Depot build routing
 
-GitHub-hosted runners are the default. They build Docker images with Buildx and run the selected smoke and publication checks on the matching architecture. This covers review images, Distributed Inbox QA, nightly release images and the optional Embedded desktop image. Linux desktop packaging also uses a GitHub-hosted runner by default.
+GitHub-hosted runners are the default. They build Docker images with Buildx and run the selected smoke and publication checks on the matching architecture. This covers review images, nightly release images and the optional Embedded desktop image. Linux desktop packaging also uses a GitHub-hosted runner by default.
+
+The Embedded Assistant verification exercises the exact packaged Linux x86_64 app in the first pass and the macOS Intel and Apple Silicon apps in the second pass. The packaged Linux smoke verifies an offline switch between FLAN-T5 Small and GPT-2 Small. The Linux pack job runs isolated streaming workloads for FLAN-T5 Base and GPT-2 Medium.
 
 The [image helper](../../../.github/scripts/release_images.py) builds and loads CI images from the [shared Bake file](../../../deploy/docker-bake.hcl). The backend closure is `runtime`, `search-index` and `surrealdb`, with `web` added when selected. A full review also verifies the preloaded development Web image when selected. The Compose profiles run with `--no-build` against the loaded image IDs, and Web-only packaging retains its standalone smoke. Both builders produce images under the same tags for smoke, digest verification and release staging.
 

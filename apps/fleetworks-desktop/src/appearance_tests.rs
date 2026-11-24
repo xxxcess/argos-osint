@@ -34,22 +34,28 @@ fn runtime(page: Page, preferences: FixtureAccessibility) -> Runtime<State> {
 #[test]
 fn wide_shell_shows_context_rail_and_compact_shell_keeps_settings_access() {
     for (width, rail_visible) in [(1440.0, true), (1180.0, false)] {
-        let mut state = crate::tests::registered_fixture();
-        state.page = Page::Workstation;
-        let mut runtime = Runtime::new(
-            state,
-            app::view,
-            (width, 800.0),
-            Env {
-                system_dark: true,
-                scale: 1.0,
-            },
-        );
-        runtime.frame(0.0);
-        runtime.frame(1.0 / 60.0);
-        assert_eq!(runtime.find("context-rail").is_some(), rail_visible);
-        assert!(runtime.find("open-workstation-settings").is_some());
-        assert!(runtime.find("nav-workstation").is_some());
+        for (page, show_rail) in [(Page::Workstation, false), (Page::Brain, rail_visible)] {
+            let mut state = crate::tests::registered_fixture();
+            state.page = page;
+            let mut runtime = Runtime::new(
+                state,
+                app::view,
+                (width, 800.0),
+                Env {
+                    system_dark: true,
+                    scale: 1.0,
+                },
+            );
+            runtime.frame(0.0);
+            runtime.frame(1.0 / 60.0);
+            assert_eq!(
+                runtime.find("context-rail").is_some(),
+                show_rail,
+                "{page:?}"
+            );
+            assert!(runtime.find("open-workstation-settings").is_some());
+            assert!(runtime.find("nav-workstation").is_some());
+        }
     }
 }
 
@@ -100,7 +106,7 @@ fn material_and_matte_keep_actual_toolbar_and_navigation_hit_bounds_on_all_pages
         assert!(satin.find("nav-seed").is_none());
         assert!(matte.find("nav-seed").is_none());
         let page_tab = (page != Page::Seed).then(|| format!("nav-{}", page.key()));
-        for key in ["connection-editor".to_owned(), "nav-workstation".to_owned()]
+        for key in ["inbox-toggle".to_owned(), "nav-workstation".to_owned()]
             .into_iter()
             .chain(page_tab)
         {
@@ -219,6 +225,17 @@ fn actual_readiness_view_distinguishes_stale_ready_and_unverified_inference() {
         runtime.state.intents.is_empty(),
         "opening status never starts maintenance or inference"
     );
+
+    runtime.update(|state, _| {
+        state.connection.status = crate::connection::ConnectionStatus::Disconnected;
+    });
+    runtime.frame(3.0 / 60.0);
+    let offline = runtime.accessibility_json().to_string();
+    assert!(offline.contains("Status checks · offline"));
+    assert!(offline.contains("Connect a backend to see status checks."));
+    assert!(!offline.contains("Gateway: Last ready"));
+    assert!(!offline.contains("Atlas BERT inference"));
+    assert!(runtime.find("readiness-status-table").is_none());
 }
 
 #[test]
@@ -238,9 +255,9 @@ fn material_and_matte_preserve_interactive_hit_bounds_and_a11y_on_status_and_see
         (
             Page::Workstation,
             vec![
-                "workstation-tile-cpu",
-                "workstation-tile-memory",
-                "workstation-tile-disk",
+                "nav-workstation",
+                "status-checks-toggle/trigger",
+                "workstation-diagnostics/trigger",
             ],
         ),
         (
@@ -290,14 +307,22 @@ fn material_and_matte_preserve_interactive_hit_bounds_and_a11y_on_status_and_see
         matte.frame(0.0);
 
         for key in keys {
-            let satin_box = satin
-                .presented(key)
-                .unwrap_or_else(|| panic!("{key} presented in satin mode on {page:?}"));
-            let matte_box = matte
-                .presented(key)
-                .unwrap_or_else(|| panic!("{key} presented in matte mode on {page:?}"));
+            let interactive_bounds = |runtime: &Runtime<State>| {
+                let path = format!("/{key}");
+                runtime
+                    .elements()
+                    .into_iter()
+                    .find(|element| {
+                        !element.exiting
+                            && (element.key.as_deref() == Some(key)
+                                || element.path.ends_with(&path))
+                    })
+                    .map(|element| (element.rect, element.opacity))
+                    .unwrap_or_else(|| panic!("expected {key} on {page:?}"))
+            };
             assert_eq!(
-                satin_box, matte_box,
+                interactive_bounds(&satin),
+                interactive_bounds(&matte),
                 "{key} paint mode cannot alter geometry on {page:?}"
             );
         }

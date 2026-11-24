@@ -137,10 +137,10 @@ fn job_error_summary(job: &crate::backend::ActivityJob) -> &str {
         return &job.error_summary;
     }
     match job.error_summary.as_str() {
-        "atlas_gnews_key_missing" => "GNews API key missing. Save a key in OSINT Tools.",
-        "atlas_newsdata_key_missing" => "NewsData.io API key missing. Save a key in OSINT Tools.",
-        "atlas_newsapi_key_missing" => "NewsAPI API key missing. Save a key in OSINT Tools.",
-        "atlas_currents_key_missing" => "Currents API key missing. Save a key in OSINT Tools.",
+        "atlas_gnews_key_missing" => "GNews API key missing. Save a key in Tool Box.",
+        "atlas_newsdata_key_missing" => "NewsData.io API key missing. Save a key in Tool Box.",
+        "atlas_newsapi_key_missing" => "NewsAPI API key missing. Save a key in Tool Box.",
+        "atlas_currents_key_missing" => "Currents API key missing. Save a key in Tool Box.",
         "atlas_classifier_unavailable" | "atlas_classifier_service_unavailable" => {
             "Rust-BERT worker unavailable. Check the Distributed gateway."
         }
@@ -246,7 +246,7 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
             ActionButton::new("Set up Distributed")
                 .key("atlas-open-distributed-setup")
                 .on_press_tx(|state: &mut State, tx| {
-                    state.setup_gateway = true;
+                    state.open_connection_settings();
                     tx.scroll_into_view("switch-remote-gateway");
                     tx.focus("switch-remote-gateway", tx.by_keys());
                 })
@@ -723,7 +723,7 @@ fn atlas_prerequisites(state: &State, preferences: ViewPreferences, kit: &Kit) -
         let (status, tone) = atlas_key_status(presence);
         have_saved_key |= presence == AtlasKeyPresence::Saved;
         let action = (presence == AtlasKeyPresence::Missing).then(|| {
-            ActionButton::new("OSINT Tools")
+            ActionButton::new("Tool Box")
                 .key(format!("atlas-key-open-{provider}"))
                 .finish(MetalFinish::ObsidianPill)
                 .on_press(move |state: &mut State| {
@@ -731,7 +731,7 @@ fn atlas_prerequisites(state: &State, preferences: ViewPreferences, kit: &Kit) -
                     open_tool_credential_editor(state, provider);
                 })
                 .build(kit, preferences, None)
-                .label(format!("Configure the {label} API key in OSINT Tools"))
+                .label(format!("Configure the {label} API key in Tool Box"))
         });
         checks = checks.child(atlas_check_row(provider, label, status, tone, action, kit));
     }
@@ -828,15 +828,47 @@ fn tools(
     kit: &Kit,
     layers: &mut Vec<El>,
 ) -> El {
-    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
-    let mut body = rune::col().gap(12.0).child(ui_components::section_header(
-        &icons::TOOLS,
-        "OSINT Tools",
-        None,
-        None,
-        None,
-        kit,
-    ));
+    let width = cx.layout_size("page-content").map_or(0.0, |size| size[0]);
+    let separate_overview = width >= 760.0;
+    let title = ui_components::section_header(&icons::TOOLS, "Tool Box", None, None, None, kit);
+    let catalog = tool_catalog(state, width >= 1100.0, preferences, kit);
+    let overview = tools_overview(state, preferences, kit);
+    tool_key_dialog(state, preferences, kit, layers);
+    if separate_overview {
+        rune::row()
+            .key("tool-box-layout")
+            .w_full()
+            .grow(1.0)
+            .min_h(0.0)
+            .child(
+                rune::col()
+                    .grow(1.0)
+                    .h_full()
+                    .min_w(0.0)
+                    .min_h(0.0)
+                    .child(scroll(
+                        rune::col().child(title).child(catalog),
+                        "tools-body",
+                    )),
+            )
+            .child(
+                rune::col()
+                    .w(300.0)
+                    .h_full()
+                    .min_h(0.0)
+                    .border_sides([1.0, 0.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE))
+                    .child(scroll(overview, "tool-box-overview-scroll")),
+            )
+    } else {
+        scroll(
+            rune::col().child(title).child(overview).child(catalog),
+            "tools-body",
+        )
+    }
+}
+
+fn tool_catalog(state: &State, wide: bool, preferences: ViewPreferences, kit: &Kit) -> El {
+    let mut body = rune::col().w_full().min_w(0.0).gap(10.0);
     if let Some(message) = list_load_or_skeleton(
         &state.backend.tools,
         "Tool availability has not been observed.",
@@ -850,9 +882,6 @@ fn tools(
         if catalog.tools.is_empty() {
             body = body.child(quiet("No services are advertised by this gateway.", kit));
         }
-        let wide = cx
-            .layout_size("page-content")
-            .is_some_and(|size| size[0] >= 780.0);
         let mut grid = if wide {
             rune::row().flex_wrap()
         } else {
@@ -898,6 +927,22 @@ fn tools(
             body = body.child(grid);
         }
     }
+    body
+}
+
+fn tools_overview(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
+    let mut body = rune::col()
+        .key("tool-box-overview")
+        .w_full()
+        .min_w(0.0)
+        .gap(10.0)
+        .child(
+            heading("Overview", kit)
+                .role("heading")
+                .key("tool-box-overview-title"),
+        )
+        .child(quiet("Provider API keys", kit));
     if let Some(message) = list_load_or_skeleton(
         &state.backend.profile,
         "Credential availability has not been observed.",
@@ -908,6 +953,9 @@ fn tools(
         body = body.child(message);
     }
     if let Load::Ready(profile) = &state.backend.profile {
+        if profile.tool_credentials.is_empty() {
+            body = body.child(quiet("No tool credential slots are configured.", kit));
+        }
         for credential in &profile.tool_credentials {
             let provider = credential.provider.clone();
             let configured = credential.primary_present || credential.fallback_present;
@@ -917,51 +965,51 @@ fn tools(
                 StatusTone::Warn
             };
             body = body.child(material::canvas_tile(
-                rune::row()
+                rune::col()
+                    .w_full()
+                    .min_w(0.0)
                     .padding(10.0)
-                    .gap(10.0)
-                    .center_y()
+                    .gap(8.0)
                     .key(format!("tool-provider-{}", credential.provider))
-                    .child(ui_components::status_dot(tone, preferences))
                     .child(
-                        rune::col()
-                            .grow(1.0)
-                            .min_w(0.0)
-                            .gap(4.0)
-                            .child(heading(credential.provider.clone(), kit))
-                            .child(
-                                rune::row()
-                                    .flex_wrap()
-                                    .gap(6.0)
-                                    .child(ui_components::status_pill(
-                                        if credential.primary_present {
-                                            "Primary configured"
-                                        } else {
-                                            "Primary empty"
-                                        },
-                                        Some(&icons::KEY),
-                                        if credential.primary_present {
-                                            StatusTone::Ok
-                                        } else {
-                                            StatusTone::Neutral
-                                        },
-                                        kit,
-                                    ))
-                                    .child(ui_components::status_pill(
-                                        if credential.fallback_present {
-                                            "Fallback configured"
-                                        } else {
-                                            "Fallback empty"
-                                        },
-                                        None,
-                                        if credential.fallback_present {
-                                            StatusTone::Info
-                                        } else {
-                                            StatusTone::Neutral
-                                        },
-                                        kit,
-                                    )),
-                            ),
+                        rune::row()
+                            .center_y()
+                            .gap(8.0)
+                            .child(ui_components::status_dot(tone, preferences))
+                            .child(heading(credential.provider.clone(), kit).min_w(0.0)),
+                    )
+                    .child(
+                        rune::row()
+                            .flex_wrap()
+                            .gap(6.0)
+                            .child(ui_components::status_pill(
+                                if credential.primary_present {
+                                    "Primary configured"
+                                } else {
+                                    "Primary empty"
+                                },
+                                Some(&icons::KEY),
+                                if credential.primary_present {
+                                    StatusTone::Ok
+                                } else {
+                                    StatusTone::Neutral
+                                },
+                                kit,
+                            ))
+                            .child(ui_components::status_pill(
+                                if credential.fallback_present {
+                                    "Fallback configured"
+                                } else {
+                                    "Fallback empty"
+                                },
+                                None,
+                                if credential.fallback_present {
+                                    StatusTone::Info
+                                } else {
+                                    StatusTone::Neutral
+                                },
+                                kit,
+                            )),
                     )
                     .child(
                         ActionButton::new("Configure API keys")
@@ -972,15 +1020,15 @@ fn tools(
                             .on_press(move |state: &mut State| {
                                 open_tool_credential_editor(state, &provider);
                             })
-                            .build(kit, preferences, pointer_ref),
+                            .build(kit, preferences, pointer_ref)
+                            .label(format!("Configure API keys for {}", credential.provider)),
                     ),
                 false,
                 preferences,
             ));
         }
     }
-    tool_key_dialog(state, preferences, kit, layers);
-    scroll(body, "tools-body")
+    body
 }
 
 fn tool_key_dialog(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Vec<El>) {
@@ -3298,4 +3346,78 @@ fn jobs_tail(
         ));
     }
     footer
+}
+
+#[cfg(test)]
+mod tools_tests {
+    use rune::Env;
+    use rune::Runtime;
+
+    use crate::app;
+    use crate::app::Load;
+    use crate::app::Page;
+    use crate::backend::ProfileSnapshot;
+    use crate::backend::ToolCatalog;
+    use crate::backend::ToolCredentialMetadata;
+    use crate::backend::ToolDefinition;
+
+    #[test]
+    fn tool_box_keeps_provider_controls_in_the_responsive_overview() {
+        for (size, wide) in [((640.0, 480.0), false), ((1440.0, 860.0), true)] {
+            let mut state = crate::tests::registered_fixture();
+            state.page = Page::Tools;
+            state.backend.profile = Load::Ready(ProfileSnapshot {
+                configuration_revision: 1,
+                configuration_format: 4,
+                accounts: Vec::new(),
+                tool_credentials: vec![ToolCredentialMetadata {
+                    provider: "newsdata".into(),
+                    primary_present: true,
+                    fallback_present: false,
+                }],
+                setup_required: false,
+                portable_schema_version: 4,
+            });
+            state.backend.tools = Load::Ready(ToolCatalog {
+                tools: vec![ToolDefinition {
+                    id: "fixture".into(),
+                    name: "Fixture tool".into(),
+                    category: "News".into(),
+                    description: "Synthetic tool".into(),
+                    inputs: Vec::new(),
+                    restrictions: String::new(),
+                    timeout_seconds: 1,
+                }],
+            });
+            let mut runtime = Runtime::new(
+                state,
+                app::view,
+                size,
+                Env {
+                    system_dark: true,
+                    scale: 1.0,
+                },
+            );
+            runtime.frame(0.0);
+            runtime.frame(1.0 / 60.0);
+
+            let overview = runtime.find("tool-box-overview-title").unwrap();
+            let catalog = runtime.find("tool-fixture").unwrap();
+            assert_eq!(runtime.find("tool-box-overview-scroll").is_some(), wide);
+            if wide {
+                assert!(overview.0 > catalog.0);
+            } else {
+                assert!(overview.1 < catalog.1);
+            }
+            let (x, y) = runtime.find("tool-key-open-newsdata").unwrap();
+            assert!((0.0..size.0).contains(&x) && (0.0..size.1).contains(&y));
+            runtime.pointer_down(x, y);
+            runtime.pointer_up(x, y);
+            runtime.frame(2.0 / 60.0);
+            assert!(runtime.state.tool_key_dialog);
+            assert_eq!(runtime.state.configuration.tool_provider.text, "newsdata");
+            assert!(runtime.find("tool-key-primary").is_some());
+            assert!(runtime.find("tool-key-fallback").is_some());
+        }
+    }
 }

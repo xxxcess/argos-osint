@@ -319,7 +319,6 @@ pub(crate) fn internal_access_with_token(
             Permission::RebindWorkstation,
             Permission::ResolveWebSession,
             Permission::ManageConfiguration,
-            Permission::ManageInboxQa,
             Permission::MaintainBackend,
             Permission::SubmitInteractive,
             Permission::ReadWorkstationActivity,
@@ -327,29 +326,6 @@ pub(crate) fn internal_access_with_token(
             Permission::CancelJob,
         ]),
     )
-}
-
-/// The optional QA executor credential reaches only the QA wake-up route.
-pub(crate) fn qa_jobs_access() -> Result<Option<NetworkPolicy>> {
-    use fleetworks_contracts::context::Permission;
-
-    if env::var_os("FLEETWORKS_QA_JOBS_TOKEN").is_none()
-        && env::var_os("FLEETWORKS_QA_JOBS_TOKEN_FILE").is_none()
-    {
-        return Ok(None);
-    }
-    let qa_token = read_secret("FLEETWORKS_QA_JOBS_TOKEN")?;
-    ensure!(
-        qa_token != read_secret("FLEETWORKS_JOBS_TOKEN")?,
-        "Inbox QA requires a distinct Jobs credential"
-    );
-    let (_, policy) = internal_access_with_identity(
-        "JOBS",
-        &qa_token,
-        "internal-jobs-qa".to_owned(),
-        BTreeSet::from([Permission::SubmitInteractive]),
-    )?;
-    Ok(Some(policy))
 }
 
 fn internal_access_with_identity(

@@ -19,7 +19,6 @@ use reqwest::header::AUTHORIZATION;
 use url::Url;
 
 pub(crate) const QA_QUEUE: &str = "fleetworks.qa";
-pub(crate) const QA_QUEUE_PATH: &str = "/internal/jobs/qa/queue";
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_RESPONSE_BYTES: usize = 128 * 1024;
@@ -51,14 +50,6 @@ impl Client {
     }
 
     pub(crate) fn new(origin: &str, token: &str, queue: String) -> Result<Self> {
-        Self::with_endpoint(origin, token, queue, "/internal/jobs/queue")
-    }
-
-    pub(crate) fn for_qa(origin: &str, token: &str) -> Result<Self> {
-        Self::with_endpoint(origin, token, QA_QUEUE.to_owned(), QA_QUEUE_PATH)
-    }
-
-    fn with_endpoint(origin: &str, token: &str, queue: String, path: &str) -> Result<Self> {
         let mut endpoint = Url::parse(origin).context("invalid Jobs origin")?;
         ensure!(
             matches!(endpoint.scheme(), "http" | "https")
@@ -70,7 +61,7 @@ impl Client {
                 && matches!(endpoint.path(), "" | "/"),
             "Jobs origin must be an exact HTTP(S) origin"
         );
-        endpoint.set_path(path);
+        endpoint.set_path("/internal/jobs/queue");
         let mut bearer =
             HeaderValue::from_str(&format!("Bearer {token}")).context("invalid Jobs bearer")?;
         bearer.set_sensitive(true);

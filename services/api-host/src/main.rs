@@ -10,6 +10,7 @@ mod jobs_service;
 mod local_ipc;
 mod native_worker;
 mod nlp_service;
+mod qa_model_assets;
 mod qa_worker;
 mod queue_client;
 mod reset_services;
@@ -105,8 +106,6 @@ enum Role {
     Execution,
     /// Claim and execute durable Atlas dispatches.
     AtlasWorker,
-    /// Execute private, durable Inbox QA work on the selected deployment.
-    AssistantQa,
     /// Consume registered setup/tools Jobs and pump the private actor index.
     NativeWorker,
     /// Warm, private Compromise inference without a database session.
@@ -463,12 +462,6 @@ async fn run_non_ipc(args: Args) -> Result<()> {
         );
         return Ok(());
     }
-    // QA owns a queue-only Jobs credential and has no shared Jobs client.
-    if role == Role::AssistantQa {
-        let result = inbox_qa_service::run_distributed(repo, shutdown_signal()).await;
-        drain_storage().await;
-        return result;
-    }
     let jobs_store = if role == Role::Jobs {
         let workspace = fleetworks::workspace_path()?;
         let store = jobs_service::open(workspace.clone()).await?;
@@ -594,14 +587,6 @@ async fn run_non_ipc(args: Args) -> Result<()> {
             port,
             Arc::new(api.origins),
         );
-        let qa_stop = argos_osint_api::inbox_qa::CancellationToken::new();
-        let qa_refresh = (role == Role::Api).then(|| {
-            tokio::spawn(argos_osint_api::inbox_qa::run_health_refresh(
-                state.clone(),
-                services.clone(),
-                qa_stop.clone(),
-            ))
-        });
         let router = if let Some(policy) = api.policy {
             let reset = if role == Role::Api {
                 reset_services::gateway(&state, policy.clone()).await?
@@ -616,27 +601,13 @@ async fn run_non_ipc(args: Args) -> Result<()> {
                 Role::Control => argos_osint_api::control_router(state, policy),
                 Role::Jobs => {
                     let (store, queue) = jobs_store.expect("Jobs owns the operational datastores");
-                    let qa_queue = if let Some(qa_policy) =
-                        tokio::task::spawn_blocking(fleetworks::qa_jobs_access).await??
-                    {
-                        argos_osint_api::guard_network(
-                            jobs_service::qa_router(queue.clone()),
-                            qa_policy,
-                            Arc::new(Vec::new()),
-                            port,
-                        )
-                    } else {
-                        axum::Router::new()
-                    };
                     let internal = argos_osint_api::guard_network(
                         jobs_service::router(store, queue),
                         policy.clone(),
                         Arc::new(Vec::new()),
                         port,
                     );
-                    argos_osint_api::jobs_router(state, policy)
-                        .merge(internal)
-                        .merge(qa_queue)
+                    argos_osint_api::jobs_router(state, policy).merge(internal)
                 }
                 _ => argos_osint_api::network_router_with_private_services(state, policy, services),
             };
@@ -657,7 +628,7 @@ async fn run_non_ipc(args: Args) -> Result<()> {
             );
             argos_osint_api::router(state)
         };
-        Some((listener, router, qa_stop, qa_refresh))
+        Some((listener, router))
     } else {
         None
     };
@@ -666,7 +637,7 @@ async fn run_non_ipc(args: Args) -> Result<()> {
     } else {
         None
     };
-    let served = if let Some((listener, router, qa_stop, qa_refresh)) = http {
+    let served = if let Some((listener, router)) = http {
         let listen = listener.local_addr()?;
         tracing::info!(
             role = ?role,
@@ -674,18 +645,13 @@ async fn run_non_ipc(args: Args) -> Result<()> {
             storage = "connected",
             "Fleetworks startup summary: HTTP listener ready"
         );
-        let served = serve_with_graceful_shutdown_timeout(
+        serve_with_graceful_shutdown_timeout(
             listener,
             router,
             shutdown_signal(),
             Duration::from_secs(15),
         )
-        .await;
-        qa_stop.cancel();
-        if let Some(refresh) = qa_refresh {
-            let _ = refresh.await;
-        }
-        served
+        .await
     } else {
         shutdown_signal().await;
         Ok(())

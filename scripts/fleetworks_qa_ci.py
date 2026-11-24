@@ -137,25 +137,65 @@ def mac_libraries(binary, directory, torch_root):
     return list(libraries.values())
 
 
-def verify_inference(root, loader_key, target):
+def prepare_assets(directory, chat_model):
+    pin = pack.CHAT_MODELS[chat_model]
+    directory.mkdir(mode=0o700, parents=True)
+    url = f"https://huggingface.co/{pin['repository']}/resolve/{pin['revision']}"
+    for name, asset in pin["files"].items():
+        destination = directory / name
+        run("curl", "--fail", "--silent", "--show-error", "--location",
+            "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "5",
+            "--retry", "3", "--max-time", "1200", "--max-filesize", str(asset["bytes"]),
+            f"{url}/{name}", "--output", str(destination), timeout=1240)
+        pack.check(destination.stat().st_size == asset["bytes"] and pack.sha256(destination) == asset["sha256"],
+                   f"{name} does not match the pinned chat model")
+
+
+def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODEL, *, model_directory=None):
     # The extracted pack must find all runtime libraries and use the exact
     # checkpoint without inheriting Torch or model-cache environment variables.
     model_env = {loader_key: str(root / "lib"), "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
-                 "RAYON_NUM_THREADS": "1"}
+                 "RAYON_NUM_THREADS": "1", "FLEETWORKS_QA_DIALOGUE": "1",
+                 "FLEETWORKS_QA_CONTEXT_USAGE": "1", "FLEETWORKS_QA_STREAMING": "1",
+                 "FLEETWORKS_QA_MODEL_TARGET": chat_model}
+    window = 896 if chat_model.startswith("gpt2-") else 512
     started = time.monotonic()
     worker = root / pack.WORKER
-    model = root / "model"
+    model = model_directory or root / "model"
     command = [str(worker), "--model-dir", str(model)]
     if target in DARWIN_WHEELS:
         launcher = ROOT / "services/api-host/src/qa_embedded_macos.sh"
         profile = launcher.with_suffix(".sb")
         command = ["/bin/sh", "-c", launcher.read_text(encoding="utf-8"), "fleetworks-inbox-qa",
                    target.split("-", 1)[0], "-f", str(profile), "-D", f"pack={root}",
-                   "-D", f"worker={worker}", *command]
+                   "-D", f"worker={worker}", "-D", f"model={model}", *command]
     error_log = tempfile.TemporaryFile()
     process = subprocess.Popen(command, env=model_env, cwd=model, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=error_log)
-    deadline = started + 60
+    deadline = started + 45
+    peak_rss = None
+    rss_samples = 0
+
+    def sample_rss():
+        nonlocal peak_rss, rss_samples
+        try:
+            if target in DARWIN_WHEELS:
+                result = subprocess.run(["/bin/ps", "-o", "rss=", "-p", str(process.pid)],
+                                        capture_output=True, text=True, timeout=1)
+                if result.returncode != 0:
+                    return
+                kib = int(result.stdout.strip())
+            else:
+                status = Path(f"/proc/{process.pid}/status").read_text()
+                match = re.search(r"^VmHWM:\s+(\d+) kB$", status, re.M)
+                if match is None:
+                    return
+                kib = int(match[1])
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return
+        if kib > 0:
+            rss_samples += 1
+            peak_rss = max(peak_rss or 0, kib * 1024)
 
     def send(message):
         encoded = json.dumps(message, separators=(",", ":")).encode()
@@ -168,8 +208,11 @@ def verify_inference(root, loader_key, target):
         def read(size):
             output = bytearray()
             while len(output) < size:
-                remaining = max(deadline - time.monotonic(), 0)
-                pack.check(select.select([fd], [], [], remaining)[0], "QA checkpoint smoke timed out")
+                remaining = deadline - time.monotonic()
+                pack.check(remaining > 0, "QA checkpoint smoke timed out")
+                if not select.select([fd], [], [], min(remaining, 0.25))[0]:
+                    sample_rss()
+                    continue
                 chunk = os.read(fd, size - len(output))
                 pack.check(chunk, "QA checkpoint worker stopped unexpectedly")
                 output.extend(chunk)
@@ -179,23 +222,101 @@ def verify_inference(root, loader_key, target):
         pack.check(0 < size <= 512 * 1024, "QA checkpoint reply exceeds its limit")
         return json.loads(read(size))
 
+    def valid_reply(reply):
+        return (isinstance(reply, str) and bool(reply.strip()) and reply.isprintable()
+                and len(reply.encode("utf-8")) <= 1024 and len(reply.split()) <= 60)
+
+    def receive_event(request, sequence):
+        envelope = receive()
+        event = envelope.get("event", {})
+        pack.check(envelope.get("reply") == "event" and event.get("turn_id") == request["turn_id"]
+                   and event.get("sequence") == sequence, "generator returned an out-of-sequence event")
+        return event
+
+    def read_drafts(request):
+        chunks = []
+        size = 0
+        first_delta = None
+        for sequence in range(1, 130):
+            event = receive_event(request, sequence)
+            if event.get("kind") != "delta":
+                return event, sequence, "".join(chunks), first_delta
+            if first_delta is None:
+                first_delta = time.monotonic()
+            text = event.get("text")
+            pack.check(isinstance(text, str) and text and sequence <= 128,
+                       "generator returned an invalid draft delta")
+            size += len(text.encode("utf-8"))
+            pack.check(size <= 4096, "generator exceeded its draft budget")
+            chunks.append(text)
+        raise ValueError("generator did not complete its bounded draft")
+
+    def complete_turn(event, *, prose_required):
+        reply = event.get("reply")
+        usage = event.get("context", {})
+        pack.check(event.get("kind") == "complete" and event.get("outcome") == "answered"
+                   and (valid_reply(reply) or (reply is None and not prose_required)),
+                   "generator did not complete the bounded turn")
+        pack.check(usage.get("window_tokens") == window and usage.get("model_windows") == 1
+                   and type(usage.get("peak_input_tokens")) is int and 0 < usage["peak_input_tokens"] <= window,
+                   "generator did not report its bounded input window")
+        return usage, reply is not None
+
     try:
-        pack.check(receive() == {"reply": "ready", "protocol": 1, "model_revision": pack.MODEL_REVISION},
-                   "QA checkpoint did not become ready")
+        ready = {"reply": "ready_with_streaming", "protocol": 1,
+                 "model_revision": pack.CHAT_MODELS[chat_model]["revision"]}
+        pack.check(receive() == ready, "chat checkpoint did not become ready with streaming")
         warm = time.monotonic()
-        send({"command": "ask", "request": {"turn_id": "pack-probe", "snapshot_id": "pack-probe",
-              "question": "What is the state of actor search?",
-              "passages": [{"source_id": "readiness", "text": "Actor search is ready."}]}})
-        finding = {"reply": "event", "event": {"kind": "finding", "turn_id": "pack-probe",
-                   "sequence": 1, "source_id": "readiness", "start": 16, "end": 21, "text": "ready"}}
-        pack.check(receive() == finding, "pinned checkpoint did not extract the expected exact answer")
-        pack.check(receive() == {"reply": "event", "event": {"kind": "complete", "turn_id": "pack-probe",
-                   "sequence": 2, "outcome": "answered"}}, "QA checkpoint did not complete the turn")
-        complete = time.monotonic()
+        sample_rss()
+        greeting = {
+            "turn_id": "pack-dialogue-probe", "snapshot_id": "pack-dialogue-probe",
+            "question": "Hello!", "passages": [],
+            "dialogue": {"kind": "greeting", "history": [
+                {"question": "What can I call you?", "reply": "You can call me Fleetworks."},
+                {"question": "Good morning.", "reply": "Good morning!"},
+            ]},
+        }
+        greeting_started = time.monotonic()
+        deadline = greeting_started + 25
+        send({"command": "ask", "request": greeting})
+        greeting_terminal, greeting_sequence, greeting_draft, first_delta = read_drafts(greeting)
+        pack.check(first_delta is not None and greeting_draft.strip(),
+                   "generator did not stream any conversational text before completion")
+        greeting_context, _ = complete_turn(greeting_terminal, prose_required=True)
+        greeted = time.monotonic()
+        sample_rss()
+
+        fact = {"source_id": "readiness", "text": "Actor search is ready."}
+        operational = {
+            "turn_id": "pack-operational-probe", "snapshot_id": "pack-operational-probe",
+            "question": "What is the state of actor search?", "passages": [fact],
+            "dialogue": {"kind": "operational", "history": []},
+        }
+        operational_started = time.monotonic()
+        deadline = operational_started + 25
+        send({"command": "ask", "request": operational})
+        finding, finding_sequence, operational_draft, _ = read_drafts(operational)
+        pack.check(not operational_draft or operational_draft.strip() == fact["text"],
+                   "operational turn streamed text outside its approved observation")
+        pack.check(finding == {"kind": "finding", "turn_id": operational["turn_id"], "sequence": finding_sequence,
+                               "start": 0, "end": len(fact["text"]), **fact},
+                   "operational turn did not cite the exact frozen fact")
+        terminal = receive_event(operational, finding_sequence + 1)
+        operational_context, composed = complete_turn(terminal, prose_required=False)
+        operational_finished = time.monotonic()
+        sample_rss()
+
         send({"command": "shutdown"})
         pack.check(process.wait(timeout=10) == 0, "QA checkpoint worker did not shut down")
         return {"model_warm_ms": round((warm - started) * 1000, 1),
-                "single_passage_ms": round((complete - warm) * 1000, 1)}
+                "first_delta_ms": round((first_delta - greeting_started) * 1000, 1),
+                "first_reply_ms": round((greeted - greeting_started) * 1000, 1),
+                "dialogue_delta_events": greeting_sequence - 1,
+                "operational_delta_events": finding_sequence - 1,
+                "operational_reply_ms": round((operational_finished - operational_started) * 1000, 1),
+                "dialogue_context": greeting_context, "operational_context": operational_context,
+                "operational_composed": composed, "peak_sampled_rss_bytes": peak_rss,
+                "rss_samples": rss_samples}
     except Exception:
         error_log.seek(0)
         diagnostic = error_log.read(16 * 1024)
@@ -214,7 +335,24 @@ def verify_inference(root, loader_key, target):
         error_log.close()
 
 
-def build(target, directory):
+def probe(target, chat_model, runtime, manifest_sha256, assets=None):
+    readonly_toolchain(target)
+    pack.verify_directory(runtime, target, manifest_sha256)
+    loader_key = "DYLD_LIBRARY_PATH" if target in DARWIN_WHEELS else "LD_LIBRARY_PATH"
+    runtime = runtime.resolve()
+    if assets is not None:
+        pack.verify_model_assets(assets, chat_model)
+        result = verify_inference(runtime, loader_key, target, chat_model, model_directory=assets.resolve())
+    else:
+        with tempfile.TemporaryDirectory(prefix="inbox-qa-probe-") as scratch:
+            model = Path(scratch).resolve() / "model"
+            prepare_assets(model, chat_model)
+            result = verify_inference(runtime, loader_key, target, chat_model, model_directory=model)
+    return {"chat_model": chat_model, "target": target, "model_revision": pack.CHAT_MODELS[chat_model]["revision"],
+            "runtime_manifest_sha256": manifest_sha256, "checkpoint_smoke": result}
+
+
+def build(target, directory, chat_model=pack.DEFAULT_CHAT_MODEL):
     readonly_toolchain(target)
     directory = directory.resolve()
     directory.mkdir(parents=True, exist_ok=False)
@@ -222,7 +360,7 @@ def build(target, directory):
     libraries = staging / "runtime-libraries"
     libraries.mkdir(parents=True)
     model = staging / "model"
-    run("bash", "tools/assistant-bert/scripts/prepare-model.sh", str(model), timeout=720)
+    prepare_assets(model / "generator", chat_model)
     torch_root, loader_key, env = torch_environment()
     manifest = "tools/assistant-bert/Cargo.toml"
     run("cargo", "fmt", "--manifest-path", manifest, "--check")
@@ -246,15 +384,16 @@ def build(target, directory):
 
     archive = directory / f"Fleetworks-Inbox-QA-Pack-{target}.tar.gz"
     digests = pack.build(argparse.Namespace(model=model, worker=binary, listener=listener,
-                                           lib=native, license=notices, output=archive, target=target))
+                                           lib=native, license=notices, output=archive, target=target,
+                                           chat_model=chat_model))
     installed = directory / "installed"
     pack.install(argparse.Namespace(archive=archive, output=installed, state_dir=None, target=target,
-                                    archive_sha256=digests["archive_sha256"],
+                                    chat_model=chat_model, archive_sha256=digests["archive_sha256"],
                                     manifest_sha256=digests["manifest_sha256"]))
     if target not in DARWIN_WHEELS:
         linux_libraries(installed / pack.WORKER, installed / "lib",
                         {**env, loader_key: str(installed / "lib")}, installed=True)
-    digests["checkpoint_smoke"] = verify_inference(installed, loader_key, target)
+    digests["checkpoint_smoke"] = verify_inference(installed, loader_key, target, chat_model)
     (directory / "digests.json").write_text(json.dumps(digests, sort_keys=True) + "\n")
     print(json.dumps(digests, sort_keys=True))
 
@@ -267,11 +406,26 @@ def main():
     command = commands.add_parser("build")
     command.add_argument("--target", required=True, choices=pack.TARGETS)
     command.add_argument("--output", type=Path, required=True)
+    command.add_argument("--chat-model", choices=pack.CHAT_MODELS, default=pack.DEFAULT_CHAT_MODEL)
+    command = commands.add_parser("probe")
+    command.add_argument("--target", required=True, choices=pack.TARGETS)
+    command.add_argument("--chat-model", required=True, choices=pack.CHAT_MODELS)
+    command.add_argument("--runtime", type=Path, required=True)
+    command.add_argument("--manifest-sha256", required=True)
+    command.add_argument("--assets", type=Path)
+    command = commands.add_parser("prepare-assets")
+    command.add_argument("--chat-model", required=True, choices=pack.CHAT_MODELS)
+    command.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "wheel":
         print(wheel(args.target))
+    elif args.command == "build":
+        build(args.target, args.output, args.chat_model)
+    elif args.command == "probe":
+        result = probe(args.target, args.chat_model, args.runtime, args.manifest_sha256, args.assets)
+        print(json.dumps(result, sort_keys=True))
     else:
-        build(args.target, args.output)
+        prepare_assets(args.output, args.chat_model)
 
 
 if __name__ == "__main__":

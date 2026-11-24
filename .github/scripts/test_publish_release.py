@@ -76,7 +76,8 @@ class PublicationTests(unittest.TestCase):
             receipt = archive.with_name(archive.name + ".digests.json")
             receipt.write_text(json.dumps({
                 "target": target, "source_sha": plan["head"], "version": plan["version"],
-                "model_revision": release.MODEL_REVISION, "archive": archive.name,
+                "model_revision": release.GENERATOR_REVISION, "archive": archive.name,
+                "generated_dialogue": True,
                 "archive_sha256": release.sha256(archive), "manifest_sha256": "e" * 64,
                 "status": "passed", "runtime": "embedded-unix-socket", "native_archive_sha256": native_digest,
                 "transport_attestation": {

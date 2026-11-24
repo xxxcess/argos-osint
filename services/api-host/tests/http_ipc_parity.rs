@@ -648,10 +648,10 @@ async fn run_shared_flow(
         .expect("capabilities satisfy native contract");
     assert!(caps.features.iter().any(|f| f == "actor-discovery"));
     assert!(caps.features.iter().any(|f| f == "workstation-readiness"));
-    assert!(caps.features.iter().any(|f| f == "inbox-qa-v2"));
+    let local = transport == "ipc";
+    assert_eq!(caps.features.iter().any(|f| f == "inbox-qa-v2"), local);
     assert!(caps.features.iter().any(|f| f == "jobs"));
     assert!(caps.features.iter().any(|f| f == "logs"));
-    let local = transport == "ipc";
     let local_nlp = local && cfg!(feature = "nlp");
     assert_eq!(caps.features.iter().any(|f| f == "nlp"), local_nlp);
     assert!(!caps.features.iter().any(|f| f == "classifier"));
@@ -1433,44 +1433,55 @@ async fn run_shared_flow(
         "chat turn ok acknowledgement and empty-input 400 parity",
     );
 
-    let qa_settings = client.qa_settings().await.expect("registered QA settings");
-    assert!(
-        !qa_settings.enabled,
-        "{transport}: Inbox QA defaults to Off"
-    );
-    assert_eq!(qa_settings.phase, QaPhase::Off);
-    assert!(qa_settings.can_manage);
-    assert!(
-        client
-            .latest_qa_turn()
-            .await
-            .expect("latest Inbox exchange")
-            .is_none(),
-        "{transport}: a fresh registration has no accepted QA exchange",
-    );
     let qa_context = MutationContext::new(&registered_context);
-    assert_eq!(
-        client
-            .update_qa_settings(&QaSettingsUpdate::new(
-                qa_context.clone(),
-                qa_settings.revision + 1,
-                true,
-            ))
-            .await
-            .unwrap_err(),
-        ClientError::Status(409),
-    );
     let qa_turn = QaTurnRequest::new(
         format!("parity-inbox-qa-{transport}"),
         qa_context.clone(),
-        "What is the state of the gateway?".to_owned(),
+        "What is the state of actor search?".to_owned(),
         None,
     )
     .expect("valid QA turn");
-    assert_eq!(
-        client.submit_qa_turn(&qa_turn).await.unwrap_err(),
-        ClientError::Status(503),
-    );
+    if local {
+        let qa_settings = client.qa_settings().await.expect("registered QA settings");
+        assert!(!qa_settings.enabled, "Embedded Assistant defaults to Off");
+        assert_eq!(qa_settings.phase, QaPhase::Off);
+        assert!(qa_settings.can_manage);
+        assert!(
+            client
+                .latest_qa_turn()
+                .await
+                .expect("latest Inbox exchange")
+                .is_none(),
+            "A fresh Embedded registration has no accepted Assistant exchange",
+        );
+        assert_eq!(
+            client
+                .update_qa_settings(&QaSettingsUpdate::new(
+                    qa_context.clone(),
+                    qa_settings.revision + 1,
+                    true,
+                ))
+                .await
+                .unwrap_err(),
+            ClientError::Status(409),
+        );
+        assert_eq!(
+            client.submit_qa_turn(&qa_turn).await.unwrap_err(),
+            ClientError::Status(503),
+        );
+    } else {
+        let missing = ClientError::Status(404);
+        assert_eq!(client.qa_settings().await.unwrap_err(), missing);
+        assert_eq!(client.latest_qa_turn().await.unwrap_err(), missing);
+        assert_eq!(
+            client
+                .update_qa_settings(&QaSettingsUpdate::new(qa_context.clone(), 0, true))
+                .await
+                .unwrap_err(),
+            missing,
+        );
+        assert_eq!(client.submit_qa_turn(&qa_turn).await.unwrap_err(), missing);
+    }
     let missing_turn_id = "missing-parity-turn";
     assert_eq!(
         client
@@ -1489,15 +1500,20 @@ async fn run_shared_flow(
             .unwrap_err(),
         ClientError::Status(404),
     );
-    for (operation, summary) in [
-        ("qa_settings", "registered backend defaults to Off"),
-        ("qa_settings_update", "stale setting revision conflict"),
-        ("qa_turn_submit", "disabled inference rejects turn"),
-        ("qa_latest", "fresh registration has no latest exchange"),
-        ("qa_events", "unknown turn rejects event read"),
-        ("qa_cancel", "unknown turn rejects Stop"),
+    for operation in [
+        "qa_settings",
+        "qa_settings_update",
+        "qa_turn_submit",
+        "qa_latest",
+        "qa_events",
+        "qa_cancel",
     ] {
-        record(report, operation, "live_parity", summary);
+        record(
+            report,
+            operation,
+            "intentional_exception",
+            "Embedded Assistant operation; Distributed HTTP returns 404",
+        );
     }
 
     assert_eq!(
@@ -1794,6 +1810,26 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
         &mut report,
     )
     .await;
+
+    report.record_exception(IntentionalExceptionRecord {
+        id: "embedded-inbox-assistant".to_owned(),
+        operations: [
+            "qa_settings",
+            "qa_settings_update",
+            "qa_turn_submit",
+            "qa_latest",
+            "qa_events",
+            "qa_cancel",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        reason: "The inference worker and its scoped context belong to Embedded.".to_owned(),
+        http_behavior: "Distributed omits the capability and rejects all Assistant routes."
+            .to_owned(),
+        ipc_behavior: "Embedded serves the Assistant V2 operations over private IPC.".to_owned(),
+        verified: true,
+    });
 
     // Graceful IPC shutdown relinquishes leases and checkpoints local durable stores.
     drop(ipc_client1);

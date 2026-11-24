@@ -19,10 +19,10 @@ mod native {
     use fleetworks_contracts::chat::ChatSourceReference;
     use fleetworks_contracts::chat::QaAvailabilityReason;
     use fleetworks_contracts::chat::QaFinding;
-    use fleetworks_contracts::chat::QaMeasurement;
-    use fleetworks_contracts::chat::QaMeasurementUnit;
+    use fleetworks_contracts::chat::QaModelTarget;
     use fleetworks_contracts::chat::QaPhase;
     use fleetworks_contracts::chat::QaSettings;
+    use fleetworks_contracts::chat::QaStartupStage;
     use fleetworks_contracts::chat::QaTurn;
     use fleetworks_contracts::chat::QaTurnState;
     use fleetworks_contracts::connect::RegistrationReceipt;
@@ -30,6 +30,7 @@ mod native {
     use fleetworks_contracts::context::OriginSource;
     use fleetworks_contracts::context::Permission;
     use fleetworks_contracts::context::RegisteredContext;
+    use fleetworks_contracts::qa_worker::QaContextUsage;
     use fleetworks_contracts::readiness::DatasetKind;
     use fleetworks_contracts::readiness::DatasetRef;
     use fleetworks_contracts::readiness::MaintenanceOperation;
@@ -59,6 +60,7 @@ mod native {
     use fleetworks_desktop::backend::ProfileSnapshot;
     use fleetworks_desktop::backend::ReadKind;
     use fleetworks_desktop::backend::ToolCatalog;
+    use fleetworks_desktop::backend::ToolCredentialMetadata;
     use fleetworks_desktop::backend::ToolDefinition;
     use fleetworks_desktop::brain::ActorDossier;
     use fleetworks_desktop::configuration::ConfigurationSaved;
@@ -264,7 +266,19 @@ mod native {
     }
 
     fn tools_ready(state: &mut State) {
-        connected(state);
+        registered(state);
+        state.backend.profile = Load::Ready(ProfileSnapshot {
+            configuration_revision: 1,
+            configuration_format: 4,
+            accounts: Vec::new(),
+            tool_credentials: vec![ToolCredentialMetadata {
+                provider: "newsdata".into(),
+                primary_present: true,
+                fallback_present: false,
+            }],
+            setup_required: false,
+            portable_schema_version: 4,
+        });
         state.backend.tools = Load::Ready(ToolCatalog {
             tools: vec![ToolDefinition {
                 id: "synthetic-tool".into(),
@@ -624,8 +638,10 @@ mod native {
     fn inbox_qa_turn(state: &mut State, stage: QaTurnState) {
         registered(state);
         state.seed_inbox_qa_drawer_fixture();
+        state.backend_kind = BackendKind::Local;
+        state.connection.origin = TextEdit::new("local://embedded");
         let question = if stage == QaTurnState::Answered {
-            "What is the current memory usage?"
+            "Summarize workstation readiness."
         } else {
             "Is actor search ready?"
         };
@@ -636,25 +652,10 @@ mod native {
         );
         turn.state = stage;
         turn.cursor = 1;
-        if stage == QaTurnState::Answered {
-            let answer = "The connected gateway host memory usage is 42.5%.";
-            let mut finding = QaFinding::new(
-                ChatSourceReference::new(ChatSourceKind::HostMetric, "memory".into())
-                    .expect("fixture host metric source"),
-                "Connected gateway host memory usage".into(),
-                answer.into(),
-                0,
-                answer.len() as u32,
-                "2026-01-01T00:00:00Z".into(),
-            );
-            finding.measurement = Some(QaMeasurement::new(
-                425,
-                QaMeasurementUnit::PercentTenths,
-                "connected gateway host".into(),
-            ));
-            turn.findings.push(finding);
-            turn.cursor = 2;
-        } else if stage == QaTurnState::Canceled {
+        if stage == QaTurnState::Running {
+            turn.provisional_reply = Some("Let me check actor search readiness.".into());
+        }
+        if matches!(stage, QaTurnState::Answered | QaTurnState::Canceled) {
             let answer = "Actor search is ready.";
             turn.findings.push(QaFinding::new(
                 ChatSourceReference::new(ChatSourceKind::Readiness, "actor-search".into())
@@ -666,6 +667,13 @@ mod native {
                 "2026-01-01T00:00:00Z".into(),
             ));
             turn.cursor = 3;
+        }
+        if stage == QaTurnState::Answered {
+            turn.context = Some(QaContextUsage::new(
+                QaModelTarget::FlanT5Small.input_tokens(),
+                448,
+                1,
+            ));
         }
         state.seed_inbox_qa_fixture(
             QaSettings::new(true, QaPhase::Ready, 2, 1, true),
@@ -690,6 +698,29 @@ mod native {
     fn workstation_settings(state: &mut State) {
         registered(state);
         state.fixture_show_workstation_settings();
+    }
+
+    fn assistant_settings(state: &mut State, provisioning: bool) {
+        registered(state);
+        state.backend_kind = BackendKind::Local;
+        state.connection.origin = TextEdit::new("local://embedded");
+        let mut settings = QaSettings::new(
+            true,
+            if provisioning {
+                QaPhase::Starting
+            } else {
+                QaPhase::Ready
+            },
+            2,
+            1,
+            true,
+        );
+        if provisioning {
+            settings.model_target = QaModelTarget::FlanT5Base;
+            settings.startup_stage = Some(QaStartupStage::DownloadingPack);
+        }
+        state.seed_inbox_qa_fixture(settings, None);
+        state.fixture_show_assistant_settings();
     }
 
     fn toolbar_telemetry_populated(state: &mut State) {
@@ -875,6 +906,12 @@ mod native {
                 }),
                 ("workstation-status-checks-mixed", workstation_status),
                 ("workstation-settings", workstation_settings),
+                ("workstation-settings-assistant", |state| {
+                    assistant_settings(state, false);
+                }),
+                ("workstation-settings-assistant-provisioning", |state| {
+                    assistant_settings(state, true);
+                }),
                 ("toolbar-telemetry-populated", toolbar_telemetry_populated),
                 ("tools-catalog-ready-matte", |state| {
                     review_appearance(state, tools_ready, ReviewAppearance::Matte);

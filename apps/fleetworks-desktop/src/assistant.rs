@@ -748,13 +748,17 @@ mod render_tests {
     }
 
     #[test]
-    fn the_chat_panel_is_off_by_default_and_the_context_rail_stays() {
+    fn the_chat_panel_is_off_by_default_and_brain_keeps_the_wide_context_rail() {
         assert!(!Assistant::default().enabled);
         for width in [1440.0, 1180.0] {
-            let rt = runtime(width, false, Preference::Open);
+            let mut rt = runtime(width, false, Preference::Open);
             assert!(rt.find("assistant-dock").is_none());
             assert!(rt.find("assistant-overlay").is_none());
             assert!(rt.find("assistant-toggle").is_none());
+            assert!(rt.find("context-rail").is_none());
+            rt.update(|state, _| state.navigate(Page::Brain));
+            rt.frame(2.0 / 60.0);
+            rt.frame(3.0 / 60.0);
             assert_eq!(rt.find("context-rail").is_some(), width >= 1440.0);
             // The Inbox is independent of the Assistant.
             assert!(rt.find("inbox-toggle").is_some());

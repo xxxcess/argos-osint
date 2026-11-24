@@ -446,7 +446,11 @@ impl State {
 
     pub(crate) fn open_atlas_distributed_setup(&mut self, tx: &mut Tx) {
         self.set_backend_kind(BackendKind::Remote);
-        self.setup_gateway = true;
+        if self.startup.active() {
+            self.setup_gateway = true;
+        } else {
+            self.open_connection_settings();
+        }
         self.prefill_startup_distributed_url();
         tx.scroll_into_view("gateway-origin");
         tx.focus("gateway-origin", tx.by_keys());
@@ -538,9 +542,7 @@ impl State {
                     return Some(if self.permission(Permission::ManageConfiguration) {
                         format!("Add a {provider} API key using Configure API keys")
                     } else {
-                        format!(
-                            "Ask the gateway operator to add a {provider} API key in OSINT Tools"
-                        )
+                        format!("Ask the gateway operator to add a {provider} API key in Tool Box")
                     })
                 }
                 AtlasKeyPresence::Saved => {}

@@ -444,7 +444,7 @@ fn distributed_atlas_prerequisites_gate_creation_and_open_the_missing_key_editor
     runtime.frame(0.0);
     let tree = runtime.accessibility_json().to_string();
     assert!(tree.contains("Ask the gateway operator to check the Rust-BERT worker and checkpoint"));
-    assert!(tree.contains("Configure the Currents API key in OSINT Tools"));
+    assert!(tree.contains("Configure the Currents API key in Tool Box"));
     assert!(tree.contains("Saved keys still need provider authentication"));
 
     runtime.update(|state, _| {
@@ -503,7 +503,8 @@ fn embedded_atlas_links_to_setup_without_stopping_the_companion() {
     runtime.pointer_down(x, y);
     runtime.pointer_up(x, y);
     runtime.frame(0.021);
-    assert!(runtime.state.setup_gateway);
+    assert!(runtime.state.settings_open);
+    assert!(!runtime.state.setup_gateway);
     assert_eq!(runtime.state.backend_kind, BackendKind::Local);
     assert!(runtime.state.connected());
     assert!(runtime.find("switch-remote-gateway").is_some());

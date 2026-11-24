@@ -18,6 +18,17 @@ ELF = b"\x7fELF\x02\x01" + bytes(12) + (62).to_bytes(2, "little")
 
 
 class PackTest(unittest.TestCase):
+    def test_pack_progress_is_private_and_clears_after_interrupted_download(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            marker = state / "qa-pack-progress.json"
+            with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                with pack.pack_progress(state, "downloading_pack"):
+                    self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(json.loads(marker.read_text()), {"stage": "downloading_pack"})
+                    raise RuntimeError("interrupted")
+            self.assertFalse(marker.exists())
+
     def test_import_checks_frozen_inventory_and_registers_private_pointer(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -55,8 +66,10 @@ class PackTest(unittest.TestCase):
                 self.assertFalse(installed.exists())
                 pointer = state / "qa-pack.json"
                 self.assertFalse(pointer.exists())
+                self.assertFalse((state / "qa-pack-progress.json").exists())
                 options.manifest_sha256 = receipt["manifest_sha256"]
                 pack.install(options)
+                self.assertFalse((state / "qa-pack-progress.json").exists())
                 self.assertEqual(pointer.stat().st_mode & 0o777, 0o600)
                 self.assertEqual(json.loads(pointer.read_text()), {
                     "root": str(installed.resolve()), "manifest_sha256": options.manifest_sha256,

@@ -873,7 +873,6 @@ fn brain_debounce_and_first_fetch_share_one_results_skeleton() {
 #[test]
 fn loading_list_areas_render_shape_accurate_shimmering_skeletons_with_reduced_motion_fallback() {
     let mut state = shell();
-    state.host_metrics = Load::Loading;
     state.backend.jobs = Load::Loading;
     state.backend.detail = Load::Loading;
     let mut runtime = Runtime::new(
@@ -890,9 +889,13 @@ fn loading_list_areas_render_shape_accurate_shimmering_skeletons_with_reduced_mo
     assert!(runtime.find("job-detail-loading").is_some());
     assert!(runtime.find("skeleton-shimmer").is_some());
 
-    runtime.update(|state, _| state.navigate(crate::app::Page::Workstation));
+    runtime.update(|state, _| {
+        state.navigate(crate::app::Page::Workstation);
+        state.workstation_status_checks_open = true;
+        state.readiness = Load::Loading;
+    });
     runtime.frame(1.0 / 60.0);
-    assert!(runtime.find("host-metrics-loading").is_some());
+    assert!(runtime.find("readiness-loading").is_some());
 
     runtime.update(|state, _| {
         state.navigate(crate::app::Page::Brain);

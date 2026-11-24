@@ -1,4 +1,4 @@
-//! Authenticated V2 Inbox QA admission and reads shared by HTTP and private IPC.
+//! Authenticated Inbox QA admission and reads over private Embedded IPC.
 
 mod metrics;
 mod question;
@@ -7,6 +7,7 @@ mod readiness;
 pub use readiness::validated_summary_finding;
 
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -14,23 +15,22 @@ use std::time::Duration;
 use argos_osint_core::storage::inbox_qa as store;
 use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::tx::TxError;
-use axum::extract::{Extension, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::http::StatusCode;
 use fleetworks_contracts::chat::{
-    ChatSourceKind, ChatSourceReference, QaAvailabilityReason, QaCancelRequest, QaEventPage,
-    QaEventQuery, QaFinding, QaPhase, QaSettings, QaSettingsUpdate, QaTurn, QaTurnRequest,
-    QA_CANCEL_PATH, QA_EVENTS_PATH, QA_EVIDENCE_HEADER, QA_EVIDENCE_VERSION, QA_LATEST_PATH,
-    QA_SETTINGS_PATH, QA_TURNS_PATH,
+    ChatSourceKind, ChatSourceReference, QaAvailabilityReason, QaCancelRequest,
+    QaConversationReply, QaEventPage, QaEventQuery, QaPhase, QaSettings, QaSettingsUpdate,
+    QaStartupStage, QaTurn, QaTurnNotice, QaTurnRequest, QA_MAX_FINDINGS, QA_MAX_WORDS,
 };
 use fleetworks_contracts::context::{CredentialPurpose, MutationContext, Permission};
-use fleetworks_contracts::qa_worker::{QaPassage, QaWorkerEvent, QaWorkerRequest};
+use fleetworks_contracts::qa_worker::{
+    QaDialogueKind, QaPassage, QaWorkerDialogue, QaWorkerEvent, QaWorkerRequest,
+};
+use fleetworks_contracts::readiness::{ReadinessCheckId, ReadinessState};
 use futures_util::StreamExt;
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::time::Instant;
 
+use self::question::{Metric, Question};
 use crate::actor_search::SearchClient;
 use crate::host_metrics::SharedSampler;
 use crate::request_context::{ContextFailure, ResolvedRequest};
@@ -69,14 +69,20 @@ impl Default for CancellationToken {
     }
 }
 
-/// The selected Embedded companion's redacted startup diagnosis.
+/// The selected Embedded companion's redacted startup observation.
 #[derive(Clone)]
-pub struct QaRuntimeAvailability(watch::Sender<Option<AvailabilityFailure>>);
+pub struct QaRuntimeAvailability(watch::Sender<Option<GenerationAvailability>>);
 
 #[derive(Clone, Copy)]
-struct AvailabilityFailure {
+struct GenerationAvailability {
     generation: i64,
-    reason: Option<QaAvailabilityReason>,
+    observation: Option<StartupObservation>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartupObservation {
+    Progress(QaStartupStage),
+    Failure(QaAvailabilityReason),
 }
 
 impl Default for QaRuntimeAvailability {
@@ -88,27 +94,51 @@ impl Default for QaRuntimeAvailability {
 impl QaRuntimeAvailability {
     /// Report a failure or clear it after successful startup for an enablement generation.
     pub fn record(&self, generation: i64, reason: Option<QaAvailabilityReason>) {
-        self.0.send_modify(|failure| {
-            if failure.is_none_or(|previous| previous.generation <= generation) {
-                *failure = Some(AvailabilityFailure { generation, reason });
+        self.publish(generation, reason.map(StartupObservation::Failure));
+    }
+
+    /// Report progress of the current supervised worker startup attempt.
+    pub fn record_stage(&self, generation: i64, stage: QaStartupStage) {
+        self.publish(generation, Some(StartupObservation::Progress(stage)));
+    }
+
+    /// Clear abandoned progress while preserving the latest startup diagnosis.
+    pub fn clear_stage(&self, generation: i64) {
+        self.0.send_modify(|current| {
+            if let Some(current) = current.as_mut() {
+                if current.generation == generation
+                    && matches!(current.observation, Some(StartupObservation::Progress(_)))
+                {
+                    current.observation = None;
+                }
             }
         });
     }
 
-    fn reason(&self, generation: i64) -> Option<QaAvailabilityReason> {
+    fn publish(&self, generation: i64, observation: Option<StartupObservation>) {
+        self.0.send_modify(|current| {
+            if current.is_none_or(|previous| previous.generation <= generation) {
+                *current = Some(GenerationAvailability {
+                    generation,
+                    observation,
+                });
+            }
+        });
+    }
+
+    fn observe(&self, generation: i64) -> Option<StartupObservation> {
         self.0
             .borrow()
-            .filter(|failure| failure.generation == generation)
-            .and_then(|failure| failure.reason)
+            .filter(|current| current.generation == generation)
+            .and_then(|current| current.observation)
     }
 }
 
-/// Model process operations used by either executor placement.
+/// Model process operations used by the Embedded executor.
 pub type QaInferenceFuture<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
 
 /// An executor owns an isolated implementation of this stream.
 pub trait QaInference: Send + Sync {
-    fn warm(&self) -> QaInferenceFuture<'_>;
     fn ask(
         &self,
         request: QaWorkerRequest,
@@ -215,7 +245,6 @@ fn wake_at(revision: &watch::Sender<i64>, sample: i64) {
 pub(crate) struct QaTarget {
     readiness: Option<ReadinessOwners>,
     search: Option<SearchClient>,
-    embedded: bool,
     sampler: Option<SharedSampler>,
     subscribers: Arc<Semaphore>,
     events: Arc<EventWake>,
@@ -223,15 +252,10 @@ pub(crate) struct QaTarget {
 }
 
 impl QaTarget {
-    pub(crate) fn new(
-        readiness: Option<ReadinessOwners>,
-        search: Option<SearchClient>,
-        embedded: bool,
-    ) -> Self {
+    pub(crate) fn new(readiness: Option<ReadinessOwners>, search: Option<SearchClient>) -> Self {
         Self {
             readiness,
             search,
-            embedded,
             sampler: None,
             subscribers: Arc::new(Semaphore::new(8)),
             events: Arc::new(EventWake::new()),
@@ -262,7 +286,7 @@ impl QaTarget {
             store::HealthClaim::Ready(sample) => Ok(Some(sample)),
             store::HealthClaim::Pending => Ok(None),
             store::HealthClaim::Probe(boundary) => {
-                // The durable claim outlives a disconnected or timed-out HTTP/IPC reader.
+                // The durable claim outlives a disconnected or timed-out IPC reader.
                 let target = self.clone();
                 let state = state.clone();
                 tokio::spawn(async move {
@@ -288,14 +312,8 @@ impl QaTarget {
                 .readiness
                 .as_ref()
                 .ok_or_else(current_health_unavailable)?;
-            let Some((at, facts)) = workstation::qa_snapshot(
-                state,
-                readiness,
-                self.search.as_ref(),
-                boundary,
-                self.embedded,
-            )
-            .await
+            let Some((at, facts)) =
+                workstation::qa_snapshot(state, readiness, self.search.as_ref(), boundary).await
             else {
                 return Ok(None);
             };
@@ -352,29 +370,6 @@ impl QaTarget {
             }
         }
     }
-}
-
-/// Refresh coalesced backend facts while enabled, independent of drawers or event readers.
-pub async fn run_health_refresh(
-    state: ApiState,
-    services: crate::PrivateServices,
-    stop: CancellationToken,
-) {
-    let target = QaTarget::new(services.readiness, services.search, false);
-    target.refresh(&state, &stop).await;
-}
-
-pub(crate) fn routes() -> Router<ApiState> {
-    Router::new()
-        .route(QA_SETTINGS_PATH, get(read_settings))
-        .route(QA_TURNS_PATH, post(submit))
-        .route(QA_LATEST_PATH, get(latest))
-        .route(QA_EVENTS_PATH, get(events))
-        .route(QA_CANCEL_PATH, post(cancel))
-}
-
-pub(crate) fn control_routes() -> Router<ApiState> {
-    Router::new().route(QA_SETTINGS_PATH, post(update))
 }
 
 fn storage_error(error: TxError) -> ApiError {
@@ -465,15 +460,22 @@ async fn settings_value(
     setting: store::Setting,
     availability: Option<&QaRuntimeAvailability>,
 ) -> Result<QaSettings, ApiError> {
-    let reason = availability.and_then(|availability| availability.reason(setting.generation));
+    let observation =
+        availability.and_then(|availability| availability.observe(setting.generation));
+    let (startup_stage, reason) = match observation {
+        Some(StartupObservation::Progress(stage)) => (Some(stage), None),
+        Some(StartupObservation::Failure(reason)) => (None, Some(reason)),
+        None => (None, None),
+    };
     let phase = if setting.enabled {
         if store::replica_present(&state.repo, setting.generation)
             .await
             .map_err(storage_error)?
         {
             QaPhase::Ready
-        } else if reason.is_none()
-            && chrono::Utc::now().timestamp_millis() - setting.changed_at_ms < 15_000
+        } else if startup_stage.is_some()
+            || reason.is_none()
+                && chrono::Utc::now().timestamp_millis() - setting.changed_at_ms < 15_000
         {
             QaPhase::Starting
         } else {
@@ -487,6 +489,16 @@ async fn settings_value(
     } else {
         QaPhase::Off
     };
+    let startup_stage = match phase {
+        QaPhase::Starting if startup_stage.is_some() => startup_stage,
+        QaPhase::Off | QaPhase::Starting | QaPhase::Unavailable if availability.is_some() => {
+            match state.workspace_root.as_deref() {
+                Some(root) => pack_progress(root).await,
+                None => None,
+            }
+        }
+        _ => None,
+    };
     context.revalidate(&state.repo).await?;
     let mut settings = QaSettings::new(
         setting.enabled,
@@ -498,7 +510,72 @@ async fn settings_value(
     if phase == QaPhase::Unavailable {
         settings.availability_reason = reason;
     }
+    settings.startup_stage = startup_stage;
+    settings.model_target = setting.model_target;
     Ok(settings)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn pack_progress(root: &Path) -> Option<QaStartupStage> {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || read_pack_progress(&root))
+        .await
+        .ok()
+        .flatten()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+async fn pack_progress(_root: &Path) -> Option<QaStartupStage> {
+    None
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn read_pack_progress(root: &Path) -> Option<QaStartupStage> {
+    use std::fs::{self, OpenOptions};
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Marker {
+        stage: QaStartupStage,
+    }
+
+    const MAX_BYTES: u64 = 128;
+    const MAX_AGE: Duration = Duration::from_secs(15 * 60);
+
+    // SAFETY: geteuid has no arguments or memory side effects.
+    let uid = unsafe { libc::geteuid() };
+    let directory = fs::symlink_metadata(root).ok()?;
+    if !directory.is_dir() || directory.uid() != uid || directory.mode() & 0o777 != 0o700 {
+        return None;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(root.join("qa-pack-progress.json"))
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file()
+        || metadata.uid() != uid
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.nlink() != 1
+        || !(1..=MAX_BYTES).contains(&metadata.len())
+        || metadata.modified().ok()?.elapsed().ok()? > MAX_AGE
+    {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return None;
+    }
+    let marker: Marker = serde_json::from_slice(&bytes).ok()?;
+    matches!(
+        marker.stage,
+        QaStartupStage::DownloadingPack | QaStartupStage::VerifyingPack
+    )
+    .then_some(marker.stage)
 }
 
 pub(crate) async fn settings_request(
@@ -520,9 +597,15 @@ pub(crate) async fn update_request(
     let actor = require(context, Permission::ManageInboxQa, Some(&request.context))?;
     let revision = i64::try_from(request.expected_revision).map_err(|_| crate::bad())?;
     context.revalidate(&state.repo).await?;
-    let setting = store::set(&state.repo, &actor, revision, request.enabled)
-        .await
-        .map_err(|error| settings_storage_error("write_setting", error))?;
+    let setting = store::set(
+        &state.repo,
+        &actor,
+        revision,
+        request.enabled,
+        request.model_target,
+    )
+    .await
+    .map_err(|error| settings_storage_error("write_setting", error))?;
     settings_value(state, context, setting, availability).await
 }
 
@@ -566,13 +649,39 @@ pub(crate) async fn submit_request(
         ));
     }
     let deadline = Instant::now() + Duration::from_secs(4);
+    let follow_up = if question::classify(&request.question) == Question::FollowUp {
+        tokio::time::timeout_at(deadline, store::last_answered_prompt(&state.repo, &actor))
+            .await
+            .map_err(|_| current_health_unavailable())?
+            .map_err(storage_error)?
+            .filter(|previous| {
+                matches!(
+                    question::classify(previous),
+                    Question::Readiness(_)
+                        | Question::ReadinessExplanation(_)
+                        | Question::StatusChecks(_)
+                        | Question::Metric(_)
+                        | Question::HostResources
+                        | Question::JobsSummary
+                        | Question::Summary
+                )
+            })
+            .map(|question| {
+                let mut resolved = request.clone();
+                resolved.question = question;
+                resolved
+            })
+    } else {
+        None
+    };
+    let evidence_request = follow_up.as_ref().unwrap_or(&request);
     loop {
         let evidence = snapshot(
             state,
             context,
             target,
             &actor,
-            &request,
+            evidence_request,
             setting.generation,
             deadline,
         )
@@ -607,7 +716,8 @@ async fn snapshot(
     })?;
     let boundary = store::freshness_boundary(&state.repo, actor)
         .await
-        .map_err(storage_error)?;
+        .map_err(storage_error)?
+        .max(chrono::Utc::now().timestamp_millis() - 1);
     let intent = question::classify(&request.question);
     let source = request.source.as_ref();
     let mut selected_activity = None;
@@ -615,7 +725,10 @@ async fn snapshot(
         match source.kind {
             ChatSourceKind::Job | ChatSourceKind::Cycle => {
                 let observed_at = chrono::Utc::now();
-                let (label, status) = activity_fact(state, context, source).await?;
+                let (label, status) =
+                    tokio::time::timeout_at(deadline, activity_fact(state, context, source))
+                        .await
+                        .map_err(|_| current_health_unavailable())??;
                 selected_activity = Some((label, status, observed_at));
             }
             ChatSourceKind::Readiness => {}
@@ -623,14 +736,8 @@ async fn snapshot(
         }
     }
 
-    let needs_health = matches!(
-        intent,
-        question::Question::Readiness(_)
-            | question::Question::ReadinessExplanation(_)
-            | question::Question::Summary
-    ) || source.is_some_and(|source| source.kind == ChatSourceKind::Readiness);
-    let health = if needs_health {
-        let observed = tokio::time::timeout_at(deadline, async {
+    let health_probe = async {
+        tokio::time::timeout_at(deadline, async {
             loop {
                 if let Some(sample) = target.observe(state, generation, boundary, true).await? {
                     return Ok::<_, ApiError>(sample);
@@ -639,47 +746,50 @@ async fn snapshot(
             }
         })
         .await
-        .map_err(|_| current_health_unavailable())
-        .and_then(|result| result);
-        if matches!(intent, question::Question::Summary)
-            || source.is_some_and(|source| source.kind == ChatSourceKind::Readiness)
-        {
-            Some(observed?)
-        } else {
-            observed.ok()
-        }
-    } else {
-        None
+        .map_err(|_| current_health_unavailable())?
     };
+    // Keep one current, authorized projection for the turn. Select the relevant
+    // facts only after the host, Jobs and readiness observations have settled.
+    let (health, measurements) = tokio::join!(
+        health_probe,
+        metrics::collect_snapshot(state, context, target.sampler.as_ref(), boundary, deadline),
+    );
     if let Some(source) = source.filter(|source| source.kind == ChatSourceKind::Readiness) {
-        if !health
-            .as_ref()
-            .is_some_and(|sample| sample.facts.iter().any(|fact| fact.id == source.id))
-        {
+        let sample = health.as_ref().map_err(|_| current_health_unavailable())?;
+        if !sample.facts.iter().any(|fact| fact.id == source.id) {
             return Err(crate::missing());
         }
     }
+    let health = health.ok();
 
     let mut passages = Vec::new();
     let mut sources = Vec::new();
-    let mut push = |reference, label, text, observed_at, measurement, whole_passage| {
+    let mut earliest = None::<chrono::DateTime<chrono::Utc>>;
+    let mut push = |reference,
+                    label,
+                    text,
+                    observed_at: chrono::DateTime<chrono::Utc>,
+                    measurement,
+                    whole_passage| {
+        earliest = Some(earliest.map_or(observed_at, |prior| prior.min(observed_at)));
         let opaque_id = format!("passage-{}", passages.len());
         passages.push(QaPassage::new(opaque_id.clone(), text));
         sources.push(store::Source {
             opaque_id,
             reference,
             label,
-            observed_at,
+            observed_at: observed_at.to_rfc3339(),
             measurement,
             whole_passage,
         });
     };
-    let mut sampled_at_ms = chrono::Utc::now().timestamp_millis();
     let mut answer_mode = store::AnswerMode::Grounded;
+    let mut notice = None;
+    let mut conversation = None;
     match intent {
-        question::Question::Readiness(check) | question::Question::ReadinessExplanation(check) => {
+        Question::Readiness(check) | Question::ReadinessExplanation(check) => {
             if let Some((sample, fact)) = health.as_ref().and_then(|sample| {
-                let explanation = matches!(intent, question::Question::ReadinessExplanation(_));
+                let explanation = matches!(intent, Question::ReadinessExplanation(_));
                 sample
                     .facts
                     .iter()
@@ -697,61 +807,159 @@ async fn snapshot(
                     reference,
                     readiness::label(fact).to_owned(),
                     readiness::answer(fact),
-                    at.to_rfc3339(),
+                    at,
                     None,
                     false,
                 );
-                sampled_at_ms = sample.sampled_at_ms;
             }
         }
-        question::Question::Metric(metric) => {
-            if let Some(sampler) = &target.sampler {
-                let subject = if target.embedded {
-                    metrics::HostSubject::Embedded
-                } else {
-                    metrics::HostSubject::ConnectedGateway
-                };
-                let fact =
-                    metrics::collect(state, context, sampler, metric, boundary, deadline, subject)
-                        .await;
-                sampled_at_ms = chrono::Utc::now().timestamp_millis();
-                if let Some(fact) = fact {
-                    let reference = ChatSourceReference::new(fact.kind, fact.id.into())
-                        .map_err(|_| crate::bad())?;
+        Question::StatusChecks(selection) => {
+            // This observation belongs to the validated caller, not the shared health sample.
+            let registration = store::HealthFact {
+                id: ReadinessCheckId::Registration.as_str().to_owned(),
+                label: "Registration".into(),
+                status: ReadinessState::Ready.as_str().to_owned(),
+                reason: None,
+                explanation: String::new(),
+            };
+            if let Some((sample, (summary, details))) = health.as_ref().and_then(|sample| {
+                readiness::status_check_summary(
+                    sample.facts.iter().chain([&registration]),
+                    selection,
+                )
+                .map(|report| (sample, report))
+            }) {
+                let at = chrono::DateTime::from_timestamp_millis(sample.sampled_at_ms)
+                    .ok_or_else(current_health_unavailable)?;
+                let reference = ChatSourceReference::new(
+                    ChatSourceKind::Readiness,
+                    "workstation_status_checks".to_owned(),
+                )
+                .map_err(|_| crate::bad())?;
+                let mut remaining_words =
+                    QA_MAX_WORDS.saturating_sub(summary.split_whitespace().count());
+                push(
+                    reference,
+                    "Workstation status checks".to_owned(),
+                    summary,
+                    at,
+                    None,
+                    false,
+                );
+                for fact in details.into_iter().take(QA_MAX_FINDINGS - 1) {
+                    let text = readiness::answer(fact);
+                    let words = text.split_whitespace().count();
+                    if words > remaining_words {
+                        continue;
+                    }
+                    remaining_words -= words;
+                    let reference =
+                        ChatSourceReference::new(ChatSourceKind::Readiness, fact.id.clone())
+                            .map_err(|_| crate::bad())?;
                     push(
                         reference,
-                        fact.label.into(),
-                        fact.text,
-                        fact.observed_at.to_rfc3339(),
-                        Some(fact.measurement),
+                        readiness::label(fact).to_owned(),
+                        text,
+                        at,
+                        None,
                         false,
                     );
-                    sampled_at_ms = fact.observed_at.timestamp_millis();
                 }
             }
         }
-        question::Question::ContextStatus(kind) => {
+        Question::Metric(_) | Question::HostResources | Question::JobsSummary => {
+            let relevant = |metric| match (intent, metric) {
+                (Question::Metric(requested), metric) => requested == metric,
+                (Question::HostResources, Metric::Cpu | Metric::Memory | Metric::Disk)
+                | (
+                    Question::JobsSummary,
+                    Metric::QueuedJobs | Metric::RunningJobs | Metric::RetryingJobs,
+                ) => true,
+                _ => false,
+            };
+            for (_, fact) in measurements
+                .into_iter()
+                .filter(|(metric, _)| relevant(*metric))
+            {
+                let reference = ChatSourceReference::new(fact.kind, fact.id.into())
+                    .map_err(|_| crate::bad())?;
+                push(
+                    reference,
+                    fact.label.into(),
+                    fact.text,
+                    fact.observed_at,
+                    Some(fact.measurement),
+                    false,
+                );
+            }
+        }
+        Question::ContextStatus(kind) => {
             if let (Some(source), Some((label, status, at))) = (source, selected_activity) {
                 if source.kind == kind && status != "unknown" && at.timestamp_millis() > boundary {
                     push(
                         source.clone(),
                         label.into(),
                         format!("{label} is {status}."),
-                        at.to_rfc3339(),
+                        at,
                         None,
                         false,
                     );
-                    sampled_at_ms = at.timestamp_millis();
                 }
             }
         }
-        question::Question::Summary => {
-            if let Some(sample) = health {
+        Question::ExplainSelected => {
+            if let Some(source) = source {
+                if source.kind == ChatSourceKind::Readiness {
+                    if let Some((sample, fact)) = health.as_ref().and_then(|sample| {
+                        sample
+                            .facts
+                            .iter()
+                            .find(|fact| fact.id == source.id)
+                            .map(|fact| (sample, fact))
+                    }) {
+                        let observed_at =
+                            chrono::DateTime::from_timestamp_millis(sample.sampled_at_ms)
+                                .ok_or_else(current_health_unavailable)?;
+                        push(
+                            source.clone(),
+                            readiness::label(fact).to_owned(),
+                            readiness::answer(fact),
+                            observed_at,
+                            None,
+                            false,
+                        );
+                    }
+                } else if let Some((label, status, at)) = selected_activity {
+                    if status != "unknown" && at.timestamp_millis() > boundary {
+                        push(
+                            source.clone(),
+                            label.into(),
+                            format!("{label} is {status}."),
+                            at,
+                            None,
+                            false,
+                        );
+                    }
+                }
+            } else {
+                notice = Some(QaTurnNotice::OutOfScope);
+                conversation = Some(QaConversationReply::ContextNeeded);
+            }
+        }
+        Question::Summary => {
+            if let Some(sample) = health.filter(|sample| !sample.facts.is_empty()) {
                 answer_mode = store::AnswerMode::Model;
-                sampled_at_ms = sample.sampled_at_ms;
-                let at = chrono::DateTime::from_timestamp_millis(sampled_at_ms)
+                let at = chrono::DateTime::from_timestamp_millis(sample.sampled_at_ms)
                     .ok_or_else(current_health_unavailable)?;
-                for fact in &sample.facts {
+                let mut facts = sample
+                    .facts
+                    .iter()
+                    .filter(|fact| {
+                        !matches!(fact.status.as_str(), "not applicable" | "not_applicable")
+                    })
+                    .collect::<Vec<_>>();
+                facts.sort_by_key(|fact| readiness::priority(fact));
+                for fact in facts {
                     let reference =
                         ChatSourceReference::new(ChatSourceKind::Readiness, fact.id.clone())
                             .map_err(|_| crate::bad())?;
@@ -759,7 +967,7 @@ async fn snapshot(
                         reference,
                         readiness::label(fact).to_owned(),
                         readiness::answer(fact),
-                        at.to_rfc3339(),
+                        at,
                         None,
                         true,
                     );
@@ -771,20 +979,59 @@ async fn snapshot(
                         source.clone(),
                         label.into(),
                         format!("{label} is {status}."),
-                        observed_at.to_rfc3339(),
+                        observed_at,
                         None,
                         true,
                     );
-                    sampled_at_ms = sampled_at_ms.min(observed_at.timestamp_millis());
                 }
             }
         }
-        question::Question::Unsupported => {}
+        Question::Greeting => notice = Some(QaTurnNotice::Greeting),
+        Question::Acknowledgement => {
+            notice = Some(QaTurnNotice::Greeting);
+            conversation = Some(QaConversationReply::Acknowledgement);
+        }
+        Question::Help => {
+            notice = Some(QaTurnNotice::Greeting);
+            conversation = Some(QaConversationReply::Help);
+        }
+        Question::FollowUp => {
+            notice = Some(QaTurnNotice::OutOfScope);
+            conversation = Some(QaConversationReply::FollowUpNeedsTopic);
+        }
+        Question::Recall => {
+            notice = Some(QaTurnNotice::OutOfScope);
+            conversation = Some(QaConversationReply::RecallNeedsHistory);
+        }
+        Question::Unsupported => {
+            notice = Some(QaTurnNotice::OutOfScope);
+            conversation = Some(QaConversationReply::ContextNeeded);
+        }
     }
+    let sampled_at_ms = earliest.unwrap_or_else(chrono::Utc::now).timestamp_millis();
     let turn_id = store::accepted_turn_id(actor, request, generation).map_err(storage_error)?;
+    let dialogue = match intent {
+        Question::Greeting => Some(QaDialogueKind::Greeting),
+        Question::Acknowledgement => Some(QaDialogueKind::Acknowledgement),
+        Question::Help => Some(QaDialogueKind::Help),
+        Question::Recall => Some(QaDialogueKind::Recall),
+        Question::Summary if !passages.is_empty() => Some(QaDialogueKind::Operational),
+        _ => None,
+    };
+    let mut worker_request =
+        QaWorkerRequest::new(turn_id.clone(), turn_id, request.question.clone(), passages);
+    if let Some(kind) = dialogue {
+        answer_mode = store::AnswerMode::Model;
+        worker_request.dialogue = Some(QaWorkerDialogue {
+            kind,
+            history: Vec::new(),
+        });
+    }
     Ok(store::FrozenEvidence {
         answer_mode,
-        request: QaWorkerRequest::new(turn_id.clone(), turn_id, request.question.clone(), passages),
+        notice,
+        conversation,
+        request: worker_request,
         sources,
         sampled_at_ms,
     })
@@ -898,287 +1145,89 @@ pub(crate) async fn cancel_request(
     Ok(turn)
 }
 
-struct HttpError(ApiError);
-
-impl From<ApiError> for HttpError {
-    fn from(error: ApiError) -> Self {
-        Self(error)
-    }
-}
-
-impl IntoResponse for HttpError {
-    fn into_response(self) -> Response {
-        let mut response = self.0.into_response();
-        if response.status() == StatusCode::TOO_MANY_REQUESTS {
-            response
-                .headers_mut()
-                .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
-        }
-        response
-            .headers_mut()
-            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        response
-    }
-}
-
-type HttpResult<T> = Result<([(header::HeaderName, &'static str); 2], Json<T>), HttpError>;
-
-fn response<T>(value: T) -> HttpResult<T> {
-    Ok((
-        [
-            (header::CACHE_CONTROL, "private, no-store"),
-            (header::VARY, QA_EVIDENCE_HEADER),
-        ],
-        Json(value),
-    ))
-}
-
-fn legacy_evidence(headers: &HeaderMap) -> bool {
-    headers.get(QA_EVIDENCE_HEADER) != Some(&HeaderValue::from_static(QA_EVIDENCE_VERSION))
-}
-
-fn project_legacy_finding(finding: &mut QaFinding) {
-    if matches!(
-        finding.source.kind,
-        ChatSourceKind::HostMetric | ChatSourceKind::JobCount
-    ) {
-        finding.source.kind = ChatSourceKind::Readiness;
-        finding.measurement = None;
-    }
-}
-
-fn project_legacy_turn(turn: &mut QaTurn) {
-    turn.findings.iter_mut().for_each(project_legacy_finding);
-}
-
-fn project_legacy_page(page: &mut QaEventPage) {
-    project_legacy_turn(&mut page.turn);
-    for finding in page
-        .events
-        .iter_mut()
-        .filter_map(|event| event.finding.as_mut())
-    {
-        project_legacy_finding(finding);
-    }
-}
-
-async fn read_settings(
-    State(state): State<ApiState>,
-    Extension(context): Extension<ResolvedRequest>,
-) -> HttpResult<QaSettings> {
-    response(settings_request(&state, &context, None).await?)
-}
-
-async fn update(
-    State(state): State<ApiState>,
-    Extension(context): Extension<ResolvedRequest>,
-    Json(request): Json<QaSettingsUpdate>,
-) -> HttpResult<QaSettings> {
-    response(update_request(&state, &context, request, None).await?)
-}
-
-async fn submit(
-    State(state): State<ApiState>,
-    Extension(context): Extension<ResolvedRequest>,
-    Extension(target): Extension<QaTarget>,
-    headers: HeaderMap,
-    Json(request): Json<QaTurnRequest>,
-) -> HttpResult<QaTurn> {
-    let mut turn = submit_request(&state, &context, &target, request).await?;
-    if legacy_evidence(&headers) {
-        project_legacy_turn(&mut turn);
-    }
-    response(turn)
-}
-
-async fn latest(
-    State(state): State<ApiState>,
-    Extension(context): Extension<ResolvedRequest>,
-    headers: HeaderMap,
-) -> HttpResult<Option<QaTurn>> {
-    let mut latest = latest_request(&state, &context).await?;
-    if let Some(turn) = latest.as_mut().filter(|_| legacy_evidence(&headers)) {
-        project_legacy_turn(turn);
-    }
-    response(latest)
-}
-
-async fn events(
-    State(state): State<ApiState>,
-    Extension(context): Extension<ResolvedRequest>,
-    Extension(target): Extension<QaTarget>,
-    headers: HeaderMap,
-    Query(query): Query<QaEventQuery>,
-) -> HttpResult<QaEventPage> {
-    let mut page = events_request(&state, &context, &target, query).await?;
-    if legacy_evidence(&headers) {
-        project_legacy_page(&mut page);
-    }
-    response(page)
-}
-
-async fn cancel(
-    State(state): State<ApiState>,
-    Extension(context): Extension<ResolvedRequest>,
-    headers: HeaderMap,
-    Json(request): Json<QaCancelRequest>,
-) -> HttpResult<QaTurn> {
-    let mut turn = cancel_request(&state, &context, request).await?;
-    if legacy_evidence(&headers) {
-        project_legacy_turn(&mut turn);
-    }
-    response(turn)
-}
-
 #[cfg(test)]
 mod tests {
-    use fleetworks_contracts::chat::{QaEvent, QaMeasurement, QaMeasurementUnit, QaTurnState};
-    use serde::Deserialize;
-
     use super::*;
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    enum LegacySourceKind {
-        Actor,
-        Job,
-        Cycle,
-        Readiness,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct LegacySource {
-        kind: LegacySourceKind,
-        id: String,
-    }
-
-    #[derive(Deserialize)]
-    struct LegacyFinding {
-        source: LegacySource,
-    }
-
-    #[derive(Deserialize)]
-    struct LegacyTurn {
-        findings: Vec<LegacyFinding>,
-        cursor: u64,
-    }
-
-    #[derive(Deserialize)]
-    struct LegacyEvent {
-        sequence: u64,
-        state: QaTurnState,
-        finding: Option<LegacyFinding>,
-    }
-
-    #[derive(Deserialize)]
-    struct LegacyPage {
-        turn: LegacyTurn,
-        events: Vec<LegacyEvent>,
-        gap: bool,
-    }
-
-    #[test]
-    fn negotiated_legacy_view_decodes_metrics_without_changing_the_event_cursor() {
-        let mut headers = HeaderMap::new();
-        assert!(legacy_evidence(&headers));
-        headers.insert(QA_EVIDENCE_HEADER, HeaderValue::from_static("2"));
-        assert!(legacy_evidence(&headers));
-        headers.insert(
-            QA_EVIDENCE_HEADER,
-            HeaderValue::from_static(QA_EVIDENCE_VERSION),
-        );
-        assert!(!legacy_evidence(&headers));
-
-        for (kind, id, unit) in [
-            (
-                ChatSourceKind::HostMetric,
-                "cpu",
-                QaMeasurementUnit::PercentTenths,
-            ),
-            (
-                ChatSourceKind::JobCount,
-                "running_jobs",
-                QaMeasurementUnit::Jobs,
-            ),
-        ] {
-            let mut finding = QaFinding::new(
-                ChatSourceReference::new(kind, id.to_owned()).unwrap(),
-                "Registered evidence".to_owned(),
-                "A frozen reading.".to_owned(),
-                0,
-                17,
-                "2026-11-21T10:00:00+00:00".to_owned(),
-            );
-            finding.measurement = Some(QaMeasurement::new(0, unit, "fixture".to_owned()));
-            let mut turn = QaTurn::queued(
-                "turn".to_owned(),
-                "request".to_owned(),
-                "Question?".to_owned(),
-            );
-            turn.findings.push(finding.clone());
-            turn.state = QaTurnState::Answered;
-            turn.cursor = 2;
-            let mut page = QaEventPage::new(
-                turn.clone(),
-                vec![
-                    QaEvent::new(1, QaTurnState::Running, Some(finding.clone())),
-                    QaEvent::new(2, QaTurnState::Answered, None),
-                ],
-                false,
-            );
-            assert!(
-                serde_json::from_value::<LegacyPage>(serde_json::to_value(&page).unwrap()).is_err()
-            );
-            project_legacy_page(&mut page);
-            let shape = serde_json::to_value(&page).unwrap();
-            assert!(shape["turn"]["findings"][0].get("measurement").is_none());
-            assert!(shape["events"][0]["finding"].get("measurement").is_none());
-            let legacy = serde_json::from_value::<LegacyPage>(shape).unwrap();
-            assert!(!legacy.gap);
-            assert_eq!(legacy.turn.cursor, turn.cursor);
-            assert_eq!(legacy.events[0].sequence, 1);
-            assert_eq!(legacy.events[1].sequence, legacy.turn.cursor);
-            assert_eq!(legacy.events[1].state, QaTurnState::Answered);
-            assert!(legacy.events[1].finding.is_none());
-            for read in [
-                &legacy.turn.findings[0],
-                legacy.events[0].finding.as_ref().unwrap(),
-            ] {
-                assert!(matches!(read.source.kind, LegacySourceKind::Readiness));
-                assert_eq!(read.source.id, id);
-            }
-            finding.source.kind = ChatSourceKind::Readiness;
-            finding.measurement = None;
-            assert_eq!(page.turn.findings, [finding.clone()]);
-            assert_eq!(page.events[0].finding, Some(finding));
-            assert_eq!(turn.findings[0].source.kind, kind);
-            assert_eq!(turn.findings[0].measurement.as_ref().unwrap().value, 0);
-        }
-    }
 
     #[test]
     fn reports_only_the_current_embedded_enablement_generation() {
         let availability = QaRuntimeAvailability::default();
-        assert_eq!(availability.reason(1), None);
+        assert_eq!(availability.observe(1), None);
 
         let supervisor = availability.clone();
         supervisor.record(1, Some(QaAvailabilityReason::PackMissing));
         assert_eq!(
-            availability.reason(1),
-            Some(QaAvailabilityReason::PackMissing)
+            availability.observe(1),
+            Some(StartupObservation::Failure(
+                QaAvailabilityReason::PackMissing
+            ))
         );
-        assert_eq!(availability.reason(2), None);
+        assert_eq!(availability.observe(2), None);
 
-        supervisor.record(2, Some(QaAvailabilityReason::SandboxUnsupported));
+        supervisor.record_stage(2, QaStartupStage::LoadingModel);
         supervisor.record(1, Some(QaAvailabilityReason::WorkerStartFailed));
         assert_eq!(
-            availability.reason(2),
-            Some(QaAvailabilityReason::SandboxUnsupported)
+            availability.observe(2),
+            Some(StartupObservation::Progress(QaStartupStage::LoadingModel))
         );
-        assert_eq!(availability.reason(1), None);
+        assert_eq!(availability.observe(1), None);
+        supervisor.clear_stage(2);
+        assert_eq!(availability.observe(2), None);
 
+        supervisor.record(2, Some(QaAvailabilityReason::SandboxUnsupported));
+        supervisor.clear_stage(2);
+        assert_eq!(
+            availability.observe(2),
+            Some(StartupObservation::Failure(
+                QaAvailabilityReason::SandboxUnsupported
+            ))
+        );
         supervisor.record(2, None);
-        assert_eq!(availability.reason(2), None);
+        assert_eq!(availability.observe(2), None);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn pack_progress_reads_only_private_fresh_installer_stages() {
+        use std::fs;
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        use std::time::SystemTime;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(read_pack_progress(root), None);
+
+        let marker = root.join("qa-pack-progress.json");
+        fs::write(&marker, br#"{"stage":"downloading_pack"}"#).unwrap();
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(read_pack_progress(root), None);
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_pack_progress(root),
+            Some(QaStartupStage::DownloadingPack)
+        );
+
+        fs::write(&marker, br#"{"stage":"verifying_pack"}"#).unwrap();
+        assert_eq!(
+            read_pack_progress(root),
+            Some(QaStartupStage::VerifyingPack)
+        );
+        fs::write(&marker, br#"{"stage":"loading_model"}"#).unwrap();
+        assert_eq!(read_pack_progress(root), None);
+
+        fs::write(&marker, br#"{"stage":"downloading_pack"}"#).unwrap();
+        let previous = root.join("previous-progress.json");
+        fs::rename(&marker, &previous).unwrap();
+        symlink(&previous, &marker).unwrap();
+        assert_eq!(read_pack_progress(root), None);
+        fs::remove_file(&marker).unwrap();
+        fs::rename(&previous, &marker).unwrap();
+
+        fs::File::open(&marker)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(16 * 60))
+            .unwrap();
+        assert_eq!(read_pack_progress(root), None);
     }
 }

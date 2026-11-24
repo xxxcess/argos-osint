@@ -1,0 +1,109 @@
+name: Compare pinned Fleetworks Inbox reply candidates
+
+on:
+  workflow_call:
+    inputs:
+      head:
+        type: string
+        required: true
+      selection:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    name: ${{ matrix.candidate }} on Linux x86_64
+    runs-on: ubuntu-24.04
+    container: python:3.11-bookworm
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate: ${{ fromJSON(inputs.selection == 'all' && '["flan-t5-small","flan-t5-base","gpt2-small","gpt2-medium"]' || format('["{0}"]', inputs.selection)) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      EXPECTED_HEAD: ${{ inputs.head }}
+      CANDIDATE: ${{ matrix.candidate }}
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CARGO_TERM_COLOR: never
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_RELEASE_DEBUG: 0
+      LIBTORCH_USE_PYTORCH: 1
+      PYTHONDONTWRITEBYTECODE: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          lfs: false
+      - name: Verify exact source and select the Rust toolchain
+        id: rust
+        run: |
+          set -euo pipefail
+          case "$CANDIDATE" in
+            flan-t5-small|flan-t5-base|gpt2-small|gpt2-medium) ;;
+            *) exit 2 ;;
+          esac
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$EXPECTED_HEAD" = "$GITHUB_SHA"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$(uname -m)" = x86_64
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import tomllib
+
+          version = tomllib.loads(Path("rust-toolchain.toml").read_text())["toolchain"]["channel"]
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              print(f"version={version}", file=output)
+          PY
+      - name: Install the Debian tools, selected Rust compiler and pinned CPU Torch
+        env:
+          TOOLCHAIN: ${{ steps.rust.outputs.version }}
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev ca-certificates curl
+          curl --fail --silent --show-error --location --retry 3 https://sh.rustup.rs -o "$RUNNER_TEMP/rustup-init.sh"
+          sh "$RUNNER_TEMP/rustup-init.sh" -y --no-modify-path --profile minimal --default-toolchain "$TOOLCHAIN"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          wheel="$(python3 -B tools/atlas-bert/scripts/verify_linux.py wheel --target x86_64-unknown-linux-gnu)"
+          python3 -m pip install --only-binary=:all: "$wheel" 'numpy==1.26.4'
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          from pathlib import Path
+          import torch
+
+          base = Path(torch.__file__).resolve().parent
+          print(f"LD_LIBRARY_PATH={base / 'lib'}:{base.with_name('torch.libs')}")
+          PY
+      - name: Build the standalone Rust-BERT evaluator
+        env:
+          TOOLCHAIN: ${{ steps.rust.outputs.version }}
+        run: |
+          set -euo pipefail
+          cargo +"$TOOLCHAIN" build --locked --release \
+            --manifest-path tools/assistant-bert/Cargo.toml \
+            --example inbox_qa_evaluation \
+            --target-dir "$RUNNER_TEMP/inbox-qa-build"
+      - name: Verify assets and measure the candidate on unchanged fixtures
+        run: |
+          set -euo pipefail
+          python3 -B .github/scripts/evaluate_inbox_qa.py \
+            --candidate "$CANDIDATE" --head "$EXPECTED_HEAD" \
+            --worker "$RUNNER_TEMP/inbox-qa-build/release/examples/inbox_qa_evaluation" \
+            --output "$RUNNER_TEMP/inbox-qa-evaluation/receipt.json"
+      - name: Retain the per-case quality, latency and memory receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Inbox-QA-evaluation-${{ matrix.candidate }}-${{ inputs.head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/inbox-qa-evaluation/
+          if-no-files-found: warn
+          retention-days: 14

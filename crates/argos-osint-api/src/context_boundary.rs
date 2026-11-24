@@ -37,21 +37,6 @@ fn requirement(request: &Request) -> Option<(Permission, ContextRequirement)> {
     {
         return None;
     }
-    use fleetworks_contracts::chat::{
-        QA_CANCEL_PATH, QA_EVENTS_PATH, QA_LATEST_PATH, QA_SETTINGS_PATH, QA_TURNS_PATH,
-    };
-    let qa_permission = match (request.method(), path) {
-        (&Method::GET, QA_SETTINGS_PATH) => Some(Permission::ReadBackend),
-        (&Method::POST, QA_SETTINGS_PATH) => Some(Permission::ManageInboxQa),
-        (&Method::GET, QA_LATEST_PATH | QA_EVENTS_PATH) => {
-            Some(Permission::ReadWorkstationActivity)
-        }
-        (&Method::POST, QA_TURNS_PATH | QA_CANCEL_PATH) => Some(Permission::SubmitInteractive),
-        _ => None,
-    };
-    if let Some(permission) = qa_permission {
-        return Some((permission, ContextRequirement::Registered));
-    }
     if matches!(
         path,
         fleetworks_contracts::classifier_activation::ACTIVATION_PATH

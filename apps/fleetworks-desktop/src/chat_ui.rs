@@ -36,11 +36,12 @@ impl Role {
     }
 }
 
-/// The real state of a turn. V1 is a status, then a final answer; there is no partial text.
+/// The real state of a turn, including provisional V2 generation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TurnState {
     Queued,
     Running,
+    Streaming,
     Retrying { attempt: u32 },
     Final,
     Failed { reason: String },
@@ -52,6 +53,7 @@ impl TurnState {
         match self {
             Self::Queued => Some(("Queued".to_owned(), StatusTone::Neutral)),
             Self::Running => Some(("Working".to_owned(), StatusTone::Info)),
+            Self::Streaming => Some(("Draft · unverified".to_owned(), StatusTone::Info)),
             Self::Retrying { attempt } => {
                 Some((format!("Retrying, attempt {attempt}"), StatusTone::Warn))
             }
@@ -61,7 +63,10 @@ impl TurnState {
     }
 
     pub(crate) fn is_pending(&self) -> bool {
-        matches!(self, Self::Queued | Self::Running | Self::Retrying { .. })
+        matches!(
+            self,
+            Self::Queued | Self::Running | Self::Streaming | Self::Retrying { .. }
+        )
     }
 }
 
@@ -107,15 +112,8 @@ fn chip(label: String, tone: StatusTone, kit: &Kit) -> El {
         .child(rune::text(label).font(kit.ty.small).color(tone.fg()).wrap())
 }
 
-fn citations(list: &[Citation], kit: &Kit) -> Option<El> {
-    if list.is_empty() {
-        return None;
-    }
-    let mut column = rune::col().w_full().gap(3.0).child(
-        rune::text("Sources")
-            .font(kit.ty.small_medium)
-            .color(theme::hex(theme::TEXT_MUTED)),
-    );
+pub(crate) fn citation_rows(list: &[Citation], kit: &Kit) -> El {
+    let mut column = rune::col().w_full().gap(3.0);
     for (index, citation) in list.iter().enumerate() {
         column = column.child(
             rune::text(format!("{}: {}", citation.kind, citation.label))
@@ -125,12 +123,27 @@ fn citations(list: &[Citation], kit: &Kit) -> Option<El> {
                 .wrap_anywhere(),
         );
     }
-    Some(column)
+    column
 }
 
 /// One message. The operator's sit on the right in an accent tint; the Assistant's sit on the
 /// left on a raised surface. A pending or failed turn shows its real state beside the text.
 pub(crate) fn bubble(message: &ChatMessage, kit: &Kit) -> El {
+    let sources = (!message.citations.is_empty()).then(|| {
+        rune::col()
+            .w_full()
+            .gap(3.0)
+            .child(
+                rune::text("Sources")
+                    .font(kit.ty.small_medium)
+                    .color(theme::hex(theme::TEXT_MUTED)),
+            )
+            .child(citation_rows(&message.citations, kit))
+    });
+    bubble_with_sources(message, sources, kit)
+}
+
+pub(crate) fn bubble_with_sources(message: &ChatMessage, sources: Option<El>, kit: &Kit) -> El {
     let operator = message.role == Role::Operator;
     let tone = if operator {
         StatusTone::Accent
@@ -153,9 +166,6 @@ pub(crate) fn bubble(message: &ChatMessage, kit: &Kit) -> El {
     if let Some((label, chip_tone)) = message.state.chip() {
         body = body.child(chip(label, chip_tone, kit).key(format!("chat-state-{}", message.id)));
     }
-    if let Some(sources) = citations(&message.citations, kit) {
-        body = body.child(sources);
-    }
     let surface = rune::col()
         .key(message_key(&message.id))
         .label(format!("{} message", message.role.label()))
@@ -164,7 +174,7 @@ pub(crate) fn bubble(message: &ChatMessage, kit: &Kit) -> El {
         .radius(10.0)
         .fill(tone.bg())
         .border(1.0, tone.border())
-        .child(body);
+        .child(body.children(sources));
     let row = rune::row().w_full();
     if operator {
         row.child(rune::spacer()).child(surface)

@@ -10,7 +10,6 @@ use std::fs;
 use std::future;
 use std::io;
 use std::io::Read;
-use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::ExitStatusExt;
@@ -28,14 +27,20 @@ use argos_osint_api::inbox_qa::CancellationToken;
 use argos_osint_api::inbox_qa::QaInference;
 use argos_osint_api::inbox_qa::QaInferenceFuture;
 use fleetworks_contracts::chat::QaAvailabilityReason;
+use fleetworks_contracts::chat::QaModelTarget;
+use fleetworks_contracts::chat::QaStartupStage;
 use fleetworks_contracts::qa_worker::qa_frame_len;
 use fleetworks_contracts::qa_worker::QaWorkerCommand;
 use fleetworks_contracts::qa_worker::QaWorkerEvent;
 use fleetworks_contracts::qa_worker::QaWorkerReply;
 use fleetworks_contracts::qa_worker::QaWorkerRequest;
 use fleetworks_contracts::qa_worker::QaWorkerSequence;
+use fleetworks_contracts::qa_worker::QA_CONTEXT_USAGE_ENV;
+use fleetworks_contracts::qa_worker::QA_DIALOGUE_ENV;
 use fleetworks_contracts::qa_worker::QA_MODEL_FILES;
 use fleetworks_contracts::qa_worker::QA_MODEL_REVISION;
+use fleetworks_contracts::qa_worker::QA_MODEL_TARGET_ENV;
+use fleetworks_contracts::qa_worker::QA_STREAMING_ENV;
 use fleetworks_contracts::qa_worker::QA_WORKER_PROTOCOL;
 use serde::Deserialize;
 use sha2::Digest;
@@ -44,17 +49,16 @@ use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
-use tokio::net::UnixStream;
 use tokio::process::Child;
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 const PACK_ROOT_ENV: &str = "FLEETWORKS_QA_PACK_ROOT";
 const PACK_DIGEST_ENV: &str = "FLEETWORKS_QA_MANIFEST_SHA256";
-const SOCKET_ENV: &str = "FLEETWORKS_QA_SOCKET";
 const MANIFEST: &str = "manifest.json";
 const WORKER_BINARY: &str = "bin/fleetworks-assistant-bert";
 const SOCKET_LISTENER_BINARY: &str = "bin/fleetworks-assistant-bert-listener";
@@ -66,7 +70,39 @@ const WARM_LIMIT: Duration = Duration::from_secs(45);
 const TURN_LIMIT: Duration = Duration::from_secs(25);
 const PING_LIMIT: Duration = Duration::from_secs(2);
 const UNLOAD_LIMIT: Duration = Duration::from_secs(3);
-const MAX_RESIDENT_BYTES: u64 = 1536 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
+
+struct WorkerLimits {
+    threads: u16,
+    resident_bytes: u64,
+}
+
+impl WorkerLimits {
+    fn for_target(target: QaModelTarget) -> Self {
+        let default_mib = match target {
+            QaModelTarget::FlanT5Small => 1536,
+            QaModelTarget::FlanT5Base => 3584,
+            QaModelTarget::Gpt2Small => 2048,
+            QaModelTarget::Gpt2Medium => 4608,
+            _ => 1536,
+        };
+        let configured = |name: &str| {
+            env::var(name)
+                .ok()
+                .and_then(|value| value.parse::<u16>().ok())
+        };
+        Self {
+            threads: configured("FLEETWORKS_QA_CPU_THREADS")
+                .filter(|n| (1..=4).contains(n))
+                .unwrap_or(1),
+            resident_bytes: u64::from(
+                configured("FLEETWORKS_QA_MEMORY_MIB")
+                    .filter(|n| (512..=6144).contains(n))
+                    .unwrap_or(default_mib),
+            ) * MIB,
+        }
+    }
+}
 
 #[derive(Debug)]
 struct WarmFailure(QaAvailabilityReason);
@@ -156,103 +192,96 @@ struct Manifest {
     files: BTreeMap<String, String>,
 }
 
-enum WorkerTarget {
-    EmbeddedState(PathBuf),
-    Distributed(PathBuf),
-}
-
-/// The selected transport is fixed for the lifetime of the backend service.
+/// Owns the only isolated model child for this Embedded companion.
 pub(crate) struct QaWorkerSupervisor {
-    target: WorkerTarget,
+    state_dir: PathBuf,
     session: Mutex<Option<WorkerSession>>,
     stopping: watch::Sender<()>,
 }
 
 impl QaWorkerSupervisor {
-    fn new(target: WorkerTarget) -> Self {
+    pub(crate) fn embedded_for_state(state_dir: PathBuf) -> Self {
         Self {
-            target,
+            state_dir,
             session: Mutex::new(None),
             stopping: watch::channel(()).0,
         }
     }
 
-    /// Discover an offline pack installed in this companion's private state directory.
-    pub(crate) fn embedded_for_state(state_dir: PathBuf) -> Self {
-        Self::new(WorkerTarget::EmbeddedState(state_dir))
-    }
-
-    /// Read the optional Distributed socket address. It can only select a backend sidecar.
-    pub(crate) fn distributed_from_environment() -> Result<Option<Self>> {
-        env::var_os(SOCKET_ENV)
-            .map(|path| {
-                let path = PathBuf::from(path);
-                ensure!(path.is_absolute(), "invalid QA socket configuration");
-                Ok(Self::new(WorkerTarget::Distributed(path)))
-            })
-            .transpose()
-    }
-
-    async fn connect(&self) -> Result<WorkerSession> {
-        match &self.target {
-            WorkerTarget::Distributed(socket) => {
-                let mut session = WorkerSession::socket(socket)
-                    .await
-                    .map_err(|error| warm_error("worker_socket", error))?;
-                session
-                    .send(&QaWorkerCommand::Open)
-                    .await
-                    .map_err(|error| warm_error("worker_socket_open", error))?;
-                Ok(session)
-            }
-            WorkerTarget::EmbeddedState(state_dir) => {
-                let state_dir = state_dir.clone();
-                let mut stage = WarmStage::new("pack_verification");
-                let verified = tokio::task::spawn_blocking(move || {
-                    let pointer = match override_pack().map_err(pack_pointer_error)? {
-                        Some(pointer) => pointer,
-                        None => load_installed_pointer(&state_dir).map_err(pack_pointer_error)?,
-                    };
-                    let invalid_pack = || WarmFailure(QaAvailabilityReason::PackInvalid);
-                    let pack = verify_pack(&pointer).map_err(|error| {
-                        warm_error("pack_verification", error.context(invalid_pack()))
-                    })?;
-                    sandbox::protect_state(&state_dir, &pack).map_err(|error| {
-                        warm_error("sandbox_state_boundary", error.context(invalid_pack()))
-                    })?;
-                    Ok::<_, anyhow::Error>(pack)
-                })
-                .await;
-                stage.finish();
-                let pack = verified.map_err(|_| {
-                    warm_error(
-                        "pack_verification",
-                        anyhow!("QA pack verification did not finish"),
-                    )
-                })??;
-                WorkerSession::child(&pack)
-            }
+    async fn connect(
+        &self,
+        target: QaModelTarget,
+        progress: &(dyn Fn(QaStartupStage) + Sync),
+    ) -> Result<WorkerSession> {
+        let state_dir = self.state_dir.clone();
+        let (pointer_loaded, pointer_observed) = oneshot::channel();
+        let mut stage = WarmStage::new("pack_verification");
+        let verification = tokio::task::spawn_blocking(move || {
+            let pointer = worker_pack_pointer(&state_dir, target).map_err(pack_pointer_error)?;
+            let _ = pointer_loaded.send(());
+            let invalid_pack = || WarmFailure(QaAvailabilityReason::PackInvalid);
+            let (pack, packed_target) = verify_pack(&pointer)
+                .map_err(|error| warm_error("pack_verification", error.context(invalid_pack())))?;
+            ensure!(
+                packed_target.is_some(),
+                "QA pack requires a verified generation runtime"
+            );
+            sandbox::protect_state(&state_dir, &pack).map_err(|error| {
+                warm_error("sandbox_state_boundary", error.context(invalid_pack()))
+            })?;
+            Ok::<_, anyhow::Error>((pack, packed_target == Some(target)))
+        });
+        if pointer_observed.await.is_ok() {
+            progress(QaStartupStage::VerifyingPack);
         }
+        let verified = timeout(WARM_LIMIT, verification).await;
+        stage.finish();
+        let (pack, selected) = verified?.map_err(|_| {
+            warm_error(
+                "pack_verification",
+                anyhow!("QA pack verification did not finish"),
+            )
+        })??;
+        let model = if selected {
+            pack.join("model")
+        } else {
+            progress(QaStartupStage::DownloadingPack);
+            crate::qa_model_assets::provision(&self.state_dir, target)
+                .await
+                .map_err(|error| {
+                    warm_error(
+                        "model_provision",
+                        error.context(WarmFailure(QaAvailabilityReason::PackInvalid)),
+                    )
+                })?
+        };
+        let model = tokio::fs::canonicalize(model).await?;
+        sandbox::protect_state(&self.state_dir, &model)?;
+        progress(QaStartupStage::LoadingModel);
+        WorkerSession::child(&pack, &model, target)
     }
 
     async fn connect_ready(
         &self,
+        target: QaModelTarget,
         stopped: &mut watch::Receiver<()>,
         cancel: &CancellationToken,
+        progress: &(dyn Fn(QaStartupStage) + Sync),
     ) -> Result<WorkerSession> {
         let mut session = tokio::select! {
             biased;
             _ = stopped.changed() => return Err(anyhow!("QA worker is stopping")),
             _ = cancel.cancelled() => return Err(anyhow!("QA request was canceled")),
-            result = timeout(WARM_LIMIT, self.connect()) => result??,
+            result = self.connect(target, progress) => result?,
         };
         let child_pid = session.child_id();
         let mut stage = WarmStage::new("worker_ready_frame");
+        let resident_limit = session.resident_limit;
         let (ready, failure_stage) = tokio::select! {
             biased;
             _ = stopped.changed() => (Err(anyhow!("QA worker is stopping")), None),
             _ = cancel.cancelled() => (Err(anyhow!("QA request was canceled")), None),
-            error = guard_resident(child_pid) => (Err(error), Some("worker_memory_limit")),
+            error = guard_resident(child_pid, resident_limit) => (Err(error), Some("worker_memory_limit")),
             result = timeout(WARM_LIMIT, session.ready()) => match result {
                 Ok(result) => (result, Some("worker_ready_frame")),
                 Err(_) => (Err(anyhow!("QA worker did not load in time")), Some("worker_ready_timeout")),
@@ -279,43 +308,39 @@ impl QaWorkerSupervisor {
         Ok(session)
     }
 
-    async fn ensure_ready(
+    pub(crate) async fn warm_with_progress(
         &self,
-        slot: &mut Option<WorkerSession>,
-        stopped: &mut watch::Receiver<()>,
-        cancel: &CancellationToken,
+        target: QaModelTarget,
+        progress: &(dyn Fn(QaStartupStage) + Sync),
     ) -> Result<()> {
-        if let Some(session) = slot.as_mut() {
-            let child_pid = session.child_id();
-            let ping = tokio::select! {
-                biased;
-                _ = stopped.changed() => return Err(anyhow!("QA worker is stopping")),
-                _ = cancel.cancelled() => return Err(anyhow!("QA request was canceled")),
-                error = guard_resident(child_pid) => Ok(Err(error)),
-                result = timeout(PING_LIMIT, session.ping()) => result,
-            };
-            if matches!(ping, Ok(Ok(()))) {
-                return Ok(());
-            }
-        }
+        let mut stopped = self.stopping.subscribe();
+        let mut slot = self.session.lock().await;
         if let Some(old) = slot.take() {
-            let _ = old.stop().await;
+            old.stop().await?;
         }
-        *slot = Some(self.connect_ready(stopped, cancel).await?);
+        let cancel = CancellationToken::new();
+        *slot = Some(
+            self.connect_ready(target, &mut stopped, &cancel, progress)
+                .await?,
+        );
         Ok(())
+    }
+
+    pub(crate) async fn check_ready(&self) -> Result<()> {
+        let mut slot = self.session.lock().await;
+        let session = slot
+            .as_mut()
+            .ok_or_else(|| anyhow!("QA worker unavailable"))?;
+        let child_pid = session.child_id();
+        let resident_limit = session.resident_limit;
+        tokio::select! {
+            error = guard_resident(child_pid, resident_limit) => Err(error),
+            result = timeout(PING_LIMIT, session.ping()) => result?,
+        }
     }
 }
 
 impl QaInference for QaWorkerSupervisor {
-    fn warm(&self) -> QaInferenceFuture<'_> {
-        Box::pin(async move {
-            let mut stopped = self.stopping.subscribe();
-            let mut slot = self.session.lock().await;
-            let cancel = CancellationToken::new();
-            self.ensure_ready(&mut slot, &mut stopped, &cancel).await
-        })
-    }
-
     fn ask(
         &self,
         request: QaWorkerRequest,
@@ -326,16 +351,16 @@ impl QaInference for QaWorkerSupervisor {
             request.validate()?;
             let mut stopped = self.stopping.subscribe();
             let mut slot = self.session.lock().await;
-            self.ensure_ready(&mut slot, &mut stopped, &cancel).await?;
             let session = slot
                 .as_mut()
                 .ok_or_else(|| anyhow!("QA worker unavailable"))?;
             let child_pid = session.child_id();
+            let resident_limit = session.resident_limit;
             let (result, failure_stage) = tokio::select! {
                 biased;
                 _ = stopped.changed() => (Err(anyhow!("QA worker is stopping")), None),
                 _ = cancel.cancelled() => (Err(anyhow!("QA request was canceled")), None),
-                error = guard_resident(child_pid) => (Err(error), Some("worker_memory_limit")),
+                error = guard_resident(child_pid, resident_limit) => (Err(error), Some("worker_memory_limit")),
                 result = timeout(TURN_LIMIT, session.ask(request, events)) => match result {
                     Ok(Ok(())) => (Ok(()), None),
                     Ok(Err(error)) => {
@@ -378,16 +403,7 @@ impl QaInference for QaWorkerSupervisor {
             self.stopping.send_modify(|_| {});
             let mut slot = self.session.lock().await;
             if let Some(session) = slot.take() {
-                let stopped = session.stop().await;
-                if stopped.is_ok() || matches!(self.target, WorkerTarget::EmbeddedState(_)) {
-                    return stopped;
-                }
-            }
-            if let WorkerTarget::Distributed(socket) = &self.target {
-                // Query the Torch-free listener. It can confirm unload even after the original
-                // executor connection was lost, without starting another inference child.
-                let session = WorkerSession::socket(socket).await?;
-                return session.stop().await;
+                session.stop().await?;
             }
             Ok(())
         })
@@ -398,26 +414,34 @@ struct WorkerSession {
     input: Box<dyn AsyncWrite + Send + Unpin>,
     output: Box<dyn AsyncRead + Send + Unpin>,
     child: Option<Child>,
+    streaming: bool,
+    model_target: QaModelTarget,
+    resident_limit: u64,
 }
 
 impl WorkerSession {
-    fn child(pack: &Path) -> Result<Self> {
-        let model = pack.join("model");
-        let mut command = sandbox::command(pack, &pack.join(WORKER_BINARY))
+    fn child(pack: &Path, model: &Path, target: QaModelTarget) -> Result<Self> {
+        let limits = WorkerLimits::for_target(target);
+        let threads = limits.threads.to_string();
+        let mut command = sandbox::command(pack, model, &pack.join(WORKER_BINARY))
             .map_err(|error| warm_error("sandbox_setup", error))?;
         command
             .arg("--model-dir")
-            .arg(&model)
-            .current_dir(&model)
-            .env("OMP_NUM_THREADS", "1")
-            .env("MKL_NUM_THREADS", "1")
-            .env("RAYON_NUM_THREADS", "1")
+            .arg(model)
+            .current_dir(model)
+            .env(QA_CONTEXT_USAGE_ENV, "1")
+            .env(QA_DIALOGUE_ENV, "1")
+            .env(QA_STREAMING_ENV, "1")
+            .env(QA_MODEL_TARGET_ENV, target.slug())
+            .env("OMP_NUM_THREADS", &threads)
+            .env("MKL_NUM_THREADS", &threads)
+            .env("RAYON_NUM_THREADS", &threads)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .process_group(0)
             .kill_on_drop(true);
-        limit_embedded_memory(&mut command);
+        limit_embedded_worker(&mut command);
         let mut child = command
             .spawn()
             .map_err(|error| warm_error("worker_spawn", error.into()))?;
@@ -433,35 +457,14 @@ impl WorkerSession {
             input: Box::new(input),
             output: Box::new(output),
             child: Some(child),
+            streaming: false,
+            model_target: target,
+            resident_limit: limits.resident_bytes,
         })
     }
 
     fn child_id(&self) -> Option<u32> {
         self.child.as_ref().and_then(Child::id)
-    }
-
-    async fn socket(socket: &Path) -> Result<Self> {
-        let parent = socket
-            .parent()
-            .ok_or_else(|| anyhow!("invalid QA worker socket"))?;
-        let directory = tokio::fs::symlink_metadata(parent).await?;
-        let metadata = tokio::fs::symlink_metadata(socket).await?;
-        ensure!(
-            directory.is_dir()
-                && directory.mode() & 0o777 == 0o700
-                && directory.uid() == uid()
-                && metadata.file_type().is_socket()
-                && metadata.mode() & 0o777 == 0o600
-                && metadata.uid() == uid(),
-            "QA worker socket must be private"
-        );
-        let stream = timeout(PING_LIMIT, UnixStream::connect(socket)).await??;
-        let (output, input) = stream.into_split();
-        Ok(Self {
-            input: Box::new(input),
-            output: Box::new(output),
-            child: None,
-        })
     }
 
     async fn send(&mut self, command: &QaWorkerCommand) -> Result<()> {
@@ -478,17 +481,40 @@ impl WorkerSession {
     async fn receive(&mut self) -> Result<QaWorkerReply> {
         let mut header = [0; 4];
         self.output.read_exact(&mut header).await?;
+        self.receive_payload(header).await
+    }
+
+    async fn receive_payload(&mut self, header: [u8; 4]) -> Result<QaWorkerReply> {
         let mut payload = vec![0; qa_frame_len(header)?];
         self.output.read_exact(&mut payload).await?;
         serde_json::from_slice(&payload).map_err(|_| anyhow!("invalid QA worker response"))
     }
 
     async fn ready(&mut self) -> Result<()> {
-        match self.receive().await? {
-            QaWorkerReply::Ready {
+        let reply = self.receive().await?;
+        self.validate_ready(reply)
+    }
+
+    fn validate_ready(&mut self, reply: QaWorkerReply) -> Result<()> {
+        match reply {
+            QaWorkerReply::ReadyWithDialogue {
                 protocol,
                 model_revision,
-            } if protocol == QA_WORKER_PROTOCOL && model_revision == QA_MODEL_REVISION => Ok(()),
+            } if protocol == QA_WORKER_PROTOCOL
+                && model_revision == self.model_target.revision() =>
+            {
+                self.streaming = false;
+                Ok(())
+            }
+            QaWorkerReply::ReadyWithStreaming {
+                protocol,
+                model_revision,
+            } if protocol == QA_WORKER_PROTOCOL
+                && model_revision == self.model_target.revision() =>
+            {
+                self.streaming = true;
+                Ok(())
+            }
             QaWorkerReply::StartupFailed {
                 source,
                 line,
@@ -529,6 +555,19 @@ impl WorkerSession {
                 return Err(anyhow!("QA worker stopped before its terminal result"));
             };
             let terminal = validation.accept(&request, &event)?;
+            match &event {
+                QaWorkerEvent::Delta { .. } => ensure!(self.streaming, "unexpected QA stream"),
+                QaWorkerEvent::Complete {
+                    context: Some(context),
+                    ..
+                } if self.streaming => {
+                    ensure!(
+                        context.window_tokens == self.model_target.input_tokens(),
+                        "unexpected QA context window"
+                    );
+                }
+                _ => {}
+            }
             events
                 .send(event)
                 .await
@@ -575,14 +614,14 @@ impl WorkerSession {
     }
 }
 
-async fn guard_resident(pid: Option<u32>) -> anyhow::Error {
+async fn guard_resident(pid: Option<u32>, resident_limit: u64) -> anyhow::Error {
     let Some(pid) = pid else {
         return future::pending().await;
     };
     loop {
         if resident_bytes(pid)
             .await
-            .is_some_and(|bytes| bytes > MAX_RESIDENT_BYTES)
+            .is_some_and(|bytes| bytes > resident_limit)
         {
             return anyhow!("QA worker exceeded its resident memory budget");
         }
@@ -628,7 +667,16 @@ async fn resident_bytes(pid: u32) -> Option<u64> {
     Some(unsafe { info.assume_init() }.pti_resident_size)
 }
 
-fn limit_embedded_memory(command: &mut Command) {
+fn limit_embedded_worker(command: &mut Command) {
+    // SAFETY: setpriority applies only to the forked worker before exec.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpriority(libc::PRIO_PROCESS, 0, 10) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     #[cfg(target_os = "linux")]
     // SAFETY: The hook makes only async-signal-safe getrlimit/setrlimit calls before exec.
     unsafe {
@@ -668,14 +716,48 @@ fn override_pack() -> Result<Option<PackPointer>> {
     }
 }
 
-fn load_installed_pointer(state_dir: &Path) -> Result<PackPointer> {
-    let directory = fs::symlink_metadata(state_dir)?;
+fn protect_private_directory(path: &Path) -> Result<()> {
+    let directory = fs::symlink_metadata(path)?;
     ensure!(
         directory.is_dir() && directory.uid() == uid() && directory.mode() & 0o777 == 0o700,
         "QA state directory must be private"
     );
-    let path = state_dir.join("qa-pack.json");
-    let mut pointer = open_pack_file(&path, MAX_POINTER_BYTES)?;
+    Ok(())
+}
+
+fn worker_pack_pointer(state_dir: &Path, target: QaModelTarget) -> Result<PackPointer> {
+    if let Some(pointer) = override_pack()? {
+        return Ok(pointer);
+    }
+    protect_private_directory(state_dir)?;
+    let targets = state_dir.join("qa-model-packs");
+    match protect_private_directory(&targets) {
+        Ok(()) => {
+            let path = targets.join(format!("{}.json", target.slug()));
+            match read_pointer(&path) {
+                Err(error)
+                    if error
+                        .downcast_ref::<io::Error>()
+                        .is_some_and(|error| error.kind() == io::ErrorKind::NotFound) => {}
+                other => return other,
+            }
+        }
+        Err(error)
+            if error
+                .downcast_ref::<io::Error>()
+                .is_some_and(|error| error.kind() == io::ErrorKind::NotFound) => {}
+        Err(error) => return Err(error),
+    }
+    load_installed_pointer(state_dir)
+}
+
+fn load_installed_pointer(state_dir: &Path) -> Result<PackPointer> {
+    protect_private_directory(state_dir)?;
+    read_pointer(&state_dir.join("qa-pack.json"))
+}
+
+fn read_pointer(path: &Path) -> Result<PackPointer> {
+    let mut pointer = open_pack_file(path, MAX_POINTER_BYTES)?;
     ensure!(
         pointer.metadata()?.mode() & 0o777 == 0o600,
         "QA pack pointer must be private"
@@ -709,7 +791,7 @@ fn open_pack_file(path: &Path, max_size: u64) -> Result<fs::File> {
     Ok(file)
 }
 
-fn verify_pack(pointer: &PackPointer) -> Result<PathBuf> {
+fn verify_pack(pointer: &PackPointer) -> Result<(PathBuf, Option<QaModelTarget>)> {
     ensure!(
         pointer.root.is_absolute(),
         "QA pack directory must be absolute"
@@ -739,9 +821,20 @@ fn verify_pack(pointer: &PackPointer) -> Result<PathBuf> {
     );
     let manifest: Manifest =
         serde_json::from_slice(&bytes).map_err(|_| anyhow!("invalid QA pack manifest"))?;
+    let legacy_model = manifest.model_revision == QA_MODEL_REVISION;
+    let mut packed_target = QaModelTarget::ALL
+        .into_iter()
+        .find(|model| model.revision() == manifest.model_revision);
+    let has_generator = manifest
+        .files
+        .keys()
+        .any(|name| name.starts_with("model/generator/"));
+    if legacy_model && has_generator {
+        packed_target = Some(QaModelTarget::FlanT5Small);
+    }
     ensure!(
         manifest.protocol == QA_WORKER_PROTOCOL
-            && manifest.model_revision == QA_MODEL_REVISION
+            && (legacy_model || packed_target.is_some())
             && manifest.target == host_target()
             && manifest.files.len() <= MAX_PACK_FILES
             && manifest.files.contains_key(WORKER_BINARY)
@@ -749,20 +842,44 @@ fn verify_pack(pointer: &PackPointer) -> Result<PathBuf> {
         "QA pack is incompatible with this companion"
     );
     for (name, digest) in QA_MODEL_FILES {
+        let entry = manifest
+            .files
+            .get(&format!("model/{name}"))
+            .map(String::as_str);
         ensure!(
-            manifest
-                .files
-                .get(&format!("model/{name}"))
-                .map(String::as_str)
-                == Some(digest),
+            if legacy_model {
+                entry == Some(digest)
+            } else {
+                entry.is_none()
+            },
             "QA pack contains the wrong model"
         );
     }
+    if let Some(target) = packed_target {
+        let files = crate::qa_model_assets::expected_files(target)?;
+        ensure!(
+            manifest
+                .files
+                .iter()
+                .filter(|(name, _)| name.starts_with("model/generator/"))
+                .count()
+                == files.len(),
+            "QA pack has unexpected generator assets"
+        );
+        for (name, digest) in files {
+            ensure!(
+                manifest.files.get(&format!("model/generator/{name}")) == Some(&digest),
+                "QA pack contains an incomplete or incompatible generator"
+            );
+        }
+    }
+    let max_generator_bytes = packed_target.map_or(0, |target| target.weight_bytes() + 4 * MIB);
 
     // The directory inventory rejects an unverified file anywhere in the loader path.
     let mut pending = vec![root.clone()];
     let mut count = 0;
     let mut total_bytes = 0;
+    let mut generator_bytes = 0;
     let mut seen = 0;
     while let Some(dir) = pending.pop() {
         for entry in fs::read_dir(&dir)? {
@@ -801,7 +918,12 @@ fn verify_pack(pointer: &PackPointer) -> Result<PathBuf> {
                 .get(relative)
                 .ok_or_else(|| anyhow!("unverified QA pack file"))?;
             ensure!(valid_sha(expected), "invalid QA pack file digest");
-            let file = open_pack_file(&path, MAX_PACK_BYTES - total_bytes)?;
+            let (used, limit) = if relative.starts_with("model/generator/") {
+                (&mut generator_bytes, max_generator_bytes)
+            } else {
+                (&mut total_bytes, MAX_PACK_BYTES)
+            };
+            let file = open_pack_file(&path, limit - *used)?;
             if matches!(relative, WORKER_BINARY | SOCKET_LISTENER_BINARY) {
                 ensure!(
                     file.metadata()?.mode() & 0o100 != 0,
@@ -809,14 +931,8 @@ fn verify_pack(pointer: &PackPointer) -> Result<PathBuf> {
                 );
             }
             let mut digest = Sha256::new();
-            total_bytes += io::copy(
-                &mut file.take(MAX_PACK_BYTES - total_bytes + 1),
-                &mut digest,
-            )?;
-            ensure!(
-                total_bytes <= MAX_PACK_BYTES,
-                "QA pack exceeds its size limit"
-            );
+            *used += io::copy(&mut file.take(limit - *used + 1), &mut digest)?;
+            ensure!(*used <= limit, "QA pack exceeds its size limit");
             ensure!(
                 format!("{:x}", digest.finalize()) == *expected,
                 "QA pack digest mismatch"
@@ -828,7 +944,7 @@ fn verify_pack(pointer: &PackPointer) -> Result<PathBuf> {
         seen == manifest.files.len() && root.join("lib").is_dir(),
         "QA pack is incomplete"
     );
-    Ok(root)
+    Ok((root, packed_target))
 }
 
 fn allowed_pack_file(name: &str) -> bool {
@@ -836,6 +952,17 @@ fn allowed_pack_file(name: &str) -> bool {
         || QA_MODEL_FILES
             .iter()
             .any(|(file, _)| name.strip_prefix("model/") == Some(*file))
+        || name.strip_prefix("model/generator/").is_some_and(|file| {
+            matches!(
+                file,
+                "config.json"
+                    | "spiece.model"
+                    | "model.safetensors"
+                    | "rust_model.ot"
+                    | "merges.txt"
+                    | "vocab.json"
+            )
+        })
         || name
             .strip_prefix("lib/")
             .is_some_and(|file| !file.contains('/'))
@@ -865,9 +992,10 @@ fn host_target() -> String {
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 
-    use fleetworks_contracts::qa_worker::QaPassage;
-    use fleetworks_contracts::qa_worker::QaWorkerOutcome;
-    use tokio::net::UnixListener;
+    use fleetworks_contracts::qa_worker::{
+        QaContextUsage, QaDialogueKind, QaWorkerDialogue, QaWorkerOutcome,
+    };
+    use tokio::net::UnixStream;
     use tokio::sync::oneshot;
 
     use super::*;
@@ -907,69 +1035,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streams_first_finding_before_next_batch_and_confirms_stop() {
-        let directory = tempfile::tempdir().unwrap();
-        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let socket = directory.path().join("qa.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
-        let (release, next_batch) = oneshot::channel();
-        let peer = tokio::spawn(async move {
-            let (mut peer, _) = listener.accept().await.unwrap();
-            assert!(matches!(
-                read_command(&mut peer).await,
-                QaWorkerCommand::Open
-            ));
-            let ready = || QaWorkerReply::Ready {
-                protocol: QA_WORKER_PROTOCOL,
-                model_revision: QA_MODEL_REVISION.into(),
-            };
-            write_reply(&mut peer, ready()).await;
-            assert!(matches!(
-                read_command(&mut peer).await,
-                QaWorkerCommand::Ping
-            ));
-            write_reply(&mut peer, ready()).await;
+    async fn streaming_draft_arrives_before_the_canonical_completion() {
+        let (io, mut peer) = UnixStream::pair().unwrap();
+        let (input, output) = io.into_split();
+        let target = QaModelTarget::FlanT5Small;
+        let usage = QaContextUsage::new(target.input_tokens(), 82, 1);
+        let mut session = WorkerSession {
+            input: Box::new(output),
+            output: Box::new(input),
+            child: None,
+            streaming: false,
+            model_target: target,
+            resident_limit: WorkerLimits::for_target(target).resident_bytes,
+        };
+        let (release, next) = oneshot::channel();
+        let child = async {
+            write_reply(
+                &mut peer,
+                QaWorkerReply::ReadyWithStreaming {
+                    protocol: QA_WORKER_PROTOCOL,
+                    model_revision: target.revision().into(),
+                },
+            )
+            .await;
             let QaWorkerCommand::Ask { request } = read_command(&mut peer).await else {
-                panic!("missing prediction request");
+                panic!("missing inference request");
             };
             let turn_id = request.turn_id;
             write_reply(
                 &mut peer,
                 QaWorkerReply::Event {
-                    event: QaWorkerEvent::Finding {
+                    event: QaWorkerEvent::Delta {
                         turn_id: turn_id.clone(),
                         sequence: 1,
-                        source_id: "check-a".into(),
-                        start: 16,
-                        end: 21,
-                        text: "ready".into(),
+                        text: "Hello".into(),
                     },
                 },
             )
             .await;
-            next_batch.await.unwrap();
-            write_reply(
-                &mut peer,
-                QaWorkerReply::Event {
-                    event: QaWorkerEvent::Finding {
-                        turn_id: turn_id.clone(),
-                        sequence: 2,
-                        source_id: "check-b".into(),
-                        start: 11,
-                        end: 18,
-                        text: "healthy".into(),
-                    },
-                },
-            )
-            .await;
+            next.await.unwrap();
             write_reply(
                 &mut peer,
                 QaWorkerReply::Event {
                     event: QaWorkerEvent::Complete {
                         turn_id,
-                        sequence: 3,
+                        sequence: 2,
                         outcome: QaWorkerOutcome::Answered,
+                        context: Some(usage),
+                        reply: Some("Hello!".into()),
                     },
                 },
             )
@@ -979,40 +1092,33 @@ mod tests {
                 QaWorkerCommand::Shutdown
             ));
             write_reply(&mut peer, QaWorkerReply::Stopped).await;
-        });
-        let supervisor = QaWorkerSupervisor::new(WorkerTarget::Distributed(socket));
-        supervisor.warm().await.unwrap();
-        let request = QaWorkerRequest::new(
-            "turn-a".into(),
-            "snapshot-a".into(),
-            "How are the workstation dependencies?".into(),
-            vec![
-                QaPassage::new("check-a".into(), "Actor search is ready.".into()),
-                QaPassage::new("check-b".into(), "Storage is healthy.".into()),
-            ],
-        );
-        let (events, mut stream) = mpsc::channel(1);
-        let ask = supervisor.ask(request, events, CancellationToken::new());
-        let consume = async {
-            assert!(matches!(
-                stream.recv().await,
-                Some(QaWorkerEvent::Finding { sequence: 1, .. })
-            ));
-            release.send(()).unwrap();
-            assert!(matches!(
-                stream.recv().await,
-                Some(QaWorkerEvent::Finding { sequence: 2, .. })
-            ));
-            assert!(matches!(
-                stream.recv().await,
-                Some(QaWorkerEvent::Complete { sequence: 3, .. })
-            ));
         };
-        let (result, ()) = timeout(PING_LIMIT, async { tokio::join!(ask, consume) })
+        let executor = async {
+            session.ready().await.unwrap();
+            let mut request = QaWorkerRequest::new(
+                "turn-a".into(),
+                "snapshot-a".into(),
+                "Hi!".into(),
+                Vec::new(),
+            );
+            request.dialogue = Some(QaWorkerDialogue {
+                kind: QaDialogueKind::Greeting,
+                history: Vec::new(),
+            });
+            let (events, mut stream) = mpsc::channel(1);
+            let consume = async {
+                assert!(matches!(stream.recv().await,
+                    Some(QaWorkerEvent::Delta { sequence: 1, text, .. }) if text == "Hello"));
+                release.send(()).unwrap();
+                assert!(matches!(stream.recv().await,
+                    Some(QaWorkerEvent::Complete { sequence: 2, context: Some(context), .. }) if context == usage));
+            };
+            let (result, ()) = tokio::join!(session.ask(request, events), consume);
+            result.unwrap();
+            session.stop().await.unwrap();
+        };
+        timeout(PING_LIMIT, async { tokio::join!(child, executor) })
             .await
             .unwrap();
-        result.unwrap();
-        supervisor.shutdown().await.unwrap();
-        peer.await.unwrap();
     }
 }

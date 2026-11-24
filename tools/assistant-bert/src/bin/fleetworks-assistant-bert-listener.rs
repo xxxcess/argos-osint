@@ -40,11 +40,16 @@ use anyhow::Result;
 use serde::de::DeserializeOwned;
 
 use protocol::qa_frame_len;
+use protocol::QaModelTarget;
 use protocol::QaWorkerCommand;
 use protocol::QaWorkerEvent;
 use protocol::QaWorkerReply;
+use protocol::QA_CONTEXT_USAGE_ENV;
+use protocol::QA_DIALOGUE_ENV;
 use protocol::QA_MAX_FRAME_BYTES;
 use protocol::QA_MODEL_REVISION;
+use protocol::QA_MODEL_TARGET_ENV;
+use protocol::QA_STREAMING_ENV;
 use protocol::QA_WORKER_PROTOCOL;
 
 const INITIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
@@ -344,9 +349,22 @@ fn relay(
                         QaWorkerReply::Ready {
                             protocol,
                             model_revision,
+                        }
+                        | QaWorkerReply::ReadyWithDialogue {
+                            protocol,
+                            model_revision,
+                        }
+                        | QaWorkerReply::ReadyWithStreaming {
+                            protocol,
+                            model_revision,
                         },
                         Phase::Starting | Phase::Pinging,
-                    ) if protocol == QA_WORKER_PROTOCOL && model_revision == QA_MODEL_REVISION => {
+                    ) if protocol == QA_WORKER_PROTOCOL
+                        && (model_revision == QA_MODEL_REVISION
+                            || QaModelTarget::ALL
+                                .into_iter()
+                                .any(|target| model_revision == target.revision())) =>
+                    {
                         phase = Phase::Idle;
                         *reply = Some(packet);
                     }
@@ -361,7 +379,7 @@ fn relay(
                     }
                     (
                         QaWorkerReply::Event {
-                            event: QaWorkerEvent::Finding { .. },
+                            event: QaWorkerEvent::Finding { .. } | QaWorkerEvent::Delta { .. },
                         },
                         Phase::Answering,
                     ) => {
@@ -414,11 +432,14 @@ fn supervise(
 
 fn serve(stream: UnixStream, worker: &Path, model: &Path, libraries: &Path) -> Result<()> {
     stream.set_nonblocking(true)?;
-    match opening_command(&stream)? {
+    let (report_context, dialogue, streaming) = match opening_command(&stream)? {
         QaWorkerCommand::Shutdown => return confirm_stopped(&stream),
-        QaWorkerCommand::Open => {}
+        QaWorkerCommand::Open => (false, false, false),
+        QaWorkerCommand::OpenWithContext => (true, false, false),
+        QaWorkerCommand::OpenWithDialogue => (true, true, false),
+        QaWorkerCommand::OpenWithStreaming => (true, true, true),
         _ => return Err(anyhow!("invalid QA executor handshake")),
-    }
+    };
 
     // Relay rather than passing the executor FD to the worker so a stuck worker cannot hold
     // its own lease open. Each direction holds at most one bounded frame awaiting delivery.
@@ -431,22 +452,33 @@ fn serve(stream: UnixStream, worker: &Path, model: &Path, libraries: &Path) -> R
     } else {
         "LD_LIBRARY_PATH"
     };
-    let mut child = ModelChild(
-        Command::new(worker)
-            .arg("--model-dir")
-            .arg(model)
-            .current_dir(model)
-            .env_clear()
-            .env(library_variable, libraries)
-            .env("OMP_NUM_THREADS", "1")
-            .env("MKL_NUM_THREADS", "1")
-            .env("RAYON_NUM_THREADS", "1")
-            .stdin(Stdio::from(input))
-            .stdout(Stdio::from(output))
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()?,
-    );
+    let mut command = Command::new(worker);
+    command
+        .arg("--model-dir")
+        .arg(model)
+        .current_dir(model)
+        .env_clear()
+        .env(library_variable, libraries)
+        .env("OMP_NUM_THREADS", "1")
+        .env("MKL_NUM_THREADS", "1")
+        .env("RAYON_NUM_THREADS", "1")
+        .stdin(Stdio::from(input))
+        .stdout(Stdio::from(output))
+        .stderr(Stdio::null())
+        .process_group(0);
+    if report_context {
+        command.env(QA_CONTEXT_USAGE_ENV, "1");
+    }
+    if dialogue {
+        command.env(QA_DIALOGUE_ENV, "1");
+    }
+    if streaming {
+        command.env(QA_STREAMING_ENV, "1");
+    }
+    if let Some(target) = env::var_os(QA_MODEL_TARGET_ENV) {
+        command.env(QA_MODEL_TARGET_ENV, target);
+    }
+    let mut child = ModelChild(command.spawn()?);
     supervise(&stream, &model_io, &mut child, EXECUTOR_LEASE)
 }
 

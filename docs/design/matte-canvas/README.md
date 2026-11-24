@@ -24,7 +24,7 @@ Approved **Glass Canvas** visual target for the native client and shared web pai
 | Initial unresolved content or pending list tail | Steady skeleton base with a restrained translated cool sheen |
 | Long record lists | Continuous scrolling over bounded, opaque cursor requests; no routine page-number or Previous/Next chrome |
 
-The deep-space backdrop is `#060709`. Build primary surfaces, chrome, cards, controls, and floating overlays as **layered smoked/frosted glass** with static liquid-metal hairline rim highlights, warm molten-core active accents, cyan interactive cues, and fractured crescent-moon textures derived from the logo. Keep desktop chrome calm and structured (slim left rail, centered glass command trigger pill, compact top-right telemetry & bell-badge strip, hairline-grouped glass settings rows, floating notification card stack). Preserve accessible ≥ 4.5:1 text contrast, crisp keyboard focus and essential input boundaries, and avoid resting animation wake loops or pointer-lighting loops.
+The deep-space backdrop is `#060709`. Build primary surfaces, chrome, cards, controls, and floating overlays as **layered smoked/frosted glass** with static liquid-metal hairline rim highlights, warm molten-core active accents, cyan interactive cues, and fractured crescent-moon textures derived from the logo. Keep desktop chrome calm and structured (slim left rail, empty native toolbar title area, compact top-right telemetry & bell-badge strip, hairline-grouped glass settings rows, floating notification card stack). Preserve accessible ≥ 4.5:1 text contrast, crisp keyboard focus and essential input boundaries, and avoid resting animation wake loops or pointer-lighting loops.
 
 ## Approved screens
 
@@ -32,7 +32,7 @@ The deep-space backdrop is `#060709`. Build primary surfaces, chrome, cards, con
 
 ![Baseline workstation overview layout](mockups/01-workstation-status.png)
 
-One resources group, a compact client/gateway band and a readiness grid, rendered with Glass Canvas surfaces. The last verified health and freshness are separate. The context rail is omitted when it would duplicate visible information.
+The production Workstation takes its material cues from this reference. Use one compact registration band and three sections for Services, Status checks and Diagnostics. Keep actor search and scoped job activity easy to scan, with health and observation freshness displayed distinctly.
 
 ### Setup Gateway
 

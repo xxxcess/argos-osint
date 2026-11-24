@@ -47,15 +47,13 @@ class VerificationPassTests(unittest.TestCase):
 
         first = ci.verification("first", plan, inbox_qa=True)
         self.assertTrue(first["desktop_linux"])
-        self.assertEqual([entry["arch"] for entry in first["inbox_qa_images"]], ["amd64"])
-        self.assertEqual([entry["target"] for entry in first["inbox_qa_embedded"]],
+        self.assertEqual([entry["target"] for entry in first["inbox_qa_packs"]],
                          ["x86_64-unknown-linux-gnu"])
 
         second = ci.verification("second", plan, inbox_qa=True)
         self.assertTrue(second["desktop_macos"])
         self.assertFalse(second["desktop_linux"])
-        self.assertEqual([entry["arch"] for entry in second["inbox_qa_images"]], ["arm64"])
-        self.assertEqual([entry["target"] for entry in second["inbox_qa_embedded"]],
+        self.assertEqual([entry["target"] for entry in second["inbox_qa_packs"]],
                          ["x86_64-apple-darwin", "aarch64-apple-darwin"])
         self.assertFalse(second["web"])
 
@@ -64,12 +62,9 @@ class VerificationPassTests(unittest.TestCase):
         plan["inbox_qa"] = True
         selected = ci.verification("standard", plan)
         self.assertTrue(selected["inbox_qa"])
-        self.assertFalse(selected["inbox_qa_distributed"])
         self.assertEqual([entry["target"] for entry in selected["inbox_qa_packs"]], [
             "x86_64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin",
         ])
-        self.assertEqual(selected["inbox_qa_packs"], selected["inbox_qa_embedded"])
-        self.assertEqual(selected["inbox_qa_images"], [])
 
     def test_native_implementation_and_artwork_use_only_native_linux_first(self):
         plan = self.scopes(

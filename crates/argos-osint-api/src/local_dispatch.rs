@@ -180,12 +180,9 @@ impl LocalGateway {
         capability_config: LocalCapabilityConfig,
     ) -> anyhow::Result<Self> {
         let host_sampler = host_metrics::new_sampler();
-        let qa = crate::inbox_qa::QaTarget::new(
-            services.readiness.clone(),
-            services.search.clone(),
-            true,
-        )
-        .with_metrics(host_sampler.clone());
+        let qa =
+            crate::inbox_qa::QaTarget::new(services.readiness.clone(), services.search.clone())
+                .with_metrics(host_sampler.clone());
         Ok(Self {
             state,
             qa,

@@ -26,7 +26,6 @@ pub(crate) fn read_routes() -> Router<ApiState> {
 
 pub(crate) fn routes() -> Router<ApiState> {
     Router::new()
-        .merge(crate::inbox_qa::control_routes())
         .route("/api/v1/profile", get(configuration::profile))
         .route("/api/v1/models/defaults", get(configuration::models))
         .route(

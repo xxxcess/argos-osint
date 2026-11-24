@@ -296,17 +296,27 @@ pub(crate) fn view(
         }
         header = header.child(rune::spacer());
         if !showing_data && state.connected() && state.registration.context.is_some() {
-            header = header.child(
-                ActionButton::new("Done")
-                    .key("gateway-setup-done")
-                    .icon(&icons::SHIELD_CHECK)
-                    .finish(crate::material::MetalFinish::GoldCta)
-                    .on_press_tx(State::finish_gateway_setup)
-                    .build(kit, preferences, None)
-                    .on_key(|state: &mut State, event, tx| {
-                        activate_on_return(state, event, tx, State::finish_gateway_setup)
-                    }),
-            );
+            header = header
+                .child(
+                    ActionButton::new("Open Workstation")
+                        .key("startup-open-workstation")
+                        .on_press_tx(State::finish_startup)
+                        .build(kit, preferences, None)
+                        .on_key(|state: &mut State, event, tx| {
+                            activate_on_return(state, event, tx, State::finish_startup)
+                        }),
+                )
+                .child(
+                    ActionButton::new("Continue data setup")
+                        .key("gateway-setup-done")
+                        .icon(&icons::SHIELD_CHECK)
+                        .finish(crate::material::MetalFinish::GoldCta)
+                        .on_press_tx(State::finish_gateway_setup)
+                        .build(kit, preferences, None)
+                        .on_key(|state: &mut State, event, tx| {
+                            activate_on_return(state, event, tx, State::finish_gateway_setup)
+                        }),
+                );
         }
         header = header.child(setup_mark);
         if showing_data {
@@ -541,6 +551,10 @@ impl State {
     pub(crate) fn finish_gateway_setup(&mut self, tx: &mut Tx) {
         if !self.startup.active() {
             self.setup_gateway = false;
+            if self.settings_open {
+                self.settings_open = false;
+                tx.focus("open-workstation-settings", tx.by_keys());
+            }
             return;
         }
         if !self.connected() || self.registration.context.is_none() {
@@ -562,6 +576,9 @@ impl State {
     }
 
     pub(crate) fn finish_startup(&mut self, tx: &mut Tx) {
+        if !self.startup.active() || !self.connected() || self.registration.context.is_none() {
+            return;
+        }
         self.startup.start_flight(Dock::Rail, self.clock);
         if self.startup.flight.is_some() {
             tx.wake_after(std::time::Duration::from_secs_f64(1.0 / 60.0));
@@ -745,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_pose_docks_and_done_mounts_status_without_waiting_for_the_mark() {
+    fn selected_pose_docks_and_finishing_setup_mounts_status_without_waiting_for_the_mark() {
         for (size, reduced) in [
             ((640.0, 480.0), false),
             ((640.0, 480.0), true),
@@ -810,6 +827,7 @@ mod tests {
             click(&mut runtime, "gateway-setup-done");
             runtime.frame(0.02);
             assert!(runtime.find("startup-data-setup").is_some());
+            assert!(runtime.find("startup-open-workstation").is_none());
             click(&mut runtime, "startup-data-continue");
             runtime.frame(0.02);
             assert_eq!(runtime.state.page, app::Page::Workstation);
@@ -1058,6 +1076,32 @@ mod tests {
         complete_data_checks(&mut state, receipt.clone(), checks);
         runtime.state = state;
         (runtime, receipt)
+    }
+
+    #[test]
+    fn registered_backend_can_open_workstation_before_data_setup() {
+        let (mut runtime, _) = data_setup_runtime([ReadinessState::NotReady; 3]);
+        let registration = runtime.state.registration.context.take();
+        runtime.state.page = app::Page::Brain;
+        runtime.frame(0.0);
+        assert!(runtime.find("startup-open-workstation").is_none());
+
+        runtime.update(|state, _| state.registration.context = registration);
+        runtime.frame(0.02);
+        let ([x, y, width, height], _) = runtime
+            .presented("startup-open-workstation")
+            .expect("registered backend offers a direct workstation entry");
+        assert!(x >= 0.0 && y >= 0.0 && x + width <= 640.0 && y + height <= 480.0);
+        assert!(runtime.find("gateway-setup-done").is_some());
+
+        click(&mut runtime, "startup-open-workstation");
+        runtime.frame(0.02);
+        assert!(!runtime.state.startup.active());
+        assert!(!runtime.state.setup_gateway);
+        assert!(runtime.state.startup.data_step.is_none());
+        assert_eq!(runtime.state.page, app::Page::Workstation);
+        assert!(runtime.find("screen-workstation").is_some());
+        assert!(runtime.find("nav-workstation").is_some());
     }
 
     #[test]

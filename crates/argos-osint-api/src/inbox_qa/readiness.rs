@@ -2,6 +2,9 @@ use argos_osint_core::storage::inbox_qa::HealthFact;
 use fleetworks_contracts::chat::QA_MAX_FINDINGS;
 use fleetworks_contracts::chat::QA_MAX_WORDS;
 use fleetworks_contracts::qa_worker::exact_span;
+use fleetworks_contracts::readiness::ReadinessCheckId;
+
+use super::question::StatusChecks;
 
 pub(super) fn label(fact: &HealthFact) -> &str {
     crate::workstation::qa_readiness_label(&fact.id).unwrap_or(&fact.label)
@@ -11,7 +14,7 @@ pub(super) fn answer(fact: &HealthFact) -> String {
     let label = label(fact);
     let status = match fact.status.as_str() {
         "ready" => "is ready",
-        "not ready" | "not_ready" => "is not ready",
+        "failed" | "not ready" | "not_ready" => "is not ready",
         "unavailable" => "readiness could not be verified",
         "not applicable" | "not_applicable" => "readiness is not applicable",
         "degraded" => "is degraded",
@@ -29,6 +32,80 @@ pub(super) fn answer(fact: &HealthFact) -> String {
         answer.push_str(reason);
     }
     answer
+}
+
+/// Summarize the same fresh status groups used by the Workstation view.
+pub(super) fn status_check_summary<'a>(
+    facts: impl Iterator<Item = &'a HealthFact>,
+    selection: StatusChecks,
+) -> Option<(String, Vec<&'a HealthFact>)> {
+    let mut facts = facts.peekable();
+    facts.peek()?;
+    let (mut passed, mut failed, mut unresolved) = (0, 0, 0);
+    let mut relevant = Vec::new();
+    for fact in facts.filter(|fact| {
+        fact.id == ReadinessCheckId::Registration.as_str()
+            || (fact.id != ReadinessCheckId::ClassifierTraining.as_str()
+                && crate::workstation::qa_readiness_label(&fact.id).is_some())
+    }) {
+        let status = match fact.status.as_str() {
+            "not applicable" | "not_applicable" => continue,
+            "ready" => {
+                passed += 1;
+                StatusChecks::Passed
+            }
+            "failed" => {
+                failed += 1;
+                StatusChecks::Failed
+            }
+            _ => {
+                unresolved += 1;
+                StatusChecks::Unresolved
+            }
+        };
+        if selection == status || (selection == StatusChecks::All && status != StatusChecks::Passed)
+        {
+            relevant.push(fact);
+        }
+    }
+    relevant.sort_by_key(|fact| priority(fact));
+    let summary = match selection {
+        StatusChecks::All if passed + failed + unresolved == 0 => {
+            "No status checks apply in the latest observation.".into()
+        }
+        StatusChecks::All => format!(
+            "The current status checks show {passed} passed, {failed} failed, and {unresolved} unresolved."
+        ),
+        selection => {
+            let group = match selection {
+                StatusChecks::Passed => "passed",
+                StatusChecks::Failed => "failed",
+                StatusChecks::Unresolved => "unresolved",
+                StatusChecks::All => unreachable!(),
+            };
+            match relevant.as_slice() {
+                [] => format!("No {group} status checks were observed."),
+                [fact] => format!("One {group} status check covers {}.", label(fact)),
+                _ => {
+                    let names = relevant.iter().map(|fact| label(fact)).collect::<Vec<_>>();
+                    format!("{} {group} status checks cover {}.", names.len(), names.join(", "))
+                }
+            }
+        }
+    };
+    Some((summary, relevant))
+}
+
+/// Show current blockers and in-progress work before passed checks in a broad summary.
+pub(super) fn priority(fact: &HealthFact) -> u8 {
+    match fact.status.as_str() {
+        "failed" => 0,
+        "not ready" | "not_ready" | "degraded" => 1,
+        "unavailable" => 2,
+        "running" => 3,
+        "ready" => 5,
+        _ => 4,
+    }
 }
 
 /// Promote a model-selected readiness subject, state, or reason to its complete
@@ -66,7 +143,9 @@ pub fn validated_summary_finding<'a>(
 #[cfg(test)]
 mod tests {
     use super::answer;
+    use super::status_check_summary;
     use super::validated_summary_finding;
+    use super::StatusChecks;
     use argos_osint_core::storage::inbox_qa::HealthFact;
 
     fn fact(id: &str, status: &str, reason: Option<&str>) -> HealthFact {
@@ -110,6 +189,53 @@ mod tests {
             answer(&fact("classifier_training", "running", None)),
             "Legacy Natural training has unfinished resource work.",
         );
+    }
+
+    #[test]
+    fn unresolved_checks_exclude_passed_failed_and_retired_checks() {
+        let facts = [
+            fact("gateway", "ready", None),
+            fact("jobs", "failed", None),
+            fact(
+                "actor_search",
+                "running",
+                Some("Index visibility is incomplete."),
+            ),
+            fact("actor_catalog", "not ready", None),
+            fact("classifier_inference", "not applicable", None),
+            fact("classifier_training", "not ready", None),
+        ];
+        let (summary, details) =
+            status_check_summary(facts.iter(), StatusChecks::Unresolved).unwrap();
+        assert_eq!(
+            summary,
+            "2 unresolved status checks cover Actor catalog, Actor search."
+        );
+        assert_eq!(
+            details
+                .iter()
+                .map(|fact| fact.id.as_str())
+                .collect::<Vec<_>>(),
+            ["actor_catalog", "actor_search"]
+        );
+        let (summary, details) = status_check_summary(facts.iter(), StatusChecks::Failed).unwrap();
+        assert_eq!(summary, "One failed status check covers Jobs service.");
+        assert_eq!(details.len(), 1);
+        let (summary, _) =
+            status_check_summary(facts[..2].iter(), StatusChecks::Unresolved).unwrap();
+        assert_eq!(summary, "No unresolved status checks were observed.");
+        let registration = HealthFact {
+            label: "Registration".into(),
+            ..fact("registration", "ready", None)
+        };
+        let (summary, details) =
+            status_check_summary(facts.iter().chain([&registration]), StatusChecks::Passed)
+                .unwrap();
+        assert_eq!(
+            summary,
+            "2 passed status checks cover Gateway, Registration."
+        );
+        assert_eq!(details.len(), 2);
     }
 
     fn selected<'a>(passage: &'a str, label: &str, text: &str) -> Option<&'a str> {

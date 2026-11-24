@@ -38,7 +38,7 @@ const LOADER_DIRS: &[&str] = &[
 ];
 
 #[cfg(target_os = "macos")]
-pub(super) fn command(pack: &Path, worker: &Path) -> Result<Command> {
+pub(super) fn command(pack: &Path, model: &Path, worker: &Path) -> Result<Command> {
     use std::ffi::OsString;
 
     const PROFILE: &str = include_str!("qa_embedded_macos.sb");
@@ -60,6 +60,8 @@ pub(super) fn command(pack: &Path, worker: &Path) -> Result<Command> {
         .arg(PROFILE)
         .arg("-D")
         .arg(parameter("pack=", pack))
+        .arg("-D")
+        .arg(parameter("model=", model))
         .arg("-D")
         .arg(parameter("worker=", worker))
         .arg(worker);
@@ -143,7 +145,7 @@ mod linux {
         })
     }
 
-    fn rules_for(pack: &Path) -> Result<OwnedFd> {
+    fn rules_for(pack: &Path, model: &Path) -> Result<OwnedFd> {
         // SAFETY: The null descriptor data and zero size request the supported ABI version.
         let abi = unsafe {
             libc::syscall(
@@ -170,6 +172,7 @@ mod linux {
         // SAFETY: A successful create_ruleset gives this caller a new close-on-exec descriptor.
         let ruleset = unsafe { OwnedFd::from_raw_fd(i32::try_from(raw)?) };
         allow_path(&ruleset, pack, FS_READ_ONLY)?;
+        allow_path(&ruleset, model, FS_READ_ONLY)?;
         for path in LOADER_DIRS {
             allow_if_present(&ruleset, path, FS_READ_ONLY)?;
         }
@@ -249,13 +252,17 @@ mod linux {
         filter
     }
 
-    pub(in crate::qa_worker) fn command(pack: &Path, worker: &Path) -> Result<Command> {
+    pub(in crate::qa_worker) fn command(
+        pack: &Path,
+        model: &Path,
+        worker: &Path,
+    ) -> Result<Command> {
         let libraries = pack.join("lib");
         ensure!(
             !libraries.as_os_str().as_bytes().contains(&b':'),
             "QA pack directory cannot contain a dynamic loader path separator"
         );
-        let ruleset = rules_for(pack)?;
+        let ruleset = rules_for(pack, model)?;
         let filter = syscall_filter();
         let filter_len = u16::try_from(filter.len())?;
         let mut command = Command::new(worker);

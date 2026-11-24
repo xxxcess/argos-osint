@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Inbox prompt flow</title>
+  <style>
+    body{margin:0;padding:clamp(16px,4vw,32px);color:#242424;background:#fff;font:16px/1.6 Geist,Arial,sans-serif}
+    main{max-width:1120px;margin:auto}
+    h1{font:36px/1.2 "Instrument Serif",Georgia,serif;margin:0 0 12px}
+    p{max-width:88ch}
+    figure{margin:24px 0;overflow-x:auto}
+    svg{display:block;width:100%;min-width:760px;height:auto}
+    a{color:#a14b24}
+  </style>
+</head>
+<body>
+<main>
+  <h1>Inbox prompt flow</h1>
+  <p>The Embedded companion supplies fresh evidence. It answers exact facts directly and queues model-assisted turns.</p>
+  <figure tabindex="0" aria-label="Scrollable prompt flow diagram">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 896" role="img" aria-labelledby="inbox-prompt-flow-title inbox-prompt-flow-desc">
+  <title id="inbox-prompt-flow-title">Inbox prompt flow</title>
+  <desc id="inbox-prompt-flow-desc">Rune sends the registered Inbox question to the Embedded companion through its private Unix socket. Admission checks permissions and builds a fresh workstation snapshot and up to two prior exchanges. Explicit operational questions are answered directly from the snapshot. Broad or conversational turns use a durable queue and one sandboxed Rust-BERT generator with cached incremental decoding. Provisional chunks travel back by cursor. The coordinator checks operational facts and persists validated final text and timestamped citations. Inbox replaces its draft with the canonical reply and shows the model context dial.</desc>
+  <style>
+    text{font-family:Geist,Arial,sans-serif;fill:#242424}
+    .label{font-size:22px;font-weight:600}
+    .note{font-size:18px;fill:#555}
+    .node{fill:#fff;stroke:#999;stroke-width:1}
+    .focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}
+    .isolated{fill:#fafafa;stroke:#777;stroke-width:1;stroke-dasharray:4 4}
+    .wire{fill:none;stroke:#555;stroke-width:2;marker-end:url(#inbox-prompt-arrow)}
+  </style>
+  <defs>
+    <marker id="inbox-prompt-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 Z" fill="#555"/>
+    </marker>
+  </defs>
+  <rect width="1120" height="896" fill="#fff"/>
+
+  <g class="wire">
+    <path d="M 560 88 V 124"/>
+    <path d="M 560 212 V 248"/>
+    <path d="M 420 360 V 372 H 304 V 384"/>
+    <path d="M 700 360 V 372 H 816 V 384"/>
+    <path d="M 304 472 V 644"/>
+    <path d="M 816 472 V 508"/>
+    <path d="M 816 608 V 644"/>
+    <path d="M 560 752 V 788"/>
+  </g>
+
+  <g data-card="true">
+    <rect x="360" y="24" width="400" height="64" rx="6" class="node"/>
+    <text x="380" y="52" class="label">Fleetworks Desktop Inbox</text>
+    <text x="380" y="76" class="note">Rune composer submits one registered turn</text>
+  </g>
+  <g data-card="true">
+    <rect x="382" y="124" width="356" height="88" rx="6" class="node"/>
+    <text x="402" y="152" class="label">Embedded companion</text>
+    <text x="402" y="176" class="note">Inherited private Unix socket</text>
+    <text x="402" y="200" class="note">Authenticated framed IPC</text>
+  </g>
+
+  <g data-card="true">
+    <rect x="252" y="248" width="616" height="112" rx="6" class="focus"/>
+    <text x="272" y="280" class="label">Embedded Assistant admission</text>
+    <text x="272" y="304" class="note">Check workstation registration, permissions and inference readiness</text>
+    <text x="272" y="326" class="note">Freeze fresh, scoped readiness checks, host metrics and Jobs counts</text>
+    <text x="272" y="348" class="note">Follow-ups reuse the topic and take new observations</text>
+  </g>
+
+  <g data-card="true">
+    <rect x="80" y="384" width="448" height="88" rx="6" class="node"/>
+    <text x="100" y="412" class="label">Immediate answer</text>
+    <text x="100" y="436" class="note">Failed or unresolved check counts and names</text>
+    <text x="100" y="460" class="note">Specific metrics, help and context requests</text>
+  </g>
+  <g data-card="true">
+    <rect x="592" y="384" width="448" height="88" rx="6" class="node"/>
+    <text x="612" y="412" class="label">Inference queue</text>
+    <text x="612" y="436" class="note">The QA executor claims the registered turn</text>
+    <text x="612" y="460" class="note">Authorized facts and up to two exchanges</text>
+  </g>
+  <g data-card="true">
+    <rect x="592" y="508" width="448" height="100" rx="6" class="isolated"/>
+    <text x="612" y="536" class="label">Sandboxed Rust-BERT worker</text>
+    <text x="612" y="560" class="note">One selected FLAN-T5 or GPT-2 model</text>
+    <text x="612" y="580" class="note">Incremental decoding with cached attention</text>
+    <text x="612" y="600" class="note">512 or 896 input tokens, up to 128 output</text>
+  </g>
+
+  <g data-card="true">
+    <rect x="192" y="644" width="736" height="108" rx="6" class="focus"/>
+    <text x="212" y="672" class="label">Validate and commit</text>
+    <text x="212" y="696" class="note">Verify cited spans and preserve source IDs and original observation times</text>
+    <text x="212" y="720" class="note">Use eligible fresh readiness facts when a summary returns no usable selection</text>
+    <text x="212" y="744" class="note">Publish provisional events and commit the verified reply</text>
+  </g>
+
+  <g data-card="true">
+    <rect x="240" y="788" width="640" height="84" rx="6" class="node"/>
+    <text x="260" y="816" class="label">Inbox transcript</text>
+    <text x="260" y="840" class="note">Recover the canonical turn or resume from its event cursor</text>
+    <text x="260" y="864" class="note">Mini dial below the reply and collapsible Sources</text>
+  </g>
+</svg>
+  </figure>
+  <p><a href="../wiki/code/assistant-chat-contract.md#inbox-qa-v2">Inbox QA contract</a> · <a href="../../deploy/inbox-qa.md">Worker deployment</a> · <a href="../diagrams.md">Diagram catalog</a></p>
+</main>
+</body>
+</html>

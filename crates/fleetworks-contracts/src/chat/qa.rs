@@ -6,6 +6,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::context::MutationContext;
+use crate::qa_worker::QaContextUsage;
+pub use crate::qa_worker::QaModelTarget;
 
 use super::identity;
 use super::request_id;
@@ -41,6 +43,17 @@ pub enum QaPhase {
     Unavailable,
 }
 
+/// The work currently preparing the optional Embedded inference model.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaStartupStage {
+    DownloadingPack,
+    VerifyingPack,
+    LoadingModel,
+    Activating,
+}
+
 /// Redacted recovery category for an unavailable Embedded inference worker.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -65,9 +78,14 @@ pub struct QaSettings {
     pub revision: u64,
     pub generation: u64,
     pub can_manage: bool,
+    #[serde(default)]
+    pub model_target: QaModelTarget,
     /// Present only when the selected Embedded companion diagnoses unavailability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub availability_reason: Option<QaAvailabilityReason>,
+    /// Optional progress from the private Embedded installer or current worker startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_stage: Option<QaStartupStage>,
 }
 
 impl QaSettings {
@@ -86,7 +104,9 @@ impl QaSettings {
             revision,
             generation,
             can_manage,
+            model_target: QaModelTarget::default(),
             availability_reason: None,
+            startup_stage: None,
         }
     }
 }
@@ -99,6 +119,8 @@ pub struct QaSettingsUpdate {
     pub context: MutationContext,
     pub expected_revision: u64,
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_target: Option<QaModelTarget>,
 }
 
 impl QaSettingsUpdate {
@@ -109,7 +131,14 @@ impl QaSettingsUpdate {
             context,
             expected_revision,
             enabled,
+            model_target: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_model_target(mut self, target: QaModelTarget) -> Self {
+        self.model_target = Some(target);
+        self
     }
 }
 
@@ -256,6 +285,30 @@ impl QaTurnState {
     }
 }
 
+/// A fixed reply without an evidence citation, separate from the turn lifecycle.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaTurnNotice {
+    Greeting,
+    OutOfScope,
+    ObservationUnavailable,
+}
+
+/// A conversational reply that asks for input or explains supported assistance.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaConversationReply {
+    Acknowledgement,
+    Help,
+    ContextNeeded,
+    FollowUpNeedsTopic,
+    RecallNeedsHistory,
+    #[serde(other)]
+    Unknown,
+}
+
 /// Exact unit of a frozen metric reading. Percentages are stored in tenths of a percent.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -337,6 +390,16 @@ pub struct QaTurn {
     pub question: String,
     pub state: QaTurnState,
     pub findings: Vec<QaFinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<QaTurnNotice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<QaConversationReply>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<QaContextUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisional_reply: Option<String>,
     pub cursor: u64,
 }
 
@@ -359,6 +422,11 @@ impl QaTurn {
             question,
             state: QaTurnState::Queued,
             findings: Vec::new(),
+            notice: None,
+            conversation: None,
+            context: None,
+            reply: None,
+            provisional_reply: None,
             cursor: 0,
         }
     }
@@ -371,6 +439,8 @@ pub struct QaEvent {
     pub sequence: u64,
     pub state: QaTurnState,
     pub finding: Option<QaFinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisional_delta: Option<String>,
 }
 
 impl QaEvent {
@@ -381,6 +451,7 @@ impl QaEvent {
             sequence,
             state,
             finding,
+            provisional_delta: None,
         }
     }
 }
@@ -405,6 +476,25 @@ impl QaEventPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_context_cannot_be_supplied_by_the_frontend() {
+        let valid = serde_json::json!({
+            "request_id": "request-1",
+            "context": {
+                "registration_id": "registration-1",
+                "expected_registration_revision": 1,
+                "expected_context_revision": 1,
+            },
+            "question": "Which checks passed?",
+        });
+        assert!(serde_json::from_value::<QaTurnRequest>(valid.clone()).is_ok());
+        for field in ["evidence", "history"] {
+            let mut supplied = valid.clone();
+            supplied[field] = serde_json::json!([]);
+            assert!(serde_json::from_value::<QaTurnRequest>(supplied).is_err());
+        }
+    }
 
     #[test]
     fn embedded_availability_reason_is_optional_and_typed() {
@@ -435,5 +525,41 @@ mod tests {
                 settings
             );
         }
+    }
+
+    #[test]
+    fn embedded_startup_stage_is_optional_and_typed() {
+        let mut settings = QaSettings::new(false, QaPhase::Off, 1, 1, true);
+        let old = serde_json::to_value(settings).unwrap();
+        assert!(old.get("startup_stage").is_none());
+        assert_eq!(serde_json::from_value::<QaSettings>(old).unwrap(), settings);
+
+        settings.startup_stage = Some(QaStartupStage::DownloadingPack);
+        let current = serde_json::to_value(settings).unwrap();
+        assert_eq!(current["startup_stage"], "downloading_pack");
+        assert_eq!(current["phase"], "off");
+        assert_eq!(
+            serde_json::from_value::<QaSettings>(current).unwrap(),
+            settings
+        );
+    }
+
+    #[test]
+    fn conversational_reply_preserves_the_legacy_notice() {
+        let mut turn = QaTurn::queued("turn".into(), "request".into(), "Can you help?".into());
+        turn.state = QaTurnState::InsufficientContext;
+        turn.notice = Some(QaTurnNotice::Greeting);
+        let old = serde_json::to_value(&turn).unwrap();
+        assert!(old.get("conversation").is_none());
+        assert_eq!(serde_json::from_value::<QaTurn>(old).unwrap(), turn);
+
+        turn.conversation = Some(QaConversationReply::Help);
+        let mut payload = serde_json::to_value(&turn).unwrap();
+        assert_eq!(payload["notice"], "greeting");
+        assert_eq!(payload["conversation"], "help");
+        payload["conversation"] = "future_reply".into();
+        let decoded = serde_json::from_value::<QaTurn>(payload).unwrap();
+        assert_eq!(decoded.conversation, Some(QaConversationReply::Unknown));
+        assert_eq!(decoded.notice, turn.notice);
     }
 }

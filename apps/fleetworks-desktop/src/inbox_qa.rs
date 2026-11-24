@@ -4,15 +4,18 @@
 use std::time::Duration;
 
 use fleetworks_contracts::chat::ChatSourceKind;
-use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::chat::QaAvailabilityReason;
 use fleetworks_contracts::chat::QaCancelRequest;
+use fleetworks_contracts::chat::QaConversationReply;
 use fleetworks_contracts::chat::QaEventPage;
 use fleetworks_contracts::chat::QaEventQuery;
+use fleetworks_contracts::chat::QaModelTarget;
 use fleetworks_contracts::chat::QaPhase;
 use fleetworks_contracts::chat::QaSettings;
 use fleetworks_contracts::chat::QaSettingsUpdate;
+use fleetworks_contracts::chat::QaStartupStage;
 use fleetworks_contracts::chat::QaTurn;
+use fleetworks_contracts::chat::QaTurnNotice;
 use fleetworks_contracts::chat::QaTurnRequest;
 use fleetworks_contracts::chat::QaTurnState;
 use fleetworks_contracts::chat::MAX_EVENT_WAIT_SECS;
@@ -20,6 +23,7 @@ use fleetworks_contracts::chat::MAX_INPUT_BYTES;
 use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::context::RegisteredContext;
+use fleetworks_contracts::qa_worker::QaContextUsage;
 use fleetworks_contracts::Client;
 use fleetworks_contracts::ClientError;
 use fleetworks_workstation::native::BackendKind;
@@ -30,23 +34,31 @@ use rune::LiveRegion;
 use rune::TextEdit;
 use rune::Tx;
 use rune_kit::Kit;
+use rune_kit::ProgressCircle;
+use rune_kit::RadioGroup;
+use rune_kit::RadioItem;
 
 use crate::accessibility::ViewPreferences;
 use crate::assistant;
 use crate::chat_ui;
 use crate::connection::GatewayEffects;
 use crate::connection::RequestTask;
+use crate::icons;
 use crate::material::{self, GlassSurface, MetalFinish};
 use crate::theme;
 use crate::theme::StatusTone;
 use crate::ui_components::ActionButton;
-use crate::workstation_settings::SettingsSection;
 use crate::State;
 
 const SETTINGS_REFRESH: f64 = 5.0;
+const STARTUP_REFRESH: f64 = 1.0;
 const MIN_EVENT_INTERVAL: f64 = 0.2;
 const COMPOSER: &str = "inbox-qa-composer";
+const SOURCES_TOGGLE: &str = "inbox-qa-sources-toggle";
+const SOURCES_CONTENT: &str = "inbox-qa-sources";
+const CONTEXT_DIAL: &str = "inbox-qa-context";
 const SETTINGS_CONTROL: &str = "inbox-qa-toggle";
+#[cfg(test)]
 const REPLY: &str = "chat-message-inbox-qa-answer";
 const DETAILS_TOGGLE: &str = "inbox-qa-availability-toggle";
 const DETAILS: &str = "inbox-qa-availability-details";
@@ -135,6 +147,12 @@ struct Ticket {
     request_revision: u64,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsChange {
+    Inference(bool),
+    Model(QaModelTarget),
+}
+
 pub(crate) struct InboxQa {
     binding: Option<Binding>,
     settings: Option<QaSettings>,
@@ -145,8 +163,9 @@ pub(crate) struct InboxQa {
     status: Option<&'static str>,
     settings_loaded: bool,
     details_open: bool,
+    sources_open: bool,
     startup_seen: bool,
-    change_to: Option<bool>,
+    settings_change: Option<SettingsChange>,
     request: Option<InFlight>,
     request_revision: u64,
     resume: bool,
@@ -167,8 +186,9 @@ impl Default for InboxQa {
             status: None,
             settings_loaded: false,
             details_open: false,
+            sources_open: false,
             startup_seen: false,
-            change_to: None,
+            settings_change: None,
             request: None,
             request_revision: 0,
             resume: true,
@@ -190,6 +210,7 @@ impl InboxQa {
 
     fn retire(&mut self) {
         self.latest = None;
+        self.sources_open = false;
         self.pending = None;
         self.draft = TextEdit::new("");
         self.source = None;
@@ -212,11 +233,23 @@ impl InboxQa {
             .is_some_and(|request| request.kind.changes_backend())
     }
 
+    fn settings_change_pending(&self) -> bool {
+        self.settings_change.is_some()
+            || self
+                .request
+                .as_ref()
+                .is_some_and(|task| task.kind == Kind::Update)
+    }
+
     fn adopt(&mut self, turn: Option<QaTurn>) {
         if let (Some(old), Some(next)) = (&self.latest, &turn) {
             if old.turn_id == next.turn_id && next.cursor < old.cursor {
                 return;
             }
+        }
+        if self.latest.as_ref().map(|turn| &turn.turn_id) != turn.as_ref().map(|turn| &turn.turn_id)
+        {
+            self.sources_open = false;
         }
         self.latest = turn;
     }
@@ -235,8 +268,15 @@ impl InboxQa {
         }
         self.settings = Some(settings);
         self.settings_loaded = true;
-        self.change_to = None;
-        self.next_settings_at = now + SETTINGS_REFRESH;
+        self.settings_change = None;
+        let tracking_startup =
+            settings.startup_stage.is_some() || settings.phase == QaPhase::Starting;
+        self.next_settings_at = now
+            + if tracking_startup {
+                STARTUP_REFRESH
+            } else {
+                SETTINGS_REFRESH
+            };
     }
 
     fn accept_pending(&mut self, turn: &QaTurn) -> bool {
@@ -311,19 +351,19 @@ impl State {
         self.inbox_qa.resume = false;
     }
 
-    /// Open the synthetic Gateway scene with QA availability details expanded.
+    /// Open the synthetic Connection settings with QA availability details expanded.
     #[doc(hidden)]
     pub fn fixture_show_gateway_qa_details(&mut self) {
         if self.fixture {
             self.inbox.close();
-            self.settings_open = true;
-            self.settings_section = SettingsSection::Gateway;
+            self.open_connection_settings();
             self.inbox_qa.details_open = true;
         }
     }
 
     pub(crate) fn supports_inbox_qa(&self) -> bool {
-        self.connected()
+        self.is_local_backend()
+            && self.connected()
             && self.registration.context.is_some()
             && self.permission(Permission::ReadBackend)
             && self
@@ -358,12 +398,15 @@ impl State {
                 .is_some_and(|settings| settings.can_manage)
     }
 
+    pub(crate) fn assistant_settings_visible(&self) -> bool {
+        self.inbox_qa.settings_change != Some(SettingsChange::Inference(false))
+            && self
+                .inbox_qa_settings()
+                .is_some_and(|settings| settings.enabled && settings.phase != QaPhase::Stopping)
+    }
+
     fn inbox_qa_visible(&self) -> bool {
-        self.permission(Permission::ReadWorkstationActivity)
-            && self.inbox_qa.change_to != Some(false)
-            && self.inbox_qa_settings().is_some_and(|settings| {
-                settings.enabled && !matches!(settings.phase, QaPhase::Off | QaPhase::Stopping)
-            })
+        self.permission(Permission::ReadWorkstationActivity) && self.assistant_settings_visible()
     }
 
     fn can_send_inbox_qa(&self) -> bool {
@@ -376,7 +419,7 @@ impl State {
             && self.inbox_qa.pending.is_none()
             && self.inbox_qa.active().is_none()
             && !self.inbox_qa.mutation_in_flight()
-            && self.inbox_qa.change_to.is_none()
+            && self.inbox_qa.settings_change.is_none()
     }
 
     fn sync_inbox_qa_binding(&mut self) -> bool {
@@ -416,7 +459,7 @@ impl State {
         }
         let qa = &self.inbox_qa;
         let watch_settings = !qa.settings_loaded
-            || qa.change_to.is_some()
+            || qa.settings_change.is_some()
             || self.inbox.open
             || self.settings_open
             || self.startup.data_setup_active()
@@ -459,6 +502,9 @@ impl State {
         else {
             return false;
         };
+        if !client.is_local_ipc() {
+            return false;
+        }
         let Ok(client) = client.with_registered_context(context) else {
             return false;
         };
@@ -504,7 +550,7 @@ impl State {
             }
             Reply::Settings(Err(error)) | Reply::Update(Err(error)) => {
                 if admission_rejected(error) {
-                    qa.change_to = None;
+                    qa.settings_change = None;
                 }
                 qa.status = Some(status_message(error));
                 if denied(error) {
@@ -517,8 +563,7 @@ impl State {
                 if qa.accept_pending(&turn) {
                     qa.adopt(Some(turn));
                     qa.retry_count = 0;
-                    if self.inbox.open {
-                        show_reply(tx);
+                    if self.inbox.open && self.inbox.at_bottom {
                         tx.focus(COMPOSER, tx.focus_visible());
                     }
                 } else {
@@ -533,8 +578,7 @@ impl State {
                 if denied(error) {
                     qa.retire();
                     qa.settings_loaded = false;
-                } else if self.inbox.open {
-                    show_reply(tx);
+                } else if self.inbox.open && self.inbox.at_bottom {
                     tx.focus(COMPOSER, tx.focus_visible());
                 }
             }
@@ -546,12 +590,15 @@ impl State {
             Reply::Latest(Ok(turn)) => {
                 qa.resume = false;
                 qa.retry_count = 0;
+                let had_exchange = qa.latest.is_some() || qa.pending.is_some();
                 let accepted_pending = turn.as_ref().is_some_and(|turn| qa.accept_pending(turn));
                 if qa.pending.is_none() {
                     qa.adopt(turn);
                 }
-                if self.inbox.open && qa.latest.is_some() {
-                    show_reply(tx);
+                if self.inbox.open && self.inbox.at_bottom && qa.latest.is_some() {
+                    if !had_exchange {
+                        tx.scroll_to_bottom_instant(crate::inbox::SCROLL);
+                    }
                     if accepted_pending {
                         tx.focus(COMPOSER, tx.focus_visible());
                     }
@@ -563,15 +610,10 @@ impl State {
                     .as_ref()
                     .is_some_and(|turn| turn.turn_id == page.turn.turn_id)
                 {
-                    let has_new_findings = qa.latest.as_ref().is_some_and(|turn| {
-                        page.turn.cursor > turn.cursor
-                            && page.turn.findings.len() > turn.findings.len()
-                    });
+                    // Each page carries the cumulative draft. Apply it once per page so visual
+                    // updates are bounded and a lost event or reconnect can recover the turn.
                     qa.adopt(Some(page.turn));
                     qa.status = None;
-                    if self.inbox.open && has_new_findings && qa.draft.focused {
-                        show_reply(tx);
-                    }
                 } else {
                     qa.resume = true;
                 }
@@ -581,7 +623,7 @@ impl State {
             Reply::Cancel(Ok(turn)) => {
                 qa.adopt(Some(turn));
                 qa.status = None;
-                if self.inbox.open {
+                if self.inbox.open && self.inbox.at_bottom {
                     tx.focus(COMPOSER, true);
                 }
             }
@@ -598,14 +640,11 @@ impl State {
     }
 
     fn set_inbox_inference(&mut self, enabled: bool) {
-        if !self.can_manage_inbox_qa()
-            || self.inbox_qa.change_to.is_some()
-            || self
-                .inbox_qa
-                .request
-                .as_ref()
-                .is_some_and(|task| task.kind == Kind::Update)
-        {
+        self.update_inbox_settings(SettingsChange::Inference(enabled));
+    }
+
+    fn update_inbox_settings(&mut self, change: SettingsChange) {
+        if !self.can_manage_inbox_qa() || self.inbox_qa.settings_change_pending() {
             return;
         }
         let (Some(context), Some(settings)) =
@@ -613,13 +652,23 @@ impl State {
         else {
             return;
         };
-        if settings.enabled == enabled || settings.phase == QaPhase::Stopping {
+        if settings.phase == QaPhase::Stopping {
             return;
         }
-        let update =
-            QaSettingsUpdate::new(MutationContext::new(context), settings.revision, enabled);
+        let context = MutationContext::new(context);
+        let update = match change {
+            SettingsChange::Inference(enabled) if enabled != settings.enabled => {
+                QaSettingsUpdate::new(context, settings.revision, enabled)
+            }
+            SettingsChange::Model(target)
+                if settings.enabled && target != settings.model_target =>
+            {
+                QaSettingsUpdate::new(context, settings.revision, true).with_model_target(target)
+            }
+            _ => return,
+        };
         if self.dispatch_inbox_qa(Request::Update(update)) {
-            self.inbox_qa.change_to = Some(enabled);
+            self.inbox_qa.settings_change = Some(change);
             self.inbox_qa.status = None;
         }
     }
@@ -643,7 +692,11 @@ impl State {
             self.inbox_qa.status = Some("Could not prepare the question. Try again.");
             return;
         };
-        let source = self.inbox_qa.source.as_ref().and_then(optional_source);
+        let source = self
+            .inbox_qa
+            .source
+            .as_ref()
+            .and_then(assistant::source_for);
         let Ok(request) = QaTurnRequest::new(
             request_id,
             MutationContext::new(context),
@@ -656,7 +709,7 @@ impl State {
         if self.dispatch_inbox_qa(Request::Submit(request.clone())) {
             self.inbox_qa.pending = Some(Pending { request });
             self.inbox_qa.status = None;
-            show_reply(tx);
+            tx.scroll_to_bottom_instant(crate::inbox::SCROLL);
         }
     }
 
@@ -698,41 +751,41 @@ impl GatewayEffects {
     }
 }
 
-fn show_reply(tx: &mut Tx) {
-    tx.scroll_into_view_in("inbox-scroll", REPLY);
-}
-
-fn target_label(state: &State) -> &'static str {
-    if state.is_local_backend() {
-        "Runs on this device"
-    } else {
-        "Runs on the connected gateway"
-    }
-}
-
 fn phase_label(state: &State) -> (&'static str, StatusTone) {
-    if state.inbox_qa.change_to == Some(false) {
-        return (stopping_label(state), StatusTone::Warn);
+    match state.inbox_qa.settings_change {
+        Some(SettingsChange::Inference(false)) => return ("Stopping", StatusTone::Warn),
+        Some(SettingsChange::Inference(true)) => return ("Starting", StatusTone::Info),
+        Some(SettingsChange::Model(_)) => return ("Switching model", StatusTone::Info),
+        None => {}
     }
-    if state.inbox_qa.change_to == Some(true) {
-        return ("Starting", StatusTone::Info);
+    if let Some(label) = startup_label(state) {
+        return (label, StatusTone::Info);
     }
     match state.inbox_qa_settings().map(|settings| settings.phase) {
         Some(QaPhase::Off) => ("Off", StatusTone::Neutral),
         Some(QaPhase::Starting) => ("Starting", StatusTone::Info),
         Some(QaPhase::Ready) => ("Ready", StatusTone::Ok),
-        Some(QaPhase::Stopping) => (stopping_label(state), StatusTone::Warn),
+        Some(QaPhase::Stopping) => ("Stopping", StatusTone::Warn),
         Some(QaPhase::Unavailable) => ("Unavailable", StatusTone::Warn),
         _ if state.supports_inbox_qa() => ("Checking", StatusTone::Info),
         _ => ("Unavailable", StatusTone::Neutral),
     }
 }
 
-fn stopping_label(state: &State) -> &'static str {
-    if state.is_local_backend() {
-        "Stopping"
-    } else {
-        "Stopping · replica unconfirmed"
+fn startup_label(state: &State) -> Option<&'static str> {
+    if state.inbox_qa.settings_change.is_some() {
+        return None;
+    }
+    let settings = state.inbox_qa_settings()?;
+    if !settings.enabled || matches!(settings.phase, QaPhase::Ready | QaPhase::Stopping) {
+        return None;
+    }
+    match settings.startup_stage? {
+        QaStartupStage::DownloadingPack => Some("Downloading QA pack"),
+        QaStartupStage::VerifyingPack => Some("Verifying QA pack"),
+        QaStartupStage::LoadingModel => Some("Loading QA model"),
+        QaStartupStage::Activating => Some("Activating QA model"),
+        _ => None,
     }
 }
 
@@ -750,11 +803,14 @@ struct EmbeddedProblem {
 }
 
 fn embedded_problem(state: &State) -> Option<EmbeddedProblem> {
-    if !state.is_local_backend() || state.inbox_qa.change_to.is_some() {
+    if !state.is_local_backend()
+        || state.inbox_qa.settings_change.is_some()
+        || startup_label(state).is_some()
+    {
         return None;
     }
     let settings = state.inbox_qa_settings()?;
-    if settings.phase != QaPhase::Unavailable {
+    if !settings.enabled || settings.phase != QaPhase::Unavailable {
         return None;
     }
     let problem = match settings.availability_reason? {
@@ -812,17 +868,17 @@ pub(crate) fn settings_content(state: &State, kit: &Kit, preferences: ViewPrefer
         .w_full()
         .min_w(0.0)
         .gap(8.0)
-        .child(hint(target_label(state), kit));
+        .child(hint("Runs on this device", kit));
     let mut actions = rune::row()
         .w_full()
         .flex_wrap()
         .center_y()
         .gap(8.0)
-        .children(
-            problem
-                .is_none()
-                .then(|| crate::ui_components::status_pill(phase, None, tone, kit)),
-        );
+        .children(problem.is_none().then(|| {
+            crate::ui_components::status_pill(phase, None, tone, kit)
+                .key("inbox-qa-settings-status")
+                .live_region(LiveRegion::Polite)
+        }));
     if let Some(settings) = state.inbox_qa_settings() {
         if state.can_manage_inbox_qa() {
             let enable = !settings.enabled;
@@ -831,13 +887,14 @@ pub(crate) fn settings_content(state: &State, kit: &Kit, preferences: ViewPrefer
                     .key(SETTINGS_CONTROL)
                     .finish(MetalFinish::Gunmetal)
                     .disabled(
-                        state.inbox_qa.change_to.is_some() || settings.phase == QaPhase::Stopping,
+                        state.inbox_qa.settings_change_pending()
+                            || settings.phase == QaPhase::Stopping,
                     )
                     .on_press(move |state: &mut State| state.set_inbox_inference(enable))
                     .build(kit, preferences, None),
             );
         } else if !settings.enabled && problem.is_none() {
-            content = content.child(hint(operator_nudge(state), kit));
+            content = content.child(hint(OPERATOR_NUDGE, kit));
         }
     } else if !state.supports_inbox_qa() {
         content = content.child(hint(
@@ -850,25 +907,64 @@ pub(crate) fn settings_content(state: &State, kit: &Kit, preferences: ViewPrefer
     } else if let Some(status) = state.inbox_qa.status {
         content = content.child(hint(status, kit).role("status"));
     } else if phase == "Unavailable" && state.supports_inbox_qa() {
-        content = content.child(hint(unavailable_nudge(state), kit));
+        content = content.child(hint(UNAVAILABLE_NUDGE, kit));
     }
     content.child(actions)
 }
 
-fn operator_nudge(state: &State) -> &'static str {
-    if state.is_local_backend() {
-        "Ask an authorized workstation manager to enable backend inference."
+const OPERATOR_NUDGE: &str = "Ask an authorized workstation manager to enable backend inference.";
+const UNAVAILABLE_NUDGE: &str =
+    "Embedded inference is unavailable. Check Connection settings for backend status.";
+
+fn model_footprint(target: QaModelTarget) -> String {
+    let bytes = target.weight_bytes();
+    if bytes >= 1_000_000_000 {
+        format!("{:.2} GB of model weights", bytes as f64 / 1_000_000_000.0)
     } else {
-        "Ask your gateway operator to enable backend inference."
+        format!("{:.0} MB of model weights", bytes as f64 / 1_000_000.0)
     }
 }
 
-fn unavailable_nudge(state: &State) -> &'static str {
-    if state.is_local_backend() {
-        "Embedded inference is unavailable. Check Gateway settings for backend status."
-    } else {
-        "Ask your gateway operator to check the inference worker and model pack."
+pub(crate) fn assistant_settings_content(state: &State, kit: &Kit) -> El {
+    let Some(settings) = state.inbox_qa_settings() else {
+        return rune::el();
+    };
+    let selected = match state.inbox_qa.settings_change {
+        Some(SettingsChange::Model(target)) => target,
+        _ => settings.model_target,
+    };
+    let mut options = RadioGroup::new().label("Model Target").disabled(
+        !state.can_manage_inbox_qa()
+            || state.inbox_qa.settings_change_pending()
+            || settings.phase == QaPhase::Stopping,
+    );
+    for target in QaModelTarget::ALL {
+        options = options.item(
+            RadioItem::new(target.label(), target == selected)
+                .description(model_footprint(target))
+                .on_select(move |state: &mut State| {
+                    state.update_inbox_settings(SettingsChange::Model(target));
+                }),
+        );
     }
+    let (phase, tone) = phase_label(state);
+    let status = crate::ui_components::status_pill(phase, None, tone, kit)
+        .key("assistant-model-status")
+        .live_region(LiveRegion::Polite);
+    rune::col()
+        .w_full()
+        .min_w(0.0)
+        .padding(12.0)
+        .gap(12.0)
+        .child(rune::row().child(status))
+        .children(embedded_problem(state).map(|problem| hint(problem.details, kit)))
+        .children(
+            state
+                .inbox_qa
+                .status
+                .map(|status| hint(status, kit).role("status")),
+        )
+        .child(options.build(kit).key("assistant-model-target"))
 }
 
 pub(crate) fn setup_choice(state: &State) -> bool {
@@ -878,11 +974,6 @@ pub(crate) fn setup_choice(state: &State) -> bool {
 pub(crate) fn continue_setup(state: &mut State, tx: &mut Tx) {
     state.inbox_qa.startup_seen = true;
     tx.focus("startup-data-stage", true);
-}
-
-fn optional_source(context: &assistant::Context) -> Option<ChatSourceReference> {
-    assistant::source_for(context)
-        .filter(|source| matches!(source.kind, ChatSourceKind::Job | ChatSourceKind::Cycle))
 }
 
 fn citation_kind(kind: ChatSourceKind) -> &'static str {
@@ -896,9 +987,9 @@ fn citation_kind(kind: ChatSourceKind) -> &'static str {
     }
 }
 
-fn answer_state(state: QaTurnState) -> (chat_ui::TurnState, &'static str) {
+fn answer_state(turn: &QaTurn) -> (chat_ui::TurnState, &'static str) {
     use chat_ui::TurnState;
-    match state {
+    let (stage, fallback) = match turn.state {
         QaTurnState::Queued => (TurnState::Queued, ""),
         QaTurnState::Running => (TurnState::Running, ""),
         QaTurnState::Answered => (TurnState::Final, ""),
@@ -913,32 +1004,196 @@ fn answer_state(state: QaTurnState) -> (chat_ui::TurnState, &'static str) {
             },
             "",
         ),
-    }
+    };
+    let context_needed = "What would you like to work through? Point me to a source, or select a related job, news cycle, or status check.";
+    let detail = match turn.conversation {
+        Some(QaConversationReply::Acknowledgement) => "Of course. What else can I help with?",
+        Some(QaConversationReply::Help) => {
+            "Try “Is actor search ready?” or “How much memory is in use?” Select a job to ask about its status."
+        }
+        Some(QaConversationReply::ContextNeeded) => context_needed,
+        Some(QaConversationReply::FollowUpNeedsTopic) => {
+            "What would you like me to check again? Try “What’s the current memory usage?” or select the job you mean."
+        }
+        Some(QaConversationReply::RecallNeedsHistory) => "Ask me a question first, then I can recap our recent exchange.",
+        _ => match turn.notice {
+            Some(QaTurnNotice::Greeting) => {
+                "Hi! How can I help? You can ask about actor search, memory usage, or running jobs."
+            }
+            Some(QaTurnNotice::OutOfScope) => context_needed,
+            Some(QaTurnNotice::ObservationUnavailable) => {
+                "I couldn’t get a current reading for that. Try again in a moment."
+            }
+            _ => fallback,
+        },
+    };
+    (stage, detail)
 }
 
-pub(crate) fn exchange(state: &State, kit: &Kit) -> Option<El> {
+fn answer_sources(turn_id: &str, citations: &[chat_ui::Citation], expanded: bool, kit: &Kit) -> El {
+    let turn_id = turn_id.to_owned();
+    let trigger = rune_kit::Button::new(format!("Sources ({})", citations.len()))
+        .variant(rune_kit::ButtonVariant::Ghost)
+        .icon(if expanded {
+            kit.glyph.triangle_down
+        } else {
+            kit.glyph.triangle_right
+        })
+        .on_press_tx(move |state: &mut State, tx| {
+            let qa = &mut state.inbox_qa;
+            if qa.pending.is_none()
+                && qa
+                    .latest
+                    .as_ref()
+                    .is_some_and(|turn| turn.turn_id == turn_id)
+            {
+                qa.sources_open = !qa.sources_open;
+                if !state.inbox.at_bottom {
+                    tx.keep_on_screen(SOURCES_TOGGLE);
+                }
+            }
+        })
+        .build(kit)
+        .key(SOURCES_TOGGLE)
+        .expanded(expanded);
+    rune::col()
+        .w_full()
+        .min_w(0.0)
+        .gap(4.0)
+        .child(rune::row().child(trigger))
+        .children(expanded.then(|| {
+            chat_ui::citation_rows(citations, kit)
+                .key(SOURCES_CONTENT)
+                .role("region")
+                .label("Source citations")
+        }))
+}
+
+fn context_dial(usage: Option<QaContextUsage>, kit: &Kit) -> El {
+    let row = rune::row().key(CONTEXT_DIAL).gap(5.0).center_y();
+    let usage = usage.filter(|usage| {
+        usage.window_tokens > 0
+            && usage.peak_input_tokens <= usage.window_tokens
+            && (usage.model_windows == 0) == (usage.peak_input_tokens == 0)
+    });
+    let (row, fraction, tone, tokens, percentage) = if let Some(usage) = usage {
+        let used = usage.peak_input_tokens;
+        let capacity = usage.window_tokens;
+        let fraction = f32::from(used) / f32::from(capacity);
+        let percentage = format!("{:.0}%", fraction * 100.0);
+        let tone = match fraction {
+            _ if usage.model_windows == 0 => StatusTone::Neutral,
+            value if value >= 0.95 => StatusTone::Err,
+            value if value >= 0.85 => StatusTone::Warn,
+            _ => StatusTone::Info,
+        };
+        let value = if usage.model_windows == 0 {
+            format!("{used} of {capacity} tokens, {percentage}, model bypassed")
+        } else {
+            format!("{used} of {capacity} tokens, {percentage} peak usage")
+        };
+        (
+            row.role("meter")
+                .label("Model context window")
+                .range_value(f64::from(used), 0.0, f64::from(capacity))
+                .a11y_value(value),
+            fraction,
+            tone,
+            format!("{used}/{capacity} tokens"),
+            Some(percentage),
+        )
+    } else {
+        (
+            row.role("group")
+                .label("Model context window, usage unavailable"),
+            0.0,
+            StatusTone::Neutral,
+            "—".into(),
+            None,
+        )
+    };
+    let ink = tone.fg();
+    let mut dial_kit = kit.clone();
+    dial_kit.c.icon_muted = ink;
+    row.child(
+        ProgressCircle::new(fraction)
+            .size(14.0)
+            .build(&dial_kit)
+            .a11y_hidden(),
+    )
+    .child(rune::icon(&icons::MODELS, 12.0).color(ink).a11y_hidden())
+    .child(
+        rune::text(tokens)
+            .font(kit.ty.text_xsmall)
+            .color(kit.c.text_muted)
+            .a11y_hidden(),
+    )
+    .children(percentage.map(|text| {
+        rune::text(text)
+            .font(kit.ty.text_xsmall_medium)
+            .color(ink)
+            .a11y_hidden()
+    }))
+}
+
+pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -> Option<El> {
     if !state.inbox_qa_visible() {
         return None;
     }
     let qa = &state.inbox_qa;
-    let (question, stage, detail, findings) = if let Some(pending) = &qa.pending {
-        (
-            pending.request.question.as_str(),
-            chat_ui::TurnState::Queued,
-            "",
-            &[][..],
-        )
-    } else if let Some(turn) = &qa.latest {
-        let (stage, detail) = answer_state(turn.state);
-        (
-            turn.question.as_str(),
-            stage,
-            detail,
-            turn.findings.as_slice(),
-        )
-    } else {
-        return None;
-    };
+    let (question, stage, answer, findings, request_id, turn_id, usage) =
+        if let Some(pending) = &qa.pending {
+            (
+                pending.request.question.as_str(),
+                chat_ui::TurnState::Queued,
+                String::new(),
+                &[][..],
+                pending.request.request_id.as_str(),
+                None,
+                None,
+            )
+        } else if let Some(turn) = &qa.latest {
+            let (stage, detail) = answer_state(turn);
+            let draft = turn
+                .provisional_reply
+                .as_deref()
+                .filter(|draft| turn.state == QaTurnState::Running && !draft.trim().is_empty());
+            let stage = if draft.is_some() {
+                chat_ui::TurnState::Streaming
+            } else {
+                stage
+            };
+            let reply = match turn.state {
+                QaTurnState::Answered | QaTurnState::InsufficientContext => turn
+                    .reply
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|reply| !reply.is_empty()),
+                _ => draft,
+            };
+            let answer = reply.map_or_else(
+                || {
+                    turn.findings
+                        .iter()
+                        .map(|finding| finding.text.as_str())
+                        .chain((!detail.is_empty()).then_some(detail))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                },
+                str::to_owned,
+            );
+            (
+                turn.question.as_str(),
+                stage,
+                answer,
+                turn.findings.as_slice(),
+                turn.request_id.as_str(),
+                Some(turn.turn_id.as_str()),
+                turn.context,
+            )
+        } else {
+            return None;
+        };
     let question = chat_ui::ChatMessage {
         id: "inbox-qa-question".into(),
         role: chat_ui::Role::Operator,
@@ -946,17 +1201,6 @@ pub(crate) fn exchange(state: &State, kit: &Kit) -> Option<El> {
         text: question.to_owned(),
         citations: Vec::new(),
     };
-    let mut answer = findings
-        .iter()
-        .map(|finding| finding.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if !detail.is_empty() {
-        if !answer.is_empty() {
-            answer.push('\n');
-        }
-        answer.push_str(detail);
-    }
     let answer = chat_ui::ChatMessage {
         id: "inbox-qa-answer".into(),
         role: chat_ui::Role::Assistant,
@@ -970,22 +1214,64 @@ pub(crate) fn exchange(state: &State, kit: &Kit) -> Option<El> {
             })
             .collect(),
     };
+    let sources = turn_id
+        .filter(|_| !answer.citations.is_empty())
+        .map(|turn_id| answer_sources(turn_id, &answer.citations, qa.sources_open, kit));
+    let live_region = if answer.state == chat_ui::TurnState::Streaming {
+        LiveRegion::Off
+    } else {
+        LiveRegion::Polite
+    };
+    let bubbles = rune::col()
+        .w_full()
+        .gap(8.0)
+        .instant_changes()
+        .transition(rune::Transition::none())
+        .child(chat_ui::bubble(&question, kit))
+        .child(
+            chat_ui::bubble_with_sources(&answer, sources, kit)
+                .key("inbox-qa-live-answer")
+                .live_region(live_region),
+        )
+        .child(context_dial(usage, kit));
+    // Admission and streaming keep the same request key as the queued draft.
+    let turn = crate::inbox::enter_from_below(
+        rune::col()
+            .key(format!("inbox-qa-turn-{request_id}"))
+            .w_full()
+            .child(bubbles),
+        preferences,
+    );
     Some(
         rune::col()
             .key("inbox-qa-exchange")
             .w_full()
             .min_w(0.0)
-            .gap(8.0)
-            .child(chat_ui::bubble(&question, kit))
-            .child(
-                chat_ui::bubble(&answer, kit)
-                    .key("inbox-qa-live-answer")
-                    .live_region(LiveRegion::Polite),
-            ),
+            .child(turn),
     )
 }
 
-pub(crate) fn footer(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
+pub(crate) fn footer(state: &State, kit: &Kit, preferences: ViewPreferences) -> Option<El> {
+    state
+        .is_local_backend()
+        .then(|| footer_content(state, kit, preferences))
+}
+
+fn footer_content(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
+    let progress = match state.inbox_qa.settings_change {
+        Some(SettingsChange::Model(_)) => Some("Switching model"),
+        Some(SettingsChange::Inference(true)) => Some("Starting backend inference"),
+        _ => startup_label(state),
+    };
+    if let Some(label) = progress {
+        return footer_layer(
+            hint(label, kit)
+                .key("inbox-qa-startup-status")
+                .role("status")
+                .live_region(LiveRegion::Polite),
+            preferences,
+        );
+    }
     if let Some(problem) = embedded_problem(state) {
         return footer_layer(problem_content(state, problem, kit), preferences);
     }
@@ -995,10 +1281,10 @@ pub(crate) fn footer(state: &State, kit: &Kit, preferences: ViewPreferences) -> 
     let qa = &state.inbox_qa;
     let phase = state.inbox_qa_settings().map(|settings| settings.phase);
     if phase != Some(QaPhase::Ready) {
-        let label = if phase == Some(QaPhase::Starting) {
+        let label = if matches!(phase, Some(QaPhase::Off | QaPhase::Starting)) {
             "Preparing backend inference…"
         } else {
-            unavailable_nudge(state)
+            UNAVAILABLE_NUDGE
         };
         return footer_layer(hint(label, kit).role("status"), preferences);
     }
@@ -1006,8 +1292,8 @@ pub(crate) fn footer(state: &State, kit: &Kit, preferences: ViewPreferences) -> 
         return footer_layer(hint("This registration can view answers. Sending a question requires interactive access.", kit), preferences);
     }
     let input = rune_kit::TextArea::new(&qa.draft)
-        .label("Ask about workstation health")
-        .placeholder("Ask about workstation health")
+        .label("Question for the Inbox assistant")
+        .placeholder("Ask a question")
         .auto_grow(2, 6)
         .wrap_anywhere()
         .disabled(qa.pending.is_some())
@@ -1041,7 +1327,7 @@ pub(crate) fn footer(state: &State, kit: &Kit, preferences: ViewPreferences) -> 
         );
     } else {
         let current = assistant::current_context(state);
-        if optional_source(&current).is_some() {
+        if assistant::source_for(&current).is_some() {
             row = row.child(
                 ActionButton::new(format!("Include {}", current.kind.to_lowercase()))
                     .key("inbox-qa-pin-source")
@@ -1086,12 +1372,12 @@ fn nudge(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
         "Reconnect the selected backend to check inference."
     } else if !state.supports_inbox_qa() {
         "Backend inference is unavailable for this selection."
-    } else if state.inbox_qa.change_to == Some(false)
+    } else if state.inbox_qa.settings_change == Some(SettingsChange::Inference(false))
         || state
             .inbox_qa_settings()
             .is_some_and(|settings| settings.phase == QaPhase::Stopping)
     {
-        stopping_label(state)
+        "Stopping"
     } else if state.inbox_qa_settings().is_none() {
         state
             .inbox_qa
@@ -1103,9 +1389,9 @@ fn nudge(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
     {
         "This registration does not have access to Inbox answers."
     } else if state.can_manage_inbox_qa() {
-        "Enable backend inference in Gateway settings to ask questions."
+        "Enable backend inference in Connection settings to ask questions."
     } else {
-        operator_nudge(state)
+        OPERATOR_NUDGE
     };
     let mut content = rune::col()
         .w_full()
@@ -1113,13 +1399,12 @@ fn nudge(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
         .child(hint(text, kit).role("status"));
     if !state.connected() || state.can_manage_inbox_qa() {
         content = content.child(
-            ActionButton::new("Gateway settings")
+            ActionButton::new("Connection settings")
                 .key("inbox-qa-settings")
                 .finish(MetalFinish::Gunmetal)
                 .on_press_tx(|state: &mut State, tx| {
                     state.close_inbox(tx);
-                    state.settings_section = SettingsSection::Gateway;
-                    state.settings_open = true;
+                    state.open_connection_settings();
                     state.inbox_qa.next_settings_at = 0.0;
                     tx.focus("settings-section-title", true);
                 })
@@ -1144,6 +1429,7 @@ fn footer_layer(content: El, preferences: ViewPreferences) -> El {
 
 #[cfg(test)]
 mod tests {
+    use fleetworks_contracts::chat::ChatSourceReference;
     use fleetworks_contracts::chat::QaFinding;
     use rune::Env;
     use rune::Ime;
@@ -1178,6 +1464,8 @@ mod tests {
     fn active_drawer(size: (f32, f32)) -> Runtime<State> {
         let mut state = crate::tests::registered_fixture();
         state.page = crate::app::Page::Workstation;
+        state.backend_kind = BackendKind::Local;
+        state.connection.origin = TextEdit::new("local://embedded");
         state
             .connection
             .capabilities
@@ -1219,6 +1507,198 @@ mod tests {
     }
 
     #[test]
+    fn composer_can_include_the_selected_readiness_check() {
+        let mut runtime = active_drawer((640.0, 480.0));
+        let key = "inbox-qa-pin-source";
+        assert!(runtime.find(key).is_none());
+
+        runtime.update(|state, _| state.selected_readiness = Some("actor_search".into()));
+        runtime.frame(1.0);
+        assert!(runtime.find(key).is_some());
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("Include readiness"));
+    }
+
+    #[test]
+    fn assistant_controls_follow_embedded_inference_and_model_readiness() {
+        let mut runtime = active_drawer((1280.0, 800.0));
+        runtime.update(|state, _| {
+            state.inbox.close();
+            state.fixture_show_assistant_settings();
+        });
+        runtime.frame(1.0);
+        assert!(runtime.find("settings-category-assistant").is_some());
+        let tree = runtime.accessibility_json().to_string();
+        for model in QaModelTarget::ALL {
+            assert!(tree.contains(model.label()));
+            assert!(tree.contains(&model_footprint(model)));
+        }
+        assert!(tree.contains("Model Target"));
+        assert!(runtime.find("assistant-model-status").is_some());
+
+        runtime.update(|state, _| {
+            let mut next = QaSettings::new(true, QaPhase::Starting, 2, 2, true);
+            next.model_target = QaModelTarget::Gpt2Small;
+            next.startup_stage = Some(QaStartupStage::DownloadingPack);
+            state.inbox_qa.apply_settings(next, 1.5);
+        });
+        runtime.frame(1.5);
+        let tree = runtime.accessibility_json().to_string();
+        assert!(tree.contains("Downloading QA pack"));
+        assert!(runtime.find("assistant-model-target").is_some());
+
+        runtime.update(|state, _| {
+            state.settings_open = false;
+            state.seed_inbox_qa_drawer_fixture();
+        });
+        runtime.frame(2.0);
+        assert!(runtime.find("inbox-qa-startup-status").is_some());
+        assert!(runtime.find(COMPOSER).is_none());
+
+        runtime.update(|state, _| {
+            state.inbox.close();
+            state.fixture_show_assistant_settings();
+            state
+                .inbox_qa
+                .apply_settings(QaSettings::new(false, QaPhase::Off, 3, 3, true), 2.5);
+        });
+        runtime.frame(2.5);
+        assert!(runtime.find("settings-category-assistant").is_none());
+        assert!(runtime.find("assistant-model-target").is_none());
+
+        runtime.update(|state, _| {
+            state.backend_kind = BackendKind::Remote;
+            state.settings_open = false;
+            state.seed_inbox_qa_drawer_fixture();
+            state.seed_inbox_qa_fixture(
+                QaSettings::new(true, QaPhase::Ready, 1, 1, true),
+                Some(turn(QaTurnState::Answered, 3)),
+            );
+        });
+        runtime.frame(3.0);
+        assert!(runtime.find("inbox-group-connection-toggle").is_some());
+        assert!(runtime.find("inbox-qa-footer").is_none());
+        assert!(runtime.find("inbox-qa-exchange").is_none());
+    }
+
+    #[test]
+    fn provisional_text_recovers_in_one_bubble_and_yields_to_the_canonical_turn() {
+        let mut runtime = active_drawer((640.0, 480.0));
+        let draft = "Provisional model draft";
+        runtime.update(move |state, _| {
+            let mut running = turn(QaTurnState::Running, 1);
+            running.cursor = 2;
+            running.provisional_reply = Some(draft.into());
+            state.inbox_qa.adopt(Some(running));
+        });
+        runtime.frame(1.0);
+        let tree = runtime.accessibility_json();
+        assert_eq!(accessibility_nodes_with_key(&tree, REPLY), 1);
+        let rendered = tree.to_string();
+        assert!(rendered.contains(draft));
+        assert!(rendered.contains("Draft · unverified"));
+        assert!(runtime.find("inbox-qa-stop").is_some());
+
+        runtime.update(move |state, _| {
+            let mut recovered = turn(QaTurnState::Running, 1);
+            recovered.cursor = 4;
+            recovered.provisional_reply = Some(format!("{draft} from a recovered page"));
+            state.inbox_qa.adopt(Some(recovered));
+        });
+        runtime.frame(1.25);
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("from a recovered page"));
+
+        runtime.update(|state, _| {
+            let mut answer = turn(QaTurnState::Answered, 5);
+            answer.reply = Some(FINDING.into());
+            state.inbox_qa.adopt(Some(answer));
+        });
+        runtime.frame(1.5);
+        let tree = runtime.accessibility_json();
+        assert_eq!(accessibility_nodes_with_key(&tree, REPLY), 1);
+        let rendered = tree.to_string();
+        assert!(rendered.contains(FINDING));
+        assert!(!rendered.contains(draft));
+        assert!(!rendered.contains("Draft · unverified"));
+        assert!(runtime.find(SOURCES_TOGGLE).is_some());
+        assert!(runtime.find("inbox-qa-stop").is_none());
+    }
+
+    #[test]
+    fn context_dial_uses_the_response_usage_and_distinguishes_bypass_from_unknown() {
+        let mut runtime = active_drawer((640.0, 480.0));
+        let assert_unknown = |runtime: &Runtime<State>| {
+            let tree = runtime.accessibility_json();
+            assert_eq!(accessibility_nodes_with_key(&tree, CONTEXT_DIAL), 1);
+            let rendered = tree.to_string();
+            assert!(rendered.contains("Model context window, usage unavailable"));
+            assert!(!rendered.contains("model bypassed"));
+        };
+        assert_unknown(&runtime);
+
+        runtime.update(|state, _| {
+            let mut modeled = turn(QaTurnState::Answered, 2);
+            modeled.reply = Some(format!("Here are the current checks. {FINDING}"));
+            modeled.notice = Some(QaTurnNotice::Greeting);
+            modeled.conversation = Some(QaConversationReply::Help);
+            modeled.context = Some(QaContextUsage::new(
+                QaModelTarget::FlanT5Small.input_tokens(),
+                448,
+                1,
+            ));
+            state.inbox_qa.adopt(Some(modeled));
+        });
+        runtime.frame(1.0);
+        let tree = runtime.accessibility_json();
+        assert_eq!(accessibility_nodes_with_key(&tree, REPLY), 1);
+        assert_eq!(accessibility_nodes_with_key(&tree, CONTEXT_DIAL), 1);
+        let rendered = tree.to_string();
+        assert!(rendered.contains("Here are the current checks."));
+        assert!(rendered.contains(FINDING));
+        assert!(!rendered.contains("How can I help?"));
+        assert!(!rendered.contains("Select a job to ask about its status"));
+        assert!(runtime.find(SOURCES_TOGGLE).is_some());
+        assert!(runtime.find("chat-citation-0").is_none());
+        assert!(rendered.contains("448 of 512 tokens, 88% peak usage"));
+        assert!(runtime.elements().iter().any(|element| {
+            !element.exiting && element.text.as_deref() == Some("448/512 tokens")
+        }));
+        let (reply, _) = runtime.presented(REPLY).unwrap();
+        let (dial, _) = runtime.presented(CONTEXT_DIAL).unwrap();
+        assert!(dial[1] >= reply[1] + reply[3]);
+
+        runtime.update(|state, _| {
+            let mut direct = turn(QaTurnState::Answered, 2);
+            direct.turn_id = "fixture-direct".into();
+            direct.request_id = "fixture-direct-request".into();
+            direct.context = Some(QaContextUsage::new(
+                QaModelTarget::Gpt2Medium.input_tokens(),
+                0,
+                0,
+            ));
+            state.inbox_qa.adopt(Some(direct));
+        });
+        runtime.frame(1.5);
+        let rendered = runtime.accessibility_json().to_string();
+        assert!(rendered.contains("0 of 896 tokens, 0%, model bypassed"));
+        assert!(!rendered.contains("448 of 512 tokens"));
+
+        runtime.update(|state, _| {
+            let mut stopped = turn(QaTurnState::Canceled, 3);
+            stopped.turn_id = "fixture-stopped".into();
+            stopped.request_id = "fixture-stopped-request".into();
+            state.inbox_qa.adopt(Some(stopped));
+        });
+        runtime.frame(2.0);
+        assert_unknown(&runtime);
+    }
+
+    #[test]
     fn qa_drawer_pins_composer_and_updates_one_answer_at_both_window_sizes() {
         for size in [(640.0, 480.0), (1280.0, 800.0)] {
             let mut runtime = active_drawer(size);
@@ -1229,23 +1709,59 @@ mod tests {
             assert!((drawer[1] + drawer[3] - size.1).abs() < 0.5);
             assert!(scroll[1] + scroll[3] <= footer[1] + 0.5);
             assert!((footer[1] + footer[3] - size.1).abs() < 1.5);
+            let (exchange, _) = runtime.presented("inbox-qa-exchange").unwrap();
+            assert!((scroll[1] + scroll[3] - exchange[1] - exchange[3] - 12.0).abs() < 0.5);
+            let (notifications, _) = runtime.presented("inbox-list").unwrap();
+            let (divider, _) = runtime.presented("inbox-chat-divider").unwrap();
+            assert!(notifications[1] + notifications[3] < divider[1]);
+            assert!(divider[2] > 0.0 && divider[3] > 0.0);
+            assert!(divider[1] + divider[3] < exchange[1]);
             assert!(runtime.find("inbox-qa-stop").is_some());
+            assert!(runtime.find(SOURCES_TOGGLE).is_none());
             let unread = runtime.state.inbox.unread();
 
-            runtime.update(|state, tx| {
+            runtime.update(|state, _| {
                 state.inbox_qa.adopt(Some(turn(QaTurnState::Running, 2)));
-                tx.scroll_to_bottom_instant("inbox-scroll");
             });
             runtime.frame(1.0);
-            assert!(runtime.find("chat-citation-0").is_some());
+            assert!(runtime.find("chat-citation-0").is_none());
+            let elements = runtime.elements();
+            let toggle = elements
+                .iter()
+                .find(|el| el.key.as_deref() == Some(SOURCES_TOGGLE))
+                .expect("Sources disclosure for the cited finding");
+            assert_eq!(toggle.role, "button");
+            assert_eq!(toggle.label.as_deref(), Some("Sources (1)"));
+            assert_eq!(toggle.expanded, Some(false));
             assert!(runtime.accessibility_json().to_string().contains(FINDING));
+            let (exchange, _) = runtime.presented("inbox-qa-exchange").unwrap();
+            assert!((scroll[1] + scroll[3] - exchange[1] - exchange[3] - 12.0).abs() < 0.5);
 
-            runtime.update(|state, tx| {
+            press_disclosure(&mut runtime, SOURCES_TOGGLE, 1.25);
+            let elements = runtime.elements();
+            let toggle = elements
+                .iter()
+                .find(|el| el.key.as_deref() == Some(SOURCES_TOGGLE))
+                .unwrap();
+            assert_eq!(toggle.expanded, Some(true));
+            assert!(toggle.focused);
+            let citation = elements
+                .iter()
+                .find(|el| el.key.as_deref() == Some("chat-citation-0"))
+                .expect("expanded citation");
+            assert_eq!(
+                citation.text.as_deref(),
+                Some("Readiness: Actor search · 2026-01-01T00:00:00Z")
+            );
+            assert!(citation.rect[1] >= scroll[1] - 0.5);
+            assert!(citation.rect[1] + citation.rect[3] <= scroll[1] + scroll[3] + 0.5);
+
+            runtime.update(|state, _| {
                 state.inbox_qa.adopt(Some(turn(QaTurnState::Canceled, 3)));
-                tx.scroll_to_bottom_instant("inbox-scroll");
             });
-            runtime.frame(1.25);
+            runtime.frame(1.75);
             assert!(runtime.find("inbox-qa-stop").is_none());
+            assert!(runtime.find("chat-citation-0").is_some());
             let tree = runtime.accessibility_json();
             assert_eq!(accessibility_nodes_with_key(&tree, REPLY), 1);
             let rendered = tree.to_string();
@@ -1254,29 +1770,193 @@ mod tests {
             assert!(rendered.contains(FINDING) && rendered.contains("Stopped"));
             assert_eq!(runtime.state.inbox.unread(), unread);
 
+            press_disclosure(&mut runtime, SOURCES_TOGGLE, 2.0);
+            assert!(runtime.find("chat-citation-0").is_none());
+            press_disclosure(&mut runtime, SOURCES_TOGGLE, 2.5);
+            assert!(runtime.find("chat-citation-0").is_some());
+            runtime.update(|state, _| {
+                let mut next = turn(QaTurnState::Answered, 2);
+                next.turn_id = "fixture-next-turn".into();
+                next.request_id = "fixture-next-request".into();
+                state.inbox_qa.adopt(Some(next));
+            });
+            runtime.frame(3.0);
+            assert!(runtime.find(SOURCES_TOGGLE).is_some());
+            assert!(runtime.find("chat-citation-0").is_none());
+
             runtime.update(|state, _| {
                 state
                     .inbox_qa
-                    .apply_settings(QaSettings::new(false, QaPhase::Off, 2, 2, false), 2.0);
+                    .apply_settings(QaSettings::new(false, QaPhase::Off, 2, 2, false), 3.25);
             });
-            runtime.frame(2.0);
+            runtime.frame(3.25);
             assert!(runtime.find(COMPOSER).is_none());
             assert!(runtime.find(REPLY).is_none());
             assert!(runtime
                 .accessibility_json()
                 .to_string()
-                .contains(operator_nudge(&runtime.state)));
+                .contains(OPERATOR_NUDGE));
             assert_eq!(runtime.state.inbox.unread(), unread);
         }
     }
 
-    fn press_details(runtime: &mut Runtime<State>, now: f64) {
-        runtime.update(|_, tx| tx.focus(DETAILS_TOGGLE, true));
+    #[test]
+    fn informational_notices_keep_the_answer_and_composer_available() {
+        let mut runtime = active_drawer((640.0, 480.0));
+        for (index, (notice, conversation, copy)) in [
+            (QaTurnNotice::Greeting, None, "How can I help?"),
+            (
+                QaTurnNotice::OutOfScope,
+                Some(QaConversationReply::Acknowledgement),
+                "What else can I help with?",
+            ),
+            (
+                QaTurnNotice::OutOfScope,
+                Some(QaConversationReply::Help),
+                "Select a job to ask about its status",
+            ),
+            (
+                QaTurnNotice::OutOfScope,
+                None,
+                "What would you like to work through?",
+            ),
+            (
+                QaTurnNotice::OutOfScope,
+                Some(QaConversationReply::ContextNeeded),
+                "select a related job, news cycle, or status check",
+            ),
+            (
+                QaTurnNotice::OutOfScope,
+                Some(QaConversationReply::FollowUpNeedsTopic),
+                "What’s the current memory usage?",
+            ),
+            (
+                QaTurnNotice::ObservationUnavailable,
+                None,
+                "Try again in a moment.",
+            ),
+            (
+                QaTurnNotice::ObservationUnavailable,
+                Some(QaConversationReply::Unknown),
+                "Try again in a moment.",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            runtime.update(move |state, _| {
+                let mut reply = turn(QaTurnState::InsufficientContext, 1);
+                reply.turn_id = format!("fixture-notice-{index}");
+                reply.notice = Some(notice);
+                reply.conversation = conversation;
+                state.inbox_qa.adopt(Some(reply));
+            });
+            runtime.frame(1.0 + index as f64 / 4.0);
+            let tree = runtime.accessibility_json().to_string();
+            assert!(
+                tree.contains(copy),
+                "missing reply for {notice:?} {conversation:?}"
+            );
+            assert!(!tree.contains("could not verify an answer"));
+            assert!(runtime.find(REPLY).is_some());
+            assert!(runtime.find(COMPOSER).is_some());
+            assert!(runtime.find(SOURCES_TOGGLE).is_none());
+        }
+    }
+
+    #[test]
+    fn queued_turn_rises_once_and_keeps_its_slot_on_acceptance() {
+        const TURN: &str = "inbox-qa-turn-fixture-queued";
+        for reduced_motion in [false, true] {
+            let mut runtime = active_drawer((1280.0, 800.0));
+            runtime.update(move |state, _| {
+                state
+                    .accessibility
+                    .fixture_override
+                    .as_mut()
+                    .unwrap()
+                    .reduced_motion = reduced_motion;
+            });
+            runtime.frame(0.5);
+            runtime.update(|state, tx| {
+                let context = MutationContext::new(state.registration.context.as_ref().unwrap());
+                let request = QaTurnRequest::new(
+                    "fixture-queued".into(),
+                    context,
+                    "What is the current memory usage?".into(),
+                    None,
+                )
+                .unwrap();
+                state.inbox_qa.pending = Some(Pending { request });
+                tx.scroll_to_bottom_instant(crate::inbox::SCROLL);
+            });
+            runtime.frame(0.0);
+            let (exchange, _) = runtime.presented("inbox-qa-exchange").unwrap();
+            let (queued, _) = runtime.presented(TURN).unwrap();
+            if reduced_motion {
+                assert_eq!(queued, exchange);
+            } else {
+                assert!(queued[1] > exchange[1] + 1.0);
+            }
+            assert_eq!(runtime.scroll_at_bottom(crate::inbox::SCROLL), Some(true));
+            runtime.frame(0.5);
+            runtime.update(|state, _| {
+                let mut accepted = turn(QaTurnState::Running, 1);
+                accepted.turn_id = "fixture-accepted".into();
+                accepted.request_id = "fixture-queued".into();
+                assert!(state.inbox_qa.accept_pending(&accepted));
+                state.inbox_qa.adopt(Some(accepted));
+            });
+            runtime.frame(0.0);
+            let (exchange, _) = runtime.presented("inbox-qa-exchange").unwrap();
+            let (accepted, _) = runtime.presented(TURN).unwrap();
+            assert_eq!(accepted, exchange);
+        }
+    }
+
+    #[test]
+    fn qa_updates_preserve_earlier_scroll_position_and_draft() {
+        let mut runtime = active_drawer((640.0, 480.0));
+        let mut running = turn(QaTurnState::Running, 2);
+        running.findings[0].text = format!("{FINDING}\n").repeat(24);
+        let mut completed = running.clone();
+        completed.cursor = 3;
+        completed.state = QaTurnState::Canceled;
+        runtime.update(move |state, _| {
+            state.inbox_qa.adopt(Some(running));
+            state.inbox_qa.draft = TextEdit::new("An unsent follow-up");
+        });
+        runtime.frame(0.75);
+        assert_eq!(runtime.scroll_at_bottom(crate::inbox::SCROLL), Some(true));
+
+        runtime.update(|_, tx| tx.scroll_to_y(crate::inbox::SCROLL, 0.0));
+        runtime.frame(1.0);
+        let (older, _) = runtime.presented("inbox-group-connection-toggle").unwrap();
+        assert_eq!(runtime.scroll_at_bottom(crate::inbox::SCROLL), Some(false));
+
+        runtime.update(move |state, _| state.inbox_qa.adopt(Some(completed)));
+        runtime.frame(1.25);
+        assert_eq!(
+            runtime
+                .presented("inbox-group-connection-toggle")
+                .unwrap()
+                .0,
+            older
+        );
+        assert_eq!(runtime.scroll_at_bottom(crate::inbox::SCROLL), Some(false));
+        assert_eq!(runtime.state.inbox_qa.draft.text, "An unsent follow-up");
+    }
+
+    fn press_disclosure(runtime: &mut Runtime<State>, key: &'static str, now: f64) {
+        runtime.update(|_, tx| {
+            tx.scroll_into_view(key);
+            tx.focus(key, true);
+        });
         runtime.frame(now);
         assert!(runtime
             .elements()
             .iter()
-            .any(|element| { element.key.as_deref() == Some(DETAILS_TOGGLE) && element.focused }));
+            .any(|element| { element.key.as_deref() == Some(key) && element.focused }));
         runtime.key(KeyEvent {
             key: Key::Text(" ".into()),
             mods: Mods::default(),
@@ -1328,7 +2008,7 @@ mod tests {
                 assert!(runtime.find("inbox-group-connection-toggle").is_some());
                 assert_eq!(runtime.state.inbox.unread(), unread);
 
-                press_details(&mut runtime, now + 0.25);
+                press_disclosure(&mut runtime, DETAILS_TOGGLE, now + 0.25);
                 assert!(runtime.accessibility_json().to_string().contains(details));
                 let (footer, _) = runtime.presented("inbox-qa-footer").unwrap();
                 let (scroll, _) = runtime.presented("inbox-scroll").unwrap();
@@ -1339,7 +2019,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_settings_discloses_the_embedded_host_prerequisite() {
+    fn connection_settings_discloses_the_embedded_host_prerequisite() {
         for size in [(640.0, 480.0), (1280.0, 800.0)] {
             let mut runtime = active_drawer(size);
             runtime.update(|state, _| {
@@ -1348,8 +2028,7 @@ mod tests {
                 settings.availability_reason = Some(QaAvailabilityReason::SandboxUnsupported);
                 state.inbox_qa.apply_settings(settings, 1.0);
                 state.inbox.close();
-                state.settings_open = true;
-                state.settings_section = SettingsSection::Gateway;
+                state.open_connection_settings();
             });
             runtime.frame(1.0);
             runtime.frame(1.25);
@@ -1358,13 +2037,74 @@ mod tests {
             assert!(tree.contains("Turn Off"));
             assert!(!tree.contains("Landlock"));
 
-            press_details(&mut runtime, 1.5);
+            press_disclosure(&mut runtime, DETAILS_TOGGLE, 1.5);
             let tree = runtime.accessibility_json();
             assert_eq!(accessibility_nodes_with_key(&tree, DETAILS), 1);
             assert!(tree
                 .to_string()
                 .contains("requires Landlock ABI 3 or newer"));
         }
+    }
+
+    #[test]
+    fn embedded_startup_stages_appear_in_the_inbox_footer_and_connection_settings() {
+        let stages = [
+            (
+                QaPhase::Starting,
+                QaStartupStage::DownloadingPack,
+                "Downloading QA pack",
+            ),
+            (
+                QaPhase::Unavailable,
+                QaStartupStage::VerifyingPack,
+                "Verifying QA pack",
+            ),
+            (
+                QaPhase::Starting,
+                QaStartupStage::LoadingModel,
+                "Loading QA model",
+            ),
+            (
+                QaPhase::Starting,
+                QaStartupStage::Activating,
+                "Activating QA model",
+            ),
+        ];
+        let mut runtime = active_drawer((640.0, 480.0));
+        for (index, (phase, stage, label)) in stages.into_iter().enumerate() {
+            let now = 1.0 + index as f64;
+            runtime.update(|state, _| {
+                state.backend_kind = BackendKind::Local;
+                let mut settings = QaSettings::new(true, phase, 2, 2, true);
+                settings.startup_stage = Some(stage);
+                if phase == QaPhase::Unavailable {
+                    settings.availability_reason = Some(QaAvailabilityReason::PackMissing);
+                }
+                state.inbox_qa.apply_settings(settings, now);
+            });
+            runtime.frame(now);
+            let tree = runtime.accessibility_json();
+            assert_eq!(
+                accessibility_nodes_with_key(&tree, "inbox-qa-startup-status"),
+                1
+            );
+            assert!(tree.to_string().contains(label));
+            assert!(runtime.find(DETAILS_TOGGLE).is_none());
+            assert!(runtime.find(COMPOSER).is_none());
+        }
+
+        runtime.update(|state, _| {
+            state.inbox.close();
+            state.open_connection_settings();
+        });
+        runtime.frame(5.0);
+        runtime.frame(5.25);
+        let tree = runtime.accessibility_json();
+        assert_eq!(
+            accessibility_nodes_with_key(&tree, "inbox-qa-settings-status"),
+            1
+        );
+        assert!(tree.to_string().contains("Activating QA model"));
     }
 
     #[test]
@@ -1457,6 +2197,8 @@ mod tests {
     #[test]
     fn target_switch_retires_the_draft_and_stale_replay_cannot_replace_a_turn() {
         let mut state = crate::tests::registered_fixture();
+        state.backend_kind = BackendKind::Local;
+        state.connection.origin = TextEdit::new("local://embedded");
         state.seed_inbox_qa_fixture(
             QaSettings::new(true, QaPhase::Ready, 1, 1, true),
             Some(turn(QaTurnState::Answered, 3)),

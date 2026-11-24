@@ -47,13 +47,18 @@ on:
         description: Compare Depot cold and warm Linux native builds with a same-revision GitHub baseline
         type: boolean
         default: false
+      inbox_qa_evaluation:
+        description: Compare pinned Inbox reply candidates on GitHub Linux without building or publishing packages
+        type: choice
+        options: [none, flan-t5-small, flan-t5-base, gpt2-small, gpt2-medium, all]
+        default: none
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: fleetworks-${{ github.event_name }}-${{ github.event_name == 'push' && github.ref != 'refs/heads/nightly' && 'stable' || github.event.pull_request.number || github.ref }}-${{ inputs.depot_linux_native_pilot && 'depot-linux-native-pilot' || inputs.stage || 'standard' }}
+  group: fleetworks-${{ github.event_name }}-${{ github.event_name == 'push' && github.ref != 'refs/heads/nightly' && 'stable' || github.event.pull_request.number || github.ref }}-${{ inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none' && format('inbox-qa-{0}', inputs.inbox_qa_evaluation) || inputs.depot_linux_native_pilot && 'depot-linux-native-pilot' || inputs.stage || 'standard' }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
@@ -66,9 +71,17 @@ env:
   CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
+  inbox_qa_evaluation:
+    name: Compare Inbox reply candidates
+    if: github.event_name == 'workflow_dispatch' && inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none'
+    uses: ./.github/workflows/fleetworks-inbox-qa-evaluation.yml
+    with:
+      selection: ${{ inputs.inbox_qa_evaluation }}
+      head: ${{ inputs.head || github.sha }}
+
   linux_native_depot_pilot:
     name: Linux native Depot pilot
-    if: github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot
+    if: github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot && (inputs.inbox_qa_evaluation == '' || inputs.inbox_qa_evaluation == 'none')
     uses: ./.github/workflows/fleetworks-native-linux-depot-pilot.yml
     with:
       expected-head: ${{ inputs.head }}
@@ -77,7 +90,7 @@ jobs:
 
   scope:
     name: Select verification scopes
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.depot_linux_native_pilot || (inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none'))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -106,10 +119,6 @@ jobs:
       bert: ${{ steps.verification.outputs.bert }}
       inbox_qa: ${{ steps.verification.outputs.inbox_qa }}
       inbox_qa_packs: ${{ steps.verification.outputs.inbox_qa_packs }}
-      inbox_qa_images: ${{ steps.verification.outputs.inbox_qa_images }}
-      inbox_qa_embedded: ${{ steps.verification.outputs.inbox_qa_embedded }}
-      inbox_qa_distributed: ${{ steps.verification.outputs.inbox_qa_distributed }}
-      inbox_qa_distributed_selected: ${{ steps.verification.outputs.inbox_qa_distributed == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
       web: ${{ steps.verification.outputs.web }}
       web_dev: ${{ steps.verification.outputs.web_dev }}
       images: ${{ steps.verification.outputs.images }}
@@ -381,7 +390,7 @@ jobs:
             ${{ (github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'nightly') ||
                 (github.event_name == 'workflow_dispatch' && inputs.stage == 'second' && steps.promotion.outputs.base_ref == 'nightly') ||
                 github.ref == 'refs/heads/nightly' ||
-                (github.event_name == 'workflow_dispatch' && (inputs.image_builder == 'depot' || inputs.image_builder == 'buildx')) }}
+                (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.head == github.sha) }}
         run: |
           python3 .github/scripts/fleetworks_ci.py select --stage "$FLEETWORKS_STAGE" \
             --plan "$RUNNER_TEMP/release.json" --output "$GITHUB_OUTPUT"
@@ -488,7 +497,7 @@ jobs:
       head: ${{ needs.scope.outputs.head }}
       target: ${{ matrix.target }}
       runner: ${{ matrix.runner }}
-      streaming-test: ${{ matrix.target == 'x86_64-unknown-linux-gnu' || endsWith(matrix.target, '-apple-darwin') }}
+      probe-all-models: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && needs.scope.outputs.publish != 'true' }}
 
   inbox_qa_embedded:
     name: Inbox QA Embedded / ${{ matrix.target }}
@@ -497,41 +506,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJson(needs.scope.outputs.inbox_qa_embedded) }}
+        include: ${{ fromJson(needs.scope.outputs.inbox_qa_packs) }}
     uses: ./.github/workflows/fleetworks-inbox-qa-smoke.yml
     permissions:
       contents: read
       actions: read
-      id-token: write
     with:
       head: ${{ needs.scope.outputs.head }}
       target: ${{ matrix.target }}
       runner: ${{ matrix.runner }}
-      arch: ${{ matrix.arch }}
-      runtime: embedded
       release-version: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.release_version || '' }}
       release-asset: ${{ fromJson(needs.scope.outputs.release_plan).inbox_qa == true }}
-
-  inbox_qa_distributed:
-    name: Inbox QA Distributed (${{ needs.scope.outputs.selected_image_builder }}) / Linux ${{ matrix.arch }}
-    needs: [scope, inbox_qa_packs]
-    if: ${{ !cancelled() && needs.scope.outputs.inbox_qa_distributed_selected == 'true' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.scope.outputs.inbox_qa_images) }}
-    uses: ./.github/workflows/fleetworks-inbox-qa-smoke.yml
-    permissions:
-      contents: read
-      actions: read
-      id-token: write
-    with:
-      head: ${{ needs.scope.outputs.head }}
-      target: ${{ matrix.target }}
-      runner: ${{ matrix.runner }}
-      arch: ${{ matrix.arch }}
-      runtime: distributed
-      image-builder: ${{ needs.scope.outputs.selected_image_builder }}
 
   images_buildx:
     name: Image checks (Buildx) / Linux ${{ matrix.arch }}
@@ -715,9 +700,9 @@ jobs:
           retention-days: 7
 
   source_checks:
-    name: ${{ inputs.stage == 'second' && 'Fleetworks second pass source checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual source checks' || 'Fleetworks source checks' }}
-    needs: [scope, gsd_core, gsd_ui, images_buildx, images_depot, native_embedded_image, inbox_qa_packs, inbox_qa_embedded, inbox_qa_distributed]
-    if: always() && !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot)
+    name: ${{ inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none' && 'Regular source checks' || inputs.stage == 'second' && 'Fleetworks second pass source checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual source checks' || 'Fleetworks source checks' }}
+    needs: [scope, gsd_core, gsd_ui, images_buildx, images_depot, native_embedded_image, inbox_qa_packs, inbox_qa_embedded]
+    if: always() && !(github.event_name == 'workflow_dispatch' && (inputs.depot_linux_native_pilot || (inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none')))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -752,11 +737,8 @@ jobs:
           DEPOT_IMAGES_RESULT: ${{ needs.images_depot.result }}
           NATIVE_EMBEDDED_IMAGE_RESULT: ${{ needs.native_embedded_image.result }}
           INBOX_QA_SELECTED: ${{ needs.scope.outputs.inbox_qa }}
-          INBOX_QA_DISTRIBUTED_AFFECTED: ${{ needs.scope.outputs.inbox_qa_distributed }}
-          INBOX_QA_DISTRIBUTED_SELECTED: ${{ needs.scope.outputs.inbox_qa_distributed_selected }}
           INBOX_QA_PACKS_RESULT: ${{ needs.inbox_qa_packs.result }}
           INBOX_QA_EMBEDDED_RESULT: ${{ needs.inbox_qa_embedded.result }}
-          INBOX_QA_DISTRIBUTED_RESULT: ${{ needs.inbox_qa_distributed.result }}
         shell: bash
         run: |
           set -euo pipefail
@@ -814,10 +796,6 @@ jobs:
           verify native_embedded_image "$NATIVE_EMBEDDED_IMAGE_SELECTED" "$NATIVE_EMBEDDED_IMAGE_RESULT" || failed=1
           verify "Inbox QA packs" "$INBOX_QA_SELECTED" "$INBOX_QA_PACKS_RESULT" || failed=1
           verify "Inbox QA Embedded" "$INBOX_QA_SELECTED" "$INBOX_QA_EMBEDDED_RESULT" || failed=1
-          verify "Inbox QA Distributed" "$INBOX_QA_DISTRIBUTED_SELECTED" "$INBOX_QA_DISTRIBUTED_RESULT" || failed=1
-          if [[ "$INBOX_QA_DISTRIBUTED_AFFECTED:$INBOX_QA_DISTRIBUTED_SELECTED" == true:false ]]; then
-            printf 'Inbox QA Distributed was skipped for the fork pull request.\n' >> "$GITHUB_STEP_SUMMARY"
-          fi
           case "$REVIEW_IMAGE_SKIP_REASON" in
             fork) reason='fork pull request' ;;
             outside_nightly) reason='outside the nightly review scope; use an exact-head manual image-builder dispatch to verify' ;;
@@ -937,9 +915,9 @@ jobs:
     steps: *release_image_steps
 
   prepublish:
-    name: ${{ inputs.stage == 'second' && 'Fleetworks second pass artifact checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual artifact checks' || 'Fleetworks artifact checks' }}
+    name: ${{ inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none' && 'Regular artifact checks' || inputs.stage == 'second' && 'Fleetworks second pass artifact checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual artifact checks' || 'Fleetworks artifact checks' }}
     needs: [scope, source_checks, release_images, release_images_nightly]
-    if: always() && !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot)
+    if: always() && !(github.event_name == 'workflow_dispatch' && (inputs.depot_linux_native_pilot || (inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none')))
     runs-on: ubuntu-24.04
     steps:
       - name: Require source checks and every selected release image
@@ -1030,9 +1008,9 @@ jobs:
             --directory "$RUNNER_TEMP/release"
 
   required:
-    name: ${{ inputs.stage == 'second' && 'Fleetworks second pass' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual verification' || 'Fleetworks required' }}
+    name: ${{ inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none' && 'Regular verification' || inputs.stage == 'second' && 'Fleetworks second pass' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual verification' || 'Fleetworks required' }}
     needs: [scope, prepublish, publish]
-    if: always() && !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot)
+    if: always() && !(github.event_name == 'workflow_dispatch' && (inputs.depot_linux_native_pilot || (inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none')))
     runs-on: ubuntu-24.04
     steps:
       - name: Require every selected check and publication

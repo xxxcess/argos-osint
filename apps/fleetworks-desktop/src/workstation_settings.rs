@@ -15,52 +15,69 @@ use crate::theme::StatusTone;
 use crate::ui_components;
 use crate::ui_components::ActionButton;
 
+pub(crate) const PRODUCT_NAME: &str = "Fleetworks";
+
 /// The selected section in the workstation settings dialog.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum SettingsSection {
     #[default]
     General,
     Appearance,
-    Gateway,
+    Connection,
+    Assistant,
     Models,
-    Tools,
 }
 
 impl SettingsSection {
     const ALL: [Self; 5] = [
         Self::General,
+        Self::Connection,
+        Self::Assistant,
         Self::Appearance,
-        Self::Gateway,
         Self::Models,
-        Self::Tools,
     ];
 
     fn title(self) -> &'static str {
         match self {
             Self::General => "General",
             Self::Appearance => "Appearance",
-            Self::Gateway => "Gateway",
+            Self::Connection => "Connection",
+            Self::Assistant => "Assistant",
             Self::Models => "Models",
-            Self::Tools => "Tools",
         }
     }
 
     fn summary(self) -> &'static str {
         match self {
-            Self::General => "Workstation identity and readiness",
+            Self::General => "About and workstation readiness",
             Self::Appearance => "Display and motion preferences",
-            Self::Gateway => "Connection and pairing",
+            Self::Connection => "Backend setup and pairing",
+            Self::Assistant => "Local model and readiness",
             Self::Models => "Model routes and provider accounts",
-            Self::Tools => "Tool provider credentials",
         }
     }
 }
 
 impl State {
+    pub(crate) fn open_connection_settings(&mut self) {
+        self.setup_gateway = false;
+        self.settings_section = SettingsSection::Connection;
+        self.settings_open = true;
+    }
+
     /// Open Settings in the synthetic review session.
     pub fn fixture_show_workstation_settings(&mut self) {
         if self.fixture {
             self.settings_section = SettingsSection::General;
+            self.settings_open = true;
+        }
+    }
+
+    /// Open the Assistant section in the synthetic review session.
+    #[doc(hidden)]
+    pub fn fixture_show_assistant_settings(&mut self) {
+        if self.fixture {
+            self.settings_section = SettingsSection::Assistant;
             self.settings_open = true;
         }
     }
@@ -140,12 +157,29 @@ fn destination_action(
         .build(kit, preferences, pointer)
 }
 
-fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
-    let pointer = (!preferences.matte()).then_some(&state.pointer_offset);
-    match state.settings_section {
+fn section_content(
+    state: &State,
+    section: SettingsSection,
+    preferences: ViewPreferences,
+    kit: &Kit,
+    connection_size: Option<[f32; 2]>,
+) -> El {
+    match section {
         SettingsSection::General => rune::col()
             .w_full()
             .gap(22.0)
+            .child(setting_group(
+                "About",
+                setting_row(
+                    PRODUCT_NAME,
+                    concat!("Version ", env!("CARGO_PKG_VERSION")),
+                    None,
+                    kit,
+                )
+                .key("settings-about-app"),
+                preferences,
+                kit,
+            ))
             .child(setting_group(
                 "Workstation",
                 rune::col()
@@ -251,79 +285,29 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
             preferences,
             kit,
         )),
-        SettingsSection::Gateway => {
-            let mut rows = rune::col().child(setting_row(
-                if state.is_local_backend() {
-                    "Embedded backend"
-                } else {
-                    "Distributed gateway URL"
-                },
-                if state.is_local_backend() {
-                    format!(
-                        "{} ({})",
-                        state.connection.origin.text,
-                        state.local_state_dir_label()
-                    )
-                } else {
-                    state.connection.origin.text.clone()
-                },
-                Some(ui_components::status_pill(
-                    if state.connected() {
-                        "Connected"
-                    } else {
-                        "Disconnected"
-                    },
-                    None,
-                    if state.connected() {
-                        StatusTone::Ok
-                    } else {
-                        StatusTone::Warn
-                    },
-                    kit,
-                )),
+        SettingsSection::Connection => rune::col()
+            .w_full()
+            .gap(22.0)
+            .child(crate::views::setup_gateway_content(
+                state,
                 kit,
-            ));
-            if state.local_backend.active() {
-                rows = rows.child(setting_divider()).child(setting_row(
-                    "Embedded companion process",
-                    "Gracefully shut down the embedded companion backend.",
-                    Some(
-                        ActionButton::new("Stop Embedded Backend")
-                            .key("settings-stop-local-backend")
-                            .finish(MetalFinish::Gunmetal)
-                            .disabled(state.local_backend.stopping)
-                            .on_press(|state: &mut State| state.stop_local_backend())
-                            .build(kit, preferences, pointer),
-                    ),
-                    kit,
-                ));
-            }
-            rows = rows.child(setting_divider()).child(setting_row(
-                "Backend and access",
-                "Select Embedded or Distributed, or inspect connection status.",
-                Some(
-                    ActionButton::new("Setup Gateway")
-                        .key("settings-gateway-open")
-                        .finish(MetalFinish::Gunmetal)
-                        .on_press(|state: &mut State| {
-                            state.settings_open = false;
-                            state.setup_gateway = true;
-                        })
-                        .build(kit, preferences, pointer),
-                ),
-                kit,
-            ));
-            rune::col()
-                .w_full()
-                .gap(22.0)
-                .child(setting_group(
+                preferences,
+                connection_size,
+            ))
+            .children(state.is_local_backend().then(|| {
+                setting_group(
                     "Backend inference",
                     crate::inbox_qa::settings_content(state, kit, preferences).padding(12.0),
                     preferences,
                     kit,
-                ))
-                .child(setting_group("Connection", rows, preferences, kit))
-        }
+                )
+            })),
+        SettingsSection::Assistant => material::glass_panel(
+            crate::inbox_qa::assistant_settings_content(state, kit)
+                .radius(8.0)
+                .clip_rounded(8.0),
+            preferences,
+        ),
         SettingsSection::Models => rune::col().w_full().gap(22.0).child(setting_group(
             "Routing",
             rune::col().child(setting_row(
@@ -343,25 +327,6 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
             preferences,
             kit,
         )),
-        SettingsSection::Tools => rune::col().w_full().gap(22.0).child(setting_group(
-            "Integrations",
-            rune::col().child(setting_row(
-                "Tool credentials",
-                "Inspect provider services and configure their API keys.",
-                Some(destination_action(
-                    "Open",
-                    "settings-tools-open",
-                    Page::Tools,
-                    !state.connected(),
-                    state,
-                    preferences,
-                    kit,
-                )),
-                kit,
-            )),
-            preferences,
-            kit,
-        )),
     }
 }
 
@@ -371,12 +336,24 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
         .accessibility
         .for_view(state.fixture, cx.is_reduced_motion());
     let pointer = (!preferences.matte()).then_some(&state.pointer_offset);
+    let assistant_visible = state.assistant_settings_visible();
+    let current_section =
+        if state.settings_section == SettingsSection::Assistant && !assistant_visible {
+            SettingsSection::Connection
+        } else {
+            state.settings_section
+        };
     let page_size = cx.layout_size("page-content");
     let compact = page_size.is_none_or(|size| size[0] < 580.0);
     let height = page_size
         .map(|size| (size[1] - 62.0).clamp(290.0, 580.0))
         .unwrap_or(370.0);
     let content_padding = if compact { 12.0 } else { 20.0 };
+    let connection_size = Some(
+        cx.layout_size("settings-scroll")
+            .map(|size| [(size[0] - 2.0 * content_padding).max(0.0), size[1]])
+            .unwrap_or([400.0, height]),
+    );
 
     let mut rail = rune::col()
         .key("settings-category-rail")
@@ -387,7 +364,10 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
         .fill(kit.c.surface_base)
         .border_sides([0.0, 1.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE));
     for section in SettingsSection::ALL {
-        let selected = state.settings_section == section;
+        if section == SettingsSection::Assistant && !assistant_visible {
+            continue;
+        }
+        let selected = current_section == section;
         rail = rail.child(
             rune::row()
                 .key(format!(
@@ -453,7 +433,7 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
                 .gap(4.0)
                 .border_sides([0.0, 0.0, 1.0, 0.0], theme::hex(theme::BORDER_SUBTLE))
                 .child(
-                    rune::text(state.settings_section.title())
+                    rune::text(current_section.title())
                         .key("settings-section-title")
                         .role("heading")
                         .focusable(true)
@@ -462,7 +442,7 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
                         .color(theme::hex(theme::TEXT_PRIMARY)),
                 )
                 .child(
-                    rune::text(state.settings_section.summary())
+                    rune::text(current_section.summary())
                         .font(kit.ty.small)
                         .color(theme::hex(theme::TEXT_MUTED))
                         .wrap(),
@@ -477,7 +457,10 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
                 .scroll(ScrollSpec {
                     stick_bottom: false,
                 })
-                .child(section_content(state, preferences, kit).padding(content_padding)),
+                .child(
+                    section_content(state, current_section, preferences, kit, connection_size)
+                        .padding(content_padding),
+                ),
         );
 
     rune::row()
@@ -513,6 +496,7 @@ mod tests {
 
     use crate::app;
     use crate::app::Page;
+    use crate::app::State;
 
     use super::motion_preference_description;
     use super::surface_preference_description;
@@ -549,6 +533,9 @@ mod tests {
         runtime.frame(0.0);
         assert!(runtime.find("settings-category-rail").is_some());
         assert!(runtime.find("settings-readiness-open").is_some());
+        assert!(runtime.find("settings-about-app").is_some());
+        let about = runtime.accessibility_json().to_string();
+        assert!(about.contains(concat!("Version ", env!("CARGO_PKG_VERSION"))));
 
         let (x, y) = runtime
             .find("settings-category-models")
@@ -567,5 +554,55 @@ mod tests {
         runtime.frame(2.0 / 60.0);
         assert_eq!(runtime.state.page, Page::Models);
         assert!(!runtime.state.settings_open);
+    }
+
+    #[test]
+    fn connection_settings_exposes_the_existing_backend_stepper_on_a_compact_window() {
+        use fleetworks_workstation::native::BackendKind;
+
+        let mut state = State::fixture();
+        state.fixture_show_workstation_settings();
+        let mut runtime = Runtime::new(
+            state,
+            app::view,
+            (640.0, 480.0),
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.frame(0.0);
+        runtime.frame(1.0 / 60.0);
+        let (x, y) = runtime
+            .find("settings-category-connection")
+            .expect("Connection in Settings");
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(2.0 / 60.0);
+        assert_eq!(runtime.state.settings_section, SettingsSection::Connection);
+        assert!(runtime.find("gateway-setup-stepper").is_some());
+        assert!(runtime.find("gateway-origin").is_some());
+        assert!(runtime.find("connect").is_some());
+
+        runtime.update(|_, tx| tx.scroll_into_view("backend-mode-local"));
+        runtime.frame(3.0 / 60.0);
+        let (x, y) = runtime
+            .find("backend-mode-local")
+            .expect("Embedded backend choice");
+        let settings = runtime
+            .elements()
+            .into_iter()
+            .find(|el| el.key.as_deref() == Some("settings-scroll"))
+            .expect("Settings scroll area");
+        assert!((settings.rect[0]..settings.rect[0] + settings.rect[2]).contains(&x));
+        assert!((settings.rect[1]..settings.rect[1] + settings.rect[3]).contains(&y));
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(4.0 / 60.0);
+        assert_eq!(runtime.state.backend_kind, BackendKind::Local);
+        assert!(runtime.find("connect-local").is_some());
+        assert!(runtime.find("gateway-origin").is_none());
+        assert!(runtime.state.settings_open);
+        assert!(!runtime.state.setup_gateway);
     }
 }

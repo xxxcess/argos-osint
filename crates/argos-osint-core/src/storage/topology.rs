@@ -24,7 +24,7 @@ use surrealdb::engine::any::Any;
 use surrealdb::types::SurrealValue;
 use surrealdb::IndexedResults;
 
-use super::provenance::ACTOR_MENTIONS_SURQL;
+use super::provenance::{MentionRow, ACTOR_MENTIONS_SURQL};
 use super::publisher::CHANGED_COUNTER;
 use super::repo::Repository;
 use super::tx::{run_tx, RetryPolicy, Tx, TxError};
@@ -76,6 +76,7 @@ const DEAD: [&str; 3] = ["deleted", "retired", "rejected"];
 
 #[derive(Debug, Clone, SurrealValue)]
 struct MemoryRow {
+    id: String,
     text: String,
     category: String,
     pinned: bool,
@@ -87,6 +88,10 @@ struct MemoryRow {
     native_ingest_batch: String,
 }
 
+const MEMORY_FIELDS: &str =
+    "record::id(id) AS id, text, category, pinned, lifecycle, memory_kind, payload_json, source_json,
+     time::format(created_at, '%+') AS created_at, (lifecycle_ingest_batch ?? '') AS native_ingest_batch";
+
 #[derive(Debug, Clone, SurrealValue)]
 struct ActorRow {
     subtype: String,
@@ -97,6 +102,7 @@ struct ActorRow {
 
 #[derive(Debug, Clone, SurrealValue)]
 struct ActorRefRow {
+    actor_id: String,
     memory_id: String,
     role: String,
     binding_state: String,
@@ -107,17 +113,6 @@ struct ActorRefRow {
 struct PayloadRow {
     id: String,
     payload_json: String,
-}
-
-#[derive(Debug, Clone, SurrealValue)]
-struct MentionRow {
-    origin_kind: String,
-    origin_scope: String,
-    origin_id: String,
-    origin_revision: String,
-    spans_json: String,
-    native_input_revision: String,
-    publication_batch: String,
 }
 
 #[derive(Debug, Clone, SurrealValue)]
@@ -214,6 +209,13 @@ struct ArticleKeyRow {
     category: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Projection {
+    Graph,
+    BriefBinding,
+    Dossier,
+}
+
 struct Query<'a> {
     repo: &'a Repository,
     tx: Tx,
@@ -225,12 +227,16 @@ struct Query<'a> {
     memories: HashMap<String, Option<MemoryRow>>,
     body_revisions: HashMap<String, Option<(String, String, String)>>,
     native: super::native_visibility::NativeVisibility,
-    /// Brief detail only needs direct article bindings, not the graph walk.
-    binding: bool,
+    projection: Projection,
     cancel: &'a tokio::sync::watch::Sender<()>,
 }
 
 impl Query<'_> {
+    fn check_cancelled(&self) -> Result<()> {
+        ensure!(!self.cancel.is_closed(), "Topology request cancelled");
+        Ok(())
+    }
+
     /// `Query::rows` bound: one extra row marks truncation, and every branch
     /// spends the shared row budget.
     fn bound<T>(&mut self, mut rows: Vec<T>) -> Vec<T> {
@@ -255,22 +261,49 @@ impl Query<'_> {
     }
 
     async fn memory(&mut self, id: &str) -> Result<Option<MemoryRow>> {
+        self.check_cancelled()?;
         if let Some(row) = self.memories.get(id) {
             return Ok(row.clone());
         }
         let mut r = stmt(
             self.tx
-                .query(
-                    "SELECT text, category, pinned, lifecycle, memory_kind, payload_json, source_json,
-                        time::format(created_at, '%+') AS created_at,(lifecycle_ingest_batch ?? '') AS native_ingest_batch
-                 FROM ONLY type::record('memory', $id)",
-                )
+                .query(format!(
+                    "SELECT {MEMORY_FIELDS} FROM ONLY type::record('memory', $id)"
+                ))
                 .bind(("id", id.to_string())),
         )
         .await?;
         let row: Option<MemoryRow> = r.take(0)?;
         self.memories.insert(id.to_string(), row.clone());
         Ok(row)
+    }
+
+    async fn prefetch_dossier_memories(&mut self, ids: BTreeSet<String>) -> Result<()> {
+        self.check_cancelled()?;
+        let ids: Vec<_> = ids
+            .into_iter()
+            .filter(|id| !self.memories.contains_key(id))
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let records = ids
+            .iter()
+            .map(|id| super::jobs::rid("memory", id))
+            .collect::<Vec<_>>();
+        let mut r = stmt(
+            self.tx
+                .query(format!("SELECT {MEMORY_FIELDS} FROM $records"))
+                .bind(("records", records)),
+        )
+        .await?;
+        for id in ids {
+            self.memories.insert(id, None);
+        }
+        for row in r.take::<Vec<MemoryRow>>(0)? {
+            self.memories.insert(row.id.clone(), Some(row));
+        }
+        Ok(())
     }
 
     async fn payload(&mut self, id: &str) -> Result<Option<MemoryPayload>> {
@@ -285,6 +318,7 @@ impl Query<'_> {
     async fn resolve(&self, actor_id: &str) -> Result<String> {
         let mut id = actor_id.to_string();
         for _ in 0..64 {
+            self.check_cancelled()?;
             let mut r = stmt(
                 self.tx
                     .query(
@@ -334,6 +368,7 @@ impl Query<'_> {
                 out.member_ids.push(canonical.clone());
                 let mut aliases = VecDeque::from([canonical.clone()]);
                 while let Some(survivor) = aliases.pop_front() {
+                    self.check_cancelled()?;
                     let mut r = stmt(
                         self.tx
                             .query(
@@ -366,6 +401,7 @@ impl Query<'_> {
                 let names: Vec<String> = r.take(0)?;
                 let mut unique = Vec::new();
                 for name in names {
+                    self.check_cancelled()?;
                     if super::actor_catalog::lookup_in(&self.tx, &name)
                         .await?
                         .as_deref()
@@ -415,7 +451,7 @@ impl Query<'_> {
         } else {
             TopologySeed::Claim(id.into())
         });
-        if self.binding {
+        if self.projection == Projection::BriefBinding {
             // The brief consumes identity, kind and label, not graph detail.
             return Ok(Some(out));
         }
@@ -473,6 +509,7 @@ impl Query<'_> {
         id: &str,
         expected: &str,
     ) -> Result<Option<TopologyNode>> {
+        self.check_cancelled()?;
         let Some(article) = atlas::article_in(&self.tx, run, id).await? else {
             return Ok(None);
         };
@@ -703,6 +740,7 @@ impl Query<'_> {
     async fn link(
         &mut self,
         id: &str,
+        dossier_actor: Option<&TopologyNode>,
     ) -> Result<Option<(TopologyNode, TopologyNode, TopologyEdge)>> {
         let Some(memory) = self
             .memory(id)
@@ -714,6 +752,17 @@ impl Query<'_> {
         let Some(payload) = self.payload(id).await? else {
             return Ok(None);
         };
+        if dossier_actor.is_some()
+            && !matches!(&payload, MemoryPayload::Link(link)
+            if link.relation == "mentioned_in"
+                && matches!(
+                    (&link.source, &link.target),
+                    (EndpointRef::Memory { kind: MemoryKind::Actor, .. }, EndpointRef::Article { .. })
+                        | (EndpointRef::Article { .. }, EndpointRef::Memory { kind: MemoryKind::Actor, .. })
+                ))
+        {
+            return Ok(None);
+        }
         if !self
             .native
             .memory_current(id, &payload, &memory.native_ingest_batch)
@@ -752,8 +801,8 @@ impl Query<'_> {
             _ => return Ok(None),
         };
         let (Some(s), Some(t)) = (
-            self.endpoint_node(&source).await?,
-            self.endpoint_node(&target).await?,
+            self.link_endpoint(&source, dossier_actor).await?,
+            self.link_endpoint(&target, dossier_actor).await?,
         ) else {
             self.gaps
                 .insert(format!("{id}: unresolved relationship endpoint"));
@@ -762,6 +811,26 @@ impl Query<'_> {
         e.from = s.id.clone();
         e.to = t.id.clone();
         Ok(Some((s, t, e)))
+    }
+
+    async fn link_endpoint(
+        &mut self,
+        endpoint: &EndpointRef,
+        dossier_actor: Option<&TopologyNode>,
+    ) -> Result<Option<TopologyNode>> {
+        if let (
+            Some(actor),
+            EndpointRef::Memory {
+                memory_id,
+                kind: MemoryKind::Actor,
+            },
+        ) = (dossier_actor, endpoint)
+        {
+            if actor.id == *memory_id {
+                return Ok(Some(actor.clone()));
+            }
+        }
+        self.endpoint_node(endpoint).await
     }
 
     /// `ScopedRows::Link`: under a cycle, a Link/Related record needs another
@@ -847,7 +916,19 @@ impl Query<'_> {
         } else {
             vec![reference]
         };
+        let dossier_actor = (self.projection == Projection::Dossier).then_some(n);
+        let mut dossier_links_left = self.limit;
         for reference in references {
+            self.check_cancelled()?;
+            let window = if dossier_actor.is_some() {
+                if dossier_links_left == 0 {
+                    self.exhausted = false;
+                    break;
+                }
+                dossier_links_left
+            } else {
+                self.limit
+            };
             let endpoint = match kind {
                 "article" => super::graph::endpoint_node(&EndpointRef::Article {
                     run_id: origin.clone(),
@@ -862,7 +943,7 @@ impl Query<'_> {
                 _ => super::graph::memory_node(&reference),
             };
             let mut r=stmt(self.tx.query("SELECT memory_id,origin FROM brain_memory_endpoint WITH INDEX brain_memory_endpoint_ref WHERE endpoint_kind=$kind AND ref_id=$reference LIMIT $cap; SELECT owner FROM brain_graph_edge WITH INDEX brain_graph_edge_input WHERE in=$node AND meaning INSIDE ['link','related'] LIMIT $cap; SELECT owner FROM brain_graph_edge WITH INDEX brain_graph_edge_output WHERE out=$node AND meaning INSIDE ['link','related'] LIMIT $cap;")
-                .bind(("kind",kind.to_owned())).bind(("reference",reference)).bind(("node",super::jobs::rid("brain_graph_node",&endpoint))).bind(("cap",(self.limit+1) as i64))).await?;
+                .bind(("kind",kind.to_owned())).bind(("reference",reference)).bind(("node",super::jobs::rid("brain_graph_node",&endpoint))).bind(("cap",(window+1) as i64))).await?;
             let rows: Vec<EndpointMemoryRow> = r.take(0)?;
             #[derive(SurrealValue)]
             struct Owner {
@@ -872,16 +953,24 @@ impl Query<'_> {
             let incoming: Vec<Owner> = r.take(2)?;
             if [rows.len(), outgoing.len(), incoming.len()]
                 .into_iter()
-                .any(|len| len > self.limit)
+                .any(|len| len > window)
             {
                 self.exhausted = false;
             }
-            let ids: BTreeSet<String> = rows
+            let mut ids: BTreeSet<String> = rows
                 .into_iter()
                 .filter(|endpoint| origin.is_empty() || endpoint.origin == origin)
                 .map(|endpoint| endpoint.memory_id)
                 .chain(outgoing.into_iter().chain(incoming).map(|edge| edge.owner))
                 .collect();
+            if dossier_actor.is_some() {
+                if ids.len() > window {
+                    self.exhausted = false;
+                    ids = ids.into_iter().take(window).collect();
+                }
+                dossier_links_left -= ids.len();
+                self.prefetch_dossier_memories(ids.clone()).await?;
+            }
             let mut links = Vec::new();
             for id in ids {
                 let Some(m) = self.memory(&id).await? else {
@@ -900,7 +989,7 @@ impl Query<'_> {
             }
             links.sort();
             for (_, id) in self.bound(links) {
-                if let Some((s, t, e)) = self.link(&id).await? {
+                if let Some((s, t, e)) = self.link(&id, dossier_actor).await? {
                     if s.id == n.id {
                         out.push((t, e));
                     } else if t.id == n.id {
@@ -1064,12 +1153,86 @@ impl Query<'_> {
         Ok((!spans.is_empty()).then(|| Value::Array(spans).to_string()))
     }
 
+    fn actor_reference(
+        n: &TopologyNode,
+        memory: TopologyNode,
+        row: ActorRefRow,
+        out: &mut Vec<Adjacency>,
+    ) {
+        let mut e = edge(
+            format!("actor-ref:{}:{}:{}", row.memory_id, row.actor_id, row.role),
+            &n.id,
+            &memory.id,
+            TopologyEdgeKind::Concerns,
+            row.provenance_json,
+        );
+        e.status = format!("recorded · {}", row.binding_state);
+        e.actor_reference = Some(crate::brain_topology::ActorReference {
+            role: row.role.clone(),
+            binding_state: row.binding_state,
+        });
+        e.rationale = format!("Recorded actor role: {}", row.role);
+        e.member_ids.push(row.actor_id);
+        out.push((memory, e));
+    }
+
+    async fn typed_actor_references(
+        &mut self,
+        n: &TopologyNode,
+        members: &[String],
+        rows: Vec<PayloadRow>,
+        out: &mut Vec<Adjacency>,
+    ) -> Result<()> {
+        let mut typed = BTreeSet::new();
+        for row in rows {
+            self.check_cancelled()?;
+            let Ok(value) = serde_json::from_str::<Value>(&row.payload_json) else {
+                continue;
+            };
+            for reference in value["payload"]["actors"].as_array().into_iter().flatten() {
+                if let Some(actor_id) = reference["actor_id"].as_str() {
+                    if members.iter().any(|member| member == actor_id) {
+                        typed.insert((
+                            actor_id.to_owned(),
+                            row.id.clone(),
+                            reference["role"].as_str().unwrap_or("mentioned").to_owned(),
+                            reference["binding_state"]
+                                .as_str()
+                                .unwrap_or("provisional")
+                                .to_owned(),
+                        ));
+                    }
+                }
+            }
+        }
+        let kept = self.scoped(typed.into_iter().collect(), |t| &t.1).await?;
+        for (actor_id, memory_id, role, binding_state) in self.bound(kept) {
+            if let Some(memory) = Box::pin(self.memory_node(&memory_id)).await? {
+                let provenance_json = format!("memory_metadata:{memory_id}@{}", memory.revision);
+                Self::actor_reference(
+                    n,
+                    memory,
+                    ActorRefRow {
+                        provenance_json,
+                        actor_id,
+                        memory_id,
+                        role,
+                        binding_state,
+                    },
+                    out,
+                );
+            }
+        }
+        Ok(())
+    }
+
     async fn actor_neighbours(&mut self, n: &TopologyNode, out: &mut Vec<Adjacency>) -> Result<()> {
         for actor_id in n.member_ids.clone() {
+            self.check_cancelled()?;
             let mut r = stmt(
                 self.tx
                     .query(
-                        "SELECT memory_id, role, binding_state, provenance_json
+                        "SELECT actor_id, memory_id, role, binding_state, provenance_json
                      FROM brain_memory_actor_ref WHERE actor_id = $a",
                     )
                     .bind(("a", actor_id.clone())),
@@ -1092,21 +1255,7 @@ impl Query<'_> {
             }
             for row in self.bound(kept) {
                 if let Some(memory) = Box::pin(self.memory_node(&row.memory_id)).await? {
-                    let mut e = edge(
-                        format!("actor-ref:{}:{actor_id}:{}", row.memory_id, row.role),
-                        &n.id,
-                        &memory.id,
-                        TopologyEdgeKind::Concerns,
-                        row.provenance_json,
-                    );
-                    e.status = format!("recorded · {}", row.binding_state);
-                    e.actor_reference = Some(crate::brain_topology::ActorReference {
-                        role: row.role.clone(),
-                        binding_state: row.binding_state.clone(),
-                    });
-                    e.rationale = format!("Recorded actor role: {}", row.role);
-                    e.member_ids.push(actor_id.clone());
-                    out.push((memory, e));
+                    Self::actor_reference(n, memory, row, out);
                 }
             }
             // Typed payload actors stay authoritative without a ref row.
@@ -1121,127 +1270,175 @@ impl Query<'_> {
                     .bind(("a", actor_id.clone())),
             )
             .await?;
-            let rows: Vec<PayloadRow> = r.take(0)?;
-            let mut typed = BTreeSet::new();
-            for row in rows {
-                let Ok(v) = serde_json::from_str::<Value>(&row.payload_json) else {
-                    continue;
-                };
-                for reference in v["payload"]["actors"].as_array().into_iter().flatten() {
-                    if reference["actor_id"].as_str() == Some(actor_id.as_str()) {
-                        typed.insert((
-                            row.id.clone(),
-                            reference["role"]
-                                .as_str()
-                                .unwrap_or("mentioned")
-                                .to_string(),
-                            reference["binding_state"]
-                                .as_str()
-                                .unwrap_or("provisional")
-                                .to_string(),
-                        ));
-                    }
-                }
-            }
-            let kept = self.scoped(typed.into_iter().collect(), |t| &t.0).await?;
-            for (mid, role, state) in self.bound(kept) {
-                if let Some(memory) = Box::pin(self.memory_node(&mid)).await? {
-                    let mut e = edge(
-                        format!("actor-ref:{mid}:{actor_id}:{role}"),
-                        &n.id,
-                        &memory.id,
-                        TopologyEdgeKind::Concerns,
-                        format!("memory_metadata:{mid}@{}", memory.revision),
-                    );
-                    e.status = format!("recorded · {state}");
-                    e.actor_reference = Some(crate::brain_topology::ActorReference {
-                        role: role.clone(),
-                        binding_state: state.clone(),
-                    });
-                    e.rationale = format!("Recorded actor role: {role}");
-                    e.member_ids.push(actor_id.clone());
-                    out.push((memory, e));
-                }
-            }
-            let mut r = stmt(
-                self.tx
-                    .query(ACTOR_MENTIONS_SURQL)
-                    .bind(("a", actor_id.clone())),
-            )
-            .await?;
+            self.typed_actor_references(n, std::slice::from_ref(&actor_id), r.take(0)?, out)
+                .await?;
+            let mut r = stmt(self.tx.query(ACTOR_MENTIONS_SURQL).bind(("a", actor_id))).await?;
             let mut mentions: Vec<MentionRow> = r.take(0)?;
             if let Some(cycle) = self.cycle() {
                 mentions.retain(|m| m.origin_kind == "article" && m.origin_scope == cycle);
             }
             let mentions = self.bound(mentions);
-            let keys: Vec<_> = mentions
+            self.actor_mentions(n, mentions, out).await?;
+        }
+        Ok(())
+    }
+
+    async fn dossier_actor_neighbours(
+        &mut self,
+        n: &TopologyNode,
+        out: &mut Vec<Adjacency>,
+    ) -> Result<()> {
+        // Bound each indexed family before dereferencing any candidate. The
+        // extra row records truncation, including when an invalid candidate
+        // later fails a revision or lifecycle check.
+        let cap = (self.limit + 1) as i64;
+        let mut r = stmt(
+            self.tx
+                .query(
+                    "SELECT actor_id, memory_id, role, binding_state, provenance_json
+             FROM brain_memory_actor_ref WITH INDEX brain_memory_actor_ref_actor
+             WHERE actor_id INSIDE $members LIMIT $cap;
+             SELECT actor_id, origin_kind, origin_scope, origin_id, origin_revision, spans_json,
+                    (native_input_revision ?? '') AS native_input_revision,
+                    (publication_batch ?? '') AS publication_batch
+             FROM brain_actor_mention WITH INDEX brain_actor_mention_actor
+             WHERE actor_id INSIDE $members AND origin_kind = 'article'
+             LIMIT $cap",
+                )
+                .bind(("members", n.member_ids.clone()))
+                .bind(("cap", cap)),
+        )
+        .await?;
+        let refs: Vec<ActorRefRow> = r.take(0)?;
+        let mentions: Vec<MentionRow> = r.take(1)?;
+        let refs = self.bound(refs);
+        let indexed_candidates = refs.len().saturating_add(mentions.len());
+        self.prefetch_dossier_memories(refs.iter().map(|row| row.memory_id.clone()).collect())
+            .await?;
+        for row in refs {
+            if self.memory(&row.memory_id).await?.is_some_and(|m| {
+                m.lifecycle == "active"
+                    && matches!(
+                        m.memory_kind.as_str(),
+                        "claim" | "atomic_claim" | "inference"
+                    )
+            }) {
+                if let Some(memory) = Box::pin(self.memory_node(&row.memory_id)).await? {
+                    Self::actor_reference(n, memory, row, out);
+                }
+            }
+        }
+
+        self.check_cancelled()?;
+        // Older typed payloads can lack materialized reference rows. Discover
+        // them with one bounded query for the family and validate exact IDs
+        // after parsing. Once indexed candidates fill the work window, the
+        // dossier is already partial and the compatibility scan can be deferred
+        // to the topology view.
+        if indexed_candidates < self.limit {
+            let members = n
+                .member_ids
                 .iter()
-                .filter(|m| m.origin_kind == "article" && !m.native_input_revision.is_empty())
-                .map(|m| crate::atlas_classify::OccurrenceKey::new(&m.origin_scope, &m.origin_id))
-                .collect();
-            self.native.prefetch(&keys).await?;
-            for mut m in mentions {
-                if m.origin_kind == "article" {
-                    if !m.native_input_revision.is_empty()
-                        && !self
-                            .native
-                            .mention_current(
-                                &crate::atlas_classify::OccurrenceKey::new(
-                                    &m.origin_scope,
-                                    &m.origin_id,
-                                ),
-                                &m.native_input_revision,
-                                &m.publication_batch,
-                            )
-                            .await?
-                    {
-                        self.gaps.insert(format!(
-                            "article:{}/{}: stale native mention generation",
-                            m.origin_scope, m.origin_id
-                        ));
-                        continue;
-                    }
-                    let Some(spans) = self.actor_spans(&m.origin_id, &m.spans_json).await? else {
-                        continue;
-                    };
-                    m.spans_json = spans;
-                }
-                let (kind, scope, id, revision) = (
-                    &m.origin_kind,
-                    &m.origin_scope,
-                    &m.origin_id,
-                    &m.origin_revision,
-                );
-                let neighbour = if kind == "article" {
-                    self.article_node(scope, id, revision).await?
-                } else if kind == "thread" {
-                    thread_history::get_thread_on(&*self.tx, id)
+                .map(|id| serde_json::to_string(id).map(|value| regex::escape(&value)))
+                .collect::<serde_json::Result<Vec<_>>>()?
+                .join("|");
+            let mut r = stmt(self.tx.query(
+                "LET $actor_pattern = <regex>$members;
+                 SELECT record::id(id) AS id, payload_json
+                 FROM memory WITH INDEX memory_lifecycle_kind
+                 WHERE lifecycle = 'active' AND memory_kind INSIDE ['claim', 'atomic_claim', 'inference']
+                   AND string::matches(payload_json, $actor_pattern)
+                 LIMIT $cap",
+            ).bind(("members", members)).bind(("cap", cap))).await?;
+            let rows = self.bound::<PayloadRow>(r.take(1)?);
+            self.prefetch_dossier_memories(rows.iter().map(|row| row.id.clone()).collect())
+                .await?;
+            self.typed_actor_references(n, &n.member_ids, rows, out)
+                .await?;
+        } else {
+            self.exhausted = false;
+        }
+
+        self.check_cancelled()?;
+        let mentions = self.bound(mentions);
+        self.actor_mentions(n, mentions, out).await
+    }
+
+    async fn actor_mentions(
+        &mut self,
+        n: &TopologyNode,
+        mentions: Vec<MentionRow>,
+        out: &mut Vec<Adjacency>,
+    ) -> Result<()> {
+        let keys: Vec<_> = mentions
+            .iter()
+            .filter(|m| m.origin_kind == "article" && !m.native_input_revision.is_empty())
+            .map(|m| crate::atlas_classify::OccurrenceKey::new(&m.origin_scope, &m.origin_id))
+            .collect();
+        self.native.prefetch(&keys).await?;
+        for mut m in mentions {
+            self.check_cancelled()?;
+            let actor_id = &m.actor_id;
+            if m.origin_kind == "article" {
+                if !m.native_input_revision.is_empty()
+                    && !self
+                        .native
+                        .mention_current(
+                            &crate::atlas_classify::OccurrenceKey::new(
+                                &m.origin_scope,
+                                &m.origin_id,
+                            ),
+                            &m.native_input_revision,
+                            &m.publication_batch,
+                        )
                         .await?
-                        .map(|t| {
-                            let mut s = source_node("thread", id, revision);
-                            s.label = t.title;
-                            s
-                        })
-                } else {
-                    Some(source_node(kind, id, revision))
-                };
-                if let Some(other) = neighbour {
-                    let mut e = edge(
-                        format!("mention:{actor_id}:{kind}:{scope}:{id}:{revision}"),
-                        &n.id,
-                        &other.id,
-                        TopologyEdgeKind::MentionedIn,
-                        format!(
-                            "brain_actor_mentions:{actor_id}:{kind}:{scope}:{id}@{revision}\n{}",
-                            m.spans_json
-                        ),
-                    );
-                    if m.origin_kind == "article" && m.native_input_revision.is_empty() {
-                        e.status = "retained".into();
-                    }
-                    e.member_ids.push(actor_id.clone());
-                    out.push((other, e));
+                {
+                    self.gaps.insert(format!(
+                        "article:{}/{}: stale native mention generation",
+                        m.origin_scope, m.origin_id
+                    ));
+                    continue;
                 }
+                let Some(spans) = self.actor_spans(&m.origin_id, &m.spans_json).await? else {
+                    continue;
+                };
+                m.spans_json = spans;
+            }
+            let (kind, scope, id, revision) = (
+                &m.origin_kind,
+                &m.origin_scope,
+                &m.origin_id,
+                &m.origin_revision,
+            );
+            let neighbour = if kind == "article" {
+                self.article_node(scope, id, revision).await?
+            } else if kind == "thread" {
+                thread_history::get_thread_on(&*self.tx, id)
+                    .await?
+                    .map(|t| {
+                        let mut s = source_node("thread", id, revision);
+                        s.label = t.title;
+                        s
+                    })
+            } else {
+                Some(source_node(kind, id, revision))
+            };
+            if let Some(other) = neighbour {
+                let mut e = edge(
+                    format!("mention:{actor_id}:{kind}:{scope}:{id}:{revision}"),
+                    &n.id,
+                    &other.id,
+                    TopologyEdgeKind::MentionedIn,
+                    format!(
+                        "brain_actor_mentions:{actor_id}:{kind}:{scope}:{id}@{revision}\n{}",
+                        m.spans_json
+                    ),
+                );
+                if m.origin_kind == "article" && m.native_input_revision.is_empty() {
+                    e.status = "retained".into();
+                }
+                e.member_ids.push(actor_id.to_owned());
+                out.push((other, e));
             }
         }
         Ok(())
@@ -1919,7 +2116,7 @@ impl Query<'_> {
                 out.push((c, e));
             }
         }
-        if self.binding {
+        if self.projection == Projection::BriefBinding {
             // Direct actors and evidence above are sufficient for brief links.
             // Related article expansion belongs to the graph/Related readers.
             return Ok(());
@@ -2183,6 +2380,9 @@ impl Query<'_> {
         }
         self.typed_links(n, &mut out).await?;
         match n.kind {
+            TopologyNodeKind::Entity if self.projection == Projection::Dossier => {
+                self.dossier_actor_neighbours(n, &mut out).await?;
+            }
             TopologyNodeKind::Entity => self.actor_neighbours(n, &mut out).await?,
             TopologyNodeKind::Claim | TopologyNodeKind::Inference => {
                 Box::pin(self.memory_neighbours(n, &mut out)).await?
@@ -2298,7 +2498,7 @@ pub async fn topology_snapshot(
     seed: &TopologySeed,
     options: &TopologyOptions,
 ) -> Result<TopologySnapshot> {
-    snapshot_worker(repo, seed, options, false).await
+    snapshot_worker(repo, seed, options, Projection::Graph).await
 }
 
 /// Direct article bindings for a brief read. Skips the neighborhood walk that
@@ -2313,14 +2513,29 @@ pub async fn brief_binding_snapshot(
         max_edges: 64,
         ..Default::default()
     };
-    snapshot_worker(repo, seed, &options, true).await
+    snapshot_worker(repo, seed, &options, Projection::BriefBinding).await
+}
+
+/// Direct recorded actor associations with the dossier's response limits.
+pub(super) async fn dossier_snapshot(repo: &Repository, id: &str) -> Result<TopologySnapshot> {
+    let options = TopologyOptions {
+        depth: 1,
+        ..Default::default()
+    };
+    snapshot_worker(
+        repo,
+        &TopologySeed::Actor(id.into()),
+        &options,
+        Projection::Dossier,
+    )
+    .await
 }
 
 async fn snapshot_worker(
     repo: &Repository,
     seed: &TopologySeed,
     options: &TopologyOptions,
-    binding: bool,
+    projection: Projection,
 ) -> Result<TopologySnapshot> {
     ensure!(
         options.continuation_token.is_none(),
@@ -2339,7 +2554,7 @@ async fn snapshot_worker(
                 if caller.is_closed() {
                     return Err(TxError::Abort("Topology request cancelled".into()));
                 }
-                snapshot_in(repo, tx, seed, options, binding, caller)
+                Box::pin(snapshot_in(repo, tx, seed, options, projection, caller))
                     .await
                     .map_err(|e| TxError::Abort(format!("{e:#}")))
             }
@@ -2363,7 +2578,7 @@ async fn snapshot_in(
     tx: Tx,
     seed: &TopologySeed,
     options: &TopologyOptions,
-    binding: bool,
+    projection: Projection,
     cancel: &tokio::sync::watch::Sender<()>,
 ) -> Result<TopologySnapshot> {
     let changed: Option<i64> = {
@@ -2386,7 +2601,7 @@ async fn snapshot_in(
         body_revisions: HashMap::new(),
         native: super::native_visibility::NativeVisibility::new(tx.clone()),
         tx,
-        binding,
+        projection,
         cancel,
     };
     let mut snapshot = TopologySnapshot {
@@ -2434,7 +2649,7 @@ async fn snapshot_in(
             revision,
         } => roots.push(source_node(origin, source_id, revision)),
         TopologySeed::Link(id) | TopologySeed::Related(id) => {
-            if let Some((s, t, e)) = q.link(id).await? {
+            if let Some((s, t, e)) = q.link(id, None).await? {
                 roots.push(s);
                 roots.push(t);
                 initial_edges.push(e);
@@ -2676,12 +2891,13 @@ async fn snapshot_in(
     let exhausted = q.exhausted;
     let gaps = std::mem::take(&mut q.gaps);
     admit(&mut snapshot, nodes, edges, options, exhausted, gaps);
-    if binding {
+    if projection == Projection::BriefBinding {
         // Brief decoration reads only the admitted nodes. Association payloads
         // and the neighborhood summary are needed only by the graph page.
         return Ok(snapshot);
     }
     for n in snapshot.nodes.clone() {
+        q.check_cancelled()?;
         if n.is_root {
             continue;
         }
@@ -2721,6 +2937,9 @@ async fn snapshot_in(
             }
             _ => {}
         }
+    }
+    if projection == Projection::Dossier {
+        return Ok(snapshot);
     }
     // Summary hydration uses its own hard ceiling before any payload reads;
     // the explorer's larger admitted graph remains unchanged.

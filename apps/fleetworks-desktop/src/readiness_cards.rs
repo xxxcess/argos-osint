@@ -42,7 +42,12 @@ impl State {
 
 pub(crate) fn workstation_section(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
     let open = state.workstation_status_checks_open;
-    let summary = summary_label(state);
+    let connected = state.connected();
+    let summary = if connected {
+        summary_label(state)
+    } else {
+        "Status checks · offline".to_owned()
+    };
     rune::col()
         .key("status-checks-toggle")
         .w_full()
@@ -56,7 +61,13 @@ pub(crate) fn workstation_section(state: &State, preferences: ViewPreferences, k
                     state.workstation_status_checks_open = !state.workstation_status_checks_open;
                 }),
         )
-        .children(open.then(|| checks(state, preferences, kit)))
+        .children(open.then(|| {
+            if connected {
+                checks(state, preferences, kit)
+            } else {
+                quiet("Connect a backend to see status checks.", kit)
+            }
+        }))
 }
 
 pub(crate) fn setup_section(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
@@ -495,13 +506,25 @@ fn refresh_button(key: &str, state: &State, preferences: ViewPreferences, kit: &
 }
 
 /// Keep the highest-priority observed blocker and a safe next action above the disclosure.
+pub(crate) enum PrimaryIssueScope {
+    GatewaySetup,
+    Workstation { include_other_blockers: bool },
+}
+
 pub(crate) fn primary_issue(
     state: &State,
-    include_other_blockers: bool,
+    scope: PrimaryIssueScope,
     preferences: ViewPreferences,
     kit: &Kit,
 ) -> Option<El> {
-    if state.setup_gateway && matches!(state.readiness, Load::Failed(_)) {
+    let setup = matches!(scope, PrimaryIssueScope::GatewaySetup);
+    let include_other_blockers = match scope {
+        PrimaryIssueScope::GatewaySetup => true,
+        PrimaryIssueScope::Workstation {
+            include_other_blockers,
+        } => include_other_blockers,
+    };
+    if setup && matches!(state.readiness, Load::Failed(_)) {
         return Some(
             rune::row()
                 .key("readiness-critical")
@@ -527,7 +550,7 @@ pub(crate) fn primary_issue(
         .filter(|check| {
             check.id != ReadinessCheckId::Registration
                 && check.id != ReadinessCheckId::ClassifierTraining
-                && (state.setup_gateway
+                && (setup
                     || !matches!(
                         check.id,
                         ReadinessCheckId::ActorCatalog | ReadinessCheckId::ActorSearch

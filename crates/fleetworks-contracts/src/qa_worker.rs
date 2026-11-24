@@ -501,6 +501,7 @@ impl QaWorkerSequence {
                     .is_some_and(|dialogue| dialogue.kind == QaDialogueKind::Operational)
                     && verified_operational_sources(request, &self.draft).is_none()
                 {
+                    self.draft.truncate(previous_length);
                     return Err(invalid(
                         "QA worker returned an unverified operational draft",
                     ));

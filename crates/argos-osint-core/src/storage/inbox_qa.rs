@@ -965,7 +965,7 @@ async fn append_event_in(
     let terminal = state.is_terminal();
     exchange.turn.cursor += 1;
     exchange.turn.state = state;
-    if terminal || state == QaTurnState::Retrying {
+    if terminal {
         exchange.turn.provisional_reply = None;
         for event in &mut exchange.events {
             event.provisional_delta = None;

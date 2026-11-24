@@ -44,7 +44,6 @@ use rune::TextEdit;
 use rune::Tx;
 use rune_kit::Kit;
 use rune_kit::ProgressCircle;
-use rune_kit::RadioGroup;
 use rune_kit::RadioItem;
 
 use crate::accessibility::ViewPreferences;
@@ -1138,16 +1137,28 @@ fn model_footprint(target: QaModelTarget) -> String {
     }
 }
 
-const GENERATOR_CHOICES: [QaGeneratorPreference; 3] = [
-    QaGeneratorPreference::Automatic,
-    QaGeneratorPreference::FlanT5Small,
-    QaGeneratorPreference::FlanT5Base,
+const GENERATOR_CHOICES: [(QaGeneratorPreference, &str); 3] = [
+    (
+        QaGeneratorPreference::Automatic,
+        "assistant-generator-automatic",
+    ),
+    (
+        QaGeneratorPreference::FlanT5Small,
+        "assistant-generator-small",
+    ),
+    (
+        QaGeneratorPreference::FlanT5Base,
+        "assistant-generator-base",
+    ),
 ];
 
-const DECISION_CHOICES: [QaDecisionPreference; 3] = [
-    QaDecisionPreference::RulesOnly,
-    QaDecisionPreference::Julia1Q8,
-    QaDecisionPreference::VllmD3EdgeQ8,
+const DECISION_CHOICES: [(QaDecisionPreference, &str); 3] = [
+    (QaDecisionPreference::RulesOnly, "assistant-decision-rules"),
+    (QaDecisionPreference::Julia1Q8, "assistant-decision-julia"),
+    (
+        QaDecisionPreference::VllmD3EdgeQ8,
+        "assistant-decision-edge",
+    ),
 ];
 
 fn generator_target(preference: QaGeneratorPreference) -> Option<QaModelTarget> {
@@ -1227,34 +1238,59 @@ fn role_summary(preferred: &str, effective: &str, reason: Option<&str>, kit: &Ki
         .children(reason.map(|reason| hint(reason, kit)))
 }
 
+fn model_selector(
+    label: &str,
+    key: &str,
+    disabled: bool,
+    options: impl Iterator<Item = El>,
+    kit: &Kit,
+) -> El {
+    rune::col()
+        .key(key.to_owned())
+        .role("radiogroup")
+        .label(label.to_owned())
+        .focus_group()
+        .disabled(disabled)
+        .gap(8.0)
+        .child(
+            rune::text(label)
+                .font(kit.ty.small.lh(11.0))
+                .color(kit.c.text_faint)
+                .a11y_hidden(),
+        )
+        .child(rune::col().key("items").gap(12.0).children(options))
+}
+
 fn generator_settings_content(
     state: &State,
     settings: &QaSettings,
     generator: QaGeneratorSettings,
     kit: &Kit,
 ) -> El {
-    let mut selector = RadioGroup::new()
-        .label("Generator")
-        .disabled(!state.can_manage_inbox_qa());
-    for preference in GENERATOR_CHOICES {
-        let label = generator_label(preference);
-        let label = generator_target(preference).map_or_else(
-            || label.into(),
-            |target| {
-                format!(
-                    "{label} · {:.0} MB",
-                    target.weight_bytes() as f64 / 1_000_000.0
-                )
-            },
-        );
-        selector = selector.item(
-            RadioItem::new(label, preference == generator.preference).on_select(
-                move |state: &mut State| {
-                    state.set_model_preference(ModelPreference::Generator(preference));
+    let disabled = !state.can_manage_inbox_qa();
+    let options = GENERATOR_CHOICES
+        .into_iter()
+        .enumerate()
+        .map(|(index, (preference, key))| {
+            let label = generator_label(preference);
+            let label = generator_target(preference).map_or_else(
+                || label.into(),
+                |target| {
+                    format!(
+                        "{label} · {:.0} MB",
+                        target.weight_bytes() as f64 / 1_000_000.0
+                    )
                 },
-            ),
-        );
-    }
+            );
+            RadioItem::new(label, preference == generator.preference)
+                .disabled(disabled)
+                .on_select(move |state: &mut State| {
+                    state.set_model_preference(ModelPreference::Generator(preference));
+                })
+                .build(kit)
+                .key(key)
+                .position_in_set(index + 1, GENERATOR_CHOICES.len())
+        });
     let phase = if generator.phase == QaPhase::Ready && generator.effective.is_none() {
         QaPhase::Unavailable
     } else {
@@ -1284,10 +1320,17 @@ fn generator_settings_content(
         })
         .and_then(|turn| turn.context);
     rune::col()
+        .key("assistant-generator-section")
         .w_full()
         .min_w(0.0)
         .gap(8.0)
-        .child(selector.build(kit).key("assistant-generator-preference"))
+        .child(model_selector(
+            "Generator",
+            "assistant-generator-preference",
+            disabled,
+            options,
+            kit,
+        ))
         .child(role_summary(
             generator_label(generator.preference),
             generator.effective.map_or("None", QaModelTarget::label),
@@ -1308,23 +1351,25 @@ fn generator_settings_content(
 }
 
 fn decision_settings_content(state: &State, decision: QaDecisionSettings, kit: &Kit) -> El {
-    let mut selector = RadioGroup::new()
-        .label("Decision")
-        .disabled(!state.can_manage_inbox_qa());
-    for preference in DECISION_CHOICES {
-        let label = match preference {
-            QaDecisionPreference::Julia1Q8 => "Julia-1 Q8 · 168 MB",
-            QaDecisionPreference::VllmD3EdgeQ8 => "vLLM d3-edge Q8 · 806 MB",
-            _ => decision_label(preference),
-        };
-        selector = selector.item(
-            RadioItem::new(label, preference == decision.preference).on_select(
-                move |state: &mut State| {
+    let disabled = !state.can_manage_inbox_qa();
+    let options = DECISION_CHOICES
+        .into_iter()
+        .enumerate()
+        .map(|(index, (preference, key))| {
+            let label = match preference {
+                QaDecisionPreference::Julia1Q8 => "Julia-1 Q8 · 168 MB",
+                QaDecisionPreference::VllmD3EdgeQ8 => "vLLM d3-edge Q8 · 806 MB",
+                _ => decision_label(preference),
+            };
+            RadioItem::new(label, preference == decision.preference)
+                .disabled(disabled)
+                .on_select(move |state: &mut State| {
                     state.set_model_preference(ModelPreference::Decision(preference));
-                },
-            ),
-        );
-    }
+                })
+                .build(kit)
+                .key(key)
+                .position_in_set(index + 1, DECISION_CHOICES.len())
+        });
     let phase = match (decision.effective, decision.phase) {
         (QaDecisionPreference::RulesOnly, QaPhase::Off | QaPhase::Ready | QaPhase::Unavailable) => {
             None
@@ -1332,10 +1377,17 @@ fn decision_settings_content(state: &State, decision: QaDecisionSettings, kit: &
         (_, phase) => Some(model_phase(phase)),
     };
     rune::col()
+        .key("assistant-decision-section")
         .w_full()
         .min_w(0.0)
         .gap(8.0)
-        .child(selector.build(kit).key("assistant-decision-preference"))
+        .child(model_selector(
+            "Decision",
+            "assistant-decision-preference",
+            disabled,
+            options,
+            kit,
+        ))
         .child(role_summary(
             decision_label(decision.preference),
             decision_label(decision.effective),
@@ -2152,28 +2204,38 @@ mod tests {
         runtime
     }
 
-    fn model_setting_key(runtime: &Runtime<State>, label: &str) -> String {
-        runtime
+    fn choose_model_setting(runtime: &mut Runtime<State>, label: &str, now: f64) -> String {
+        let option = runtime
             .elements()
             .into_iter()
             .find(|element| element.role == "radio" && element.label.as_deref() == Some(label))
-            .unwrap_or_else(|| panic!("missing model setting {label}"))
-            .path
-    }
-
-    fn choose_model_setting(runtime: &mut Runtime<State>, label: &str, now: f64) -> String {
-        let path = model_setting_key(runtime, label);
-        let focus = path.clone();
+            .unwrap_or_else(|| panic!("missing model setting {label}"));
+        let path = option.path;
+        let key = option.key.expect("model setting key");
         runtime.update(move |_, tx| {
-            tx.scroll_into_view(focus.clone());
-            tx.focus(focus, true);
+            tx.scroll_into_view(key.clone());
+            tx.focus(key, true);
         });
         runtime.frame(now);
+        let control = runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.path == path)
+            .unwrap_or_else(|| panic!("missing model setting {label} after scrolling"));
         assert!(
-            runtime.elements().into_iter().any(|element| {
-                element.path == path && element.focused && element.visible == element.rect
-            }),
-            "model choice {label} must be visible and focused"
+            control.focused && control.focus_visible,
+            "model choice {label} must have keyboard focus"
+        );
+        // Rune subtracts the clipped edges to report width and height.
+        assert!(
+            control
+                .visible
+                .into_iter()
+                .zip(control.rect)
+                .all(|(visible, actual)| (visible - actual).abs() < 0.001),
+            "model choice {label} must be fully visible: {:?} of {:?}",
+            control.visible,
+            control.rect
         );
         runtime.key(KeyEvent {
             key: Key::Text(" ".into()),
@@ -2197,18 +2259,23 @@ mod tests {
     #[test]
     fn assistant_preferences_save_independently_and_keep_focus_at_minimum_width() {
         let mut runtime = model_settings_runtime();
-        let automatic = model_setting_key(&runtime, "Automatic");
-        let small = model_setting_key(&runtime, "FLAN-T5 Small · 308 MB");
-        let base = model_setting_key(&runtime, "FLAN-T5 Base · 990 MB");
-        let rules = model_setting_key(&runtime, "Rules only");
-        let julia = model_setting_key(&runtime, "Julia-1 Q8 · 168 MB");
-        let edge = model_setting_key(&runtime, "vLLM d3-edge Q8 · 806 MB");
-        assert!(automatic.ends_with("/item0"));
-        assert!(small.ends_with("/item1"));
-        assert!(base.ends_with("/item2"));
-        assert!(rules.ends_with("/item0"));
-        assert!(julia.ends_with("/item1"));
-        assert!(edge.ends_with("/item2"));
+        let choices: Vec<_> = runtime
+            .elements()
+            .into_iter()
+            .filter(|element| element.role == "radio")
+            .filter_map(|element| element.label)
+            .collect();
+        assert_eq!(
+            choices,
+            [
+                "Automatic",
+                "FLAN-T5 Small · 308 MB",
+                "FLAN-T5 Base · 990 MB",
+                "Rules only",
+                "Julia-1 Q8 · 168 MB",
+                "vLLM d3-edge Q8 · 806 MB",
+            ]
+        );
         assert!(runtime.find("assistant-context-usage").is_some());
 
         let generator = choose_model_setting(&mut runtime, "FLAN-T5 Base · 990 MB", 1.5);

@@ -22,6 +22,7 @@ use axum::http::StatusCode;
 use fleetworks_contracts::capabilities::Capabilities;
 use fleetworks_contracts::capabilities::CONNECT_REGISTRY_FEATURE;
 use fleetworks_contracts::chat::ChatSourceKind;
+use fleetworks_contracts::chat::QA_MODEL_SETTINGS_FEATURE;
 use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
 use fleetworks_contracts::context::CredentialPurpose;
 use fleetworks_contracts::context::Permission;
@@ -199,6 +200,16 @@ impl LocalGateway {
         })
     }
 
+    /// Attach the Embedded-only runtime for qualified decision models.
+    #[must_use]
+    pub fn with_qa_decision(
+        mut self,
+        runtime: Arc<dyn crate::inbox_qa::decision::DecisionRuntime>,
+    ) -> Self {
+        self.qa = self.qa.with_decision(runtime);
+        self
+    }
+
     /// Share the diagnosis reported by this companion's supervised model worker.
     #[must_use]
     pub fn qa_runtime_availability(&self) -> crate::inbox_qa::QaRuntimeAvailability {
@@ -372,13 +383,19 @@ impl LocalGateway {
             .await?;
         match op {
             IpcOperation::QaSettings => json_payload(
-                inbox_qa::settings_request(&self.state, &context, Some(&self.qa_availability))
-                    .await?,
+                inbox_qa::settings_request(
+                    &self.state,
+                    &context,
+                    &self.qa,
+                    Some(&self.qa_availability),
+                )
+                .await?,
             ),
             IpcOperation::QaSettingsUpdate(request) => json_payload(
                 inbox_qa::update_request(
                     &self.state,
                     &context,
+                    &self.qa,
                     request,
                     Some(&self.qa_availability),
                 )
@@ -1262,6 +1279,7 @@ impl LocalGateway {
             "workstation-cycle-history-v1",
             crate::inbox_qa::FEATURE,
             QA_TRIAGE_FEATURE,
+            QA_MODEL_SETTINGS_FEATURE,
         ]
         .into_iter()
         .map(str::to_owned)

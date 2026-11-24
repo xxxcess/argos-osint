@@ -9,6 +9,7 @@ use argos_osint_core::storage::jobs_view;
 use chrono::Utc;
 use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::ChatSourceReference;
+use fleetworks_contracts::chat::QaDecisionPreference;
 use fleetworks_contracts::chat::QaRelatedActivity;
 use fleetworks_contracts::chat::QaRelatedActivityRequest;
 use fleetworks_contracts::chat::QaRelationshipReason;
@@ -16,6 +17,8 @@ use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use tokio::time::Instant;
 
+use super::decision::DecisionChoice;
+use super::decision::DecisionMenu;
 use super::require;
 use super::storage_error;
 use super::QaTarget;
@@ -208,7 +211,9 @@ pub(crate) async fn related_activity_request(
                     return Ok(QaRelatedActivity::TriageUnavailable);
                 };
                 if context.permits(Permission::ReadWorkstationActivity) {
-                    if let Some(related) = jobs_for_check(state, context, &source.id).await? {
+                    if let Some(related) =
+                        jobs_for_check(state, context, target, &setting, &source.id).await?
+                    {
                         return Ok(related);
                     }
                 }
@@ -222,8 +227,25 @@ pub(crate) async fn related_activity_request(
         .unwrap_or(Ok(QaRelatedActivity::TriageUnavailable))?;
     context.revalidate(&state.repo).await?;
     let current = store::setting(&state.repo).await.map_err(storage_error)?;
-    if !current.enabled || current.generation != setting.generation {
+    if !current.enabled
+        || current.generation != setting.generation
+        || current.decision_generation != setting.decision_generation
+    {
         return Ok(QaRelatedActivity::TriageUnavailable);
+    }
+    if let QaRelatedActivity::Found { target, .. } = &result {
+        if target.kind == ChatSourceKind::Job {
+            let scope = activity_api::scope_for_request(&state.repo, context, None).await?;
+            let job =
+                activity_api::authorized_job(&state.repo, context, &scope, &target.id).await?;
+            if !job.private_details_available
+                || !OPERATIONS.into_iter().any(|(check, operation)| {
+                    check.as_str() == source.id && operation == job.job.operation
+                })
+            {
+                return Ok(QaRelatedActivity::NoRelatedActivity);
+            }
+        }
     }
     Ok(result)
 }
@@ -231,6 +253,8 @@ pub(crate) async fn related_activity_request(
 async fn jobs_for_check(
     state: &ApiState,
     context: &ResolvedRequest,
+    target: &QaTarget,
+    setting: &store::Setting,
     id: &str,
 ) -> Result<Option<QaRelatedActivity>, ApiError> {
     let Some((_, operation)) = OPERATIONS
@@ -249,24 +273,69 @@ async fn jobs_for_check(
         context.scope_id(),
         &scope,
         &filter,
-        MAX_CANDIDATES,
+        MAX_CANDIDATES + 1,
     )
     .await
     .map_err(crate::internal)?;
-    let mut private = rows.iter().filter(|row| row.private_details_available);
-    let Some(row) = private.next() else {
-        return Ok(None);
-    };
-    // A truncated page cannot establish that the lone visible row is unique.
-    if rows.len() == MAX_CANDIDATES || private.next().is_some() {
+    if rows.len() > MAX_CANDIDATES {
         return Ok(Some(QaRelatedActivity::TriageUnavailable));
     }
-    let current = activity_api::authorized_job(&state.repo, context, &scope, &row.job.id).await?;
-    if !current.private_details_available || current.job.operation != operation {
-        return Ok(None);
-    }
-    let target =
-        ChatSourceReference::new(ChatSourceKind::Job, current.job.id).map_err(|_| crate::bad())?;
+    let private = rows
+        .iter()
+        .filter(|row| row.private_details_available)
+        .collect::<Vec<_>>();
+    let row = match private.as_slice() {
+        [] => return Ok(None),
+        [row] => *row,
+        candidates => {
+            let Some(runtime) = target
+                .decision
+                .as_ref()
+                .filter(|_| setting.decision_preference != QaDecisionPreference::RulesOnly)
+            else {
+                return Ok(Some(QaRelatedActivity::TriageUnavailable));
+            };
+            let label = crate::workstation::qa_readiness_label(id).ok_or_else(crate::missing)?;
+            let menu = DecisionMenu {
+                state: format!(
+                    "A workstation readiness notice needs relevant recorded activity for {label}."
+                ),
+                candidates: candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(index, row)| {
+                        let fact = activity_projection(&row.job, "This job");
+                        format!(
+                            "Job {} in newest-first order. {}",
+                            index + 1,
+                            fact.explanation()
+                        )
+                    })
+                    .collect(),
+            };
+            match runtime
+                .score(
+                    setting.decision_preference,
+                    setting.decision_generation,
+                    menu,
+                )
+                .await
+            {
+                DecisionChoice::Candidate(index) => {
+                    let Some(row) = candidates.get(index) else {
+                        return Ok(Some(QaRelatedActivity::TriageUnavailable));
+                    };
+                    *row
+                }
+                DecisionChoice::Abstain => return Ok(Some(QaRelatedActivity::NoRelatedActivity)),
+                DecisionChoice::Unavailable => {
+                    return Ok(Some(QaRelatedActivity::TriageUnavailable))
+                }
+            }
+        }
+    };
+    let target = ChatSourceReference::new(ChatSourceKind::Job, row.job.id.clone())
+        .map_err(|_| crate::bad())?;
     Ok(Some(QaRelatedActivity::Found {
         target,
         reason: QaRelationshipReason::SharedOperation,

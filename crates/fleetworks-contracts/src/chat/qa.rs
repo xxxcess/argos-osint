@@ -25,6 +25,8 @@ pub const QA_EVENTS_PATH: &str = "/api/v2/workstation/chat/events";
 pub const QA_CANCEL_PATH: &str = "/api/v2/workstation/chat/cancel";
 /// Embedded capability for direct Assistant answers and inline triage.
 pub const QA_TRIAGE_FEATURE: &str = "inbox-qa-triage-v1";
+/// Embedded capability for independently revisioned generator and decision preferences.
+pub const QA_MODEL_SETTINGS_FEATURE: &str = "inbox-qa-model-settings-v1";
 /// Read-only related activity lookup over private Embedded IPC.
 pub const QA_RELATED_ACTIVITY_PATH: &str = "/api/v2/workstation/chat/related-activity";
 
@@ -73,10 +75,99 @@ pub enum QaAvailabilityReason {
     SandboxUnsupported,
     /// The companion could not start or warm an isolated model worker.
     WorkerStartFailed,
-    /// Available workstation memory cannot safely accommodate even Small.
+    /// Available workstation memory cannot safely accommodate the selected model.
     InsufficientResources,
     /// The selected model assets are unavailable or could not be verified.
     ModelProvisionFailed,
+}
+
+/// Saved generator policy, independent of the currently running model.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaGeneratorPreference {
+    #[default]
+    Automatic,
+    FlanT5Small,
+    FlanT5Base,
+}
+
+/// Saved decision policy, as well as the effective rules or local scorer.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaDecisionPreference {
+    #[default]
+    RulesOnly,
+    Julia1Q8,
+    VllmD3EdgeQ8,
+}
+
+/// Redacted reason a selected decision scorer is unavailable.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaDecisionAvailabilityReason {
+    AwaitingQualification,
+    InsufficientResources,
+    PackMissing,
+    WorkerStartFailed,
+}
+
+/// The saved generator policy and the verified worker, if ready.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct QaGeneratorSettings {
+    pub preference: QaGeneratorPreference,
+    pub effective: Option<QaModelTarget>,
+    pub phase: QaPhase,
+    pub reason: Option<QaAvailabilityReason>,
+}
+
+impl QaGeneratorSettings {
+    /// Describe the saved policy and observed generator lifecycle.
+    #[must_use]
+    pub const fn new(
+        preference: QaGeneratorPreference,
+        effective: Option<QaModelTarget>,
+        phase: QaPhase,
+        reason: Option<QaAvailabilityReason>,
+    ) -> Self {
+        Self {
+            preference,
+            effective,
+            phase,
+            reason,
+        }
+    }
+}
+
+/// The saved decision policy and the currently usable engine.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct QaDecisionSettings {
+    pub preference: QaDecisionPreference,
+    pub effective: QaDecisionPreference,
+    pub phase: QaPhase,
+    pub reason: Option<QaDecisionAvailabilityReason>,
+}
+
+impl QaDecisionSettings {
+    /// Describe the saved policy and observed decision lifecycle.
+    #[must_use]
+    pub const fn new(
+        preference: QaDecisionPreference,
+        effective: QaDecisionPreference,
+        phase: QaPhase,
+        reason: Option<QaDecisionAvailabilityReason>,
+    ) -> Self {
+        Self {
+            preference,
+            effective,
+            phase,
+            reason,
+        }
+    }
 }
 
 /// Inference settings and caller-specific management authority.
@@ -96,6 +187,10 @@ pub struct QaSettings {
     /// Optional progress from the private Embedded installer or current worker startup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_stage: Option<QaStartupStage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generator: Option<QaGeneratorSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<QaDecisionSettings>,
 }
 
 impl QaSettings {
@@ -117,6 +212,8 @@ impl QaSettings {
             model_target: QaModelTarget::default(),
             availability_reason: None,
             startup_stage: None,
+            generator: None,
+            decision: None,
         }
     }
 }
@@ -128,7 +225,12 @@ impl QaSettings {
 pub struct QaSettingsUpdate {
     pub context: MutationContext,
     pub expected_revision: u64,
-    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generator_preference: Option<QaGeneratorPreference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_preference: Option<QaDecisionPreference>,
 }
 
 impl QaSettingsUpdate {
@@ -136,10 +238,35 @@ impl QaSettingsUpdate {
     #[must_use]
     pub fn new(context: MutationContext, expected_revision: u64, enabled: bool) -> Self {
         Self {
+            enabled: Some(enabled),
+            ..Self::preferences(context, expected_revision)
+        }
+    }
+
+    /// Start a partial update without modifying the backend inference switch.
+    #[must_use]
+    pub fn preferences(context: MutationContext, expected_revision: u64) -> Self {
+        Self {
             context,
             expected_revision,
-            enabled,
+            enabled: None,
+            generator_preference: None,
+            decision_preference: None,
         }
+    }
+
+    /// Set the generator preference on a peer that advertises model settings.
+    #[must_use]
+    pub const fn with_generator_preference(mut self, preference: QaGeneratorPreference) -> Self {
+        self.generator_preference = Some(preference);
+        self
+    }
+
+    /// Set the decision preference on a peer that advertises model settings.
+    #[must_use]
+    pub const fn with_decision_preference(mut self, preference: QaDecisionPreference) -> Self {
+        self.decision_preference = Some(preference);
+        self
     }
 }
 
@@ -464,6 +591,12 @@ pub struct QaTurn {
     pub conversation: Option<QaConversationReply>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<QaContextUsage>,
+    /// The verified generator that produced a nonzero context usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_target: Option<QaModelTarget>,
+    /// The generation under which that worker handled this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -495,6 +628,8 @@ impl QaTurn {
             notice: None,
             conversation: None,
             context: None,
+            model_target: None,
+            model_generation: None,
             reply: None,
             provisional_reply: None,
             related_activity: None,
@@ -547,6 +682,35 @@ impl QaEventPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assistant_preferences_are_independent_of_legacy_toggles() {
+        let legacy = serde_json::json!({
+            "context": {
+                "registration_id": "registration-1",
+                "expected_registration_revision": 1,
+                "expected_context_revision": 1,
+            },
+            "expected_revision": 5,
+            "enabled": false,
+        });
+        let toggle: QaSettingsUpdate = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(toggle.enabled, Some(false));
+        assert_eq!(toggle.generator_preference, None);
+        assert_eq!(toggle.decision_preference, None);
+        assert_eq!(serde_json::to_value(&toggle).unwrap(), legacy);
+        let patch = QaSettingsUpdate::preferences(toggle.context, 5)
+            .with_generator_preference(QaGeneratorPreference::FlanT5Small)
+            .with_decision_preference(QaDecisionPreference::VllmD3EdgeQ8);
+        let encoded = serde_json::to_value(&patch).unwrap();
+        assert!(encoded.get("enabled").is_none());
+        assert_eq!(encoded["generator_preference"], "flan_t5_small");
+        assert_eq!(encoded["decision_preference"], "vllm_d3_edge_q8");
+        assert_eq!(
+            serde_json::from_value::<QaSettingsUpdate>(encoded).unwrap(),
+            patch
+        );
+    }
 
     #[test]
     fn related_activity_rejects_untyped_inputs_and_keeps_targets_internal() {

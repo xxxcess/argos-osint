@@ -1,6 +1,7 @@
 //! Authenticated Inbox QA admission and reads over private Embedded IPC.
 
 mod comparison;
+pub mod decision;
 mod metrics;
 mod question;
 mod readiness;
@@ -22,9 +23,9 @@ use argos_osint_core::storage::tx::TxError;
 use axum::http::StatusCode;
 use fleetworks_contracts::chat::{
     ChatSourceKind, ChatSourceReference, QaAvailabilityReason, QaCancelRequest,
-    QaConversationReply, QaEventPage, QaEventQuery, QaModelTarget, QaPhase, QaRelatedActivity,
-    QaSettings, QaSettingsUpdate, QaStartupStage, QaTurn, QaTurnNotice, QaTurnRequest,
-    QA_MAX_FINDINGS, QA_MAX_WORDS,
+    QaConversationReply, QaEventPage, QaEventQuery, QaGeneratorSettings, QaModelTarget, QaPhase,
+    QaRelatedActivity, QaSettings, QaSettingsUpdate, QaStartupStage, QaTurn, QaTurnNotice,
+    QaTurnRequest, QA_MAX_FINDINGS, QA_MAX_WORDS,
 };
 use fleetworks_contracts::context::{CredentialPurpose, MutationContext, Permission};
 use fleetworks_contracts::qa_worker::{
@@ -325,6 +326,7 @@ pub(crate) struct QaTarget {
     subscribers: Arc<Semaphore>,
     events: Arc<EventWake>,
     probes: Arc<Semaphore>,
+    decision: Option<Arc<dyn decision::DecisionRuntime>>,
 }
 
 impl QaTarget {
@@ -336,7 +338,38 @@ impl QaTarget {
             subscribers: Arc::new(Semaphore::new(8)),
             events: Arc::new(EventWake::new()),
             probes: Arc::new(Semaphore::new(4)),
+            decision: None,
         }
+    }
+
+    pub(crate) fn with_decision(mut self, runtime: Arc<dyn decision::DecisionRuntime>) -> Self {
+        self.decision = Some(runtime);
+        self
+    }
+
+    fn decision_status(
+        &self,
+        setting: &store::Setting,
+    ) -> fleetworks_contracts::chat::QaDecisionSettings {
+        use fleetworks_contracts::chat::QaDecisionAvailabilityReason;
+        use fleetworks_contracts::chat::QaDecisionPreference;
+        let preference = setting.decision_preference;
+        if !setting.enabled {
+            return fleetworks_contracts::chat::QaDecisionSettings::new(
+                preference,
+                QaDecisionPreference::RulesOnly,
+                fleetworks_contracts::chat::QaPhase::Off,
+                None,
+            );
+        }
+        if let Some(runtime) = &self.decision {
+            return runtime.status(preference, setting.decision_generation);
+        }
+        decision::rules_status(
+            preference,
+            (preference != QaDecisionPreference::RulesOnly)
+                .then_some(QaDecisionAvailabilityReason::AwaitingQualification),
+        )
     }
 
     pub(crate) fn with_metrics(mut self, sampler: SharedSampler) -> Self {
@@ -539,6 +572,7 @@ fn require(
 async fn settings_value(
     state: &ApiState,
     context: &ResolvedRequest,
+    target: &QaTarget,
     setting: store::Setting,
     availability: Option<&QaRuntimeAvailability>,
 ) -> Result<QaSettings, ApiError> {
@@ -593,11 +627,21 @@ async fn settings_value(
         settings.availability_reason = reason;
     }
     settings.startup_stage = startup_stage;
-    if let Some(model) =
-        availability.and_then(|availability| availability.model(setting.generation))
-    {
+    let model = availability.and_then(|availability| availability.model(setting.generation));
+    if let Some(model) = model {
         settings.model_target = model;
     }
+    settings.generator = Some(QaGeneratorSettings::new(
+        setting.generator_preference,
+        model.filter(|_| phase == QaPhase::Ready),
+        if phase == QaPhase::Ready && model.is_none() {
+            QaPhase::Starting
+        } else {
+            phase
+        },
+        settings.availability_reason,
+    ));
+    settings.decision = Some(target.decision_status(&setting));
     Ok(settings)
 }
 
@@ -667,26 +711,33 @@ fn read_pack_progress(root: &Path) -> Option<QaStartupStage> {
 pub(crate) async fn settings_request(
     state: &ApiState,
     context: &ResolvedRequest,
+    target: &QaTarget,
     availability: Option<&QaRuntimeAvailability>,
 ) -> Result<QaSettings, ApiError> {
     require(context, Permission::ReadBackend, None)?;
     let settings = store::setting(&state.repo).await.map_err(storage_error)?;
-    settings_value(state, context, settings, availability).await
+    settings_value(state, context, target, settings, availability).await
 }
 
 pub(crate) async fn update_request(
     state: &ApiState,
     context: &ResolvedRequest,
+    target: &QaTarget,
     request: QaSettingsUpdate,
     availability: Option<&QaRuntimeAvailability>,
 ) -> Result<QaSettings, ApiError> {
     let actor = require(context, Permission::ManageInboxQa, Some(&request.context))?;
     let revision = i64::try_from(request.expected_revision).map_err(|_| crate::bad())?;
     context.revalidate(&state.repo).await?;
-    let setting = store::set(&state.repo, &actor, revision, request.enabled)
+    let update = store::SettingUpdate {
+        enabled: request.enabled,
+        generator_preference: request.generator_preference,
+        decision_preference: request.decision_preference,
+    };
+    let setting = store::update(&state.repo, &actor, revision, update)
         .await
         .map_err(|error| settings_storage_error("write_setting", error))?;
-    settings_value(state, context, setting, availability).await
+    settings_value(state, context, target, setting, availability).await
 }
 
 pub(crate) async fn submit_request(
@@ -734,6 +785,7 @@ pub(crate) async fn submit_request(
     )?;
     let runtime = SnapshotRuntime {
         generation: setting.generation,
+        history_generation: setting.history_generation,
         availability,
         previous_observation: follow_up
             .as_ref()
@@ -888,6 +940,7 @@ struct Snapshot {
 
 struct SnapshotRuntime<'a> {
     generation: i64,
+    history_generation: i64,
     availability: &'a QaRuntimeAvailability,
     previous_observation: Option<&'a store::Observation>,
 }
@@ -1309,8 +1362,8 @@ async fn snapshot(
         None => observation_start(boundary).await,
     }
     .timestamp_millis();
-    let turn_id =
-        store::accepted_turn_id(actor, request, runtime.generation).map_err(storage_error)?;
+    let turn_id = store::accepted_turn_id(actor, request, runtime.history_generation)
+        .map_err(storage_error)?;
     let dialogue = match intent {
         Question::Greeting => Some(QaDialogueKind::Greeting),
         Question::Acknowledgement => Some(QaDialogueKind::Acknowledgement),

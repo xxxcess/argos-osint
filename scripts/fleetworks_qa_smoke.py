@@ -1344,6 +1344,33 @@ def embedded_qa_session(binary, state, *, reject_model_target=False, qa_memory_m
         session.close_unconditionally()
 
 
+def select_generator(request, context, preference, *, enable=False):
+    settings = request("settings")
+    update = {"context": context, "expected_revision": settings["revision"],
+              "generator_preference": preference}
+    if enable:
+        update["enabled"] = True
+    return request("settings", update)
+
+
+def verify_explicit_base_unavailable(request, registration, model, reason, *, enable=False):
+    context = authorize(registration)
+    updated = select_generator(request, context, "flan_t5_base", enable=enable)
+    unavailable = until(lambda: request("settings"),
+                        lambda settings: settings["generation"] == updated["generation"]
+                        and settings["generator"]["phase"] == "unavailable",
+                        "Explicit Base did not settle with its own startup failure", timeout=110)
+    generator = unavailable["generator"]
+    require(generator["preference"] == "flan_t5_base" and generator.get("effective") is None
+            and generator["reason"] == reason and not model(),
+            "Explicit Base was replaced by Small or reported the wrong availability reason")
+    facts = settled_turn(request, context, f"explicit-base-{reason}", "What is the current memory usage?")
+    cited_metric(facts, "memory", "memory usage")
+    require(facts.get("model_target") is None and facts.get("model_generation") is None,
+            "Direct facts acquired generator provenance while Explicit Base was unavailable")
+    stop_model(request, registration, model, unavailable)
+
+
 def named_small_startup(args, binary, digests):
     with tempfile.TemporaryDirectory(prefix="fleetworks-embedded-qa-named-") as temporary:
         root = Path(temporary)
@@ -1367,9 +1394,51 @@ def named_small_startup(args, binary, digests):
             answer = settled_turn(request, context, "named-small-fallback", SUMMARY_QUESTION, mode="operational")
             require(all(finding["source"]["kind"] == "readiness" for finding in answer["findings"]),
                     "Named Small fallback did not preserve grounded readiness citations")
-            stop_model(request, registration, lambda: embedded_tree(session.proc.pid), ready)
+            require(ready["generator"]["preference"] == "automatic"
+                    and ready["generator"]["effective"] == "flan-t5-small",
+                    "Automatic did not describe its verified Small fallback")
+
+            def model():
+                return embedded_tree(session.proc.pid)
+
+            auto_worker, = model()
+            explicit = select_generator(request, context, "flan_t5_small")
+            ready = ready_model(request, "flan-t5-small", updated=explicit)
+            small_worker, = model()
+            require(ready["generation"] == explicit["generation"]
+                    and ready["generator"]["preference"] == "flan_t5_small"
+                    and ready["generator"]["effective"] == "flan-t5-small"
+                    and small_worker != auto_worker,
+                    "Explicit Small did not warm its own generation on a Base-capable workstation")
+            retained = request("events", query={"turn_id": answer["turn_id"], "after": answer["cursor"],
+                                                "wait_seconds": 0})
+            require(retained["turn"] == answer and not retained["events"],
+                    "Changing generator cleared a completed exchange or duplicated its terminal event")
+            explicit_answer = settled_turn(request, context, "explicit-small", SUMMARY_QUESTION, mode="operational")
+            require(explicit_answer["model_target"] == "flan-t5-small"
+                    and explicit_answer["model_generation"] == ready["generation"],
+                    "Turn provenance did not identify the actual explicit Small worker and generation")
+
+            for preference in ("julia1_q8", "vllm_d3_edge_q8", "rules_only"):
+                updated = request("settings", {"context": context, "expected_revision": ready["revision"],
+                                               "decision_preference": preference})
+                ready = request("settings")
+                decision = ready["decision"]
+                require(decision["preference"] == preference and decision["effective"] == "rules_only"
+                        and decision.get("reason") == (None if preference == "rules_only" else "awaiting_qualification")
+                        and updated["generation"] == explicit_answer["model_generation"]
+                        and ready["generator"]["effective"] == "flan-t5-small" and model() == [small_worker],
+                        "Changing Decision displaced the generator or activated an unqualified scorer")
+
+            still_warm = settled_turn(request, context, "decision-changes-kept-generator", "hi", mode="dialogue")
+            require(still_warm["model_generation"] == explicit_answer["model_generation"]
+                    and model() == [small_worker],
+                    "The generator failed to complete a turn on its existing worker after Decision edits")
+
+            verify_explicit_base_unavailable(request, registration, model, "model_provision_failed")
         return {"base_provision_attempted": True, "selected_model": "flan-t5-small",
-                "grounded_answer": True}
+                "grounded_answer": True, "explicit_small_worker": True,
+                "decision_changes_kept_generator": True, "base_provision_error_preserved": True}
 
 
 def run_embedded(args):
@@ -1411,6 +1480,9 @@ def run_embedded(args):
                             f"Embedded did not expose the advisory {stage} installer stage")
             require(not request("settings").get("startup_stage"), "Installer progress lingered after its producer exited")
             result = exercise(request, registration, model, readiness, running_jobs)
+            if linux:
+                verify_explicit_base_unavailable(request, registration, model, "insufficient_resources", enable=True)
+                result["explicit_base_memory_admission"] = "insufficient_resources"
             result["installer_stages"] = ["downloading_pack", "verifying_pack"]
             attestation = session.transport_attestation
 

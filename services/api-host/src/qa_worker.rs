@@ -17,6 +17,7 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -28,6 +29,7 @@ use argos_osint_api::inbox_qa::QaInference;
 use argos_osint_api::inbox_qa::QaInferenceFuture;
 use argos_osint_core::hardware;
 use fleetworks_contracts::chat::QaAvailabilityReason;
+use fleetworks_contracts::chat::QaGeneratorPreference;
 use fleetworks_contracts::chat::QaModelTarget;
 use fleetworks_contracts::chat::QaStartupStage;
 use fleetworks_contracts::qa_worker::qa_frame_len;
@@ -72,7 +74,7 @@ const TURN_LIMIT: Duration = Duration::from_secs(25);
 const PING_LIMIT: Duration = Duration::from_secs(2);
 const UNLOAD_LIMIT: Duration = Duration::from_secs(3);
 const MIB: u64 = 1024 * 1024;
-const WORKSTATION_RESERVE: u64 = 1024 * MIB;
+pub(crate) const WORKSTATION_RESERVE: u64 = 1024 * MIB;
 const SMALL_RESIDENT_LIMIT: u64 = 1536 * MIB;
 const BASE_RESIDENT_LIMIT: u64 = 3584 * MIB;
 
@@ -80,25 +82,35 @@ fn configured_u16(name: &str) -> Option<u16> {
     env::var(name).ok()?.parse().ok()
 }
 
-fn select_target(available_memory: u64, operator_limit: u64) -> Option<QaModelTarget> {
+fn select_target(
+    preference: QaGeneratorPreference,
+    available_memory: u64,
+    operator_limit: u64,
+) -> Option<QaModelTarget> {
     let limit = available_memory
         .saturating_sub(WORKSTATION_RESERVE)
         .min(operator_limit);
-    if limit >= BASE_RESIDENT_LIMIT {
-        Some(QaModelTarget::FlanT5Base)
-    } else if limit >= SMALL_RESIDENT_LIMIT {
-        Some(QaModelTarget::FlanT5Small)
-    } else {
-        None
+    match preference {
+        QaGeneratorPreference::Automatic | QaGeneratorPreference::FlanT5Base
+            if limit >= BASE_RESIDENT_LIMIT =>
+        {
+            Some(QaModelTarget::FlanT5Base)
+        }
+        QaGeneratorPreference::Automatic | QaGeneratorPreference::FlanT5Small
+            if limit >= SMALL_RESIDENT_LIMIT =>
+        {
+            Some(QaModelTarget::FlanT5Small)
+        }
+        _ => None,
     }
 }
 
-async fn select_workstation_model() -> Result<QaModelTarget> {
+async fn select_workstation_model(preference: QaGeneratorPreference) -> Result<QaModelTarget> {
     let available = tokio::task::spawn_blocking(hardware::available_memory_bytes).await?;
     let operator_limit = configured_u16("FLEETWORKS_QA_MEMORY_MIB")
         .filter(|n| (512..=6144).contains(n))
         .map_or(u64::MAX, |limit| u64::from(limit) * MIB);
-    select_target(available, operator_limit)
+    select_target(preference, available, operator_limit)
         .ok_or_else(|| WarmFailure(QaAvailabilityReason::InsufficientResources).into())
 }
 
@@ -209,6 +221,7 @@ struct Manifest {
 /// Owns the only isolated model child for this Embedded companion.
 pub(crate) struct QaWorkerSupervisor {
     state_dir: PathBuf,
+    model_admission: Arc<Mutex<()>>,
     session: Mutex<Option<WorkerSession>>,
     stopping: watch::Sender<()>,
 }
@@ -217,14 +230,21 @@ impl QaWorkerSupervisor {
     pub(crate) fn embedded_for_state(state_dir: PathBuf) -> Self {
         Self {
             state_dir,
+            model_admission: Arc::new(Mutex::new(())),
             session: Mutex::new(None),
             stopping: watch::channel(()).0,
         }
     }
 
+    pub(crate) fn with_model_admission(mut self, admission: Arc<Mutex<()>>) -> Self {
+        self.model_admission = admission;
+        self
+    }
+
     async fn connect(
         &self,
         mut target: QaModelTarget,
+        preference: QaGeneratorPreference,
         selected_model: &(dyn Fn(QaModelTarget) + Sync),
         progress: &(dyn Fn(QaStartupStage) + Sync),
     ) -> Result<WorkerSession> {
@@ -264,7 +284,8 @@ impl QaWorkerSupervisor {
             match crate::qa_model_assets::provision(&self.state_dir, target).await {
                 Ok(model) => model,
                 Err(error)
-                    if target == QaModelTarget::FlanT5Base
+                    if preference == QaGeneratorPreference::Automatic
+                        && target == QaModelTarget::FlanT5Base
                         && packed_target == Some(QaModelTarget::FlanT5Small) =>
                 {
                     let _ = warm_error("base_model_provision", error);
@@ -289,6 +310,7 @@ impl QaWorkerSupervisor {
     async fn connect_ready(
         &self,
         target: QaModelTarget,
+        preference: QaGeneratorPreference,
         stopped: &mut watch::Receiver<()>,
         cancel: &CancellationToken,
         selected_model: &(dyn Fn(QaModelTarget) + Sync),
@@ -298,7 +320,7 @@ impl QaWorkerSupervisor {
             biased;
             _ = stopped.changed() => return Err(anyhow!("QA worker is stopping")),
             _ = cancel.cancelled() => return Err(anyhow!("QA request was canceled")),
-            result = self.connect(target, selected_model, progress) => result?,
+            result = self.connect(target, preference, selected_model, progress) => result?,
         };
         let child_pid = session.child_id();
         let mut stage = WarmStage::new("worker_ready_frame");
@@ -336,22 +358,39 @@ impl QaWorkerSupervisor {
 
     pub(crate) async fn warm_with_progress(
         &self,
+        preference: QaGeneratorPreference,
         selected_model: &(dyn Fn(QaModelTarget) + Sync),
         progress: &(dyn Fn(QaStartupStage) + Sync),
     ) -> Result<()> {
         let mut stopped = self.stopping.subscribe();
+        let _admission = self.model_admission.lock().await;
         let mut slot = self.session.lock().await;
         if let Some(old) = slot.take() {
             old.stop().await?;
         }
-        let target = select_workstation_model().await?;
+        let target = select_workstation_model(preference).await?;
         selected_model(target);
         let cancel = CancellationToken::new();
         *slot = Some(
-            self.connect_ready(target, &mut stopped, &cancel, selected_model, progress)
-                .await?,
+            self.connect_ready(
+                target,
+                preference,
+                &mut stopped,
+                &cancel,
+                selected_model,
+                progress,
+            )
+            .await?,
         );
         Ok(())
+    }
+
+    pub(crate) async fn active_model(&self) -> Option<QaModelTarget> {
+        self.session
+            .lock()
+            .await
+            .as_ref()
+            .map(|session| session.model_target)
     }
 
     pub(crate) async fn check_ready(&self) -> Result<()> {
@@ -642,7 +681,7 @@ impl WorkerSession {
     }
 }
 
-async fn guard_resident(pid: Option<u32>, resident_limit: u64) -> anyhow::Error {
+pub(crate) async fn guard_resident(pid: Option<u32>, resident_limit: u64) -> anyhow::Error {
     let Some(pid) = pid else {
         return future::pending().await;
     };
@@ -695,7 +734,7 @@ async fn resident_bytes(pid: u32) -> Option<u64> {
     Some(unsafe { info.assume_init() }.pti_resident_size)
 }
 
-fn limit_embedded_worker(command: &mut Command) {
+pub(crate) fn limit_embedded_worker(command: &mut Command) {
     // SAFETY: setpriority applies only to the forked worker before exec.
     unsafe {
         command.pre_exec(|| {
@@ -1033,24 +1072,83 @@ mod tests {
         let base_available = BASE_RESIDENT_LIMIT + WORKSTATION_RESERVE;
         let small_available = SMALL_RESIDENT_LIMIT + WORKSTATION_RESERVE;
         assert_eq!(
-            select_target(base_available, u64::MAX),
+            select_target(QaGeneratorPreference::Automatic, base_available, u64::MAX),
             Some(QaModelTarget::FlanT5Base)
         );
         assert_eq!(
-            select_target(base_available - 1, u64::MAX),
+            select_target(
+                QaGeneratorPreference::Automatic,
+                base_available - 1,
+                u64::MAX
+            ),
             Some(QaModelTarget::FlanT5Small)
         );
         assert_eq!(
-            select_target(base_available, SMALL_RESIDENT_LIMIT),
+            select_target(
+                QaGeneratorPreference::Automatic,
+                base_available,
+                SMALL_RESIDENT_LIMIT
+            ),
             Some(QaModelTarget::FlanT5Small)
         );
         assert_eq!(
-            select_target(small_available, u64::MAX),
+            select_target(QaGeneratorPreference::Automatic, small_available, u64::MAX),
             Some(QaModelTarget::FlanT5Small)
         );
-        assert_eq!(select_target(small_available - 1, u64::MAX), None);
         assert_eq!(
-            select_target(base_available, SMALL_RESIDENT_LIMIT - 1),
+            select_target(
+                QaGeneratorPreference::Automatic,
+                small_available - 1,
+                u64::MAX
+            ),
+            None
+        );
+        assert_eq!(
+            select_target(
+                QaGeneratorPreference::Automatic,
+                base_available,
+                SMALL_RESIDENT_LIMIT - 1
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_model_preferences_require_their_own_memory_budget() {
+        let base_available = BASE_RESIDENT_LIMIT + WORKSTATION_RESERVE;
+        let small_available = SMALL_RESIDENT_LIMIT + WORKSTATION_RESERVE;
+        assert_eq!(
+            select_target(QaGeneratorPreference::FlanT5Small, base_available, u64::MAX),
+            Some(QaModelTarget::FlanT5Small),
+            "Explicit Small must remain Small on a Base-capable host"
+        );
+        assert_eq!(
+            select_target(QaGeneratorPreference::FlanT5Base, base_available, u64::MAX),
+            Some(QaModelTarget::FlanT5Base)
+        );
+        assert_eq!(
+            select_target(
+                QaGeneratorPreference::FlanT5Base,
+                base_available,
+                SMALL_RESIDENT_LIMIT
+            ),
+            None,
+            "An operator cap must not silently substitute Small for explicit Base"
+        );
+        assert_eq!(
+            select_target(
+                QaGeneratorPreference::FlanT5Base,
+                base_available - 1,
+                u64::MAX
+            ),
+            None
+        );
+        assert_eq!(
+            select_target(
+                QaGeneratorPreference::FlanT5Small,
+                small_available - 1,
+                u64::MAX
+            ),
             None
         );
     }
@@ -1108,7 +1206,12 @@ mod tests {
         let targets = state.path().join("qa-model-packs");
         fs::create_dir(&targets).unwrap();
         fs::set_permissions(&targets, fs::Permissions::from_mode(0o700)).unwrap();
-        let target = select_target(BASE_RESIDENT_LIMIT + WORKSTATION_RESERVE, u64::MAX).unwrap();
+        let target = select_target(
+            QaGeneratorPreference::Automatic,
+            BASE_RESIDENT_LIMIT + WORKSTATION_RESERVE,
+            u64::MAX,
+        )
+        .unwrap();
         assert_eq!(target, QaModelTarget::FlanT5Base);
         assert!(!state.path().join("qa-model-assets").exists());
 

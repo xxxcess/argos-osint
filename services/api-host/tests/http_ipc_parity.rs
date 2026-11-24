@@ -60,7 +60,10 @@ use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::chat::ChatTurnAck;
 use fleetworks_contracts::chat::QaCancelRequest;
+use fleetworks_contracts::chat::QaDecisionAvailabilityReason;
+use fleetworks_contracts::chat::QaDecisionPreference;
 use fleetworks_contracts::chat::QaEventQuery;
+use fleetworks_contracts::chat::QaGeneratorPreference;
 use fleetworks_contracts::chat::QaPhase;
 use fleetworks_contracts::chat::QaRelatedActivity;
 use fleetworks_contracts::chat::QaRelatedActivityRequest;
@@ -69,6 +72,7 @@ use fleetworks_contracts::chat::QaSettingsUpdate;
 use fleetworks_contracts::chat::QaTurnRequest;
 use fleetworks_contracts::chat::QaTurnState;
 use fleetworks_contracts::chat::CHAT_TURNS_PATH;
+use fleetworks_contracts::chat::QA_MODEL_SETTINGS_FEATURE;
 use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
 use fleetworks_contracts::classifier_activation::ActivationRequest;
 use fleetworks_contracts::classifier_activation::ActiveModelRevision;
@@ -1459,11 +1463,25 @@ async fn run_shared_flow(
             .any(|feature| feature == QA_TRIAGE_FEATURE),
         local
     );
+    assert_eq!(
+        caps.features
+            .iter()
+            .any(|feature| feature == QA_MODEL_SETTINGS_FEATURE),
+        local,
+    );
     if local {
         let qa_settings = client.qa_settings().await.expect("registered QA settings");
         assert!(!qa_settings.enabled, "Embedded Assistant defaults to Off");
         assert_eq!(qa_settings.phase, QaPhase::Off);
         assert!(qa_settings.can_manage);
+        assert_eq!(
+            qa_settings.generator.unwrap().preference,
+            QaGeneratorPreference::Automatic
+        );
+        assert_eq!(
+            qa_settings.decision.unwrap().preference,
+            QaDecisionPreference::RulesOnly
+        );
         assert_eq!(
             client
                 .qa_related_activity(&related)
@@ -1591,14 +1609,109 @@ async fn run_shared_flow(
             explanation.findings[0].observed_at,
         );
 
-        client
+        let julia_update = QaSettingsUpdate::preferences(qa_context.clone(), enabled.revision)
+            .with_decision_preference(QaDecisionPreference::Julia1Q8);
+        let julia = client
+            .update_qa_settings(&julia_update)
+            .await
+            .expect("retain Julia preference without an eligible pack");
+        let decision = julia.decision.unwrap();
+        assert_eq!(decision.preference, QaDecisionPreference::Julia1Q8);
+        assert_eq!(decision.effective, QaDecisionPreference::RulesOnly);
+        assert_eq!(
+            decision.reason,
+            Some(QaDecisionAvailabilityReason::AwaitingQualification)
+        );
+        assert_eq!(
+            julia.generation, enabled.generation,
+            "decision save keeps FLAN warm"
+        );
+        assert_eq!(
+            client.update_qa_settings(&julia_update).await.unwrap_err(),
+            ClientError::Status(409),
+        );
+        let same = client
+            .update_qa_settings(
+                &QaSettingsUpdate::preferences(qa_context.clone(), julia.revision)
+                    .with_decision_preference(QaDecisionPreference::Julia1Q8),
+            )
+            .await
+            .expect("save unchanged authoritative preference");
+        assert_eq!(same.revision, julia.revision);
+        let small = client
+            .update_qa_settings(
+                &QaSettingsUpdate::preferences(qa_context.clone(), same.revision)
+                    .with_generator_preference(QaGeneratorPreference::FlanT5Small),
+            )
+            .await
+            .expect("save explicit Small");
+        assert_eq!(
+            small.generator.unwrap().preference,
+            QaGeneratorPreference::FlanT5Small
+        );
+        assert_eq!(
+            small.decision.unwrap().preference,
+            QaDecisionPreference::Julia1Q8
+        );
+        assert!(small.generation > same.generation);
+        assert_eq!(
+            client
+                .latest_qa_turn()
+                .await
+                .expect("history after generator switch"),
+            Some(refreshed)
+        );
+        assert_eq!(
+            client
+                .submit_qa_turn(&explain)
+                .await
+                .expect("replay after generator switch"),
+            explanation
+        );
+        let base = client
+            .update_qa_settings(
+                &QaSettingsUpdate::preferences(qa_context.clone(), small.revision)
+                    .with_generator_preference(QaGeneratorPreference::FlanT5Base),
+            )
+            .await
+            .expect("save explicit Base");
+        assert_eq!(
+            base.generator.unwrap().preference,
+            QaGeneratorPreference::FlanT5Base
+        );
+        assert!(base.generation > small.generation);
+        let edge = client
+            .update_qa_settings(
+                &QaSettingsUpdate::preferences(qa_context.clone(), base.revision)
+                    .with_decision_preference(QaDecisionPreference::VllmD3EdgeQ8),
+            )
+            .await
+            .expect("retain d3-edge preference without an eligible pack");
+        let decision = edge.decision.unwrap();
+        assert_eq!(decision.preference, QaDecisionPreference::VllmD3EdgeQ8);
+        assert_eq!(decision.effective, QaDecisionPreference::RulesOnly);
+        assert_eq!(
+            decision.reason,
+            Some(QaDecisionAvailabilityReason::AwaitingQualification)
+        );
+        assert_eq!(edge.generation, base.generation);
+        let off = client
             .update_qa_settings(&QaSettingsUpdate::new(
                 qa_context.clone(),
-                enabled.revision,
+                edge.revision,
                 false,
             ))
             .await
             .expect("reset Assistant after parity scenario");
+        assert!(!off.enabled);
+        assert_eq!(
+            off.generator.unwrap().preference,
+            QaGeneratorPreference::FlanT5Base
+        );
+        assert_eq!(
+            off.decision.unwrap().preference,
+            QaDecisionPreference::VllmD3EdgeQ8
+        );
     } else {
         let missing = ClientError::Status(404);
         assert_eq!(client.qa_settings().await.unwrap_err(), missing);
@@ -1997,6 +2110,20 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
     let ipc_client2 = Client::from_local_ipc(Arc::clone(&ipc2))
         .with_registered_context(&ipc_res.registered_context)
         .expect("attach saved registered context after restart");
+
+    let restarted_qa = ipc_client2
+        .qa_settings()
+        .await
+        .expect("saved preferences after restart");
+    assert!(!restarted_qa.enabled);
+    assert_eq!(
+        restarted_qa.generator.unwrap().preference,
+        QaGeneratorPreference::FlanT5Base
+    );
+    assert_eq!(
+        restarted_qa.decision.unwrap().preference,
+        QaDecisionPreference::VllmD3EdgeQ8
+    );
 
     let restarted_readiness = ipc_client2
         .workstation_readiness()

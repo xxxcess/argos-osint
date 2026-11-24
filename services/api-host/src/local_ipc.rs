@@ -250,6 +250,7 @@ mod embedded {
         state_root: PathBuf,
         worker_config: Option<LocalWorkerConfig>,
         qa_broker: Client,
+        model_admission: Arc<tokio::sync::Mutex<()>>,
         helpers: Option<HelperChildren>,
         _jobs_store: Store,
         _search_service: Arc<SearchService>,
@@ -376,7 +377,16 @@ mod embedded {
                 search_enabled: true,
                 jobs_enabled: true,
             };
-            let gateway = Arc::new(LocalGateway::new(state, services, capability_config)?);
+            let model_admission = Arc::new(tokio::sync::Mutex::new(()));
+            let decision = crate::qa_decision::Supervisor::new(
+                repo.clone(),
+                layout.root.clone(),
+                Arc::clone(&model_admission),
+            );
+            let gateway = Arc::new(
+                LocalGateway::new(state, services, capability_config)?
+                    .with_qa_decision(Arc::new(decision)),
+            );
 
             let principal = AuthenticatedPrincipal::for_local_ipc(
                 "local-ipc-workstation",
@@ -413,6 +423,7 @@ mod embedded {
                 state_root: layout.root,
                 worker_config: Some(worker_config),
                 qa_broker,
+                model_admission,
                 helpers: Some(helpers),
                 _jobs_store: jobs_store,
                 _search_service: search_service,
@@ -436,7 +447,8 @@ mod embedded {
                 .take()
                 .ok_or_else(|| anyhow!("local worker configuration already consumed"))?;
             let model =
-                crate::qa_worker::QaWorkerSupervisor::embedded_for_state(self.state_root.clone());
+                crate::qa_worker::QaWorkerSupervisor::embedded_for_state(self.state_root.clone())
+                    .with_model_admission(Arc::clone(&self.model_admission));
             let health_stop = argos_osint_api::inbox_qa::CancellationToken::new();
             let health_refresh = tokio::spawn({
                 let gateway = self.gateway.clone();

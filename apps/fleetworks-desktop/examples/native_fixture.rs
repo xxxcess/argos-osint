@@ -18,7 +18,12 @@ mod native {
     use fleetworks_contracts::chat::ChatSourceKind;
     use fleetworks_contracts::chat::ChatSourceReference;
     use fleetworks_contracts::chat::QaAvailabilityReason;
+    use fleetworks_contracts::chat::QaDecisionAvailabilityReason;
+    use fleetworks_contracts::chat::QaDecisionPreference;
+    use fleetworks_contracts::chat::QaDecisionSettings;
     use fleetworks_contracts::chat::QaFinding;
+    use fleetworks_contracts::chat::QaGeneratorPreference;
+    use fleetworks_contracts::chat::QaGeneratorSettings;
     use fleetworks_contracts::chat::QaModelTarget;
     use fleetworks_contracts::chat::QaPhase;
     use fleetworks_contracts::chat::QaRelatedActivity;
@@ -27,6 +32,7 @@ mod native {
     use fleetworks_contracts::chat::QaStartupStage;
     use fleetworks_contracts::chat::QaTurn;
     use fleetworks_contracts::chat::QaTurnState;
+    use fleetworks_contracts::chat::QA_MODEL_SETTINGS_FEATURE;
     use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
     use fleetworks_contracts::connect::RegistrationReceipt;
     use fleetworks_contracts::context::JobOrigin;
@@ -753,6 +759,25 @@ mod native {
             settings.model_target = QaModelTarget::FlanT5Base;
             settings.startup_stage = Some(QaStartupStage::DownloadingPack);
         }
+        if let Some(capabilities) = &mut state.connection.capabilities {
+            capabilities.features.push(QA_MODEL_SETTINGS_FEATURE.into());
+        }
+        settings.generator = Some(QaGeneratorSettings::new(
+            if provisioning {
+                QaGeneratorPreference::FlanT5Base
+            } else {
+                QaGeneratorPreference::Automatic
+            },
+            (!provisioning).then_some(settings.model_target),
+            settings.phase,
+            None,
+        ));
+        settings.decision = Some(QaDecisionSettings::new(
+            QaDecisionPreference::Julia1Q8,
+            QaDecisionPreference::RulesOnly,
+            QaPhase::Off,
+            Some(QaDecisionAvailabilityReason::AwaitingQualification),
+        ));
         let turn = (!provisioning).then(|| {
             let mut turn = QaTurn::queued(
                 "settings-fixture-turn".into(),
@@ -766,6 +791,8 @@ mod native {
                 448,
                 1,
             ));
+            turn.model_target = Some(settings.model_target);
+            turn.model_generation = Some(settings.generation);
             turn
         });
         state.seed_inbox_qa_fixture(settings, turn);

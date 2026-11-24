@@ -41,7 +41,7 @@ Turn states are `queued`, `running`, `retrying`, `final` and `failed`. V1 is a s
 
 ## Inbox QA V2
 
-The [V2 wire contract](../../../crates/fleetworks-contracts/src/chat/qa.rs) is available through the Embedded companion's inherited Unix socket. Distributed retains Inbox notifications. In Embedded, Workstation Settings shows the Assistant model, readiness, provisioning, size and context usage while Backend inference is on. Workstation Status provides an Assistant shortcut and keeps deterministic diagnostics accessible independently. The Inbox prompts the operator to enable inference when it is off. On a companion advertising `inbox-qa-triage-v1`, the composer can answer supported direct questions while model inference is starting or unavailable.
+The [V2 wire contract](../../../crates/fleetworks-contracts/src/chat/qa.rs) is available through the Embedded companion's inherited Unix socket. Distributed retains Inbox notifications. In Embedded, Workstation Settings shows Generator and Decision preferences, effective engines, provisioning, and context usage for a registered Embedded connection while Backend inference is on. Workstation Status provides an Assistant shortcut and keeps deterministic diagnostics accessible independently. The Inbox prompts the operator to enable inference when it is off. On a companion advertising `inbox-qa-triage-v1`, the composer can answer supported direct questions while model inference is starting or unavailable.
 
 ### Prompt flow
 
@@ -66,17 +66,19 @@ The inline lookup returns one compact result and creates no Assistant exchange o
 | FLAN-T5 Base (preferred) | ~990 MB | 512 | 128 |
 | FLAN-T5 Small (fallback) | ~308 MB | 512 | 128 |
 
-The companion selects a model using fresh memory headroom, workload reserve and the worker budget. The revisioned settings operation changes enablement. Turning inference off fences the active generation and reaps its worker. A verified runtime pack provides the model executable and its libraries. The companion can reuse a verified optional model pack or fetch its pinned checkpoint files into the private asset cache. The worker remains idle between turns, runs without network access, and uses one beam. Cancellation can reap an interrupted worker and trigger a warm restart. [Pack provisioning and resource limits](../../../deploy/inbox-qa.md)
+**Generator** defaults to **Automatic**. It selects Base when fresh memory headroom allows it and can fall back to Small when Base assets are unavailable. Explicit **FLAN-T5 Small** always requests Small. Explicit **FLAN-T5 Base** stays selected if memory or verified assets are unavailable. The panel keeps the saved choice visible and reports the effective model once a verified worker is ready. Both choices use the same resource admission and sandbox checks. The warm worker stays idle between turns, runs without network access, and uses one beam. [Pack provisioning and resource limits](../../../deploy/inbox-qa.md)
+
+Each control sends a revisioned patch for its own role. Only companions advertising `inbox-qa-model-settings-v1` receive the preference fields. Legacy enablement requests leave both preferences intact, and older companions retain their read-only model display. A generator change fences active output and retains completed exchanges. Usage is attributed to the worker model and generator generation that produced it. Changing Decision leaves the generator generation and its warm worker in place. Turning Backend inference off reaps workers and retains preferences for the next enable.
 
 Each exact host fact preserves its decimal value, unit, subject and observation time. Jobs evidence comes from the authorized workstation scope. Resolved, failed, unknown and retired checks remain distinct, and passed checks can cite the authenticated registration. Direct responses report zero model input tokens. Older workers can omit usage or report their legacy limit. Model-generated text stays read-only. The zero-shot classifier has its own model and execution path.
 
 ### Decision model qualification
 
-Explicit relationships and unambiguous facts resolve in the companion. When multiple eligible sources remain, the Assistant reports that triage is unavailable. The operator can narrow the subject in the composer. Decision models are not yet available in Workstation Settings.
+**Decision** offers **Rules only** (default), **Julia-1 Q8** (168 MB), and **vLLM d3-edge Q8** (806 MB). The latter two save a preference immediately. Until the exact checkpoint and runtime qualify on the companion’s native target, **In use** stays **Rules only** and the panel reports **Awaiting qualification on this platform**. Unqualified choices trigger no model download or worker launch. Exact facts and explicit links use the same deterministic path with any preference.
 
 The [hosted scoring workflow](../../../.github/workflows/fleetworks-decision-qualification.yml) accepts an exact PR SHA through `Fleetworks` dispatch with `decision_qualification=linux` or `macos`. It verifies pinned Julia-1 and vLLM d3-edge assets, calibrates on a separate incident group, and records held-out precision, coverage, out-of-scope choices and warm eight-candidate p95. Its receipts describe isolated scoring. Julia uses the publisher’s October 19 Q8 snapshot because the later snapshot has a tokenizer metadata incompatibility with the pinned shared runtime. [Julia GGUF loading issue](https://github.com/ggml-org/llama.cpp/issues/32882)
 
-Release qualification also requires combined answer and navigation checks, resource measurements with FLAN and indexing active, and separate evidence for each native target. The Liquid pack also requires distribution license review.
+Release qualification requires combined answer and navigation checks, resource measurements with FLAN and indexing active, and separate evidence for each native target. No candidate currently has a release record. A qualified decision request uses a complete bounded set of authorized job observations, reserves workstation memory and starts one verified CPU scorer on a private Unix socket. Only a validated menu choice may become a link, and the companion rechecks permission and the active decision revision before it returns. The scorer is reaped after the request.
 
 ### Operations
 

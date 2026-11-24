@@ -226,19 +226,28 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
     button("inbox-toggle")
 
     def submit(question, *, timeout=20):
-        x, y, width, height = wait_for(
-            lambda: screen_bounds(find("inbox-qa-composer"), atspi), app, "available QA composer", timeout=timeout,
-        )
+        def shown_composer():
+            node = find("inbox-qa-composer")
+            return node if screen_bounds(node, atspi) is not None else None
+
         # A bare Xvfb display has no window manager to grant keyboard focus.
         windows = subprocess.check_output(
             ["xdotool", "search", "--onlyvisible", "--name", "^Fleetworks$"], text=True, timeout=5,
         ).split()
         require(len(windows) == 1, "expected one visible Fleetworks window on the fixture display")
-        subprocess.run(
-            ["xdotool", "windowfocus", "--sync", windows[0],
-             "mousemove", str(x + width // 2), str(y + height // 2), "click", "1"],
-            check=True, timeout=5,
-        )
+        subprocess.run(["xdotool", "windowfocus", "--sync", windows[0]], check=True, timeout=5)
+
+        def focus_composer():
+            node = shown_composer()
+            if node is None:
+                return None
+            if node.getState().contains(atspi.STATE_FOCUSED):
+                return True
+            require(node.queryComponent().grabFocus(), "Fleetworks composer rejected accessible focus")
+            return None
+
+        # The sliding drawer can expose its accessibility node before its pointer target settles.
+        wait_for(focus_composer, app, "focused QA composer", timeout=timeout)
         subprocess.run(["xdotool", "type", "--clearmodifiers", question], check=True, timeout=5)
         wait_for(lambda: find("inbox-qa-send", button=True), app, "enabled QA Send")
         submitted_at = time.monotonic()

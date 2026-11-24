@@ -28,6 +28,7 @@ axum = "0.8.8"
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 sha2.workspace = true
 url.workspace = true
 argos-osint-api = { path = "../../crates/argos-osint-api", default-features = false }
@@ -36,4 +37,3 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 argos-osint-core = { path = "../../crates/argos-osint-core", default-features = false, features = ["fixtures", "legacy-natural-fixtures"] }
-tempfile.workspace = true

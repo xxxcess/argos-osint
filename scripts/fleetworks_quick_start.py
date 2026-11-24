@@ -20,42 +20,41 @@ sys.dont_write_bytecode = True
 SCRIPT_CHECKOUT = Path(__file__).resolve().parents[1]
 
 
-def source_checkout():
+def git_path(directory, option):
+    value = subprocess.check_output(
+        ["git", "-C", str(directory), "rev-parse", "--path-format=absolute", option],
+        text=True, timeout=15,
+    ).strip()
+    return Path(value).resolve()
+
+
+def source_checkouts():
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument("--source-dir", type=Path)
     selection, _ = parser.parse_known_args()
-    if selection.source_dir is None:
-        return SCRIPT_CHECKOUT
-
-    checkout = selection.source_dir.expanduser().resolve()
-
-    def git_path(directory, option):
-        path = subprocess.check_output(
-            ["git", "-C", str(directory), "rev-parse", "--path-format=absolute", option],
-            text=True, timeout=15,
-        ).strip()
-        return Path(path).resolve()
-
     try:
+        common_dir = git_path(SCRIPT_CHECKOUT, "--git-common-dir")
+        repository = common_dir.parent
+        checkout = selection.source_dir.expanduser().resolve() if selection.source_dir else repository
         if git_path(checkout, "--show-toplevel") != checkout:
-            parser.error("--source-dir must be the root of a Fleetworks worktree")
-        if git_path(checkout, "--git-common-dir") != git_path(SCRIPT_CHECKOUT, "--git-common-dir"):
+            parser.error("Select the root of a Fleetworks checkout")
+        if git_path(checkout, "--git-common-dir") != common_dir:
             parser.error("--source-dir must be a worktree of this Fleetworks repository")
     except (OSError, subprocess.SubprocessError) as error:
-        parser.error(f"could not select --source-dir: {error}")
+        parser.error(f"could not select the Fleetworks checkout: {error}")
     if not all((checkout / "scripts" / helper).is_file()
                for helper in ("fleetworks_candidate.py", "fleetworks_qa_pack.py")):
-        parser.error("--source-dir is missing the Fleetworks packaging helpers")
-    return checkout
+        parser.error("The checkout is missing the Fleetworks packaging helpers")
+    return checkout, repository
 
 
-ROOT = source_checkout()
+ROOT, REPOSITORY = source_checkouts()
 sys.path.insert(0, str(ROOT / "scripts"))
 import fleetworks_candidate as native
 import fleetworks_qa_pack as qa
 
 REPO = "xxxcess/argos-osint"
-DEFAULT_PROFILE = ROOT / ".agent-scratch" / "native-quick-start-profile"
+DEFAULT_PROFILE = REPOSITORY / ".agent-scratch" / "native-quick-start-profile"
 APP_ARTIFACT_FAMILIES = {
     "debug": ("Fleetworks-macOS-Desktop-App-debug",),
     "release": ("Fleetworks-macOS-Desktop-App-release", "Fleetworks-macOS-Desktop-App"),
@@ -243,10 +242,6 @@ def read_receipt(path):
     value = json.loads(data)
     require(isinstance(value, dict), "Invalid app receipt")
     return value
-
-
-def repo_family_root():
-    return Path(command("git", "rev-parse", "--path-format=absolute", "--git-common-dir")).parent
 
 
 @contextmanager
@@ -553,7 +548,7 @@ def install_inbox(identity, target, profile, state):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--source-dir", type=Path,
-                        help="Build from this local worktree of the same repository")
+                        help="Build from this local worktree (default: the main repository checkout)")
     parser.add_argument("--profile", choices=tuple(APP_ARTIFACT_FAMILIES), default="debug",
                         help="Use the debug or optimized release build profile (default: debug)")
     mode = parser.add_mutually_exclusive_group()
@@ -575,7 +570,7 @@ def main():
         info = native.detect()
         target = info.native_target
         require(target in native.DARWIN_NATIVE_TARGETS, "This quick start supports Intel and Apple Silicon macOS")
-        shared = repo_family_root()
+        shared = REPOSITORY
         requested_output = args.output or shared / "target" / "native" / target / args.profile
         require(not requested_output.expanduser().is_symlink(), "The app output cannot be a symlink")
         output = native.native_output(requested_output, target, args.profile)

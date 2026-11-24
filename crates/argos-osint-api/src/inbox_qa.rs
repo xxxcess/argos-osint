@@ -753,6 +753,10 @@ pub(crate) async fn submit_request(
         None
     };
     let evidence_request = follow_up.as_ref().unwrap_or(&request);
+    let runtime = SnapshotRuntime {
+        generation: setting.generation,
+        availability,
+    };
     loop {
         let evidence = snapshot(
             state,
@@ -760,8 +764,7 @@ pub(crate) async fn submit_request(
             target,
             &actor,
             evidence_request,
-            setting.generation,
-            availability,
+            &runtime,
             deadline,
         )
         .await?;
@@ -778,14 +781,18 @@ pub(crate) async fn submit_request(
     }
 }
 
+struct SnapshotRuntime<'a> {
+    generation: i64,
+    availability: &'a QaRuntimeAvailability,
+}
+
 async fn snapshot(
     state: &ApiState,
     context: &ResolvedRequest,
     target: &QaTarget,
     actor: &store::Actor,
     request: &QaTurnRequest,
-    generation: i64,
-    availability: &QaRuntimeAvailability,
+    runtime: &SnapshotRuntime<'_>,
     deadline: Instant,
 ) -> Result<store::FrozenEvidence, ApiError> {
     let _permit = target.probes.try_acquire().map_err(|_| {
@@ -835,7 +842,7 @@ async fn snapshot(
         tokio::time::timeout_at(deadline, async {
             loop {
                 if let Some(sample) = target
-                    .observe(state, generation, health_boundary, true)
+                    .observe(state, runtime.generation, health_boundary, true)
                     .await?
                 {
                     return Ok::<_, ApiError>(Some(sample));
@@ -1044,7 +1051,7 @@ async fn snapshot(
             )
             .map_err(|_| crate::bad())?;
             let mut text = "This workstation is connected to the Embedded backend. Backend inference is on and the Assistant worker is ready.".to_owned();
-            if let Some(model) = availability.model(generation) {
+            if let Some(model) = runtime.availability.model(runtime.generation) {
                 use std::fmt::Write as _;
                 let _ = write!(text, " The active model is {}.", model.label());
             }

@@ -12,10 +12,10 @@ The Rune/rune-kit macOS and Linux x86_64 API client supports **Embedded** and **
 
 ### macOS quick start
 
-In RustRover, select **Build and open Fleetworks (Embedded)**. It builds the desktop and its bundled companion from the current checkout, opens the validated app, and starts Embedded in an isolated profile. The startup automation uses macOS Accessibility. To start Embedded by hand, run the same launcher from the repository root without `--start-embedded`.
+Open the repository root in RustRover and select **Build and open Fleetworks (Embedded)** from the run configurations. It builds the desktop and its bundled companion from the open checkout, opens the validated app, and starts Embedded in an isolated profile. The startup automation uses macOS Accessibility. The same command works from the repository root in a terminal. To start Embedded by hand, omit `--start-embedded`. [Shared RustRover configuration](../../.idea/runConfigurations/Build_and_open_Fleetworks_Embedded.xml)
 
 ```sh
-python3 scripts/fleetworks_quick_start.py
+python3 scripts/fleetworks_quick_start.py --start-embedded
 ```
 
 The launcher shares the repository's Cargo cache and keeps the app and its profile under separate `.agent-scratch/` directories. Close that app before replacing its bundle. Use `--help` for the optimized build profile, source worktree selection, and verified offline artifacts.

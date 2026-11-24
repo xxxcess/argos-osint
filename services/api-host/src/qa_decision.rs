@@ -70,9 +70,8 @@ impl Supervisor {
         menu: DecisionMenu,
     ) -> Result<DecisionChoice, Reason> {
         let qualification = pack::qualified(preference).ok_or(Reason::AwaitingQualification)?;
-        let _admission = self
-            .admission
-            .try_lock()
+        let admission = Arc::clone(&self.admission)
+            .try_lock_owned()
             .map_err(|_| Reason::InsufficientResources)?;
         if !self.current(preference, generation).await {
             return Ok(DecisionChoice::Unavailable);
@@ -86,11 +85,16 @@ impl Supervisor {
         {
             return Err(Reason::InsufficientResources);
         }
-        let verified = tokio::task::spawn_blocking(move || pack::verify(&root, qualification))
-            .await
-            .map_err(|_| Reason::WorkerStartFailed)??;
+        // Hashing cannot be aborted once scheduled. Keep admission held until
+        // the blocking task exits even when the IPC request is canceled.
+        let (verified, _admission) =
+            tokio::task::spawn_blocking(move || (pack::verify(&root, qualification), admission))
+                .await
+                .map_err(|_| Reason::WorkerStartFailed)?;
+        let verified = verified?;
         let socket = verified.socket_dir.path().join("score.sock");
-        let mut command = worker_command(&verified, &socket, qualification.alias);
+        let mut command = worker_command(&verified, &socket, qualification.alias)
+            .map_err(|_| Reason::WorkerStartFailed)?;
         let client = socket_client(&socket).map_err(|_| Reason::WorkerStartFailed)?;
         if !self.current(preference, generation).await {
             return Ok(DecisionChoice::Unavailable);
@@ -209,10 +213,19 @@ impl Drop for ReadyObservation<'_> {
     }
 }
 
-fn worker_command(pack: &pack::VerifiedPack, socket: &Path, alias: &str) -> Command {
-    let mut command = Command::new(&pack.worker);
+fn worker_command(
+    pack: &pack::VerifiedPack,
+    socket: &Path,
+    alias: &str,
+) -> anyhow::Result<Command> {
+    let runtime = pack.worker.parent().expect("verified worker directory");
+    let mut command = crate::qa_worker::decision_command(
+        runtime,
+        &pack.model,
+        &pack.worker,
+        pack.socket_dir.path(),
+    )?;
     command
-        .env_clear()
         .env("HOME", pack.socket_dir.path())
         .env("LC_ALL", "C")
         .current_dir(pack.socket_dir.path())
@@ -245,13 +258,8 @@ fn worker_command(pack: &pack::VerifiedPack, socket: &Path, alias: &str) -> Comm
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    #[cfg(target_os = "linux")]
-    command.env(
-        "LD_LIBRARY_PATH",
-        pack.worker.parent().expect("verified worker directory"),
-    );
     crate::qa_worker::limit_embedded_worker(&mut command);
-    command
+    Ok(command)
 }
 
 fn socket_client(socket: &Path) -> reqwest::Result<Client> {

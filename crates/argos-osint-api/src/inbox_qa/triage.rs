@@ -226,13 +226,6 @@ pub(crate) async fn related_activity_request(
         .await
         .unwrap_or(Ok(QaRelatedActivity::TriageUnavailable))?;
     context.revalidate(&state.repo).await?;
-    let current = store::setting(&state.repo).await.map_err(storage_error)?;
-    if !current.enabled
-        || current.generation != setting.generation
-        || current.decision_generation != setting.decision_generation
-    {
-        return Ok(QaRelatedActivity::TriageUnavailable);
-    }
     if let QaRelatedActivity::Found { target, .. } = &result {
         if target.kind == ChatSourceKind::Job {
             let scope = activity_api::scope_for_request(&state.repo, context, None).await?;
@@ -246,6 +239,13 @@ pub(crate) async fn related_activity_request(
                 return Ok(QaRelatedActivity::NoRelatedActivity);
             }
         }
+    }
+    let current = store::setting(&state.repo).await.map_err(storage_error)?;
+    if !current.enabled
+        || current.generation != setting.generation
+        || current.decision_generation != setting.decision_generation
+    {
+        return Ok(QaRelatedActivity::TriageUnavailable);
     }
     Ok(result)
 }

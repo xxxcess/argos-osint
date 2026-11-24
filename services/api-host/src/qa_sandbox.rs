@@ -74,6 +74,19 @@ const LOADER_DIRS: &[&str] = &["/lib", "/lib64", "/usr/lib", "/usr/lib64"];
 #[cfg(target_os = "linux")]
 pub(super) use linux::command;
 
+#[cfg(all(target_os = "linux", feature = "embedded"))]
+pub(super) use linux::decision_command;
+
+#[cfg(all(target_os = "macos", feature = "embedded"))]
+pub(super) fn decision_command(
+    _runtime_dir: &Path,
+    _model: &Path,
+    _worker: &Path,
+    _socket_dir: &Path,
+) -> Result<Command> {
+    anyhow::bail!("the macOS Decision worker sandbox has not been verified")
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use std::fs::OpenOptions;
@@ -91,6 +104,7 @@ mod linux {
     const MIN_LANDLOCK_ABI: libc::c_long = 3;
     const FS_READ_ONLY: u64 = (1 << 0) | (1 << 2) | (1 << 3);
     const FS_READ_FILE: u64 = 1 << 2;
+    const FS_SOCKET_DIRECTORY: u64 = (1 << 3) | (1 << 5) | (1 << 9);
     const FS_ABI_3: u64 = (1 << 15) - 1;
     const FS_IOCTL_DEV: u64 = 1 << 15;
     const LANDLOCK_RULE_PATH_BENEATH: libc::c_uint = 1;
@@ -145,7 +159,7 @@ mod linux {
         })
     }
 
-    fn rules_for(pack: &Path, model: &Path) -> Result<OwnedFd> {
+    fn rules_for(pack: &Path, model: &Path, socket_dir: Option<&Path>) -> Result<OwnedFd> {
         // SAFETY: The null descriptor data and zero size request the supported ABI version.
         let abi = unsafe {
             libc::syscall(
@@ -172,7 +186,13 @@ mod linux {
         // SAFETY: A successful create_ruleset gives this caller a new close-on-exec descriptor.
         let ruleset = unsafe { OwnedFd::from_raw_fd(i32::try_from(raw)?) };
         allow_path(&ruleset, pack, FS_READ_ONLY)?;
-        allow_path(&ruleset, model, FS_READ_ONLY)?;
+        if let Some(socket_dir) = socket_dir {
+            allow_path(&ruleset, model, FS_READ_FILE)?;
+            // The scorer may create and remove its endpoint, with no regular-file writes.
+            allow_path(&ruleset, socket_dir, FS_SOCKET_DIRECTORY)?;
+        } else {
+            allow_path(&ruleset, model, FS_READ_ONLY)?;
+        }
         for path in LOADER_DIRS {
             allow_if_present(&ruleset, path, FS_READ_ONLY)?;
         }
@@ -198,23 +218,72 @@ mod linux {
         libc::sock_filter { code, jt, jf, k }
     }
 
-    fn syscall_filter() -> Vec<libc::sock_filter> {
-        const BPF_LOAD_WORD_ABSOLUTE: u16 = 0x20;
-        const BPF_JUMP_EQUAL: u16 = 0x15;
-        const BPF_JUMP_SET: u16 = 0x45;
-        const BPF_RETURN: u16 = 0x06;
-        const SECCOMP_KILL: u32 = 0x8000_0000;
-        const SECCOMP_EPERM: u32 = 0x0005_0000 | libc::EPERM as u32;
-        const SECCOMP_ALLOW: u32 = 0x7fff_0000;
-        #[cfg(target_arch = "x86_64")]
-        const ARCH: u32 = 0xc000_003e;
-        #[cfg(target_arch = "aarch64")]
-        const ARCH: u32 = 0xc000_00b7;
+    const BPF_LOAD_WORD_ABSOLUTE: u16 = 0x20;
+    const BPF_AND: u16 = 0x54;
+    const BPF_JUMP_EQUAL: u16 = 0x15;
+    const BPF_JUMP_SET: u16 = 0x45;
+    const BPF_RETURN: u16 = 0x06;
+    const SECCOMP_KILL: u32 = 0x8000_0000;
+    const SECCOMP_EPERM: u32 = 0x0005_0000 | libc::EPERM as u32;
+    const SECCOMP_ALLOW: u32 = 0x7fff_0000;
+    #[cfg(target_arch = "x86_64")]
+    const AUDIT_ARCH: u32 = 0xc000_003e;
+    #[cfg(target_arch = "aarch64")]
+    const AUDIT_ARCH: u32 = 0xc000_00b7;
 
+    fn unix_listener_filter(filter: &mut Vec<libc::sock_filter>) {
+        const ARG_0: u32 = 16;
+        const ARG_1: u32 = ARG_0 + 8;
+        const ARG_4: u32 = ARG_0 + 4 * 8;
+        // Only stream sockets are needed. Leave CLOEXEC and NONBLOCK to the caller.
+        filter.extend([
+            instruction(BPF_JUMP_EQUAL, 0, 8, libc::SYS_socket as u32),
+            instruction(BPF_LOAD_WORD_ABSOLUTE, 0, 0, ARG_0),
+            instruction(BPF_JUMP_EQUAL, 1, 0, libc::AF_UNIX as u32),
+            instruction(BPF_RETURN, 0, 0, SECCOMP_EPERM),
+            instruction(BPF_LOAD_WORD_ABSOLUTE, 0, 0, ARG_1),
+            instruction(
+                BPF_AND,
+                0,
+                0,
+                !(libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u32,
+            ),
+            instruction(BPF_JUMP_EQUAL, 1, 0, libc::SOCK_STREAM as u32),
+            instruction(BPF_RETURN, 0, 0, SECCOMP_EPERM),
+            instruction(BPF_RETURN, 0, 0, SECCOMP_ALLOW),
+        ]);
+        for syscall in [
+            libc::SYS_bind,
+            libc::SYS_listen,
+            libc::SYS_accept,
+            libc::SYS_accept4,
+        ] {
+            filter.extend([
+                instruction(BPF_JUMP_EQUAL, 0, 1, syscall as u32),
+                instruction(BPF_RETURN, 0, 0, SECCOMP_ALLOW),
+            ]);
+        }
+        // libc send/recv use these syscalls with a null address. Reject an address in
+        // either half of the pointer, and leave ancillary-data syscalls blocked.
+        for syscall in [libc::SYS_sendto, libc::SYS_recvfrom] {
+            filter.extend([
+                instruction(BPF_JUMP_EQUAL, 0, 7, syscall as u32),
+                instruction(BPF_LOAD_WORD_ABSOLUTE, 0, 0, ARG_4),
+                instruction(BPF_JUMP_EQUAL, 1, 0, 0),
+                instruction(BPF_RETURN, 0, 0, SECCOMP_EPERM),
+                instruction(BPF_LOAD_WORD_ABSOLUTE, 0, 0, ARG_4 + 4),
+                instruction(BPF_JUMP_EQUAL, 1, 0, 0),
+                instruction(BPF_RETURN, 0, 0, SECCOMP_EPERM),
+                instruction(BPF_RETURN, 0, 0, SECCOMP_ALLOW),
+            ]);
+        }
+    }
+
+    fn syscall_filter(allow_unix_listener: bool) -> Vec<libc::sock_filter> {
         // Check seccomp_data.arch (offset 4), then seccomp_data.nr (offset 0).
         let mut filter = vec![
             instruction(BPF_LOAD_WORD_ABSOLUTE, 0, 0, 4),
-            instruction(BPF_JUMP_EQUAL, 1, 0, ARCH),
+            instruction(BPF_JUMP_EQUAL, 1, 0, AUDIT_ARCH),
             instruction(BPF_RETURN, 0, 0, SECCOMP_KILL),
             instruction(BPF_LOAD_WORD_ABSOLUTE, 0, 0, 0),
         ];
@@ -222,6 +291,9 @@ mod linux {
             // x32 uses the x86_64 audit architecture but separate syscall numbers.
             filter.push(instruction(BPF_JUMP_SET, 0, 1, 1 << 30));
             filter.push(instruction(BPF_RETURN, 0, 0, SECCOMP_KILL));
+        }
+        if allow_unix_listener {
+            unix_listener_filter(&mut filter);
         }
         for syscall in [
             libc::SYS_socket,
@@ -257,13 +329,44 @@ mod linux {
         model: &Path,
         worker: &Path,
     ) -> Result<Command> {
-        let libraries = pack.join("lib");
+        sandboxed_command(pack, model, worker, &pack.join("lib"), None)
+    }
+
+    #[cfg(feature = "embedded")]
+    pub(in crate::qa_worker) fn decision_command(
+        runtime_dir: &Path,
+        model: &Path,
+        worker: &Path,
+        socket_dir: &Path,
+    ) -> Result<Command> {
+        let metadata = fs::symlink_metadata(socket_dir)?;
+        // SAFETY: geteuid has no arguments and does not mutate process state.
+        let uid = unsafe { libc::geteuid() };
+        ensure!(
+            socket_dir.is_absolute()
+                && socket_dir.as_os_str().as_bytes().len() <= 80
+                && metadata.is_dir()
+                && metadata.uid() == uid
+                && metadata.mode() & 0o7777 == 0o700,
+            "Decision worker requires a short owner-private socket directory"
+        );
+        sandboxed_command(runtime_dir, model, worker, runtime_dir, Some(socket_dir))
+    }
+
+    fn sandboxed_command(
+        pack: &Path,
+        model: &Path,
+        worker: &Path,
+        libraries: &Path,
+        socket_dir: Option<&Path>,
+    ) -> Result<Command> {
         ensure!(
             !libraries.as_os_str().as_bytes().contains(&b':'),
             "QA pack directory cannot contain a dynamic loader path separator"
         );
-        let ruleset = rules_for(pack, model)?;
-        let filter = syscall_filter();
+        let ruleset = rules_for(pack, model, socket_dir)?;
+        let allow_unix_listener = socket_dir.is_some();
+        let filter = syscall_filter(allow_unix_listener);
         let filter_len = u16::try_from(filter.len())?;
         let mut command = Command::new(worker);
         command.env_clear().env("LD_LIBRARY_PATH", libraries);
@@ -273,6 +376,9 @@ mod linux {
             command.pre_exec(move || {
                 const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
                 const SECCOMP_MODE_FILTER: libc::c_ulong = 2;
+                if allow_unix_listener {
+                    libc::umask(0o077);
+                }
                 let program = libc::sock_fprog {
                     len: filter_len,
                     filter: filter.as_ptr().cast_mut(),
@@ -288,6 +394,86 @@ mod linux {
             });
         }
         Ok(command)
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn decision_filter_allows_only_the_unix_stream_listener_operations() {
+        let permits = |filter: &[libc::sock_filter], syscall: libc::c_long, args: [u64; 3]| {
+            let mut words = [0; 16];
+            words[0] = syscall as u32;
+            words[1] = AUDIT_ARCH;
+            words[4] = args[0] as u32;
+            words[6] = args[1] as u32;
+            // Test both halves of the address, including a pointer with a zero low word.
+            words[12] = args[2] as u32;
+            words[13] = (args[2] >> 32) as u32;
+            let mut index = 0;
+            let mut accumulator = 0;
+            loop {
+                let step = &filter[index];
+                index += 1;
+                match step.code {
+                    BPF_LOAD_WORD_ABSOLUTE => accumulator = words[step.k as usize / 4],
+                    BPF_AND => accumulator &= step.k,
+                    BPF_JUMP_EQUAL => {
+                        index += usize::from(if accumulator == step.k {
+                            step.jt
+                        } else {
+                            step.jf
+                        });
+                    }
+                    BPF_JUMP_SET => {
+                        index += usize::from(if accumulator & step.k != 0 {
+                            step.jt
+                        } else {
+                            step.jf
+                        });
+                    }
+                    BPF_RETURN => return step.k == SECCOMP_ALLOW,
+                    _ => panic!("invalid seccomp instruction"),
+                }
+            }
+        };
+        let generator = syscall_filter(false);
+        let decision = syscall_filter(true);
+        let unix = libc::AF_UNIX as u64;
+        let stream = (libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC) as u64;
+        assert!(!permits(&generator, libc::SYS_socket, [unix, stream, 0]));
+        assert!(permits(&decision, libc::SYS_socket, [unix, stream, 0]));
+        assert!(!permits(
+            &decision,
+            libc::SYS_socket,
+            [libc::AF_INET as u64, stream, 0]
+        ));
+        assert!(!permits(
+            &decision,
+            libc::SYS_socket,
+            [unix, libc::SOCK_DGRAM as u64, 0]
+        ));
+        for syscall in [
+            libc::SYS_bind,
+            libc::SYS_listen,
+            libc::SYS_accept,
+            libc::SYS_accept4,
+        ] {
+            assert!(!permits(&generator, syscall, [0; 3]));
+            assert!(permits(&decision, syscall, [0; 3]));
+        }
+        for syscall in [libc::SYS_sendto, libc::SYS_recvfrom] {
+            assert!(!permits(&generator, syscall, [0; 3]));
+            assert!(permits(&decision, syscall, [0; 3]));
+            assert!(!permits(&decision, syscall, [0, 0, 1]));
+            assert!(!permits(&decision, syscall, [0, 0, 1 << 32]));
+        }
+        for syscall in [
+            libc::SYS_socketpair,
+            libc::SYS_connect,
+            libc::SYS_sendmsg,
+            libc::SYS_recvmsg,
+        ] {
+            assert!(!permits(&decision, syscall, [0; 3]));
+        }
     }
 
     #[cfg(test)]

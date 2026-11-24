@@ -3,6 +3,16 @@
 #[path = "qa_sandbox.rs"]
 mod sandbox;
 
+#[cfg(feature = "embedded")]
+pub(crate) fn decision_command(
+    runtime_dir: &Path,
+    model: &Path,
+    worker: &Path,
+    socket_dir: &Path,
+) -> Result<Command> {
+    sandbox::decision_command(runtime_dir, model, worker, socket_dir)
+}
+
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt;

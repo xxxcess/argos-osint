@@ -43,7 +43,9 @@ use protocol::qa_frame_len;
 use protocol::QaWorkerCommand;
 use protocol::QaWorkerEvent;
 use protocol::QaWorkerReply;
+use protocol::QA_CHAT_MODEL_REVISION;
 use protocol::QA_CONTEXT_USAGE_ENV;
+use protocol::QA_DIALOGUE_ENV;
 use protocol::QA_MAX_FRAME_BYTES;
 use protocol::QA_MODEL_REVISION;
 use protocol::QA_WORKER_PROTOCOL;
@@ -345,9 +347,18 @@ fn relay(
                         QaWorkerReply::Ready {
                             protocol,
                             model_revision,
+                        }
+                        | QaWorkerReply::ReadyWithDialogue {
+                            protocol,
+                            model_revision,
                         },
                         Phase::Starting | Phase::Pinging,
-                    ) if protocol == QA_WORKER_PROTOCOL && model_revision == QA_MODEL_REVISION => {
+                    ) if protocol == QA_WORKER_PROTOCOL
+                        && matches!(
+                            model_revision.as_str(),
+                            QA_MODEL_REVISION | QA_CHAT_MODEL_REVISION
+                        ) =>
+                    {
                         phase = Phase::Idle;
                         *reply = Some(packet);
                     }
@@ -415,10 +426,11 @@ fn supervise(
 
 fn serve(stream: UnixStream, worker: &Path, model: &Path, libraries: &Path) -> Result<()> {
     stream.set_nonblocking(true)?;
-    let report_context = match opening_command(&stream)? {
+    let (report_context, dialogue) = match opening_command(&stream)? {
         QaWorkerCommand::Shutdown => return confirm_stopped(&stream),
-        QaWorkerCommand::Open => false,
-        QaWorkerCommand::OpenWithContext => true,
+        QaWorkerCommand::Open => (false, false),
+        QaWorkerCommand::OpenWithContext => (true, false),
+        QaWorkerCommand::OpenWithDialogue => (true, true),
         _ => return Err(anyhow!("invalid QA executor handshake")),
     };
 
@@ -449,6 +461,9 @@ fn serve(stream: UnixStream, worker: &Path, model: &Path, libraries: &Path) -> R
         .process_group(0);
     if report_context {
         command.env(QA_CONTEXT_USAGE_ENV, "1");
+    }
+    if dialogue {
+        command.env(QA_DIALOGUE_ENV, "1");
     }
     let mut child = ModelChild(command.spawn()?);
     supervise(&stream, &model_io, &mut child, EXECUTOR_LEASE)

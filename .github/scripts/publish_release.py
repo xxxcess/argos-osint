@@ -11,7 +11,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from fleetworks_qa_pack import MAX_COMPRESSED, MAX_MANIFEST, MODEL_REVISION
+from fleetworks_qa_pack import GENERATOR_REVISION, MAX_COMPRESSED, MAX_MANIFEST
 from inbox_qa_smoke_receipt import require_embedded_smoke
 
 IDENTITY_FIELDS = ("head", "version", "tag", "channel", "prerelease", "native", "backend", "web", "bert", "image_tag", "image_targets")
@@ -152,7 +152,8 @@ def inbox_qa_payload(plan, directory, native_digests):
         evidence = json.loads(receipt.read_text())
         if (not isinstance(evidence, dict) or evidence.get("archive") != archive.name
                 or evidence.get("target") != target or evidence.get("source_sha") != plan["head"]
-                or evidence.get("version") != plan["version"] or evidence.get("model_revision") != MODEL_REVISION
+                or evidence.get("version") != plan["version"] or evidence.get("model_revision") != GENERATOR_REVISION
+                or evidence.get("generated_dialogue") is not True
                 or evidence.get("status") != "passed"
                 or any(not isinstance(evidence.get(key), str) or not re.fullmatch(r"[0-9a-f]{64}", evidence[key])
                        for key in ("archive_sha256", "manifest_sha256", "native_archive_sha256"))

@@ -68,13 +68,7 @@ pub(super) fn status_check_summary<'a>(
             relevant.push(fact);
         }
     }
-    relevant.sort_by_key(|fact| match fact.status.as_str() {
-        "failed" => 0,
-        "not ready" | "not_ready" | "degraded" => 1,
-        "unavailable" => 2,
-        "running" => 3,
-        _ => 4,
-    });
+    relevant.sort_by_key(|fact| priority(fact));
     let summary = match selection {
         StatusChecks::All if passed + failed + unresolved == 0 => {
             "No status checks apply in the latest observation.".into()
@@ -100,6 +94,18 @@ pub(super) fn status_check_summary<'a>(
         }
     };
     Some((summary, relevant))
+}
+
+/// Show current blockers and in-progress work before passed checks in a broad summary.
+pub(super) fn priority(fact: &HealthFact) -> u8 {
+    match fact.status.as_str() {
+        "failed" => 0,
+        "not ready" | "not_ready" | "degraded" => 1,
+        "unavailable" => 2,
+        "running" => 3,
+        "ready" => 5,
+        _ => 4,
+    }
 }
 
 /// Promote a model-selected readiness subject, state, or reason to its complete

@@ -41,7 +41,9 @@ use sha2::Digest;
 use sha2::Sha256;
 use tch::Device;
 
+use protocol::verified_operational_sources;
 use protocol::QaContextUsage;
+use protocol::QaDialogueKind;
 use protocol::QaPassage;
 use protocol::QaWorkerCommand;
 use protocol::QaWorkerDialogue;
@@ -52,6 +54,7 @@ use protocol::QaWorkerPanicSource;
 use protocol::QaWorkerReply;
 use protocol::QaWorkerRequest;
 use protocol::QaWorkerSequence;
+use protocol::QA_CHAT_MODEL_REVISION;
 use protocol::QA_CONTEXT_USAGE_ENV;
 use protocol::QA_CONTEXT_WINDOW_TOKENS;
 use protocol::QA_DIALOGUE_ENV;
@@ -195,6 +198,27 @@ fn load_model(dir: &Path) -> Result<QuestionAnsweringModel> {
     .map_err(|_| anyhow!("could not load the pinned QA model"))
 }
 
+fn initial_model(
+    dir: &Path,
+    enable_dialogue: bool,
+) -> Result<(ResidentModel, Option<PathBuf>, &'static str)> {
+    let generator_dir = dir.join("generator");
+    match fs::symlink_metadata(dir.join("rust_model.ot")) {
+        Ok(_) => {
+            let model = ResidentModel::Extractive(Box::new(load_model(dir)?));
+            let generator_dir = (enable_dialogue && dialogue::verify(&generator_dir).is_ok())
+                .then_some(generator_dir);
+            Ok((model, generator_dir, QA_MODEL_REVISION))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            ensure!(enable_dialogue, "QA generator was not enabled");
+            let model = ResidentModel::Dialogue(Box::new(dialogue::load(&generator_dir)?));
+            Ok((model, Some(generator_dir), QA_CHAT_MODEL_REVISION))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 enum ResidentModel {
     Unloaded,
     Extractive(Box<QuestionAnsweringModel>),
@@ -216,8 +240,8 @@ impl ResidentModel {
     fn dialogue(
         &mut self,
         dir: Option<&Path>,
-        question: &str,
-        request: &QaWorkerDialogue,
+        request: &QaWorkerRequest,
+        dialogue: &QaWorkerDialogue,
         stopping: &AtomicBool,
     ) -> (Option<String>, Option<QaContextUsage>) {
         let skipped = (
@@ -242,7 +266,7 @@ impl ResidentModel {
             unreachable!("dialogue model was loaded");
         };
         let generated = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            dialogue::generate(generator, question, request)
+            dialogue::generate(generator, &request.question, dialogue, &request.passages)
         }));
         match generated {
             Ok(Ok(Some(generation))) => (
@@ -417,6 +441,49 @@ fn answer(
     Ok(())
 }
 
+fn complete_passage_findings<'a>(
+    request: &QaWorkerRequest,
+    passages: impl IntoIterator<Item = &'a QaPassage>,
+) -> Result<Vec<QaWorkerEvent>> {
+    let mut sequence = QaWorkerSequence::default();
+    let mut findings = Vec::new();
+    for passage in passages {
+        let event = QaWorkerEvent::Finding {
+            turn_id: request.turn_id.clone(),
+            sequence: u32::try_from(findings.len())? + 1,
+            source_id: passage.source_id.clone(),
+            start: 0,
+            end: u32::try_from(passage.text.chars().count())?,
+            text: passage.text.clone(),
+        };
+        // A candidate that would exceed a bound leaves the sequence unchanged.
+        if sequence.accept(request, &event).is_ok() {
+            findings.push(event);
+        }
+        if findings.len() == QA_MAX_FINDINGS {
+            break;
+        }
+    }
+    Ok(findings)
+}
+
+fn operational_answer(
+    request: &QaWorkerRequest,
+    reply: Option<String>,
+) -> Result<(Option<String>, Vec<QaWorkerEvent>)> {
+    if let Some(sources) = reply
+        .as_deref()
+        .and_then(|text| verified_operational_sources(request, text))
+    {
+        let source_count = sources.len();
+        let findings = complete_passage_findings(request, sources)?;
+        if source_count > 0 && findings.len() == source_count {
+            return Ok((reply, findings));
+        }
+    }
+    Ok((None, complete_passage_findings(request, &request.passages)?))
+}
+
 fn answer_dialogue(
     model: &mut ResidentModel,
     model_dir: Option<&Path>,
@@ -426,14 +493,31 @@ fn answer_dialogue(
     output: &mut impl FnMut(QaWorkerReply) -> io::Result<()>,
     stopping: &AtomicBool,
 ) -> Result<()> {
-    let (reply, context) = model.dialogue(model_dir, &request.question, dialogue, stopping);
+    let (reply, context) = model.dialogue(model_dir, request, dialogue, stopping);
+    if stopping.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let (reply, findings) = if dialogue.kind == QaDialogueKind::Operational {
+        operational_answer(request, reply)?
+    } else {
+        (reply, Vec::new())
+    };
+    let mut sequence = QaWorkerSequence::default();
+    let terminal_sequence = u32::try_from(findings.len())? + 1;
+    for event in findings {
+        if stopping.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        sequence.accept(request, &event)?;
+        output(QaWorkerReply::Event { event })?;
+    }
     if stopping.load(Ordering::Acquire) {
         return Ok(());
     }
     let event = QaWorkerEvent::Complete {
         turn_id: request.turn_id.clone(),
-        sequence: 1,
-        outcome: if reply.is_some() {
+        sequence: terminal_sequence,
+        outcome: if reply.is_some() || terminal_sequence > 1 {
             QaWorkerOutcome::Answered
         } else {
             QaWorkerOutcome::InsufficientContext
@@ -441,7 +525,7 @@ fn answer_dialogue(
         context: if report_context { context } else { None },
         reply,
     };
-    QaWorkerSequence::default().accept(request, &event)?;
+    sequence.accept(request, &event)?;
     output(QaWorkerReply::Event { event })?;
     Ok(())
 }
@@ -473,8 +557,8 @@ fn receive_commands(stopping: Arc<AtomicBool>) -> io::Result<mpsc::Receiver<QaWo
     Ok(receiver)
 }
 
-fn ready(dialogue: bool) -> QaWorkerReply {
-    let model_revision = QA_MODEL_REVISION.into();
+fn ready(dialogue: bool, model_revision: &str) -> QaWorkerReply {
+    let model_revision = model_revision.into();
     if dialogue {
         QaWorkerReply::ReadyWithDialogue {
             protocol: QA_WORKER_PROTOCOL,
@@ -507,9 +591,9 @@ pub(crate) fn run(mut output: impl FnMut(QaWorkerReply) -> io::Result<()>) -> Re
     let enable_dialogue = env::var_os(QA_DIALOGUE_ENV).as_deref() == Some("1".as_ref());
     let stopping = Arc::new(AtomicBool::new(false));
     let commands = receive_commands(stopping.clone())?;
-    let model = match panic::catch_unwind(|| {
+    let (mut model, generator_dir, model_revision) = match panic::catch_unwind(|| {
         configure_torch()?;
-        load_model(&dir)
+        initial_model(&dir, enable_dialogue)
     }) {
         Ok(model) => model?,
         Err(_) => {
@@ -526,17 +610,13 @@ pub(crate) fn run(mut output: impl FnMut(QaWorkerReply) -> io::Result<()>) -> Re
             return Err(anyhow!("QA model process panicked during startup"));
         }
     };
-    let mut model = ResidentModel::Extractive(Box::new(model));
-    let generator_dir = dir.join("generator");
-    let generator_dir =
-        (enable_dialogue && dialogue::verify(&generator_dir).is_ok()).then_some(generator_dir);
-    output(ready(generator_dir.is_some()))?;
+    output(ready(generator_dir.is_some(), model_revision))?;
     for command in commands {
         if stopping.load(Ordering::Acquire) {
             break;
         }
         match command {
-            QaWorkerCommand::Ping => output(ready(generator_dir.is_some()))?,
+            QaWorkerCommand::Ping => output(ready(generator_dir.is_some(), model_revision))?,
             QaWorkerCommand::Ask { request } => {
                 request.validate()?;
                 if let Some(dialogue) = &request.dialogue {
@@ -550,6 +630,10 @@ pub(crate) fn run(mut output: impl FnMut(QaWorkerReply) -> io::Result<()>) -> Re
                         &stopping,
                     )?;
                 } else {
+                    ensure!(
+                        model_revision == QA_MODEL_REVISION,
+                        "QA chat model requires a typed inference request"
+                    );
                     let extractive = model.extractive(&dir)?;
                     if !stopping.load(Ordering::Acquire) {
                         answer(extractive, request, report_context, &mut output, &stopping)?;
@@ -607,5 +691,41 @@ mod tests {
         assert!(best_span(&source, &[exact, ambiguous]).is_none());
         assert!(best_span(&source, &[candidate(0.07, 14, 18, "prêt")]).is_none());
         assert!(best_span(&source, &[candidate(0.99, 14, 18, "faux")]).is_none());
+    }
+
+    #[test]
+    fn grounds_operational_reply_or_publishes_complete_fallback_findings() {
+        let mut request = QaWorkerRequest::new(
+            "turn".into(),
+            "snapshot".into(),
+            "What is the actor search status?".into(),
+            vec![
+                QaPassage::new("actor-search".into(), "Actor search is ready.".into()),
+                QaPassage::new("gateway".into(), "Gateway is ready.".into()),
+            ],
+        );
+        request.dialogue = Some(QaWorkerDialogue {
+            kind: QaDialogueKind::Operational,
+            history: Vec::new(),
+        });
+
+        let (reply, findings) =
+            operational_answer(&request, Some("Gateway is ready.".into())).unwrap();
+        assert_eq!(reply.as_deref(), Some("Gateway is ready."));
+        assert!(matches!(
+            findings.as_slice(),
+            [QaWorkerEvent::Finding { source_id, sequence: 1, start: 0, end: 17, text, .. }]
+                if source_id == "gateway" && text == "Gateway is ready."
+        ));
+
+        let (reply, findings) =
+            operational_answer(&request, Some("Actor search is stopped.".into())).unwrap();
+        assert!(reply.is_none());
+        assert_eq!(findings.len(), 2);
+        assert!(matches!(
+            &findings[0],
+            QaWorkerEvent::Finding { source_id, sequence: 1, start: 0, end: 22, text, .. }
+                if source_id == "actor-search" && text == "Actor search is ready."
+        ));
     }
 }

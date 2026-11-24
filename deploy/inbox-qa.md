@@ -19,11 +19,13 @@ Quick Start reports the active artifact download and the installer reports verif
 
 The Embedded worker requires Linux Landlock ABI 3 or newer, or macOS Seatbelt. The companion starts it with access to the verified pack and the system loader. If the host lacks the required sandbox, Inbox and Connection settings report that Embedded inference is unsupported on that host. Expand the details for the Landlock requirement. Missing packs, invalid packs, and worker startup failures have their own messages.
 
-The app and companion are released independently of the optional QA archive. Pack construction uses CPU Torch 2.1.0, Rust-BERT 0.22.0, and the cased DistilBERT SQuAD checkpoint. Prepare dependencies on a connected build host. The release smoke runs with an empty model cache and disabled networking.
+The app and companion are released independently of the optional model archive. New Chat Inference Service packs use CPU Torch 2.1.0, Rust-BERT 0.22.0, and pinned FLAN-T5 Small. Prepare dependencies on a connected build host. The release smoke runs with an empty model cache and disabled networking.
 
 The companion requests context-window counts from compatible packs. Older packs continue to answer, and turns from those workers show an empty usage indicator when counts are unavailable.
 
-Embedded packs can also carry the pinned FLAN-T5-small dialogue model under `model/generator`. The installer and companion verify the complete file group against pinned digests. The worker advertises dialogue only for a verified group. Conversational turns use up to two recent exchanges from the current registration and a 256-token input budget. The worker loads one engine at a time, so the first turn after changing engines includes a model load. Packs with the extractor alone keep the existing conversational replies. The Distributed model container continues to serve extractive QA.
+The new pack carries FLAN-T5 Small under `model/generator`. The installer and companion verify the complete file group against pinned digests. The worker advertises generation after loading the model. Each generated turn uses a 256-token input budget and up to two recent exchanges from the current registration. Embedded and Distributed can still load verified legacy DistilBERT packs. The separately deployed zero-shot news classifier retains its own model and configuration.
+
+FLAN-T5 Base, GPT-2 Small and GPT-2 Medium are candidates in the manual GitHub Actions model evaluation. Candidate measurements cover the locked model runtime, frozen examples, context processing, and the model process’s memory. Deployment eligibility also needs packaged transport and host resource verification.
 
 ## Distributed review deployment
 

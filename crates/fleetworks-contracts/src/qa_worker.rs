@@ -14,6 +14,7 @@ pub const QA_CONTEXT_WINDOW_TOKENS: u16 = 256;
 pub const QA_CONTEXT_USAGE_ENV: &str = "FLEETWORKS_QA_CONTEXT_USAGE";
 pub const QA_DIALOGUE_ENV: &str = "FLEETWORKS_QA_DIALOGUE";
 pub const QA_MODEL_REVISION: &str = "564e9b582944a57a3e586bbb98fd6f0a4118db7f";
+pub const QA_CHAT_MODEL_REVISION: &str = "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab";
 pub const QA_MODEL_FILES: [(&str, &str); 3] = [
     (
         "config.json",
@@ -75,7 +76,7 @@ impl QaContextUsage {
     }
 
     fn is_valid_for(self, request: &QaWorkerRequest) -> bool {
-        let max_windows = if request.dialogue.is_some() {
+        let max_windows = if request.dialogue.is_some() && request.passages.is_empty() {
             1
         } else {
             request.passages.len() * MAX_WINDOWS_PER_PASSAGE
@@ -138,7 +139,8 @@ impl QaWorkerRequest {
             || !bounded_text(&self.question, QA_MAX_QUESTION_BYTES)
             || self.passages.len() > QA_MAX_PASSAGES
             || self.dialogue.as_ref().is_some_and(|dialogue| {
-                !self.passages.is_empty()
+                (!self.passages.is_empty() && dialogue.kind != QaDialogueKind::Operational)
+                    || (self.passages.is_empty() && dialogue.kind == QaDialogueKind::Operational)
                     || dialogue.history.len() > QA_MAX_DIALOGUE_HISTORY
                     || dialogue.history.iter().any(|exchange| {
                         !bounded_text(&exchange.question, QA_MAX_DIALOGUE_MESSAGE_BYTES)
@@ -181,6 +183,7 @@ pub enum QaDialogueKind {
     Acknowledgement,
     Help,
     Recall,
+    Operational,
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -194,6 +197,43 @@ pub fn valid_dialogue_reply(reply: &str) -> bool {
     bounded_text(reply, QA_MAX_DIALOGUE_MESSAGE_BYTES)
         && reply.split_whitespace().count() <= QA_MAX_VISIBLE_WORDS
         && !reply.chars().any(char::is_control)
+}
+
+/// Admit only complete, quoted operational facts and harmless introductory wording.
+pub fn verified_operational_sources<'a>(
+    request: &'a QaWorkerRequest,
+    reply: &str,
+) -> Option<Vec<&'a QaPassage>> {
+    if !valid_dialogue_reply(reply) {
+        return None;
+    }
+    let mut selected = Vec::new();
+    let mut first = true;
+    for sentence in reply.split(". ").map(|part| part.trim_end_matches('.')) {
+        if first
+            && matches!(
+                sentence,
+                "Here are the current checks" | "Here is the current status"
+            )
+        {
+            first = false;
+            continue;
+        }
+        first = false;
+        let passage = request.passages.iter().find(|passage| {
+            passage
+                .text
+                .split(". ")
+                .any(|fact| fact.trim_end_matches('.') == sentence)
+        })?;
+        if !selected.contains(&passage) {
+            selected.push(passage);
+        }
+        if selected.len() > QA_MAX_FINDINGS {
+            return None;
+        }
+    }
+    (!selected.is_empty()).then_some(selected)
 }
 
 /// The last event a worker emits for one request.
@@ -238,6 +278,7 @@ pub enum QaWorkerEvent {
 pub enum QaWorkerCommand {
     Open,
     OpenWithContext,
+    OpenWithDialogue,
     Ping,
     Ask { request: QaWorkerRequest },
     Shutdown,
@@ -341,7 +382,10 @@ impl QaWorkerSequence {
                 let words = self.words + text.split_whitespace().count();
                 let bytes = self.bytes + text.len();
                 if turn_id != &request.turn_id
-                    || request.dialogue.is_some()
+                    || request
+                        .dialogue
+                        .as_ref()
+                        .is_some_and(|dialogue| dialogue.kind != QaDialogueKind::Operational)
                     || *sequence != expected
                     || self.sources.len() == QA_MAX_FINDINGS
                     || self.sources.contains(source_id)
@@ -366,9 +410,22 @@ impl QaWorkerSequence {
                     || *sequence != expected
                     || context.is_some_and(|usage| !usage.is_valid_for(request))
                     || reply.as_deref().is_some_and(|text| {
-                        request.dialogue.is_none()
-                            || *outcome != QaWorkerOutcome::Answered
-                            || !valid_dialogue_reply(text)
+                        let Some(dialogue) = &request.dialogue else {
+                            return true;
+                        };
+                        *outcome != QaWorkerOutcome::Answered
+                            || if dialogue.kind == QaDialogueKind::Operational {
+                                !verified_operational_sources(request, text).is_some_and(
+                                    |passages| {
+                                        passages.len() == self.sources.len()
+                                            && passages.iter().all(|passage| {
+                                                self.sources.contains(&passage.source_id)
+                                            })
+                                    },
+                                )
+                            } else {
+                                !valid_dialogue_reply(text)
+                            }
                     })
                     || (*outcome == QaWorkerOutcome::Answered
                         && self.sources.is_empty()
@@ -517,6 +574,30 @@ mod tests {
             .unwrap());
         request.dialogue.as_mut().unwrap().history.push(earlier);
         assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn operational_replies_require_complete_observed_facts() {
+        let request = QaWorkerRequest::new(
+            "turn".into(),
+            "snapshot".into(),
+            "Summarize status".into(),
+            vec![QaPassage::new("cpu".into(), "CPU usage is 25.5%.".into())],
+        );
+        let sources = verified_operational_sources(
+            &request,
+            "Here is the current status. CPU usage is 25.5%.",
+        )
+        .unwrap();
+        assert_eq!(sources[0].source_id, "cpu");
+        for reply in [
+            "CPU usage is 26.5%.",
+            "CPU usage is 25.5% and all jobs completed.",
+            "CPU usage is 25.5%. All jobs completed.",
+            "Here is the current status.",
+        ] {
+            assert!(verified_operational_sources(&request, reply).is_none());
+        }
     }
 
     #[test]

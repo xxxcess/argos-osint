@@ -319,6 +319,8 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
     require(not model(), "Off retained a live model process")
     require(request("latest") is None, "Off exposes an exchange")
     turn = {"request_id": "inbox-qa-smoke-1", "context": authorize(registration), "question": SUMMARY_QUESTION}
+    for field in ("evidence", "history"):
+        request("turns", {**turn, field: []}, expected=(400, 422))
     request("turns", turn, expected=503)
 
     revision = before["revision"]
@@ -377,6 +379,7 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
     require(snapshot["state"] == "answered" and first_finding_ms is not None,
             "real local checkpoint did not return a cited answer")
     model_context = require_context(snapshot, inferred=True)
+    require(model_context["model_windows"] == 1, "operational reply did not use a single model input window")
     require(1 <= len(snapshot["findings"]) <= 3, "QA finding count exceeds its contract")
     for finding in snapshot["findings"]:
         require(0 <= finding["start"] < finding["end"]
@@ -481,13 +484,11 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
     require(datetime.fromisoformat(readings["memory_follow_up"]["observed_at"])
             > datetime.fromisoformat(readings["memory"]["observed_at"]),
             "memory follow-up reused the previous observation timestamp")
-    greeting = ask("greeting", "hi", check_legacy=True, generated=embedded_mode)
+    greeting = ask("greeting", "hi", check_legacy=True, generated=True)
     require(greeting.get("notice") == "greeting" and not greeting["findings"],
             "greeting did not receive a friendly reply without citations")
-    dialogue_rss_bytes = None
-    if embedded_mode:
-        worker, = model()
-        dialogue_rss_bytes = embedded.read_process_rss_bytes(worker)
+    worker, = model()
+    dialogue_rss_bytes = embedded.read_process_rss_bytes(worker)
     preceding = readings["memory_follow_up"]
     for index, question in enumerate(("And now?", "Has that changed?"), start=1):
         turn = ask(f"conversational-follow-up-{index}", question, check_legacy=True)
@@ -502,7 +503,7 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
             and all(part["source"]["kind"] == "host_metric" and part.get("measurement")
                     for part in resources["findings"]),
             "resource summary did not cite exact CPU, memory and disk observations")
-    help_turn = ask("help", "What can you help with?", check_legacy=True, generated=embedded_mode)
+    help_turn = ask("help", "What can you help with?", check_legacy=True, generated=True)
     require(help_turn.get("conversation") == "help" and not help_turn["findings"],
             "the assistant did not explain how to start a task")
     unsupported = ask("general-context", "What is the capital of Japan?", check_legacy=True)
@@ -532,7 +533,7 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
             "grounded_readiness": True, "unresolved_status_checks": True, "passed_status_checks": True,
             "live_metrics": True, "unsupported_context": True,
             "resource_snapshot": True, "greeting": True, "conversational_follow_ups": True,
-            "local_dialogue": embedded_mode,
+            "generated_dialogue": True,
             "local_dialogue_rss_bytes": dialogue_rss_bytes,
             "frozen_samples": readings, "legacy_http_evidence": legacy_request is not None}
 

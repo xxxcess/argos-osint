@@ -998,7 +998,15 @@ async fn snapshot(
                 answer_mode = store::AnswerMode::Model;
                 let at = chrono::DateTime::from_timestamp_millis(sample.sampled_at_ms)
                     .ok_or_else(current_health_unavailable)?;
-                for fact in &sample.facts {
+                let mut facts = sample
+                    .facts
+                    .iter()
+                    .filter(|fact| {
+                        !matches!(fact.status.as_str(), "not applicable" | "not_applicable")
+                    })
+                    .collect::<Vec<_>>();
+                facts.sort_by_key(|fact| readiness::priority(fact));
+                for fact in facts {
                     let reference =
                         ChatSourceReference::new(ChatSourceKind::Readiness, fact.id.clone())
                             .map_err(|_| crate::bad())?;
@@ -1050,10 +1058,11 @@ async fn snapshot(
     let sampled_at_ms = earliest.unwrap_or_else(chrono::Utc::now).timestamp_millis();
     let turn_id = store::accepted_turn_id(actor, request, generation).map_err(storage_error)?;
     let dialogue = match intent {
-        Question::Greeting if target.embedded => Some(QaDialogueKind::Greeting),
-        Question::Acknowledgement if target.embedded => Some(QaDialogueKind::Acknowledgement),
-        Question::Help if target.embedded => Some(QaDialogueKind::Help),
+        Question::Greeting => Some(QaDialogueKind::Greeting),
+        Question::Acknowledgement => Some(QaDialogueKind::Acknowledgement),
+        Question::Help => Some(QaDialogueKind::Help),
         Question::Recall => Some(QaDialogueKind::Recall),
+        Question::Summary if !passages.is_empty() => Some(QaDialogueKind::Operational),
         _ => None,
     };
     let mut worker_request =

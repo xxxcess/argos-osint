@@ -137,13 +137,12 @@ def mac_libraries(binary, directory, torch_root):
     return list(libraries.values())
 
 
-def verify_inference(root, loader_key, target, *, dialogue=False):
+def verify_inference(root, loader_key, target):
     # The extracted pack must find all runtime libraries and use the exact
     # checkpoint without inheriting Torch or model-cache environment variables.
     model_env = {loader_key: str(root / "lib"), "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
-                 "RAYON_NUM_THREADS": "1"}
-    if dialogue:
-        model_env.update(FLEETWORKS_QA_DIALOGUE="1", FLEETWORKS_QA_CONTEXT_USAGE="1")
+                 "RAYON_NUM_THREADS": "1", "FLEETWORKS_QA_DIALOGUE": "1",
+                 "FLEETWORKS_QA_CONTEXT_USAGE": "1"}
     started = time.monotonic()
     worker = root / pack.WORKER
     model = root / "model"
@@ -157,7 +156,30 @@ def verify_inference(root, loader_key, target, *, dialogue=False):
     error_log = tempfile.TemporaryFile()
     process = subprocess.Popen(command, env=model_env, cwd=model, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=error_log)
-    deadline = started + 60
+    deadline = started + 45
+    peak_rss = None
+    rss_samples = 0
+
+    def sample_rss():
+        nonlocal peak_rss, rss_samples
+        try:
+            if target in DARWIN_WHEELS:
+                result = subprocess.run(["/bin/ps", "-o", "rss=", "-p", str(process.pid)],
+                                        capture_output=True, text=True, timeout=1)
+                if result.returncode != 0:
+                    return
+                kib = int(result.stdout.strip())
+            else:
+                status = Path(f"/proc/{process.pid}/status").read_text()
+                match = re.search(r"^VmHWM:\s+(\d+) kB$", status, re.M)
+                if match is None:
+                    return
+                kib = int(match[1])
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return
+        if kib > 0:
+            rss_samples += 1
+            peak_rss = max(peak_rss or 0, kib * 1024)
 
     def send(message):
         encoded = json.dumps(message, separators=(",", ":")).encode()
@@ -170,8 +192,11 @@ def verify_inference(root, loader_key, target, *, dialogue=False):
         def read(size):
             output = bytearray()
             while len(output) < size:
-                remaining = max(deadline - time.monotonic(), 0)
-                pack.check(select.select([fd], [], [], remaining)[0], "QA checkpoint smoke timed out")
+                remaining = deadline - time.monotonic()
+                pack.check(remaining > 0, "QA checkpoint smoke timed out")
+                if not select.select([fd], [], [], min(remaining, 0.25))[0]:
+                    sample_rss()
+                    continue
                 chunk = os.read(fd, size - len(output))
                 pack.check(chunk, "QA checkpoint worker stopped unexpectedly")
                 output.extend(chunk)
@@ -181,51 +206,69 @@ def verify_inference(root, loader_key, target, *, dialogue=False):
         pack.check(0 < size <= 512 * 1024, "QA checkpoint reply exceeds its limit")
         return json.loads(read(size))
 
+    def valid_reply(reply):
+        return (isinstance(reply, str) and bool(reply.strip()) and reply.isprintable()
+                and len(reply.encode("utf-8")) <= 1024 and len(reply.split()) <= 60)
+
+    def complete_turn(request, sequence, *, prose_required):
+        terminal = receive()
+        event = terminal.get("event", {})
+        reply = event.get("reply")
+        usage = event.get("context", {})
+        pack.check(terminal.get("reply") == "event" and event.get("kind") == "complete"
+                   and event.get("turn_id") == request["turn_id"] and event.get("sequence") == sequence
+                   and event.get("outcome") == "answered"
+                   and (valid_reply(reply) or (reply is None and not prose_required)),
+                   "generator did not complete the bounded turn")
+        pack.check(usage.get("window_tokens") == 256 and usage.get("model_windows") == 1
+                   and type(usage.get("peak_input_tokens")) is int and 0 < usage["peak_input_tokens"] <= 256,
+                   "generator did not report its bounded input window")
+        return usage, reply is not None
+
     try:
-        ready = "ready_with_dialogue" if dialogue else "ready"
-        pack.check(receive() == {"reply": ready, "protocol": 1, "model_revision": pack.MODEL_REVISION},
-                   "QA checkpoint did not become ready")
+        ready = {"reply": "ready_with_dialogue", "protocol": 1, "model_revision": pack.GENERATOR_REVISION}
+        pack.check(receive() == ready, "FLAN-T5 checkpoint did not become ready")
         warm = time.monotonic()
-        if dialogue:
-            deadline = min(deadline, warm + 25)
-            request = {
-                "turn_id": "pack-dialogue-probe", "snapshot_id": "pack-dialogue-probe",
-                "question": "Hello!", "passages": [],
-                "dialogue": {"kind": "greeting", "history": [
-                    {"question": "What can I call you?", "reply": "You can call me Fleetworks."},
-                    {"question": "Good morning.", "reply": "Good morning!"},
-                ]},
-            }
-            send({"command": "ask", "request": request})
-            terminal = receive()
-            event = terminal.get("event", {})
-            reply = event.get("reply")
-            usage = event.get("context", {})
-            pack.check(terminal.get("reply") == "event" and event.get("kind") == "complete"
-                       and event.get("turn_id") == request["turn_id"] and event.get("sequence") == 1
-                       and event.get("outcome") == "answered" and isinstance(reply, str)
-                       and bool(reply.strip()) and reply.isprintable() and len(reply.encode("utf-8")) <= 1024
-                       and len(reply.split()) <= 60, "generator did not complete the bounded dialogue turn")
-            pack.check(usage.get("window_tokens") == 256 and usage.get("model_windows") == 1
-                       and type(usage.get("peak_input_tokens")) is int and 0 < usage["peak_input_tokens"] <= 256,
-                       "generator did not report its bounded input window")
-        else:
-            send({"command": "ask", "request": {"turn_id": "pack-probe", "snapshot_id": "pack-probe",
-                  "question": "What is the state of actor search?",
-                  "passages": [{"source_id": "readiness", "text": "Actor search is ready."}]}})
-            finding = {"reply": "event", "event": {"kind": "finding", "turn_id": "pack-probe",
-                       "sequence": 1, "source_id": "readiness", "start": 16, "end": 21, "text": "ready"}}
-            pack.check(receive() == finding, "pinned checkpoint did not extract the expected exact answer")
-            pack.check(receive() == {"reply": "event", "event": {"kind": "complete", "turn_id": "pack-probe",
-                       "sequence": 2, "outcome": "answered"}}, "QA checkpoint did not complete the turn")
-        complete = time.monotonic()
+        sample_rss()
+        greeting = {
+            "turn_id": "pack-dialogue-probe", "snapshot_id": "pack-dialogue-probe",
+            "question": "Hello!", "passages": [],
+            "dialogue": {"kind": "greeting", "history": [
+                {"question": "What can I call you?", "reply": "You can call me Fleetworks."},
+                {"question": "Good morning.", "reply": "Good morning!"},
+            ]},
+        }
+        greeting_started = time.monotonic()
+        deadline = greeting_started + 25
+        send({"command": "ask", "request": greeting})
+        greeting_context, _ = complete_turn(greeting, 1, prose_required=True)
+        greeted = time.monotonic()
+        sample_rss()
+
+        fact = {"source_id": "readiness", "text": "Actor search is ready."}
+        operational = {
+            "turn_id": "pack-operational-probe", "snapshot_id": "pack-operational-probe",
+            "question": "What is the state of actor search?", "passages": [fact],
+            "dialogue": {"kind": "operational", "history": []},
+        }
+        operational_started = time.monotonic()
+        deadline = operational_started + 25
+        send({"command": "ask", "request": operational})
+        finding = {"reply": "event", "event": {"kind": "finding", "turn_id": operational["turn_id"],
+                   "sequence": 1, "start": 0, "end": len(fact["text"]), **fact}}
+        pack.check(receive() == finding, "operational turn did not cite the exact frozen fact")
+        operational_context, composed = complete_turn(operational, 2, prose_required=False)
+        operational_finished = time.monotonic()
+        sample_rss()
+
         send({"command": "shutdown"})
         pack.check(process.wait(timeout=10) == 0, "QA checkpoint worker did not shut down")
-        if dialogue:
-            return {"model_warm_ms": round((warm - started) * 1000, 1),
-                    "dialogue_ms": round((complete - warm) * 1000, 1), "context": usage}
         return {"model_warm_ms": round((warm - started) * 1000, 1),
-                "single_passage_ms": round((complete - warm) * 1000, 1)}
+                "first_reply_ms": round((greeted - greeting_started) * 1000, 1),
+                "operational_reply_ms": round((operational_finished - operational_started) * 1000, 1),
+                "dialogue_context": greeting_context, "operational_context": operational_context,
+                "operational_composed": composed, "peak_sampled_rss_bytes": peak_rss,
+                "rss_samples": rss_samples}
     except Exception:
         error_log.seek(0)
         diagnostic = error_log.read(16 * 1024)
@@ -252,7 +295,7 @@ def build(target, directory):
     libraries = staging / "runtime-libraries"
     libraries.mkdir(parents=True)
     model = staging / "model"
-    run("bash", "tools/assistant-bert/scripts/prepare-model.sh", "--with-generator", str(model), timeout=1080)
+    run("bash", "tools/assistant-bert/scripts/prepare-model.sh", "--generator-only", str(model), timeout=720)
     torch_root, loader_key, env = torch_environment()
     manifest = "tools/assistant-bert/Cargo.toml"
     run("cargo", "fmt", "--manifest-path", manifest, "--check")
@@ -285,7 +328,6 @@ def build(target, directory):
         linux_libraries(installed / pack.WORKER, installed / "lib",
                         {**env, loader_key: str(installed / "lib")}, installed=True)
     digests["checkpoint_smoke"] = verify_inference(installed, loader_key, target)
-    digests["dialogue_smoke"] = verify_inference(installed, loader_key, target, dialogue=True)
     (directory / "digests.json").write_text(json.dumps(digests, sort_keys=True) + "\n")
     print(json.dumps(digests, sort_keys=True))
 

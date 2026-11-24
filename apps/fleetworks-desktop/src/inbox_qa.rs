@@ -1109,13 +1109,17 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
                     .filter(|reply| !reply.is_empty()),
                 _ => None,
             };
-            let fallback = (reply.is_none() && !detail.is_empty()).then_some(detail);
-            let answer = reply
-                .into_iter()
-                .chain(turn.findings.iter().map(|finding| finding.text.as_str()))
-                .chain(fallback)
-                .collect::<Vec<_>>()
-                .join("\n");
+            let answer = reply.map_or_else(
+                || {
+                    turn.findings
+                        .iter()
+                        .map(|finding| finding.text.as_str())
+                        .chain((!detail.is_empty()).then_some(detail))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                },
+                str::to_owned,
+            );
             (
                 turn.question.as_str(),
                 stage,
@@ -1453,7 +1457,7 @@ mod tests {
 
         runtime.update(|state, _| {
             let mut modeled = turn(QaTurnState::Answered, 2);
-            modeled.reply = Some("Here’s what I found.".into());
+            modeled.reply = Some(format!("Here are the current checks. {FINDING}"));
             modeled.notice = Some(QaTurnNotice::Greeting);
             modeled.conversation = Some(QaConversationReply::Help);
             modeled.context = Some(QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 224, 3));
@@ -1464,7 +1468,7 @@ mod tests {
         assert_eq!(accessibility_nodes_with_key(&tree, REPLY), 1);
         assert_eq!(accessibility_nodes_with_key(&tree, CONTEXT_DIAL), 1);
         let rendered = tree.to_string();
-        assert!(rendered.contains("Here’s what I found."));
+        assert!(rendered.contains("Here are the current checks."));
         assert!(rendered.contains(FINDING));
         assert!(!rendered.contains("How can I help?"));
         assert!(!rendered.contains("Select a job to ask about its status"));

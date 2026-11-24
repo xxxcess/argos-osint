@@ -31,12 +31,14 @@ use fleetworks_contracts::chat::QaAvailabilityReason;
 use fleetworks_contracts::chat::QaStartupStage;
 use fleetworks_contracts::qa_worker::qa_frame_len;
 use fleetworks_contracts::qa_worker::QaContextUsage;
+use fleetworks_contracts::qa_worker::QaDialogueKind;
 use fleetworks_contracts::qa_worker::QaWorkerCommand;
 use fleetworks_contracts::qa_worker::QaWorkerEvent;
 use fleetworks_contracts::qa_worker::QaWorkerOutcome;
 use fleetworks_contracts::qa_worker::QaWorkerReply;
 use fleetworks_contracts::qa_worker::QaWorkerRequest;
 use fleetworks_contracts::qa_worker::QaWorkerSequence;
+use fleetworks_contracts::qa_worker::QA_CHAT_MODEL_REVISION;
 use fleetworks_contracts::qa_worker::QA_CONTEXT_USAGE_ENV;
 use fleetworks_contracts::qa_worker::QA_CONTEXT_WINDOW_TOKENS;
 use fleetworks_contracts::qa_worker::QA_DIALOGUE_ENV;
@@ -205,7 +207,7 @@ impl QaWorkerSupervisor {
     async fn connect(&self, progress: &(dyn Fn(QaStartupStage) + Sync)) -> Result<WorkerSession> {
         match &self.target {
             WorkerTarget::Distributed(socket) => {
-                WorkerSession::open_socket(socket, QaWorkerCommand::OpenWithContext).await
+                WorkerSession::open_socket(socket, QaWorkerCommand::OpenWithDialogue).await
             }
             WorkerTarget::EmbeddedState(state_dir) => {
                 let state_dir = state_dir.clone();
@@ -259,10 +261,12 @@ impl QaWorkerSupervisor {
         let mut stage = WarmStage::new("worker_ready_frame");
         let readiness = async {
             if let WorkerTarget::Distributed(socket) = &self.target {
-                if session.ready_after_context_open().await? {
-                    return Ok(());
+                for fallback in [QaWorkerCommand::OpenWithContext, QaWorkerCommand::Open] {
+                    if session.ready_after_context_open().await? {
+                        return Ok(());
+                    }
+                    session = WorkerSession::open_socket(socket, fallback).await?;
                 }
-                session = WorkerSession::open_socket(socket, QaWorkerCommand::Open).await?;
             }
             session.ready().await
         };
@@ -424,6 +428,7 @@ struct WorkerSession {
     input: Box<dyn AsyncWrite + Send + Unpin>,
     output: Box<dyn AsyncRead + Send + Unpin>,
     child: Option<Child>,
+    dialogue_allowed: bool,
     dialogue: bool,
 }
 
@@ -462,6 +467,7 @@ impl WorkerSession {
             input: Box::new(input),
             output: Box::new(output),
             child: Some(child),
+            dialogue_allowed: true,
             dialogue: false,
         })
     }
@@ -474,6 +480,7 @@ impl WorkerSession {
         let mut session = Self::socket(socket)
             .await
             .map_err(|error| warm_error("worker_socket", error))?;
+        session.dialogue_allowed = matches!(&command, QaWorkerCommand::OpenWithDialogue);
         session
             .send(&command)
             .await
@@ -502,6 +509,7 @@ impl WorkerSession {
             input: Box::new(input),
             output: Box::new(output),
             child: None,
+            dialogue_allowed: false,
             dialogue: false,
         })
     }
@@ -561,9 +569,12 @@ impl WorkerSession {
             QaWorkerReply::ReadyWithDialogue {
                 protocol,
                 model_revision,
-            } if self.child.is_some()
+            } if self.dialogue_allowed
                 && protocol == QA_WORKER_PROTOCOL
-                && model_revision == QA_MODEL_REVISION =>
+                && matches!(
+                    model_revision.as_str(),
+                    QA_MODEL_REVISION | QA_CHAT_MODEL_REVISION
+                ) =>
             {
                 self.dialogue = true;
                 Ok(())
@@ -595,21 +606,24 @@ impl WorkerSession {
 
     async fn ask(
         &mut self,
-        request: QaWorkerRequest,
+        mut request: QaWorkerRequest,
         events: mpsc::Sender<QaWorkerEvent>,
     ) -> Result<()> {
-        if request.dialogue.is_some() && !self.dialogue {
-            let event = QaWorkerEvent::Complete {
-                turn_id: request.turn_id,
-                sequence: 1,
-                outcome: QaWorkerOutcome::InsufficientContext,
-                context: Some(QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 0, 0)),
-                reply: None,
-            };
-            return events
-                .send(event)
-                .await
-                .map_err(|_| anyhow!("QA event receiver closed"));
+        if let Some(dialogue) = request.dialogue.as_ref().filter(|_| !self.dialogue) {
+            if dialogue.kind != QaDialogueKind::Operational {
+                let event = QaWorkerEvent::Complete {
+                    turn_id: request.turn_id,
+                    sequence: 1,
+                    outcome: QaWorkerOutcome::InsufficientContext,
+                    context: Some(QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 0, 0)),
+                    reply: None,
+                };
+                return events
+                    .send(event)
+                    .await
+                    .map_err(|_| anyhow!("QA event receiver closed"));
+            }
+            request.dialogue = None;
         }
         self.send(&QaWorkerCommand::Ask {
             request: request.clone(),
@@ -833,27 +847,36 @@ fn verify_pack(pointer: &PackPointer) -> Result<PathBuf> {
         serde_json::from_slice(&bytes).map_err(|_| anyhow!("invalid QA pack manifest"))?;
     ensure!(
         manifest.protocol == QA_WORKER_PROTOCOL
-            && manifest.model_revision == QA_MODEL_REVISION
+            && matches!(
+                manifest.model_revision.as_str(),
+                QA_MODEL_REVISION | QA_CHAT_MODEL_REVISION
+            )
             && manifest.target == host_target()
             && manifest.files.len() <= MAX_PACK_FILES
             && manifest.files.contains_key(WORKER_BINARY)
             && manifest.files.keys().all(|name| allowed_pack_file(name)),
         "QA pack is incompatible with this companion"
     );
+    let legacy_model = manifest.model_revision == QA_MODEL_REVISION;
     for (name, digest) in QA_MODEL_FILES {
+        let entry = manifest
+            .files
+            .get(&format!("model/{name}"))
+            .map(String::as_str);
         ensure!(
-            manifest
-                .files
-                .get(&format!("model/{name}"))
-                .map(String::as_str)
-                == Some(digest),
+            if legacy_model {
+                entry == Some(digest)
+            } else {
+                entry.is_none()
+            },
             "QA pack contains the wrong model"
         );
     }
-    if manifest
-        .files
-        .keys()
-        .any(|name| name.starts_with("model/generator/"))
+    if !legacy_model
+        || manifest
+            .files
+            .keys()
+            .any(|name| name.starts_with("model/generator/"))
     {
         for (name, digest) in QA_GENERATOR_FILES {
             ensure!(
@@ -1028,6 +1051,12 @@ mod tests {
             let (mut unsupported, _) = listener.accept().await.unwrap();
             assert!(matches!(
                 read_command(&mut unsupported).await,
+                QaWorkerCommand::OpenWithDialogue
+            ));
+            drop(unsupported);
+            let (mut unsupported, _) = listener.accept().await.unwrap();
+            assert!(matches!(
+                read_command(&mut unsupported).await,
                 QaWorkerCommand::OpenWithContext
             ));
             drop(unsupported);
@@ -1073,7 +1102,7 @@ mod tests {
             let (mut peer, _) = listener.accept().await.unwrap();
             assert!(matches!(
                 read_command(&mut peer).await,
-                QaWorkerCommand::OpenWithContext
+                QaWorkerCommand::OpenWithDialogue
             ));
             let ready = || QaWorkerReply::Ready {
                 protocol: QA_WORKER_PROTOCOL,

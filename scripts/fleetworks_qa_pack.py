@@ -165,15 +165,22 @@ def verify_directory(root: Path, target: str, expected_manifest: str) -> dict:
     check(isinstance(data, dict) and set(data) == {"protocol", "target", "model_revision", "files"},
           "unexpected pack manifest fields")
     check(type(data["protocol"]) is int and data["protocol"] == 1, "unsupported pack protocol")
-    check(data["target"] == target and data["model_revision"] == MODEL_REVISION,
+    revision = data["model_revision"]
+    check(data["target"] == target and revision in (MODEL_REVISION, GENERATOR_REVISION),
           "pack target or QA model revision mismatch")
     files = data["files"]
-    check(isinstance(files, dict) and set(MODEL) | {WORKER} <= files.keys() and len(files) <= MAX_FILES,
+    check(isinstance(files, dict) and WORKER in files and len(files) <= MAX_FILES,
           "pack file inventory is incomplete or too large")
-    for name, expected in MODEL.items():
-        check(files[name] == expected, f"{name} does not match the pinned QA checkpoint")
     generator_files = GENERATOR.keys() & files.keys()
-    check(not generator_files or generator_files == GENERATOR.keys(), "generator inventory is incomplete")
+    extractive_files = MODEL.keys() & files.keys()
+    if revision == MODEL_REVISION:
+        check(extractive_files == MODEL.keys(), "extractive model inventory is incomplete")
+        for name, expected in MODEL.items():
+            check(files[name] == expected, f"{name} does not match the pinned QA checkpoint")
+        check(not generator_files or generator_files == GENERATOR.keys(), "generator inventory is incomplete")
+    else:
+        check(not extractive_files and generator_files == GENERATOR.keys(),
+              "primary generator inventory is incomplete or mixed")
     generator_bytes = sum(GENERATOR[name][0] for name in generator_files)
     check(generator_bytes <= MAX_GENERATOR_BYTES, "generator exceeds its size limit")
     for name in generator_files:
@@ -229,6 +236,9 @@ def build(args: argparse.Namespace) -> dict:
     with tempfile.TemporaryDirectory(prefix=".qa-pack-", dir=args.output.parent) as staging:
         root = Path(staging)
         install = {name: args.model / Path(name).name for name in MODEL}
+        install = {name: path for name, path in install.items() if path.exists() or path.is_symlink()}
+        check(not install or install.keys() == MODEL.keys(), "extractive model source inventory is incomplete")
+        revision = MODEL_REVISION if install else GENERATOR_REVISION
         generator = args.model / "generator"
         if generator.exists() or generator.is_symlink():
             check(generator.is_dir() and not generator.is_symlink(), "generator source directory is linked")
@@ -238,6 +248,7 @@ def build(args: argparse.Namespace) -> dict:
                 source = generator / Path(name).name
                 check(not source.is_symlink(), "generator source file is linked")
                 install[name] = source
+        check(install, "no pinned model sources were supplied")
         install[WORKER] = args.worker
         if args.listener:
             install[LISTENER] = args.listener
@@ -258,7 +269,7 @@ def build(args: argparse.Namespace) -> dict:
             shutil.copyfile(source, dest)
             dest.chmod(0o755 if name in EXECUTABLES else 0o644)
             files[name] = sha256(dest)
-        manifest = {"protocol": 1, "model_revision": MODEL_REVISION, "target": args.target, "files": files}
+        manifest = {"protocol": 1, "model_revision": revision, "target": args.target, "files": files}
         manifest_path = root / MANIFEST
         manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         manifest_digest = sha256(manifest_path)
@@ -270,7 +281,7 @@ def build(args: argparse.Namespace) -> dict:
         archive_digest = sha256(temporary)
         os.link(temporary, args.output)
         generator_bytes = sum(GENERATOR[name][0] for name in GENERATOR.keys() & files.keys())
-        receipt = {"target": args.target, "model_revision": MODEL_REVISION,
+        receipt = {"target": args.target, "model_revision": revision,
                    "manifest_sha256": manifest_digest, "archive_sha256": archive_digest,
                    "archive_bytes": archive_bytes,
                    "unpacked_bytes": sum((root / name).stat().st_size for name in (MANIFEST, *files)),

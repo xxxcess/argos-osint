@@ -17,7 +17,7 @@ use fleetworks_jobs::{Request, Store};
 use serde_json::json;
 use tokio::sync::Semaphore;
 
-use crate::queue_client::{QA_QUEUE, QA_QUEUE_PATH};
+use crate::queue_client::QA_QUEUE;
 
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -69,60 +69,33 @@ pub(crate) fn router(store: Store, queue: Queue) -> Router {
         })
 }
 
-/// This route uses the independent QA bearer policy and reserves its own RPC slots.
-pub(crate) fn qa_router(queue: Queue) -> Router {
-    Router::new()
-        .route(QA_QUEUE_PATH, post(qa_queue_command))
-        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
-        .with_state((queue, Arc::new(Semaphore::new(8))))
-}
-
 async fn queue_command(
     State(jobs): State<Jobs>,
     payload: Result<Json<QueueRequest>, JsonRejection>,
-) -> Response {
-    run_queue_command(&jobs.queue, &jobs.slots, payload, false).await
-}
-
-async fn qa_queue_command(
-    State((queue, slots)): State<(Queue, Arc<Semaphore>)>,
-    payload: Result<Json<QueueRequest>, JsonRejection>,
-) -> Response {
-    run_queue_command(&queue, &slots, payload, true).await
-}
-
-async fn run_queue_command(
-    queue: &Queue,
-    slots: &Semaphore,
-    payload: Result<Json<QueueRequest>, JsonRejection>,
-    qa_only: bool,
 ) -> Response {
     let mut request = match payload {
         Ok(Json(request)) => request,
         Err(reason) => return rejected(reason),
     };
     let queue_name = match &request.command {
-        QueueCommand::Publish { queue, .. } | QueueCommand::Claim { queue, .. } => queue,
-        QueueCommand::DeadLetters { queue, .. } if !qa_only => queue,
+        QueueCommand::Publish { queue, .. }
+        | QueueCommand::Claim { queue, .. }
+        | QueueCommand::DeadLetters { queue, .. } => queue,
         QueueCommand::Renew { token, .. }
         | QueueCommand::Requeue { token, .. }
         | QueueCommand::Ack { token }
         | QueueCommand::DeadLetter { token } => &token.queue,
         _ => return error(StatusCode::FORBIDDEN, "jobs_queue_not_allowed"),
     };
-    if (queue_name == QA_QUEUE) != qa_only {
+    // Historical Assistant queue data and idempotency keys stay private.
+    if queue_name == QA_QUEUE || request.operation_key.starts_with("qa:") {
         return error(StatusCode::FORBIDDEN, "jobs_queue_not_allowed");
     }
-    if qa_only {
-        request.operation_key = format!("qa:{}", request.operation_key);
-    } else if request.operation_key.starts_with("qa:") {
-        return error(StatusCode::FORBIDDEN, "jobs_queue_not_allowed");
-    }
-    let Ok(_slot) = slots.try_acquire() else {
+    let Ok(_slot) = jobs.slots.try_acquire() else {
         return error(StatusCode::TOO_MANY_REQUESTS, "jobs_busy");
     };
     request.now_ms = chrono::Utc::now().timestamp_millis();
-    match tokio::time::timeout(REQUEST_TIMEOUT, queue.execute(request)).await {
+    match tokio::time::timeout(REQUEST_TIMEOUT, jobs.queue.execute(request)).await {
         Ok(Ok(response)) => Json(response).into_response(),
         Ok(Err(reason)) => {
             tracing::warn!(error = %reason, "Jobs RocksDB queue command failed");
@@ -279,9 +252,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn qa_bearer_is_isolated_to_its_wakeup_queue() {
+    async fn remote_jobs_cannot_access_the_reserved_qa_queue() {
         const JOBS_TOKEN: &str = "01234567890123456789012345678901";
-        const QA_TOKEN: &str = "abcdefghijklmnopqrstuvwxyz012345";
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path().join("jobs.sqlite3"))
             .await
@@ -289,56 +261,45 @@ mod tests {
         let queue = Queue::open(directory.path().join("queue")).await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let guard = |routes, token| {
-            argos_osint_api::guard_network(
-                routes,
-                argos_osint_api::NetworkPolicy::new(&[address.to_string()], token).unwrap(),
-                Arc::new(Vec::new()),
-                address.port(),
-            )
-        };
-        let app = guard(router(store, queue.clone()), JOBS_TOKEN)
-            .merge(guard(qa_router(queue), QA_TOKEN));
+        let app = argos_osint_api::guard_network(
+            router(store, queue),
+            argos_osint_api::NetworkPolicy::new(&[address.to_string()], JOBS_TOKEN).unwrap(),
+            Arc::new(Vec::new()),
+            address.port(),
+        );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = reqwest::Client::new();
-        for (path, token, queue, expected) in [
-            (QA_QUEUE_PATH, QA_TOKEN, QA_QUEUE, StatusCode::OK),
+        for (path, queue, operation_key, expected) in [
             (
-                QA_QUEUE_PATH,
-                JOBS_TOKEN,
+                "/internal/jobs/qa/queue",
                 QA_QUEUE,
-                StatusCode::UNAUTHORIZED,
+                "isolation-claim",
+                StatusCode::NOT_FOUND,
             ),
             (
-                QA_QUEUE_PATH,
-                QA_TOKEN,
-                "fleetworks.native",
+                "/internal/jobs/queue",
+                QA_QUEUE,
+                "isolation-claim",
                 StatusCode::FORBIDDEN,
             ),
             (
                 "/internal/jobs/queue",
-                QA_TOKEN,
                 "fleetworks.native",
-                StatusCode::UNAUTHORIZED,
-            ),
-            (
-                "/internal/jobs/queue",
-                JOBS_TOKEN,
-                QA_QUEUE,
+                "qa:isolation-claim",
                 StatusCode::FORBIDDEN,
             ),
             (
-                "/internal/jobs/store",
-                QA_TOKEN,
-                QA_QUEUE,
-                StatusCode::UNAUTHORIZED,
+                "/internal/jobs/queue",
+                "fleetworks.native",
+                "isolation-claim",
+                StatusCode::OK,
             ),
         ] {
             let response = client
                 .post(format!("http://{address}{path}"))
-                .bearer_auth(token)
+                .bearer_auth(JOBS_TOKEN)
                 .json(&QueueRequest::new(
-                    "isolation-claim",
+                    operation_key,
                     0,
                     QueueCommand::Claim {
                         queue: queue.to_owned(),

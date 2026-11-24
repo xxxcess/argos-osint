@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::context::MutationContext;
 use crate::qa_worker::QaContextUsage;
+pub use crate::qa_worker::QaModelTarget;
 
 use super::identity;
 use super::request_id;
@@ -77,6 +78,8 @@ pub struct QaSettings {
     pub revision: u64,
     pub generation: u64,
     pub can_manage: bool,
+    #[serde(default)]
+    pub model_target: QaModelTarget,
     /// Present only when the selected Embedded companion diagnoses unavailability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub availability_reason: Option<QaAvailabilityReason>,
@@ -101,6 +104,7 @@ impl QaSettings {
             revision,
             generation,
             can_manage,
+            model_target: QaModelTarget::default(),
             availability_reason: None,
             startup_stage: None,
         }
@@ -115,6 +119,8 @@ pub struct QaSettingsUpdate {
     pub context: MutationContext,
     pub expected_revision: u64,
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_target: Option<QaModelTarget>,
 }
 
 impl QaSettingsUpdate {
@@ -125,7 +131,14 @@ impl QaSettingsUpdate {
             context,
             expected_revision,
             enabled,
+            model_target: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_model_target(mut self, target: QaModelTarget) -> Self {
+        self.model_target = Some(target);
+        self
     }
 }
 
@@ -385,6 +398,8 @@ pub struct QaTurn {
     pub context: Option<QaContextUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisional_reply: Option<String>,
     pub cursor: u64,
 }
 
@@ -411,6 +426,7 @@ impl QaTurn {
             conversation: None,
             context: None,
             reply: None,
+            provisional_reply: None,
             cursor: 0,
         }
     }
@@ -423,6 +439,8 @@ pub struct QaEvent {
     pub sequence: u64,
     pub state: QaTurnState,
     pub finding: Option<QaFinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisional_delta: Option<String>,
 }
 
 impl QaEvent {
@@ -433,6 +451,7 @@ impl QaEvent {
             sequence,
             state,
             finding,
+            provisional_delta: None,
         }
     }
 }
@@ -457,6 +476,25 @@ impl QaEventPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_context_cannot_be_supplied_by_the_frontend() {
+        let valid = serde_json::json!({
+            "request_id": "request-1",
+            "context": {
+                "registration_id": "registration-1",
+                "expected_registration_revision": 1,
+                "expected_context_revision": 1,
+            },
+            "question": "Which checks passed?",
+        });
+        assert!(serde_json::from_value::<QaTurnRequest>(valid.clone()).is_ok());
+        for field in ["evidence", "history"] {
+            let mut supplied = valid.clone();
+            supplied[field] = serde_json::json!([]);
+            assert!(serde_json::from_value::<QaTurnRequest>(supplied).is_err());
+        }
+    }
 
     #[test]
     fn embedded_availability_reason_is_optional_and_typed() {

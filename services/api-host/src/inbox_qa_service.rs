@@ -1,9 +1,10 @@
-//! Dedicated durable Jobs consumer for Inbox QA in either supported runtime.
+//! Dedicated durable Jobs consumer for the Embedded Assistant.
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::time::Duration;
 
-use anyhow::{anyhow, ensure, Context, Result};
+use anyhow::{anyhow, Result};
 use argos_osint_api::inbox_qa::{
     validated_summary_finding, CancellationToken, QaInference, QaRuntimeAvailability,
 };
@@ -17,9 +18,12 @@ use chrono::Utc;
 use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::QA_MAX_FINDINGS;
 use fleetworks_contracts::chat::QA_MAX_WORDS;
-use fleetworks_contracts::chat::{QaAvailabilityReason, QaFinding, QaStartupStage, QaTurnState};
+use fleetworks_contracts::chat::{
+    QaAvailabilityReason, QaFinding, QaModelTarget, QaStartupStage, QaTurnState,
+};
 use fleetworks_contracts::qa_worker::{
-    QaContextUsage, QaWorkerEvent, QaWorkerOutcome, QaWorkerSequence, QA_CONTEXT_WINDOW_TOKENS,
+    verified_operational_sources, QaContextUsage, QaDialogueKind, QaWorkerEvent, QaWorkerOutcome,
+    QaWorkerSequence, QA_CONTEXT_WINDOW_TOKENS,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
@@ -33,37 +37,10 @@ const POLL: Duration = Duration::from_millis(250);
 const CHECK: Duration = Duration::from_secs(2);
 const AUTH_TIMEOUT: Duration = Duration::from_secs(2);
 // The supervisor separately bounds pack verification and the model readiness handshake.
-const WARM_TIMEOUT: Duration = Duration::from_secs(90);
+const WARM_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const STOP_TIMEOUT: Duration = Duration::from_secs(8);
 const TURN_TIMEOUT: Duration = Duration::from_secs(30);
 const WARM_RETRY: Duration = Duration::from_secs(10);
-
-pub(crate) async fn run_distributed(
-    repo: Repository,
-    signal: impl Future<Output = ()>,
-) -> Result<()> {
-    let Some(model) = QaWorkerSupervisor::distributed_from_environment()? else {
-        signal.await;
-        return Ok(());
-    };
-    let broker = tokio::task::spawn_blocking(|| {
-        Client::for_qa(
-            &std::env::var("FLEETWORKS_JOBS_ORIGIN")?,
-            &crate::fleetworks::read_secret("FLEETWORKS_QA_JOBS_TOKEN")?,
-        )
-    })
-    .await??;
-    let placement = std::env::var("FLEETWORKS_QA_REPLICA_ID")
-        .context("FLEETWORKS_QA_REPLICA_ID is required for a Distributed executor")?;
-    ensure!(
-        (1..=64).contains(&placement.len())
-            && placement
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
-        "FLEETWORKS_QA_REPLICA_ID is invalid"
-    );
-    run(repo, broker, model, placement, None, signal).await
-}
 
 struct Executor {
     repo: Repository,
@@ -178,7 +155,7 @@ impl Executor {
                 }
                 initialized = true;
             }
-            if loaded.is_none() && Instant::now() >= next_warm {
+            if setting.enabled && loaded.is_none() && Instant::now() >= next_warm {
                 next_warm = Instant::now() + WARM_RETRY;
                 let claim = timeout(
                     AUTH_TIMEOUT,
@@ -193,7 +170,10 @@ impl Executor {
                 match claim {
                     Ok(Ok(store::ReplicaClaim::Warm)) => {
                         self.lease_held = true;
-                        if self.warm(setting.generation, stop).await {
+                        if self
+                            .warm(setting.generation, setting.model_target, stop)
+                            .await
+                        {
                             loaded = Some(setting.generation);
                             self.record_availability(setting.generation, None);
                             tracing::info!(qa_replica_stage = "ready", "Inbox QA replica ready");
@@ -272,7 +252,7 @@ impl Executor {
         }
     }
 
-    async fn warm(&self, generation: i64, stop: &CancellationToken) -> bool {
+    async fn warm(&self, generation: i64, model: QaModelTarget, stop: &CancellationToken) -> bool {
         if !self.renew_replica(generation, false, "warm_lease").await {
             return false;
         }
@@ -281,7 +261,10 @@ impl Executor {
                 availability.record_stage(generation, stage);
             }
         };
-        let warm = timeout(WARM_TIMEOUT, self.model.warm_with_progress(&progress));
+        let warm = timeout(
+            WARM_TIMEOUT,
+            self.model.warm_with_progress(model, &progress),
+        );
         tokio::pin!(warm);
         let mut next = Instant::now() + CHECK;
         loop {
@@ -350,7 +333,7 @@ impl Executor {
         {
             return false;
         }
-        let reason = match timeout(AUTH_TIMEOUT, self.model.warm()).await {
+        let reason = match timeout(AUTH_TIMEOUT, self.model.check_ready()).await {
             Ok(Ok(())) => return true,
             Ok(Err(error)) => crate::qa_worker::availability_reason(&error),
             Err(_) => QaAvailabilityReason::WorkerStartFailed,
@@ -486,11 +469,11 @@ impl Executor {
             .infer(&evidence, &lease, &delivery, generation, stop)
             .await;
         let (outcome, keep_warm) = match result {
-            RunResult::Completed => (
+            RunResult::Completed | RunResult::CompletedReset => (
                 DeliveryOutcome::Complete {
                     result_ref: "qa_terminal",
                 },
-                true,
+                matches!(result, RunResult::Completed),
             ),
             RunResult::Stopped => (
                 DeliveryOutcome::Relinquish {
@@ -657,7 +640,7 @@ impl Executor {
                 Ok(Ok(true))
             )
         {
-            return RunResult::Completed;
+            return RunResult::CompletedReset;
         }
         result
     }
@@ -717,6 +700,7 @@ async fn grounded_events(
 enum RunResult {
     More,
     Completed,
+    CompletedReset,
     Stopped,
     Fenced,
     Error,
@@ -734,6 +718,13 @@ fn cited_finding(
         .iter()
         .find(|source| source.opaque_id == source_id)
         .ok_or_else(|| anyhow!("unknown Inbox QA source"))?;
+    let now = Utc::now().timestamp_millis();
+    if !observation_is_fresh(evidence.sampled_at_ms, now)
+        || !DateTime::parse_from_rfc3339(&source.observed_at)
+            .is_ok_and(|at| observation_is_fresh(at.timestamp_millis(), now))
+    {
+        return Ok(None);
+    }
     if !source.whole_passage {
         return Ok(Some(source.finding(text, start, end)));
     }
@@ -818,6 +809,7 @@ fn readiness_fallback(evidence: &FrozenEvidence, now_ms: i64) -> Vec<QaFinding> 
 struct Publication {
     sequence: QaWorkerSequence,
     has_finding: bool,
+    cited_sources: BTreeSet<String>,
 }
 
 impl Publication {
@@ -830,6 +822,18 @@ impl Publication {
     ) -> Result<RunResult> {
         self.sequence.accept(&evidence.request, &event)?;
         let (state, finding, context, reply) = match event {
+            QaWorkerEvent::Delta { text, .. } => {
+                if matches!(evidence.request.dialogue.as_ref(), Some(dialogue) if dialogue.kind == QaDialogueKind::Operational)
+                    && !observation_is_fresh(evidence.sampled_at_ms, Utc::now().timestamp_millis())
+                {
+                    return Ok(RunResult::More);
+                }
+                return Ok(if store::publish_draft(repo, lease, text).await? {
+                    RunResult::More
+                } else {
+                    RunResult::Fenced
+                });
+            }
             QaWorkerEvent::Finding {
                 source_id,
                 start,
@@ -840,6 +844,7 @@ impl Publication {
                 let Some(finding) = cited_finding(evidence, &source_id, start, end, text)? else {
                     return Ok(RunResult::More);
                 };
+                self.cited_sources.insert(source_id);
                 (QaTurnState::Running, Some(finding), None, None)
             }
             QaWorkerEvent::Complete {
@@ -848,6 +853,35 @@ impl Publication {
                 reply,
                 ..
             } => {
+                let now = Utc::now().timestamp_millis();
+                let reply = reply.filter(|text| {
+                    if !evidence
+                        .request
+                        .dialogue
+                        .as_ref()
+                        .is_some_and(|dialogue| dialogue.kind == QaDialogueKind::Operational)
+                    {
+                        return true;
+                    }
+                    observation_is_fresh(evidence.sampled_at_ms, now)
+                        && verified_operational_sources(&evidence.request, text).is_some_and(
+                            |passages| {
+                                passages.iter().all(|passage| {
+                                    self.cited_sources.contains(&passage.source_id)
+                                        && evidence.sources.iter().any(|source| {
+                                            source.opaque_id == passage.source_id
+                                                && DateTime::parse_from_rfc3339(&source.observed_at)
+                                                    .is_ok_and(|at| {
+                                                        observation_is_fresh(
+                                                            at.timestamp_millis(),
+                                                            now,
+                                                        )
+                                                    })
+                                        })
+                                })
+                            },
+                        )
+                });
                 let had_finding = self.has_finding;
                 if !had_finding
                     && matches!(

@@ -42,7 +42,9 @@ INBOX_QA_PATHS = {
     ".github/workflows/fleetworks-inbox-qa-pack.yml",
     ".github/workflows/fleetworks-inbox-qa-smoke.yml",
     "apps/fleetworks-desktop/examples/native_fixture.rs",
+    "apps/fleetworks-desktop/src/chat_ui.rs",
     "apps/fleetworks-desktop/src/inbox.rs",
+    "apps/fleetworks-desktop/src/workstation_settings.rs",
     "Cargo.lock",
     "Cargo.toml",
     "crates/argos-osint-api/src/inbox_qa.rs",
@@ -50,13 +52,9 @@ INBOX_QA_PATHS = {
     "crates/fleetworks-contracts/src/chat.rs",
     "crates/fleetworks-contracts/src/ipc.rs",
     "crates/fleetworks-contracts/src/qa_worker.rs",
-    "deploy/Dockerfile.inbox-qa",
-    "deploy/compose.inbox-qa.yml",
-    "deploy/compose.native-review.yml",
     "rust-toolchain.toml",
     "scripts/agent_cargo.py",
     "services/api-host/src/local_ipc.rs",
-    "services/api-host/src/qa_worker.rs",
     "services/api-host/tests/http_ipc_parity.rs",
 }
 INBOX_QA_PREFIXES = (
@@ -68,6 +66,7 @@ INBOX_QA_PREFIXES = (
     "scripts/fleetworks_qa_",
     "scripts/test_fleetworks_qa_",
     "services/api-host/src/inbox_qa",
+    "services/api-host/src/qa_",
     "tools/assistant-bert/",
 )
 
@@ -229,17 +228,13 @@ def verification(stage, plan, *, inbox_qa=False):
     desktop = "desktop" in scopes or need_qa_packs
     companion = "local_backend" in scopes or need_qa_packs
     desktop_linux = (desktop or companion) and stage != "second"
-    qa_arches = arches if inbox_qa else ["amd64"] if inbox_qa_release else []
-    qa_packs = [{
-        "runner": ARCHITECTURES[arch][0],
-        "target": f"{ARCHITECTURES[arch][1]}-unknown-linux-gnu",
-        "arch": arch,
-    } for arch in qa_arches]
-    qa_images = list(qa_packs) if inbox_qa else []
+    qa_packs = []
+    if need_qa_packs and stage != "second":
+        qa_packs.append({"runner": "ubuntu-24.04", "target": "x86_64-unknown-linux-gnu"})
     if need_qa_packs and stage != "first":
         qa_packs.extend((
-            {"runner": "macos-15-intel", "target": "x86_64-apple-darwin", "arch": "amd64"},
-            {"runner": "macos-15", "target": "aarch64-apple-darwin", "arch": "arm64"},
+            {"runner": "macos-15-intel", "target": "x86_64-apple-darwin"},
+            {"runner": "macos-15", "target": "aarch64-apple-darwin"},
         ))
     return {
         **{name: name in scopes for name in sorted(SCOPES)},
@@ -249,11 +244,7 @@ def verification(stage, plan, *, inbox_qa=False):
         "core_native_linux": desktop_linux and companion and not desktop,
         "desktop_macos": desktop and stage != "first",
         "inbox_qa": need_qa_packs,
-        "inbox_qa_distributed": inbox_qa,
         "inbox_qa_packs": qa_packs,
-        "inbox_qa_images": qa_images,
-        "inbox_qa_embedded": [entry for entry in qa_packs
-                              if entry["target"] != "aarch64-unknown-linux-gnu"],
         "backend_matrix": backend_matrix(arches),
         "backend_arch": arches[0] if len(arches) == 1 else "both",
         "image_matrix": images,

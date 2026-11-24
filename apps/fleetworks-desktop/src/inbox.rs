@@ -907,7 +907,7 @@ fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
                 .on_at_bottom(|state: &mut State, at_bottom| state.inbox.at_bottom = at_bottom)
                 .child(list),
         )
-        .child(crate::inbox_qa::footer(state, kit, preferences))
+        .children(crate::inbox_qa::footer(state, kit, preferences))
 }
 
 fn group_view(group: &Group<'_>, state: &State, kit: &Kit, preferences: ViewPreferences) -> El {

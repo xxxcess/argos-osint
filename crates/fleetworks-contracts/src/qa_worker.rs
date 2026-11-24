@@ -12,6 +12,8 @@ use serde::Serialize;
 pub const QA_WORKER_PROTOCOL: u16 = 1;
 pub const QA_CONTEXT_WINDOW_TOKENS: u16 = 256;
 pub const QA_CONTEXT_USAGE_ENV: &str = "FLEETWORKS_QA_CONTEXT_USAGE";
+pub const QA_STREAMING_ENV: &str = "FLEETWORKS_QA_STREAMING";
+pub const QA_MODEL_TARGET_ENV: &str = "FLEETWORKS_QA_MODEL_TARGET";
 pub const QA_DIALOGUE_ENV: &str = "FLEETWORKS_QA_DIALOGUE";
 pub const QA_MODEL_REVISION: &str = "564e9b582944a57a3e586bbb98fd6f0a4118db7f";
 pub const QA_CHAT_MODEL_REVISION: &str = "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab";
@@ -43,6 +45,93 @@ pub const QA_GENERATOR_FILES: [(&str, &str); 3] = [
         "495fa51e204676f1a857a9fc13c4c89f3f5ba9f480b898cebca02add25e6d749",
     ),
 ];
+
+/// Pinned generation checkpoints understood by the companion and model process.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum QaModelTarget {
+    #[default]
+    #[serde(rename = "flan-t5-small")]
+    FlanT5Small,
+    #[serde(rename = "flan-t5-base")]
+    FlanT5Base,
+    #[serde(rename = "gpt2-small")]
+    Gpt2Small,
+    #[serde(rename = "gpt2-medium")]
+    Gpt2Medium,
+}
+
+impl QaModelTarget {
+    pub const ALL: [Self; 4] = [
+        Self::FlanT5Small,
+        Self::FlanT5Base,
+        Self::Gpt2Small,
+        Self::Gpt2Medium,
+    ];
+
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::FlanT5Small => "flan-t5-small",
+            Self::FlanT5Base => "flan-t5-base",
+            Self::Gpt2Small => "gpt2-small",
+            Self::Gpt2Medium => "gpt2-medium",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::FlanT5Small => "FLAN-T5 Small",
+            Self::FlanT5Base => "FLAN-T5 Base",
+            Self::Gpt2Small => "GPT-2 Small",
+            Self::Gpt2Medium => "GPT-2 Medium",
+        }
+    }
+
+    pub fn from_slug(slug: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|target| target.slug() == slug)
+    }
+
+    pub const fn revision(self) -> &'static str {
+        match self {
+            Self::FlanT5Small => QA_CHAT_MODEL_REVISION,
+            Self::FlanT5Base => "7bcac572ce56db69c1ea7c8af255c5d7c9672fc2",
+            Self::Gpt2Small => "607a30d783dfa663caf39e06633721c8d4cfcd7e",
+            Self::Gpt2Medium => "6dcaa7a952f72f9298047fd5137cd6e4f05f41da",
+        }
+    }
+
+    pub const fn weight_bytes(self) -> u64 {
+        match self {
+            Self::FlanT5Small => 307_867_048,
+            Self::FlanT5Base => 990_345_061,
+            Self::Gpt2Small => 702_517_648,
+            Self::Gpt2Medium => 1_725_881_760,
+        }
+    }
+
+    pub const fn input_tokens(self) -> u16 {
+        match self {
+            Self::FlanT5Small | Self::FlanT5Base => 512,
+            Self::Gpt2Small | Self::Gpt2Medium => 896,
+        }
+    }
+
+    pub const fn output_tokens(self) -> u16 {
+        128
+    }
+}
+
+pub const QA_MAX_DRAFT_BYTES: usize = 4 * 1024;
+pub const QA_MAX_DRAFT_EVENTS: u32 = 128;
+
+pub fn valid_draft_delta(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= QA_MAX_DRAFT_BYTES
+        && !text
+            .chars()
+            .any(|character| character.is_control() && character != '\n' && character != '\t')
+}
 
 /// Room for bounded evidence, JSON escaping, and the envelope.
 pub const QA_MAX_FRAME_BYTES: usize = 512 * 1024;
@@ -81,7 +170,11 @@ impl QaContextUsage {
         } else {
             request.passages.len() * MAX_WINDOWS_PER_PASSAGE
         };
-        self.window_tokens == QA_CONTEXT_WINDOW_TOKENS
+        (self.window_tokens == QA_CONTEXT_WINDOW_TOKENS
+            || (request.dialogue.is_some()
+                && QaModelTarget::ALL
+                    .iter()
+                    .any(|target| self.window_tokens == target.input_tokens())))
             && self.peak_input_tokens <= self.window_tokens
             && (self.model_windows == 0) == (self.peak_input_tokens == 0)
             && usize::from(self.model_windows) <= max_windows
@@ -252,6 +345,11 @@ pub enum QaWorkerOutcome {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[non_exhaustive]
 pub enum QaWorkerEvent {
+    Delta {
+        turn_id: String,
+        sequence: u32,
+        text: String,
+    },
     Finding {
         turn_id: String,
         sequence: u32,
@@ -279,6 +377,7 @@ pub enum QaWorkerCommand {
     Open,
     OpenWithContext,
     OpenWithDialogue,
+    OpenWithStreaming,
     Ping,
     Ask { request: QaWorkerRequest },
     Shutdown,
@@ -294,6 +393,10 @@ pub enum QaWorkerReply {
         model_revision: String,
     },
     ReadyWithDialogue {
+        protocol: u16,
+        model_revision: String,
+    },
+    ReadyWithStreaming {
         protocol: u16,
         model_revision: String,
     },
@@ -356,6 +459,8 @@ impl QaWorkerPanicCause {
 /// A shared check used before any worker event can enter the durable event log.
 #[derive(Default)]
 pub struct QaWorkerSequence {
+    delta_count: u32,
+    draft: String,
     sources: BTreeSet<String>,
     bytes: usize,
     words: usize,
@@ -363,13 +468,45 @@ pub struct QaWorkerSequence {
 }
 
 impl QaWorkerSequence {
+    pub fn next_sequence(&self) -> u32 {
+        self.delta_count + self.sources.len() as u32 + 1
+    }
+
     /// Require exactly one ordered stream for the given turn and validate every extracted span.
     pub fn accept(&mut self, request: &QaWorkerRequest, event: &QaWorkerEvent) -> io::Result<bool> {
         if self.terminal {
             return Err(invalid("QA worker sent an event after its terminal result"));
         }
-        let expected = self.sources.len() as u32 + 1;
+        let expected = self.next_sequence();
         match event {
+            QaWorkerEvent::Delta {
+                turn_id,
+                sequence,
+                text,
+            } => {
+                if turn_id != &request.turn_id
+                    || *sequence != expected
+                    || request.dialogue.is_none()
+                    || !valid_draft_delta(text)
+                    || self.delta_count >= QA_MAX_DRAFT_EVENTS
+                    || self.draft.len() + text.len() > QA_MAX_DRAFT_BYTES
+                {
+                    return Err(invalid("QA worker returned an invalid draft delta"));
+                }
+                let previous_length = self.draft.len();
+                self.draft.push_str(text);
+                if request
+                    .dialogue
+                    .as_ref()
+                    .is_some_and(|dialogue| dialogue.kind == QaDialogueKind::Operational)
+                    && verified_operational_sources(request, &self.draft).is_none()
+                {
+                    return Err(invalid(
+                        "QA worker returned an unverified operational draft",
+                    ));
+                }
+                self.delta_count += 1;
+            }
             QaWorkerEvent::Finding {
                 turn_id,
                 sequence,

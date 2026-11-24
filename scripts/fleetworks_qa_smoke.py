@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise a real Inbox QA pack through a packaged companion or paired gateway."""
+"""Exercise the real Inbox QA pack through a packaged Embedded companion."""
 
 import argparse
 from contextlib import contextmanager
@@ -20,17 +20,14 @@ import sys
 import tempfile
 import threading
 import time
-from urllib.parse import urlencode
 
 import fleetworks_local_backend_smoke as embedded
 import fleetworks_qa_pack as pack
 
 ROOT = Path(__file__).resolve().parents[1]
-QA = "/api/v2/workstation/chat/"
-EVIDENCE_HEADER = "X-Fleetworks-Inbox-Evidence"
 TERMINAL = {"answered", "insufficient_context", "canceled", "failed"}
 SUMMARY_QUESTION = "What is the current workstation readiness?"
-CONTEXT_WINDOW_TOKENS = 256
+CONTEXT_WINDOW_TOKENS = 512
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 DIAGNOSTIC = re.compile(r'\b(qa_(?:warm|replica|queue|turn|settings)_stage)="?([a-z0-9_]{1,40})\b')
 DIAGNOSTIC_DETAIL = re.compile(
@@ -170,31 +167,19 @@ def cited_finding(turn, kind, source_id):
     return finding
 
 
-def legacy_finding(finding):
-    if finding is None or finding["source"]["kind"] not in {"host_metric", "job_count"}:
-        return finding
-    legacy = {**finding, "source": {**finding["source"], "kind": "readiness"}}
-    del legacy["measurement"]
-    return legacy
-
-
-def legacy_turn(turn):
-    return {**turn, "findings": [legacy_finding(finding) for finding in turn["findings"]]}
-
-
-def require_context(turn, *, inferred):
+def require_context(turn, *, inferred, window=CONTEXT_WINDOW_TOKENS):
     usage = turn.get("context")
-    require(isinstance(usage, dict) and usage.get("window_tokens") == CONTEXT_WINDOW_TOKENS,
+    require(isinstance(usage, dict) and usage.get("window_tokens") == window,
             "terminal turn lacks its model context window")
     peak = usage.get("peak_input_tokens")
     windows = usage.get("model_windows")
     require(type(peak) is int and type(windows) is int
-            and (0 < peak <= CONTEXT_WINDOW_TOKENS and 0 < windows <= 48 if inferred else peak == windows == 0),
+            and (0 < peak <= window and 0 < windows <= 48 if inferred else peak == windows == 0),
             "terminal turn has incorrect model context usage")
     return usage
 
 
-def settled_turn(request, context, case, question, *, legacy_request=None, source=None, generated=False):
+def settled_turn(request, context, case, question, *, source=None, generated=False):
     payload = {"request_id": f"inbox-qa-smoke-{case}", "context": context, "question": question}
     if source is not None:
         payload["source"] = source
@@ -213,6 +198,8 @@ def settled_turn(request, context, case, question, *, legacy_request=None, sourc
         require(usage["model_windows"] == 1, f"{case} did not use a single model input window")
     page = request("events", query=query)
     require(page["turn"] == accepted and not page["gap"], f"{case} admission differed from its event snapshot")
+    require(not accepted.get("provisional_reply") and not any(event.get("provisional_delta") for event in page["events"]),
+            f"{case} retained provisional text after the terminal event")
     require([event["sequence"] for event in page["events"]] == list(range(1, accepted["cursor"] + 1)),
             f"{case} event cursor skipped a sequence")
     require([event["sequence"] for event in page["events"] if event["state"] in TERMINAL] == [accepted["cursor"]],
@@ -227,32 +214,20 @@ def settled_turn(request, context, case, question, *, legacy_request=None, sourc
     require(request("events", query=resume) == {"turn": accepted, "events": [], "gap": False},
             f"{case} terminal replay emitted another event")
 
-    if legacy_request is not None:
-        legacy = legacy_turn(accepted)
-        legacy_events = [{**event, "finding": legacy_finding(event["finding"])} for event in page["events"]]
-        require(legacy_request("latest") == legacy, f"{case} latest is unreadable by a legacy client")
-        require(legacy_request("events", query=query) == {"turn": legacy, "events": legacy_events, "gap": False},
-                f"{case} legacy event stream changed the cursor or evidence")
-        require(legacy_request("turns", payload, expected=(200, 201, 202)) == legacy,
-                f"{case} legacy submit replay changed the frozen answer")
-        require(legacy_request("cancel", cancel) == legacy, f"{case} legacy Stop changed the answer")
-        require(legacy_request("events", query=resume) == {"turn": legacy, "events": [], "gap": False},
-                f"{case} legacy resume emitted another event")
     return accepted
 
 
-def cited_metric(turn, source_id, label, *, embedded_mode):
+def cited_metric(turn, source_id, label):
     finding = cited_finding(turn, "host_metric", source_id)
     measurement = finding["measurement"]
     value = measurement["value"]
-    subject = f"{'API host' if embedded_mode else 'Connected gateway host'} {label}"
-    sentence = subject if embedded_mode else subject[0].lower() + subject[1:]
+    subject = f"API host {label}"
     require(type(value) is int and 0 <= value <= 1000
             and measurement == {"subject": subject, "unit": "percent_tenths", "value": value},
             f"{source_id} evidence does not contain a valid utilization measurement")
     whole, tenths = divmod(value, 10)
     require(finding["label"] == subject
-            and finding["text"] == f"The {sentence} is {whole}.{tenths}%.",
+            and finding["text"] == f"The {subject} is {whole}.{tenths}%.",
             f"{source_id} answer differs from its frozen measurement")
     return {"value": value, "unit": measurement["unit"], "observed_at": finding["observed_at"]}
 
@@ -267,7 +242,7 @@ def cited_running_jobs(turn, active_jobs):
             "Inbox running-job count differs from the registered workstation dashboard")
 
 
-def cancel_running_embedded_turn(request, registration, model):
+def cancel_running_embedded_turn(request, registration, model, *, draft=False):
     context = authorize(registration)
     before = request("settings")
     require(not before["enabled"] and before["phase"] == "off", "Gated fixture must start with QA off")
@@ -277,21 +252,30 @@ def cancel_running_embedded_turn(request, registration, model):
     active = model()
     require(len(active) == 1, "Expected one isolated gated worker")
     worker, = active
-    turn = request("turns", {"request_id": "inbox-qa-smoke-cancel-running", "context": context,
-                             "question": SUMMARY_QUESTION}, expected=(200, 201, 202))
+    case = "draft" if draft else "finding"
+    turn = request("turns", {"request_id": f"inbox-qa-smoke-cancel-{case}", "context": context,
+                             "question": "hi" if draft else SUMMARY_QUESTION}, expected=(200, 201, 202))
     turn_id = turn["turn_id"]
     query = {"turn_id": turn_id, "after": 0, "wait_seconds": 0}
     page = until(lambda: request("events", query=query),
-                 lambda value: bool(value["turn"]["findings"]) or value["turn"]["state"] in TERMINAL,
-                 "Gated worker did not deliver a finding before Stop", timeout=90)
+                 lambda value: value["turn"].get("provisional_reply" if draft else "findings")
+                 or value["turn"]["state"] in TERMINAL,
+                 f"Gated worker did not deliver a {case} before Stop", timeout=90)
     held = page["turn"]
     require(not page["gap"] and held["state"] == "running" and held["turn_id"] == turn_id
-            and len(held["findings"]) == 1 and any(event["state"] == "running" for event in page["events"])
-            and model() == [worker], "Expected one retained finding from the held Running turn")
+            and model() == [worker], f"Expected one worker while the Running {case} was paused")
+    if draft:
+        deltas = [event["provisional_delta"] for event in page["events"] if event.get("provisional_delta")]
+        require(len(deltas) == 1 and held.get("provisional_reply") == deltas[0] and not held["findings"],
+                "The first conversational delta was not visible in the Running turn")
+    else:
+        require(len(held["findings"]) == 1 and any(event.get("finding") for event in page["events"]),
+                "The first frozen finding was not visible in the Running turn")
     canceled = request("cancel", {"context": context, "turn_id": turn_id})
     require(canceled["turn_id"] == turn_id and canceled["state"] == "canceled"
-            and canceled["cursor"] == held["cursor"] + 1 and canceled["findings"] == held["findings"],
-            "Stop did not seal the held turn and preserve its finding")
+            and canceled["cursor"] == held["cursor"] + 1 and canceled["findings"] == held["findings"]
+            and not canceled.get("provisional_reply") and not canceled.get("reply"),
+            "Stop did not seal the held turn, clear the draft, and preserve committed findings")
     if model() == [worker]:
         try:
             os.kill(worker, signal.SIGUSR1)
@@ -303,32 +287,97 @@ def cancel_running_embedded_turn(request, registration, model):
     require(not result["gap"] and result["turn"] == canceled and canceled["turn_id"] == turn_id
             and canceled["state"] == "canceled" and len(terminal) == 1
             and terminal[0]["state"] == "canceled" and terminal[0]["sequence"] == canceled["cursor"]
+            and not any(event.get("provisional_delta") for event in result["events"])
             and [event["sequence"] for event in result["events"]] == list(range(1, canceled["cursor"] + 1)),
             "Stop did not retain exactly one canceled terminal event for the Running turn")
     replay = request("events", query={**query, "after": canceled["cursor"]})
     require(not replay["gap"] and not replay["events"] and replay["turn"] == canceled,
             "Canceled terminal replay changed or duplicated an event")
+    if draft:
+        return {"first_draft_while_running": True, "cancelled_draft_terminal_events": len(terminal),
+                "cancelled_draft_terminal_state": canceled["state"], "cancelled_draft_scrubbed": True}
     return {"cancelled_terminal_events": len(terminal), "cancelled_terminal_state": canceled["state"]}
 
 
-def exercise(request, manage, registration, manager, model, readiness, running_jobs, *,
-             embedded_mode=False, legacy_request=None, verify_other_jobs=None):
-    """Run the same real QA lifecycle over the supplied transport."""
+def ready_model(request, target, *, updated=None, stages=None):
+    if stages is None:
+        stages = set()
+
+    def observe(value):
+        if value.get("startup_stage"):
+            stages.add(value["startup_stage"])
+        return value
+
+    if updated is not None:
+        observe(updated)
+    return until(lambda: observe(request("settings")),
+                 lambda value: value["phase"] == "ready" and value["model_target"] == target,
+                 f"{target} QA worker did not warm", timeout=110, interval=0.1)
+
+
+def stop_model(request, registration, model, settings):
+    request("settings", {"context": authorize(registration), "expected_revision": settings["revision"],
+                         "enabled": False})
+    until(lambda: request("settings"), lambda value: value["phase"] == "off",
+          "QA did not finish unloading", timeout=40)
+    require(not model(), "Off retained a live model process")
+
+
+def switch_model(request, registration, model, settings, target):
+    previous, = model()
+    started = time.monotonic()
+    updated = request("settings", {"context": authorize(registration), "expected_revision": settings["revision"],
+                                   "enabled": True, "model_target": target})
+    require(updated["enabled"] and updated["model_target"] == target
+            and updated["generation"] > settings["generation"], "Model change did not create a new generation")
+    stages = set()
+    ready = ready_model(request, target, updated=updated, stages=stages)
+    active = model()
+    require(len(active) == 1 and active[0] != previous, "Model change did not replace its sole worker")
+    try:
+        os.kill(previous, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise ValueError("The previous model process was not reaped before the new model was ready")
+    return ready, {"target": target, "ready_ms": round((time.monotonic() - started) * 1000, 1),
+                   "startup_stages": sorted(stages), "previous_worker_reaped": True, "worker_count": len(active)}
+
+
+def exercise_model_switch(request, registration, model, readiness, current):
+    alternate, first = switch_model(request, registration, model, current, "gpt2-small")
+    require("downloading_pack" in first["startup_stages"] or "loading_model" in first["startup_stages"],
+            "The offline model change did not report provisioning or loading")
+    turn = request("turns", {"request_id": "inbox-qa-smoke-gpt2-small", "context": authorize(registration),
+                             "question": SUMMARY_QUESTION}, expected=(200, 201, 202))
+    query = {"turn_id": turn["turn_id"], "after": 0, "wait_seconds": 0}
+    complete = until(lambda: request("events", query=query)["turn"],
+                     lambda value: value["state"] in TERMINAL, "GPT-2 Small turn did not complete", timeout=45)
+    require(complete["state"] == "answered" and complete["findings"] and not complete.get("provisional_reply"),
+            "GPT-2 Small did not answer from the frozen workstation observations")
+    first["context"] = require_context(complete, inferred=True, window=896)
+    restored, second = switch_model(request, registration, model, alternate, pack.DEFAULT_CHAT_MODEL)
+    require(readiness(), "The same companion stopped serving readiness after its model changed")
+    return restored, [first, second]
+
+
+def exercise(request, registration, model, readiness, running_jobs, *, verify_switch=False):
+    """Run the QA lifecycle over the packaged companion's private socket."""
     before = request("settings")
-    require(not before["enabled"] and before["phase"] == "off", "QA did not default to Off")
+    require(not before["enabled"] and before["phase"] == "off"
+            and before["model_target"] == pack.DEFAULT_CHAT_MODEL,
+            "QA did not default to Off with FLAN-T5 Small selected")
     require(not model(), "Off retained a live model process")
     require(request("latest") is None, "Off exposes an exchange")
     turn = {"request_id": "inbox-qa-smoke-1", "context": authorize(registration), "question": SUMMARY_QUESTION}
-    for field in ("evidence", "history"):
-        request("turns", {**turn, field: []}, expected=(400, 422))
     request("turns", turn, expected=503)
 
     revision = before["revision"]
     started = time.monotonic()
-    manage("settings", {"context": authorize(manager), "expected_revision": revision, "enabled": True})
+    updated = request("settings", {"context": authorize(registration), "expected_revision": revision, "enabled": True})
+    stages = set()
     try:
-        current = until(lambda: request("settings"), lambda value: value["phase"] == "ready",
-                        "QA worker did not warm", timeout=110)
+        current = ready_model(request, pack.DEFAULT_CHAT_MODEL, updated=updated, stages=stages)
     except TimeoutError:
         current = request("settings")
         phase = current.get("phase")
@@ -376,8 +425,8 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
                           "model_warm_ms": ready_ms, "admission_ms": admission_ms,
                           "completion_ms": completed_ms}), file=sys.stderr)
     require(terminal_events == 1 and snapshot["cursor"] == cursor, "terminal delivery was not exactly once")
-    require(snapshot["state"] == "answered" and first_finding_ms is not None,
-            "real local checkpoint did not return a cited answer")
+    require(snapshot["state"] == "answered" and first_finding_ms is not None and not snapshot.get("provisional_reply"),
+            "real local checkpoint did not seal a cited answer")
     model_context = require_context(snapshot, inferred=True)
     require(model_context["model_windows"] == 1, "operational reply did not use a single model input window")
     require(1 <= len(snapshot["findings"]) <= 3, "QA finding count exceeds its contract")
@@ -414,12 +463,11 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
 
     context = authorize(registration)
 
-    def ask(case, question, *, check_legacy=False, generated=False):
-        return settled_turn(request, context, case, question,
-                            legacy_request=legacy_request if check_legacy else None, generated=generated)
+    def ask(case, question, *, generated=False):
+        return settled_turn(request, context, case, question, generated=generated)
 
     def check_status_group(question, group, prior_observation):
-        status_turn = ask(f"{group}-status-checks", question, check_legacy=True)
+        status_turn = ask(f"{group}-status-checks", question)
         findings = status_turn["findings"]
         require(status_turn["state"] == "answered" and status_turn["question"] == question
                 and 1 <= len(findings) <= 3,
@@ -450,25 +498,23 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
     unresolved = check_status_group(
         "what are the current unresolved status checks about?", "unresolved", observed(gateway_finding),
     )
-    if embedded_mode:
-        catalog_finding = next((finding for finding in unresolved[1:]
-                                if finding["source"]["id"] == "actor_catalog"), None)
-        require("Actor catalog" in unresolved[0]["text"] and catalog_finding is not None
-                and catalog_finding["text"]
-                == "Actor catalog is not ready. No completed seed was verified, and existing records may remain.",
-                "unresolved status checks did not preserve the actual Actor catalog seed status")
+    catalog_finding = next((finding for finding in unresolved[1:]
+                            if finding["source"]["id"] == "actor_catalog"), None)
+    require("Actor catalog" in unresolved[0]["text"] and catalog_finding is not None
+            and catalog_finding["text"]
+            == "Actor catalog is not ready. No completed seed was verified, and existing records may remain.",
+            "unresolved status checks did not preserve the actual Actor catalog seed status")
     passed = check_status_group(
         "what are tthe green status check?", "passed", max(map(observed, unresolved)),
     )
     passed_summary = passed[0]["text"].casefold()
     require("gateway" in passed_summary and "registration" in passed_summary,
             "passed status checks omitted the ready gateway or verified registration")
-    if embedded_mode:
-        require("actor catalog" not in passed_summary,
-                "passed status checks included the unseeded Actor catalog")
+    require("actor catalog" not in passed_summary,
+            "passed status checks included the unseeded Actor catalog")
 
     active_jobs = running_jobs()
-    jobs = ask("jobs", "How many jobs are running?", check_legacy=True)
+    jobs = ask("jobs", "How many jobs are running?")
     cited_running_jobs(jobs, active_jobs)
     questions = (
         ("cpu", "What is the current CPU utilization?", "CPU usage"),
@@ -477,22 +523,22 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
     )
     readings = {}
     for source_id, metric_question, label in questions:
-        metric = ask(source_id, metric_question, check_legacy=source_id == "memory")
-        readings[source_id] = cited_metric(metric, source_id, label, embedded_mode=embedded_mode)
+        metric = ask(source_id, metric_question)
+        readings[source_id] = cited_metric(metric, source_id, label)
     memory_again = ask("memory-follow-up", "How much memory consumption we are at?")
-    readings["memory_follow_up"] = cited_metric(memory_again, "memory", "memory usage", embedded_mode=embedded_mode)
+    readings["memory_follow_up"] = cited_metric(memory_again, "memory", "memory usage")
     require(datetime.fromisoformat(readings["memory_follow_up"]["observed_at"])
             > datetime.fromisoformat(readings["memory"]["observed_at"]),
             "memory follow-up reused the previous observation timestamp")
-    greeting = ask("greeting", "hi", check_legacy=True, generated=True)
+    greeting = ask("greeting", "hi", generated=True)
     require(greeting.get("notice") == "greeting" and not greeting["findings"],
             "greeting did not receive a friendly reply without citations")
     worker, = model()
     dialogue_rss_bytes = embedded.read_process_rss_bytes(worker)
     preceding = readings["memory_follow_up"]
     for index, question in enumerate(("And now?", "Has that changed?"), start=1):
-        turn = ask(f"conversational-follow-up-{index}", question, check_legacy=True)
-        measured = cited_metric(turn, "memory", "memory usage", embedded_mode=embedded_mode)
+        turn = ask(f"conversational-follow-up-{index}", question)
+        measured = cited_metric(turn, "memory", "memory usage")
         require(turn["question"] == question and observed(measured) > observed(preceding),
                 "a conversational follow-up changed the displayed prompt or reused a metric sample")
         preceding = measured
@@ -503,28 +549,24 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
             and all(part["source"]["kind"] == "host_metric" and part.get("measurement")
                     for part in resources["findings"]),
             "resource summary did not cite exact CPU, memory and disk observations")
-    help_turn = ask("help", "What can you help with?", check_legacy=True, generated=True)
+    help_turn = ask("help", "What can you help with?", generated=True)
     require(help_turn.get("conversation") == "help" and not help_turn["findings"],
             "the assistant did not explain how to start a task")
-    unsupported = ask("general-context", "What is the capital of Japan?", check_legacy=True)
+    unsupported = ask("general-context", "What is the capital of Japan?")
     require(unsupported["state"] == "insufficient_context" and not unsupported["findings"]
             and unsupported.get("notice") == "out_of_scope"
             and unsupported.get("conversation") == "context_needed",
             "the assistant did not ask for grounding context")
-    if verify_other_jobs is not None:
-        verify_other_jobs()
+
+    switched = None
+    if verify_switch:
+        current, switched = exercise_model_switch(request, registration, model, readiness, current)
 
     started = time.monotonic()
-    manage("settings", {"context": authorize(manager), "expected_revision": current["revision"], "enabled": False})
-    until(lambda: request("settings"), lambda value: value["phase"] == "off",
-          "QA did not finish unloading", timeout=40)
-    require(not model(), "Off retained a live model process")
+    stop_model(request, registration, model, current)
     require(request("latest") is None, "Off retained latest question and answer")
     query = {"turn_id": unsupported["turn_id"], "after": 0, "wait_seconds": 0}
     request("events", query=query, expected=404)
-    if legacy_request is not None:
-        require(legacy_request("latest") is None, "Off retained an exchange in the legacy view")
-        legacy_request("events", query=query, expected=404)
     return {"model_warm_ms": ready_ms, "admission_ms": admission_ms, "first_cited_finding_ms": first_finding_ms,
             "completion_ms": completed_ms, "unload_ms": round((time.monotonic() - started) * 1000, 1),
             "model_pid_count": len(active), "warm_model_rss_bytes": worker_rss_bytes,
@@ -533,9 +575,9 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
             "grounded_readiness": True, "unresolved_status_checks": True, "passed_status_checks": True,
             "live_metrics": True, "unsupported_context": True,
             "resource_snapshot": True, "greeting": True, "conversational_follow_ups": True,
-            "generated_dialogue": True,
-            "local_dialogue_rss_bytes": dialogue_rss_bytes,
-            "frozen_samples": readings, "legacy_http_evidence": legacy_request is not None}
+            "generated_dialogue": True, "startup_stages": sorted(stages),
+            "model_switches": switched, "local_dialogue_rss_bytes": dialogue_rss_bytes,
+            "frozen_samples": readings}
 
 
 def embedded_tree(parent, *, worker_path=None):
@@ -1322,6 +1364,8 @@ def run_embedded(args):
         ".cache/torch", ".cache/huggingface", ".cache/.rustbert")), "use a fresh HOME for the offline smoke")
     binary = embedded.resolve_companion_binary(app=args.app)
     digests = json.loads(args.digests.read_text())
+    if args.gpt2_small_assets is not None:
+        require(digests["target"] == "x86_64-unknown-linux-gnu", "Offline model-switch smoke requires Linux x86-64")
     with tempfile.TemporaryDirectory(prefix="fleetworks-embedded-qa-") as temporary:
         root = Path(temporary)
         state = root / "state"
@@ -1329,6 +1373,8 @@ def run_embedded(args):
         pack.install(argparse.Namespace(archive=args.archive, output=root / "pack", state_dir=state,
                                         target=digests["target"], archive_sha256=digests["archive_sha256"],
                                         manifest_sha256=digests["manifest_sha256"]))
+        if args.gpt2_small_assets is not None:
+            pack.materialize_model_assets(args.gpt2_small_assets, state, "gpt2-small")
         with embedded_qa_session(binary, state) as (session, registration, request):
 
             def model():
@@ -1344,8 +1390,15 @@ def run_embedded(args):
                         "IPC jobs dashboard counts used the wrong scope")
                 return value["counts"]["active"]
 
-            result = exercise(request, request, registration, registration, model, readiness, running_jobs,
-                              embedded_mode=True)
+            for stage in ("downloading_pack", "verifying_pack"):
+                with pack.pack_progress(state, stage):
+                    settings = request("settings")
+                    require(settings["phase"] == "off" and settings.get("startup_stage") == stage and not model(),
+                            f"Embedded did not expose the advisory {stage} installer stage")
+            require(not request("settings").get("startup_stage"), "Installer progress lingered after its producer exited")
+            result = exercise(request, registration, model, readiness, running_jobs,
+                              verify_switch=args.gpt2_small_assets is not None)
+            result["installer_stages"] = ["downloading_pack", "verifying_pack"]
             attestation = session.transport_attestation
 
     with tempfile.TemporaryDirectory(prefix="fleetworks-embedded-qa-stop-") as temporary:
@@ -1358,176 +1411,16 @@ def run_embedded(args):
             json.dump(pointer, file)
         with embedded_qa_session(binary, state) as (session, registration, request):
             require(session.transport_attestation == attestation, "Stop fixture did not negotiate the same socket")
-            cancellation = cancel_running_embedded_turn(
-                request, registration, lambda: embedded_tree(session.proc.pid, worker_path=worker),
-            )
+            def gated_model():
+                return embedded_tree(session.proc.pid, worker_path=worker)
+
+            cancellation = cancel_running_embedded_turn(request, registration, gated_model)
+            stop_model(request, registration, gated_model, request("settings"))
+            cancellation.update(cancel_running_embedded_turn(request, registration, gated_model, draft=True))
+            stop_model(request, registration, gated_model, request("settings"))
 
     return {"runtime": attestation["transport"], "transport_attestation": attestation, "target": digests["target"],
             "source_sha": digests["source_sha"], **result, **cancellation}
-
-
-def run_distributed(args):
-    sys.path.insert(0, str(ROOT / "deploy"))
-    import native_review
-    import verify
-
-    port, _ = verify.fixture_ports()
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-    image_variables = ("FLEETWORKS_RUNTIME_IMAGE", "FLEETWORKS_SURREAL_IMAGE", "FLEETWORKS_SEARCH_IMAGE")
-    images = {key: os.environ[key] for key in image_variables}
-    prepared = native_review.provision(ROOT, args.name, port, args.platform, revision, images=images)
-    workspace = Path(prepared["workspace"])
-    policy_path = workspace / "secrets/gateway-credentials.json"
-    policy = json.loads(native_review.read_private(policy_path))
-    manager_entry = next(entry for entry in policy["credentials"] if entry["id"] == "native-review")
-    # Reuse the fresh fixture's mounted token slot for a distinct configuration
-    # manager. The regular pairing issuer never receives this optional grant.
-    manager_entry.update(id="qa-manager", purpose="operator",
-                         permissions=[*manager_entry["permissions"], "manage_inbox_qa"])
-    with policy_path.open("w", encoding="utf-8") as output:
-        json.dump(policy, output)
-    # Docker daemon and Compose use the same path without a published model port.
-    socket_directory = workspace / "qa"
-    socket_directory.mkdir(mode=0o700)
-    queue_token = workspace / "secrets/qa-jobs-token"
-    native_review.private_file(queue_token, secrets.token_urlsafe(48) + "\n")
-    env = {**verify.isolated_environment(os.environ), **prepared["environment"],
-           "FLEETWORKS_QA_IMAGE": args.image, "FLEETWORKS_QA_SOCKET_DIR": str(socket_directory),
-           "FLEETWORKS_QA_JOBS_TOKEN_HOST_FILE": str(queue_token)}
-    verify.require_unused_project(env, args.platform)
-    command = [*verify.compose_command(workspace), "-f", str(ROOT / "deploy/compose.inbox-qa.yml")]
-
-    def compose(*arguments, check=True, capture=False, timeout=45):
-        return subprocess.run([*command, *arguments], cwd=ROOT, env=env, check=check, text=True,
-                              stdout=subprocess.PIPE if capture else None, timeout=timeout).stdout
-
-    failed = True
-    try:
-        compose("up", "--detach", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "240",
-                timeout=300)
-        model_id = compose("ps", "--quiet", "assistant-qa-model", capture=True).strip()
-        info, = json.loads(subprocess.check_output(["docker", "inspect", model_id], env=env, text=True, timeout=30))
-        host = info["HostConfig"]
-        require(host["NetworkMode"] == "none" and host["ReadonlyRootfs"] and not host["PortBindings"],
-                "model container does not enforce its private boundary")
-        require({entry["Destination"] for entry in info["Mounts"] if entry["Type"] != "tmpfs"}
-                == {"/run/fleetworks-qa"},
-                "model got an unexpected mount")
-        require(host["Memory"] > 0 and host["NanoCpus"] > 0 and host["PidsLimit"] > 0, "missing model resource bounds")
-        operator = native_review.read_private(workspace / "secrets/operator-token").strip()
-        manager_token = native_review.read_private(workspace / "secrets/native-token").strip()
-        relay = native_review.read_private(workspace / "secrets/web-relay-token").strip()
-
-        def paired(directory, workstation_ip):
-            directory.mkdir(mode=0o700)
-            identity = verify.native_fixture(directory)
-            identity["request_id"] = "qa-register-" + directory.name
-            identity["workstation_ip"] = workstation_ip
-            polling_secret = secrets.token_hex(32)
-            challenge = verify.expect_status(verify.request(port, "/api/v1/pairing/start", payload={
-                "request_id": secrets.token_hex(16), "installation_marker": identity["installation_marker"],
-                "polling_secret": polling_secret,
-            }), (200, 201), "start native pairing")
-            decision = {name: challenge[name] for name in ("pairing_id", "approval_code")}
-            verify.expect_status(verify.request(port, "/api/v1/admin/pairing/approve", operator, decision),
-                                 (200, 204), "operator approval")
-            issued = verify.expect_status(verify.request(port, "/api/v1/pairing/poll", payload={
-                "pairing_id": challenge["pairing_id"], "polling_secret": polling_secret,
-            }), 200, "poll approved pairing")
-            require(issued["status"] == "approved", "gateway did not issue paired native authority")
-            token = issued["access_token"]
-            registration = verify.register_native(port, token, identity)
-            return token, registration
-
-        token, registration = paired(workspace / "paired-qa", "192.0.2.91")
-        other_token, other = paired(workspace / "other-paired-qa", "192.0.2.92")
-        manager_dir = workspace / "operator-qa"
-        manager_dir.mkdir(mode=0o700)
-        manager_identity = {**verify.native_fixture(manager_dir), "request_id": "qa-register-operator"}
-        manager = verify.register_native(port, manager_token, manager_identity)
-
-        def client(bearer, context, *, typed_evidence=False):
-            headers = verify.native_headers(context)
-            if typed_evidence:
-                headers = {**headers, EVIDENCE_HEADER: "1"}
-
-            def request(path, payload=None, *, query=None, expected=200):
-                route = QA + path + ("?" + urlencode(query) if query else "")
-                status, value, response_headers = verify.exchange(port, route, bearer, payload, headers=headers)
-                statuses = (expected,) if isinstance(expected, int) else expected
-                error = value.get("error") if isinstance(value, dict) else None
-                reason = SAFE_REJECTION.get(error if isinstance(error, str) else None, "unclassified")
-                require(status in statuses, f"{path} received HTTP {status} ({reason})")
-                if path != "settings" and 200 <= status < 300:
-                    normalized = {name.lower(): content.lower() for name, content in response_headers.items()}
-                    require({"origin", EVIDENCE_HEADER.lower()} <= {
-                                name.strip() for name in normalized.get("vary", "").split(",")}
-                            and {"private", "no-store"} <= {part.strip() for part in
-                                                            normalized.get("cache-control", "").split(",")},
-                            f"{path} response did not isolate the evidence view from HTTP caches")
-                return value
-            return request
-
-        native = client(token, registration, typed_evidence=True)
-        legacy = client(token, registration)
-        manage = client(manager_token, manager)
-        other_client = client(other_token, other, typed_evidence=True)
-        client(relay, registration)("settings", expected=(401, 403))
-        require(not native("settings")["can_manage"], "ordinary paired native gained QA configuration authority")
-        native("settings", {"context": authorize(registration), "expected_revision": native("settings")["revision"],
-                            "enabled": True}, expected=403)
-
-        def request(path, payload=None, *, query=None, expected=200):
-            result = native(path, payload, query=query, expected=expected)
-            if path == "turns" and result and 200 <= (expected if isinstance(expected, int) else expected[0]) < 300:
-                other_client("events", query={"turn_id": result["turn_id"], "after": 0, "wait_seconds": 0},
-                             expected=404)
-                require(other_client("latest") is None, "another registration sees QA transcript")
-                other_client("cancel", {"context": authorize(other), "turn_id": result["turn_id"]}, expected=404)
-            return result
-
-        def model():
-            processes = subprocess.check_output(["docker", "top", model_id, "-eo", "pid,args"],
-                                                env=env, text=True, timeout=15)
-            return [int(pid) for row in processes.splitlines()[1:]
-                    for pid, program in [row.strip().split(maxsplit=1)]
-                    if program.split(maxsplit=1)[0].endswith("/" + pack.WORKER)]
-
-        def readiness():
-            response = verify.request(port, "/api/v1/workstation/readiness", token,
-                                      headers=verify.native_headers(registration))
-            return response[0] == 200
-
-        def running_jobs(bearer, context):
-            value = verify.expect_status(
-                verify.request(port, "/api/v1/jobs?sort=newest", bearer, headers=verify.native_headers(context)),
-                200, "registered workstation jobs",
-            )
-            require(value["dashboard_counts_scope"] == "unfiltered_top_level_workstation_activity",
-                    "paired jobs dashboard counts used the wrong scope")
-            return value["counts"]["active"]
-
-        def verify_other_jobs():
-            expected = running_jobs(other_token, other)
-            observed = settled_turn(other_client, authorize(other), "other-jobs", "How many jobs are running?")
-            cited_running_jobs(observed, expected)
-            native("events", query={"turn_id": observed["turn_id"], "after": 0, "wait_seconds": 0}, expected=404)
-
-        result = exercise(request, manage, registration, manager, model, readiness,
-                          lambda: running_jobs(token, registration), legacy_request=legacy,
-                          verify_other_jobs=verify_other_jobs)
-        require(other_client("latest") is None, "Off retained another registration's metric exchange")
-        failed = False
-        return {"runtime": "distributed-paired-http", "platform": args.platform, "model_image_id": info["Image"], **result}
-    except Exception:
-        try:
-            report_diagnostics(compose("logs", "--no-color", "--tail", "100", "assistant-qa-executor",
-                                       capture=True, check=False) or "")
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        raise
-    finally:
-        compose("down", check=not failed, timeout=120)
 
 
 def main():
@@ -1538,22 +1431,17 @@ def main():
     local.add_argument("--archive", type=Path, required=True)
     local.add_argument("--digests", type=Path, required=True)
     local.add_argument("--gated-worker", type=Path, required=True)
+    local.add_argument("--gpt2-small-assets", type=Path, help="Pre-fetched pinned assets for the offline Linux model switch")
     catalog = modes.add_parser("catalog", help="Run the offline bundled catalog smoke for the verified Linux PR package")
     catalog.add_argument("--app", type=Path, required=True)
     catalog.add_argument("--revision", required=True)
     catalog.add_argument("--run-id", required=True)
     catalog.add_argument("--run-attempt", required=True)
     catalog.add_argument("--stage-only", action="store_true", help="Verify single-copy bundled staging without seeding")
-    remote = modes.add_parser("distributed")
-    remote.add_argument("--name", required=True)
-    remote.add_argument("--image", required=True)
-    remote.add_argument("--platform", choices=("linux/amd64", "linux/arm64"), required=True)
     args = parser.parse_args()
     if args.runtime == "embedded":
         os.environ["RUST_LOG"] = "warn,argos_api_host::inbox_qa_service=info"
         result = run_embedded(args)
-    elif args.runtime == "distributed":
-        result = run_distributed(args)
     else:
         try:
             result = run_catalog(args)

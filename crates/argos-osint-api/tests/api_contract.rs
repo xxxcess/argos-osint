@@ -923,6 +923,99 @@ async fn capabilities_advertise_only_supported_features() {
     );
 }
 
+#[tokio::test]
+async fn distributed_gateway_has_no_inbox_qa_api() {
+    use fleetworks_contracts::chat::{
+        QA_CANCEL_PATH, QA_EVENTS_PATH, QA_LATEST_PATH, QA_SETTINGS_PATH, QA_TURNS_PATH,
+    };
+
+    const TOKEN: &str = "qa-fixture-native-0123456789abcdefghijkl";
+    let (_dir, repo, _) = isolated_api().await;
+    repo.db()
+        .query("UPSERT storage_meta:identity SET instance_id='qa-fixture' RETURN NONE")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    connect_registry::initialize_control(repo.db())
+        .await
+        .unwrap();
+    let native = ScopedCredential::new(
+        "qa-fixture-native".into(),
+        "qa-fixture-scope".into(),
+        "qa-fixture-access".into(),
+        CredentialPurpose::Native,
+        [
+            Permission::ReadBackend,
+            Permission::RegisterWorkstation,
+            Permission::SubmitInteractive,
+            Permission::ReadWorkstationActivity,
+            Permission::CancelJob,
+        ]
+        .into_iter()
+        .collect(),
+        TOKEN,
+    )
+    .unwrap();
+    let app = network_router(
+        ApiState::new(repo, "qa-fixture".into(), 8080, Arc::new(Vec::new())),
+        NetworkPolicy::with_credentials(&["127.0.0.1:8080".into()], vec![native]).unwrap(),
+    );
+    let (status, capabilities) = call_as(
+        &app,
+        "GET",
+        "/api/v1/capabilities",
+        None,
+        Some(TOKEN),
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{capabilities}");
+    assert!(capabilities["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|feature| feature != "inbox-qa-v2"));
+    let ensure = RegistrationEnsureRequest::new(
+        "qa-fixture-registration".into(),
+        None,
+        "qa-fixture-installation".into(),
+    );
+    let (status, registration) = call_as(
+        &app,
+        "POST",
+        "/api/v1/connect/registrations/ensure",
+        None,
+        Some(TOKEN),
+        None,
+        serde_json::to_value(ensure).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{registration}");
+    let registration = serde_json::from_value(registration).unwrap();
+    for (method, path) in [
+        ("GET", QA_SETTINGS_PATH),
+        ("POST", QA_SETTINGS_PATH),
+        ("POST", QA_TURNS_PATH),
+        ("GET", QA_LATEST_PATH),
+        ("GET", QA_EVENTS_PATH),
+        ("POST", QA_CANCEL_PATH),
+    ] {
+        let (status, body) = call_as(
+            &app,
+            method,
+            path,
+            None,
+            Some(TOKEN),
+            Some(&registration),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}: {body}");
+    }
+}
+
 /// Runtime contract for the discovery search route: the `ArticleSearchPage`
 /// shape (matched_field/rank/excerpt/categories/revision/next_cursor) and the
 /// paired capabilities feature.

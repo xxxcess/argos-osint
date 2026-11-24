@@ -143,7 +143,12 @@ INSTRUCTIONS = {
     "missing-evidence": "Answer using only the approved observations. Say you do not know if the answer is unavailable.",
     "conversation": "Reply to the operator in one friendly sentence without making claims about workstation conditions.",
 }
-CAPS = {"distributed": 1024 ** 3, "embedded": 3 * 1024 ** 3 // 2}
+DEFAULT_EMBEDDED_CAPS_MIB = {
+    "flan-t5-small": 1536,
+    "flan-t5-base": 3584,
+    "gpt2-small": 2048,
+    "gpt2-medium": 4608,
+}
 NUMBER = re.compile(r"(?<![\w.])[-+]?\d+(?:[.,]\d+)*(?!\w)")
 
 
@@ -236,7 +241,7 @@ def evaluate(args, receipt, model):
         receipt.update(
             wall_ms=round((time.monotonic() - started) * 1000),
             peak_rss_bytes=peak_bytes,
-            worker_rss_within_cap={key: 0 < peak_bytes <= cap for key, cap in CAPS.items()},
+            worker_rss_within_default_embedded_cap=0 < peak_bytes <= receipt["default_embedded_cap_bytes"],
         )
     if completed.returncode != 0:
         if completed.returncode > 0 and (
@@ -290,7 +295,7 @@ def main():
         "checkpoint_revision": revision,
         "target": "x86_64-unknown-linux-gnu",
         "runtime": "rust-bert 0.22.0 CPU",
-        "rss_reference_caps_bytes": CAPS,
+        "default_embedded_cap_bytes": DEFAULT_EMBEDDED_CAPS_MIB[args.candidate] * 1024 ** 2,
         "measurement_scope": "single generator process; excludes retrieval model and packaged app",
         "input_token_limit": 256,
         "output_token_limit": 48,
@@ -314,7 +319,7 @@ def main():
                 print(f"Status: `{receipt['status']}`. See the receipt for diagnostics.\n", file=output)
             if "peak_rss_bytes" in receipt:
                 print(f"Generator process peak: {receipt['peak_rss_bytes'] / 1024**2:.1f} MiB. "
-                      "Reference caps: 1 GiB Distributed and 1.5 GiB Embedded. "
+                      f"Default Embedded cap: {DEFAULT_EMBEDDED_CAPS_MIB[args.candidate]} MiB. "
                       "Retrieval and app memory are excluded.", file=output)
     return int(receipt["status"] != "completed")
 

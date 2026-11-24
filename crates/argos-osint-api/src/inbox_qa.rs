@@ -1,4 +1,4 @@
-//! Authenticated V2 Inbox QA admission and reads shared by HTTP and private IPC.
+//! Authenticated Inbox QA admission and reads over private Embedded IPC.
 
 mod metrics;
 mod question;
@@ -15,17 +15,11 @@ use std::time::Duration;
 use argos_osint_core::storage::inbox_qa as store;
 use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::tx::TxError;
-use axum::extract::{Extension, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::http::StatusCode;
 use fleetworks_contracts::chat::{
     ChatSourceKind, ChatSourceReference, QaAvailabilityReason, QaCancelRequest,
-    QaConversationReply, QaEventPage, QaEventQuery, QaFinding, QaPhase, QaSettings,
-    QaSettingsUpdate, QaStartupStage, QaTurn, QaTurnNotice, QaTurnRequest, QA_CANCEL_PATH,
-    QA_EVENTS_PATH, QA_EVIDENCE_HEADER, QA_EVIDENCE_VERSION, QA_LATEST_PATH, QA_MAX_FINDINGS,
-    QA_MAX_WORDS, QA_SETTINGS_PATH, QA_TURNS_PATH,
+    QaConversationReply, QaEventPage, QaEventQuery, QaPhase, QaSettings, QaSettingsUpdate,
+    QaStartupStage, QaTurn, QaTurnNotice, QaTurnRequest, QA_MAX_FINDINGS, QA_MAX_WORDS,
 };
 use fleetworks_contracts::context::{CredentialPurpose, MutationContext, Permission};
 use fleetworks_contracts::qa_worker::{
@@ -140,12 +134,11 @@ impl QaRuntimeAvailability {
     }
 }
 
-/// Model process operations used by either executor placement.
+/// Model process operations used by the Embedded executor.
 pub type QaInferenceFuture<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
 
 /// An executor owns an isolated implementation of this stream.
 pub trait QaInference: Send + Sync {
-    fn warm(&self) -> QaInferenceFuture<'_>;
     fn ask(
         &self,
         request: QaWorkerRequest,
@@ -252,7 +245,6 @@ fn wake_at(revision: &watch::Sender<i64>, sample: i64) {
 pub(crate) struct QaTarget {
     readiness: Option<ReadinessOwners>,
     search: Option<SearchClient>,
-    embedded: bool,
     sampler: Option<SharedSampler>,
     subscribers: Arc<Semaphore>,
     events: Arc<EventWake>,
@@ -260,15 +252,10 @@ pub(crate) struct QaTarget {
 }
 
 impl QaTarget {
-    pub(crate) fn new(
-        readiness: Option<ReadinessOwners>,
-        search: Option<SearchClient>,
-        embedded: bool,
-    ) -> Self {
+    pub(crate) fn new(readiness: Option<ReadinessOwners>, search: Option<SearchClient>) -> Self {
         Self {
             readiness,
             search,
-            embedded,
             sampler: None,
             subscribers: Arc::new(Semaphore::new(8)),
             events: Arc::new(EventWake::new()),
@@ -299,7 +286,7 @@ impl QaTarget {
             store::HealthClaim::Ready(sample) => Ok(Some(sample)),
             store::HealthClaim::Pending => Ok(None),
             store::HealthClaim::Probe(boundary) => {
-                // The durable claim outlives a disconnected or timed-out HTTP/IPC reader.
+                // The durable claim outlives a disconnected or timed-out IPC reader.
                 let target = self.clone();
                 let state = state.clone();
                 tokio::spawn(async move {
@@ -325,14 +312,8 @@ impl QaTarget {
                 .readiness
                 .as_ref()
                 .ok_or_else(current_health_unavailable)?;
-            let Some((at, facts)) = workstation::qa_snapshot(
-                state,
-                readiness,
-                self.search.as_ref(),
-                boundary,
-                self.embedded,
-            )
-            .await
+            let Some((at, facts)) =
+                workstation::qa_snapshot(state, readiness, self.search.as_ref(), boundary).await
             else {
                 return Ok(None);
             };
@@ -389,29 +370,6 @@ impl QaTarget {
             }
         }
     }
-}
-
-/// Refresh coalesced backend facts while enabled, independent of drawers or event readers.
-pub async fn run_health_refresh(
-    state: ApiState,
-    services: crate::PrivateServices,
-    stop: CancellationToken,
-) {
-    let target = QaTarget::new(services.readiness, services.search, false);
-    target.refresh(&state, &stop).await;
-}
-
-pub(crate) fn routes() -> Router<ApiState> {
-    Router::new()
-        .route(QA_SETTINGS_PATH, get(read_settings))
-        .route(QA_TURNS_PATH, post(submit))
-        .route(QA_LATEST_PATH, get(latest))
-        .route(QA_EVENTS_PATH, get(events))
-        .route(QA_CANCEL_PATH, post(cancel))
-}
-
-pub(crate) fn control_routes() -> Router<ApiState> {
-    Router::new().route(QA_SETTINGS_PATH, post(update))
 }
 
 fn storage_error(error: TxError) -> ApiError {
@@ -553,6 +511,7 @@ async fn settings_value(
         settings.availability_reason = reason;
     }
     settings.startup_stage = startup_stage;
+    settings.model_target = setting.model_target;
     Ok(settings)
 }
 
@@ -638,9 +597,15 @@ pub(crate) async fn update_request(
     let actor = require(context, Permission::ManageInboxQa, Some(&request.context))?;
     let revision = i64::try_from(request.expected_revision).map_err(|_| crate::bad())?;
     context.revalidate(&state.repo).await?;
-    let setting = store::set(&state.repo, &actor, revision, request.enabled)
-        .await
-        .map_err(|error| settings_storage_error("write_setting", error))?;
+    let setting = store::set(
+        &state.repo,
+        &actor,
+        revision,
+        request.enabled,
+        request.model_target,
+    )
+    .await
+    .map_err(|error| settings_storage_error("write_setting", error))?;
     settings_value(state, context, setting, availability).await
 }
 
@@ -783,23 +748,11 @@ async fn snapshot(
         .await
         .map_err(|_| current_health_unavailable())?
     };
-    let subject = if target.embedded {
-        metrics::HostSubject::Embedded
-    } else {
-        metrics::HostSubject::ConnectedGateway
-    };
     // Keep one current, authorized projection for the turn. Select the relevant
     // facts only after the host, Jobs and readiness observations have settled.
     let (health, measurements) = tokio::join!(
         health_probe,
-        metrics::collect_snapshot(
-            state,
-            context,
-            target.sampler.as_ref(),
-            boundary,
-            deadline,
-            subject,
-        ),
+        metrics::collect_snapshot(state, context, target.sampler.as_ref(), boundary, deadline),
     );
     if let Some(source) = source.filter(|source| source.kind == ChatSourceKind::Readiness) {
         let sample = health.as_ref().map_err(|_| current_health_unavailable())?;
@@ -1192,264 +1145,9 @@ pub(crate) async fn cancel_request(
     Ok(turn)
 }
 
-struct HttpError(ApiError);
-
-impl From<ApiError> for HttpError {
-    fn from(error: ApiError) -> Self {
-        Self(error)
-    }
-}
-
-impl IntoResponse for HttpError {
-    fn into_response(self) -> Response {
-        let mut response = self.0.into_response();
-        if response.status() == StatusCode::TOO_MANY_REQUESTS {
-            response
-                .headers_mut()
-                .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
-        }
-        response
-            .headers_mut()
-            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        response
-    }
-}
-
-type HttpResult<T> = Result<([(header::HeaderName, &'static str); 2], Json<T>), HttpError>;
-
-fn response<T>(value: T) -> HttpResult<T> {
-    Ok((
-        [
-            (header::CACHE_CONTROL, "private, no-store"),
-            (header::VARY, QA_EVIDENCE_HEADER),
-        ],
-        Json(value),
-    ))
-}
-
-fn legacy_evidence(headers: &HeaderMap) -> bool {
-    headers.get(QA_EVIDENCE_HEADER) != Some(&HeaderValue::from_static(QA_EVIDENCE_VERSION))
-}
-
-fn project_legacy_finding(finding: &mut QaFinding) {
-    if matches!(
-        finding.source.kind,
-        ChatSourceKind::HostMetric | ChatSourceKind::JobCount
-    ) {
-        finding.source.kind = ChatSourceKind::Readiness;
-        finding.measurement = None;
-    }
-}
-
-fn project_legacy_turn(turn: &mut QaTurn) {
-    turn.findings.iter_mut().for_each(project_legacy_finding);
-}
-
-fn project_legacy_page(page: &mut QaEventPage) {
-    project_legacy_turn(&mut page.turn);
-    for finding in page
-        .events
-        .iter_mut()
-        .filter_map(|event| event.finding.as_mut())
-    {
-        project_legacy_finding(finding);
-    }
-}
-
-async fn read_settings(
-    State(state): State<ApiState>,
-    Extension(context): Extension<ResolvedRequest>,
-) -> HttpResult<QaSettings> {
-    response(settings_request(&state, &context, None).await?)
-}
-
-async fn update(
-    State(state): State<ApiState>,
-    Extension(context): Extension<ResolvedRequest>,
-    Json(request): Json<QaSettingsUpdate>,
-) -> HttpResult<QaSettings> {
-    response(update_request(&state, &context, request, None).await?)
-}
-
-async fn submit(
-    State(state): State<ApiState>,
-    Extension(context): Extension<ResolvedRequest>,
-    Extension(target): Extension<QaTarget>,
-    headers: HeaderMap,
-    Json(request): Json<QaTurnRequest>,
-) -> HttpResult<QaTurn> {
-    let mut turn = submit_request(&state, &context, &target, request).await?;
-    if legacy_evidence(&headers) {
-        project_legacy_turn(&mut turn);
-    }
-    response(turn)
-}
-
-async fn latest(
-    State(state): State<ApiState>,
-    Extension(context): Extension<ResolvedRequest>,
-    headers: HeaderMap,
-) -> HttpResult<Option<QaTurn>> {
-    let mut latest = latest_request(&state, &context).await?;
-    if let Some(turn) = latest.as_mut().filter(|_| legacy_evidence(&headers)) {
-        project_legacy_turn(turn);
-    }
-    response(latest)
-}
-
-async fn events(
-    State(state): State<ApiState>,
-    Extension(context): Extension<ResolvedRequest>,
-    Extension(target): Extension<QaTarget>,
-    headers: HeaderMap,
-    Query(query): Query<QaEventQuery>,
-) -> HttpResult<QaEventPage> {
-    let mut page = events_request(&state, &context, &target, query).await?;
-    if legacy_evidence(&headers) {
-        project_legacy_page(&mut page);
-    }
-    response(page)
-}
-
-async fn cancel(
-    State(state): State<ApiState>,
-    Extension(context): Extension<ResolvedRequest>,
-    headers: HeaderMap,
-    Json(request): Json<QaCancelRequest>,
-) -> HttpResult<QaTurn> {
-    let mut turn = cancel_request(&state, &context, request).await?;
-    if legacy_evidence(&headers) {
-        project_legacy_turn(&mut turn);
-    }
-    response(turn)
-}
-
 #[cfg(test)]
 mod tests {
-    use fleetworks_contracts::chat::{QaEvent, QaMeasurement, QaMeasurementUnit, QaTurnState};
-    use serde::Deserialize;
-
     use super::*;
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    enum LegacySourceKind {
-        Actor,
-        Job,
-        Cycle,
-        Readiness,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct LegacySource {
-        kind: LegacySourceKind,
-        id: String,
-    }
-
-    #[derive(Deserialize)]
-    struct LegacyFinding {
-        source: LegacySource,
-    }
-
-    #[derive(Deserialize)]
-    struct LegacyTurn {
-        findings: Vec<LegacyFinding>,
-        cursor: u64,
-    }
-
-    #[derive(Deserialize)]
-    struct LegacyEvent {
-        sequence: u64,
-        state: QaTurnState,
-        finding: Option<LegacyFinding>,
-    }
-
-    #[derive(Deserialize)]
-    struct LegacyPage {
-        turn: LegacyTurn,
-        events: Vec<LegacyEvent>,
-        gap: bool,
-    }
-
-    #[test]
-    fn negotiated_legacy_view_decodes_metrics_without_changing_the_event_cursor() {
-        let mut headers = HeaderMap::new();
-        assert!(legacy_evidence(&headers));
-        headers.insert(QA_EVIDENCE_HEADER, HeaderValue::from_static("2"));
-        assert!(legacy_evidence(&headers));
-        headers.insert(
-            QA_EVIDENCE_HEADER,
-            HeaderValue::from_static(QA_EVIDENCE_VERSION),
-        );
-        assert!(!legacy_evidence(&headers));
-
-        for (kind, id, unit) in [
-            (
-                ChatSourceKind::HostMetric,
-                "cpu",
-                QaMeasurementUnit::PercentTenths,
-            ),
-            (
-                ChatSourceKind::JobCount,
-                "running_jobs",
-                QaMeasurementUnit::Jobs,
-            ),
-        ] {
-            let mut finding = QaFinding::new(
-                ChatSourceReference::new(kind, id.to_owned()).unwrap(),
-                "Registered evidence".to_owned(),
-                "A frozen reading.".to_owned(),
-                0,
-                17,
-                "2026-11-21T10:00:00+00:00".to_owned(),
-            );
-            finding.measurement = Some(QaMeasurement::new(0, unit, "fixture".to_owned()));
-            let mut turn = QaTurn::queued(
-                "turn".to_owned(),
-                "request".to_owned(),
-                "Question?".to_owned(),
-            );
-            turn.findings.push(finding.clone());
-            turn.state = QaTurnState::Answered;
-            turn.cursor = 2;
-            let mut page = QaEventPage::new(
-                turn.clone(),
-                vec![
-                    QaEvent::new(1, QaTurnState::Running, Some(finding.clone())),
-                    QaEvent::new(2, QaTurnState::Answered, None),
-                ],
-                false,
-            );
-            assert!(
-                serde_json::from_value::<LegacyPage>(serde_json::to_value(&page).unwrap()).is_err()
-            );
-            project_legacy_page(&mut page);
-            let shape = serde_json::to_value(&page).unwrap();
-            assert!(shape["turn"]["findings"][0].get("measurement").is_none());
-            assert!(shape["events"][0]["finding"].get("measurement").is_none());
-            let legacy = serde_json::from_value::<LegacyPage>(shape).unwrap();
-            assert!(!legacy.gap);
-            assert_eq!(legacy.turn.cursor, turn.cursor);
-            assert_eq!(legacy.events[0].sequence, 1);
-            assert_eq!(legacy.events[1].sequence, legacy.turn.cursor);
-            assert_eq!(legacy.events[1].state, QaTurnState::Answered);
-            assert!(legacy.events[1].finding.is_none());
-            for read in [
-                &legacy.turn.findings[0],
-                legacy.events[0].finding.as_ref().unwrap(),
-            ] {
-                assert!(matches!(read.source.kind, LegacySourceKind::Readiness));
-                assert_eq!(read.source.id, id);
-            }
-            finding.source.kind = ChatSourceKind::Readiness;
-            finding.measurement = None;
-            assert_eq!(page.turn.findings, [finding.clone()]);
-            assert_eq!(page.events[0].finding, Some(finding));
-            assert_eq!(turn.findings[0].source.kind, kind);
-            assert_eq!(turn.findings[0].measurement.as_ref().unwrap().value, 0);
-        }
-    }
 
     #[test]
     fn reports_only_the_current_embedded_enablement_generation() {

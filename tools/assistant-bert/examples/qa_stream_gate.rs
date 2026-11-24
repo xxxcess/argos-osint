@@ -1,4 +1,4 @@
-//! Test-only checkpoint worker. Pause each turn after its first real cited finding.
+//! Test-only checkpoint worker. Pause after the first cited finding or conversational draft.
 
 #[allow(dead_code)]
 #[path = "../src/main.rs"]
@@ -8,6 +8,7 @@ use std::io;
 use std::io::BufWriter;
 use std::mem::MaybeUninit;
 
+use worker::protocol::QaDialogueKind;
 use worker::protocol::QaWorkerEvent;
 use worker::protocol::QaWorkerReply;
 
@@ -34,21 +35,29 @@ fn block_release_signal() -> io::Result<libc::sigset_t> {
 fn main() -> anyhow::Result<()> {
     let blocked = block_release_signal()?;
     let mut output = BufWriter::new(io::stdout().lock());
-    worker::run(|reply| {
+    let mut held_turn = None;
+    worker::run(|reply, kind| {
         worker::frame::write(&mut output, &reply)?;
-        if matches!(
-            reply,
+        let conversational = kind.is_some_and(|kind| kind != QaDialogueKind::Operational);
+        let turn_id = match reply {
             QaWorkerReply::Event {
-                event: QaWorkerEvent::Finding { sequence: 1, .. }
-            }
-        ) {
-            let mut signal = 0;
-            // SAFETY: The set is initialized and this process blocked SIGUSR1 before
-            // creating its input reader. The stack output remains valid through sigwait.
-            let error = unsafe { libc::sigwait(&blocked, &mut signal) };
-            if error != 0 {
-                return Err(io::Error::from_raw_os_error(error));
-            }
+                event: QaWorkerEvent::Finding { turn_id, .. },
+            } if !conversational => turn_id,
+            QaWorkerReply::Event {
+                event: QaWorkerEvent::Delta { turn_id, .. },
+            } if conversational => turn_id,
+            _ => return Ok(()),
+        };
+        if held_turn.as_ref() == Some(&turn_id) {
+            return Ok(());
+        }
+        held_turn = Some(turn_id);
+        let mut signal = 0;
+        // SAFETY: The set is initialized and this process blocked SIGUSR1 before
+        // creating its input reader. The stack output remains valid through sigwait.
+        let error = unsafe { libc::sigwait(&blocked, &mut signal) };
+        if error != 0 {
+            return Err(io::Error::from_raw_os_error(error));
         }
         Ok(())
     })

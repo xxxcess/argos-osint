@@ -12,7 +12,7 @@ on:
       runner:
         type: string
         required: true
-      streaming-test:
+      probe-all-models:
         type: boolean
         default: false
 
@@ -35,7 +35,7 @@ jobs:
     if: endsWith(inputs.target, '-linux-gnu')
     runs-on: ${{ inputs.runner }}
     container: python:3.11-bookworm
-    timeout-minutes: 60
+    timeout-minutes: ${{ inputs.probe-all-models && 85 || 60 }}
     steps:
       - &checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -120,7 +120,6 @@ jobs:
           retention-days: 14
       - &build_fixture
         name: Build the fixture worker that holds after its first real finding
-        if: inputs.streaming-test
         shell: bash
         run: |
           set -euo pipefail
@@ -158,13 +157,38 @@ jobs:
           PY
       - &upload_fixture
         name: Retain the separate Inbox QA streaming fixture worker
-        if: inputs.streaming-test
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: Fleetworks-Inbox-QA-Stream-Gate-${{ inputs.target }}-${{ inputs.head }}-${{ github.run_id }}.${{ github.run_attempt }}
           path: ${{ runner.temp }}/inbox-qa-stream-gate/
           if-no-files-found: error
           retention-days: 7
+
+      - name: Exercise Base and Medium generators using the verified worker
+        if: inputs.probe-all-models
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/inbox-qa-pack-build"
+          evidence="$RUNNER_TEMP/inbox-qa-model-proof"
+          mkdir -p "$evidence"
+          receipt="$RUNNER_TEMP/inbox-qa-pack/digests.json"
+          cp "$receipt" "$evidence/flan-t5-small.json"
+          manifest="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["manifest_sha256"])' "$receipt")"
+          status=0
+          for model in flan-t5-base gpt2-medium; do
+            python3 -B scripts/fleetworks_qa_ci.py probe --target "$QA_TARGET" --chat-model "$model" \
+              --runtime "$output/installed" --manifest-sha256 "$manifest" > "$evidence/$model.json" || status=1
+          done
+          exit "$status"
+      - name: Retain the isolated generator workload receipts
+        if: always() && inputs.probe-all-models
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Fleetworks-Inbox-QA-Model-Proof-${{ inputs.target }}-${{ inputs.head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/inbox-qa-model-proof/
+          if-no-files-found: ignore
+          retention-days: 14
 
   macos:
     name: Native macOS CPU worker

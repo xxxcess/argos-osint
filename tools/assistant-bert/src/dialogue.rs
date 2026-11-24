@@ -1,54 +1,110 @@
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use anyhow::anyhow;
 use anyhow::ensure;
 use anyhow::Result;
+use rust_bert::gpt2::GPT2Generator;
 use rust_bert::pipelines::common::ModelResource;
 use rust_bert::pipelines::common::ModelType;
+use rust_bert::pipelines::common::TokenizerOption;
+use rust_bert::pipelines::generation_utils::Cache;
 use rust_bert::pipelines::generation_utils::GenerateConfig;
 use rust_bert::pipelines::generation_utils::LanguageGenerator;
 use rust_bert::resources::LocalResource;
+use rust_bert::resources::ResourceProvider;
 use rust_bert::t5::T5Generator;
+use serde::Deserialize;
 use tch::Device;
+use tch::Kind;
 use tch::Tensor;
 
 use super::protocol::valid_dialogue_reply;
 use super::protocol::QaDialogueExchange;
 use super::protocol::QaDialogueKind;
+use super::protocol::QaModelTarget;
 use super::protocol::QaPassage;
 use super::protocol::QaWorkerDialogue;
 use super::protocol::QA_CONTEXT_WINDOW_TOKENS;
-use super::protocol::QA_GENERATOR_FILES;
 
-const MAX_GENERATOR_FILE_BYTES: u64 = 307_867_048;
-const MAX_OUTPUT_TOKENS: i64 = 48;
 const MAX_OPERATIONAL_PASSAGES: usize = 6;
+const LEGACY_OUTPUT_TOKENS: u16 = 48;
 
-pub(super) fn verify(dir: &Path) -> Result<()> {
+#[derive(Deserialize)]
+struct AssetPin {
+    bytes: u64,
+    sha256: String,
+}
+
+#[derive(Deserialize)]
+struct ModelPin {
+    revision: String,
+    files: BTreeMap<String, AssetPin>,
+}
+
+pub(super) fn verify(dir: &Path, target: QaModelTarget) -> Result<()> {
     ensure!(
         fs::symlink_metadata(dir)?.is_dir() && dir.to_str().is_some(),
         "invalid QA generator directory"
     );
-    super::verify_model_files(dir, &QA_GENERATOR_FILES, MAX_GENERATOR_FILE_BYTES)
+    let pins: BTreeMap<String, ModelPin> =
+        serde_json::from_str(include_str!("../../../scripts/fleetworks_qa_models.json"))?;
+    let model = pins
+        .get(target.slug())
+        .ok_or_else(|| anyhow!("QA generator pin is absent"))?;
+    ensure!(
+        model.revision == target.revision(),
+        "QA generator revision mismatch"
+    );
+    let files = model
+        .files
+        .iter()
+        .map(|(name, pin)| -> Result<_> {
+            ensure!(
+                fs::symlink_metadata(dir.join(name))?.len() == pin.bytes,
+                "QA generator asset length mismatch"
+            );
+            Ok((name.as_str(), pin.sha256.as_str()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    super::verify_model_files(dir, &files, target.weight_bytes())
 }
 
-pub(super) fn load(dir: &Path) -> Result<T5Generator> {
-    verify(dir)?;
+pub(super) enum Generator {
+    T5(Box<T5Generator>),
+    Gpt2(Box<GPT2Generator>),
+}
+
+pub(super) fn load(dir: &Path, target: QaModelTarget) -> Result<Generator> {
+    verify(dir, target)?;
+    let (model_type, weights, vocab, merges) = match target {
+        QaModelTarget::FlanT5Small | QaModelTarget::FlanT5Base => {
+            (ModelType::T5, "model.safetensors", "spiece.model", None)
+        }
+        QaModelTarget::Gpt2Small | QaModelTarget::Gpt2Medium => (
+            ModelType::GPT2,
+            "rust_model.ot",
+            "vocab.json",
+            Some("merges.txt"),
+        ),
+    };
     let resource = |name| {
         Box::new(LocalResource {
             local_path: dir.join(name),
         })
     };
-    T5Generator::new(GenerateConfig {
-        model_type: ModelType::T5,
-        model_resource: ModelResource::Torch(resource("model.safetensors")),
+    let config = GenerateConfig {
+        model_type,
+        model_resource: ModelResource::Torch(resource(weights)),
         config_resource: resource("config.json"),
-        vocab_resource: resource("spiece.model"),
-        merges_resource: None,
+        vocab_resource: resource(vocab),
+        merges_resource: merges.map(|name| -> Box<dyn ResourceProvider + Send> { resource(name) }),
         min_length: 0,
-        max_length: Some(MAX_OUTPUT_TOKENS + 1), // The decoder starts with an existing token.
+        max_length: Some(i64::from(target.input_tokens()) + i64::from(target.output_tokens())),
         do_sample: false,
         early_stopping: false,
         num_beams: 1,
@@ -63,8 +119,16 @@ pub(super) fn load(dir: &Path) -> Result<T5Generator> {
         diversity_penalty: None,
         device: Device::Cpu,
         kind: None,
-    })
-    .map_err(|_| anyhow!("could not load the pinned QA generator"))
+    };
+    let generator = match target {
+        QaModelTarget::FlanT5Small | QaModelTarget::FlanT5Base => {
+            T5Generator::new(config).map(|model| Generator::T5(Box::new(model)))
+        }
+        QaModelTarget::Gpt2Small | QaModelTarget::Gpt2Medium => {
+            GPT2Generator::new(config).map(|model| Generator::Gpt2(Box::new(model)))
+        }
+    };
+    generator.map_err(|_| anyhow!("could not load the pinned QA generator"))
 }
 
 fn prompt(
@@ -114,15 +178,14 @@ fn prompt(
 }
 
 fn input_ids(
-    generator: &T5Generator,
+    tokenizer: &TokenizerOption,
+    encoder_decoder: bool,
+    input_limit: u16,
     question: &str,
     dialogue: &QaWorkerDialogue,
     passages: &[QaPassage],
 ) -> Result<Vec<i64>> {
-    let tokenizer = generator.get_tokenizer();
-    let eos = tokenizer
-        .get_eos_id()
-        .ok_or_else(|| anyhow!("missing QA generator EOS token"))?;
+    let eos = tokenizer.get_eos_id();
     let min_passages = usize::from(dialogue.kind == QaDialogueKind::Operational);
     let max_passages = passages.len().min(MAX_OPERATIONAL_PASSAGES);
     // Keep the highest-priority observations. Drop older history first, then
@@ -137,10 +200,11 @@ fn input_ids(
             let tokens = tokenizer.tokenize_with_offsets(&prompt).tokens;
             let mut ids = tokenizer.convert_tokens_to_ids(&tokens);
             // The T5 single-sequence encoding appends EOS unless it is already present.
-            if ids.last() != Some(&eos) {
+            if encoder_decoder && ids.last() != eos.as_ref() {
+                let eos = eos.ok_or_else(|| anyhow!("missing QA generator EOS token"))?;
                 ids.push(eos);
             }
-            if ids.len() <= usize::from(QA_CONTEXT_WINDOW_TOKENS) {
+            if ids.len() <= usize::from(input_limit) {
                 return Ok(ids);
             }
         }
@@ -149,33 +213,143 @@ fn input_ids(
 }
 
 pub(super) struct Generation {
+    pub(super) window_tokens: u16,
     pub(super) input_tokens: u16,
     pub(super) reply: Option<String>,
 }
 
+pub(super) struct DecodeRequest<'a> {
+    pub(super) target: QaModelTarget,
+    pub(super) streaming: bool,
+    pub(super) question: &'a str,
+    pub(super) dialogue: &'a QaWorkerDialogue,
+    pub(super) passages: &'a [QaPassage],
+}
+
+pub(super) fn input_limit(target: QaModelTarget, streaming: bool) -> u16 {
+    if streaming {
+        target.input_tokens()
+    } else {
+        // A dialogue-only legacy supervisor only accepts the original receipt limit.
+        QA_CONTEXT_WINDOW_TOKENS
+    }
+}
+
 pub(super) fn generate(
-    generator: &T5Generator,
-    question: &str,
-    dialogue: &QaWorkerDialogue,
-    passages: &[QaPassage],
+    generator: &Generator,
+    request: DecodeRequest<'_>,
+    stopping: &AtomicBool,
+    draft: &mut impl FnMut(&str) -> Result<()>,
 ) -> Result<Option<Generation>> {
-    let ids = input_ids(generator, question, dialogue, passages)?;
-    if ids.is_empty() {
+    tch::no_grad(|| match generator {
+        Generator::T5(model) => decode(model.as_ref(), request, stopping, draft),
+        Generator::Gpt2(model) => decode(model.as_ref(), request, stopping, draft),
+    })
+}
+
+// The generic LanguageGenerator bound exposes Rust-BERT's shared forward/cache interface.
+fn decode<G: LanguageGenerator>(
+    generator: &G,
+    request: DecodeRequest<'_>,
+    stopping: &AtomicBool,
+    draft: &mut impl FnMut(&str) -> Result<()>,
+) -> Result<Option<Generation>> {
+    let tokenizer = generator.get_tokenizer();
+    let encoder_decoder = generator.is_encoder_decoder();
+    let window_tokens = input_limit(request.target, request.streaming);
+    let ids = input_ids(
+        tokenizer,
+        encoder_decoder,
+        window_tokens,
+        request.question,
+        request.dialogue,
+        request.passages,
+    )?;
+    if ids.is_empty() || stopping.load(Ordering::Acquire) {
         return Ok(None);
     }
     let input_tokens = u16::try_from(ids.len())?;
     let input = Tensor::f_from_slice(&ids)?.f_unsqueeze(0)?;
-    let outputs = generator.generate_from_ids_and_past(input, None, None)?;
-    let reply = outputs.into_iter().next().and_then(|sequence| {
-        let decoded = generator
-            .get_tokenizer()
-            .decode(&sequence.indices, true, true);
-        let text = decoded.trim();
-        valid_dialogue_reply(text).then(|| text.to_owned())
+    let encoder_mask = encoder_decoder.then(|| {
+        generator.get_pad_id().map_or_else(
+            || Tensor::ones_like(&input),
+            |pad| input.ne(pad).to_kind(Kind::Int64),
+        )
     });
+    let (encoder, mut step) = if encoder_decoder {
+        let encoder = generator.encode(&input, encoder_mask.as_ref());
+        ensure!(encoder.is_some(), "QA generator did not encode its prompt");
+        let decoder_start = generator
+            .get_decoder_start_id()
+            .ok_or_else(|| anyhow!("missing QA generator decoder start token"))?;
+        (
+            encoder,
+            Tensor::f_from_slice(&[decoder_start])?.f_unsqueeze(0)?,
+        )
+    } else {
+        (None, input)
+    };
+
+    let mut cache = Cache::None;
+    let mut generated = Vec::new();
+    let output_limit = if request.streaming {
+        request.target.output_tokens()
+    } else {
+        LEGACY_OUTPUT_TOKENS
+    };
+    for _ in 0..output_limit {
+        if stopping.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        let result = generator.forward_t(
+            (!encoder_decoder).then_some(&step),
+            cache,
+            encoder_mask.as_ref(),
+            None,
+            None,
+            None,
+            encoder.as_ref(),
+            encoder_decoder.then_some(&step),
+            false,
+        )?;
+        let token = result
+            .lm_logits
+            .select(1, -1)
+            .argmax(-1, false)
+            .int64_value(&[0]);
+        if generator
+            .get_eos_ids()
+            .is_some_and(|eos| eos.contains(&token))
+        {
+            break;
+        }
+        cache = result.cache;
+        ensure!(
+            matches!(cache, Cache::T5Cache(Some(_)) | Cache::GPT2Cache(Some(_))),
+            "QA generator did not return its attention cache"
+        );
+        generated.push(token);
+        // Show the first token promptly, then amortize conversion and frame writes.
+        if request.streaming
+            && (generated.len() == 1 || generated.len().is_multiple_of(4))
+            && !stopping.load(Ordering::Acquire)
+        {
+            draft(&tokenizer.decode(&generated, true, false))?;
+        }
+        step = Tensor::f_from_slice(&[token])?.f_unsqueeze(0)?;
+    }
+    if stopping.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    if request.streaming && generated.len() > 1 && !generated.len().is_multiple_of(4) {
+        draft(&tokenizer.decode(&generated, true, false))?;
+    }
+    let decoded = tokenizer.decode(&generated, true, true);
+    let text = decoded.trim();
     Ok(Some(Generation {
+        window_tokens,
         input_tokens,
-        reply,
+        reply: valid_dialogue_reply(text).then(|| text.to_owned()),
     }))
 }
 

@@ -36,11 +36,12 @@ impl Role {
     }
 }
 
-/// The real state of a turn. V1 is a status, then a final answer; there is no partial text.
+/// The real state of a turn, including provisional V2 generation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TurnState {
     Queued,
     Running,
+    Streaming,
     Retrying { attempt: u32 },
     Final,
     Failed { reason: String },
@@ -52,6 +53,7 @@ impl TurnState {
         match self {
             Self::Queued => Some(("Queued".to_owned(), StatusTone::Neutral)),
             Self::Running => Some(("Working".to_owned(), StatusTone::Info)),
+            Self::Streaming => Some(("Draft · unverified".to_owned(), StatusTone::Info)),
             Self::Retrying { attempt } => {
                 Some((format!("Retrying, attempt {attempt}"), StatusTone::Warn))
             }
@@ -61,7 +63,10 @@ impl TurnState {
     }
 
     pub(crate) fn is_pending(&self) -> bool {
-        matches!(self, Self::Queued | Self::Running | Self::Retrying { .. })
+        matches!(
+            self,
+            Self::Queued | Self::Running | Self::Streaming | Self::Retrying { .. }
+        )
     }
 }
 

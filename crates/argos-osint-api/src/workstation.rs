@@ -883,7 +883,6 @@ pub(crate) async fn qa_snapshot(
     owners: &ReadinessOwners,
     search: Option<&SearchClient>,
     observed_after_ms: i64,
-    _embedded: bool,
 ) -> Option<(chrono::DateTime<Utc>, Vec<QaReadinessFact>)> {
     // The protocol persists millisecond boundaries, so every independent check
     // must start strictly after the last terminal boundary.

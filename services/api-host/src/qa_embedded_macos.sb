@@ -1,7 +1,7 @@
 (version 1)
 (deny default)
 (allow process-exec (literal (param "worker")))
-(allow file-read* (subpath (param "pack")))
+(allow file-read* (subpath (param "pack")) (subpath (param "model")))
 (allow file-read-data (literal "/"))
 (allow file-read*
     (subpath "/usr/lib")

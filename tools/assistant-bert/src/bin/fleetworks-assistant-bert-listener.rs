@@ -40,14 +40,16 @@ use anyhow::Result;
 use serde::de::DeserializeOwned;
 
 use protocol::qa_frame_len;
+use protocol::QaModelTarget;
 use protocol::QaWorkerCommand;
 use protocol::QaWorkerEvent;
 use protocol::QaWorkerReply;
-use protocol::QA_CHAT_MODEL_REVISION;
 use protocol::QA_CONTEXT_USAGE_ENV;
 use protocol::QA_DIALOGUE_ENV;
 use protocol::QA_MAX_FRAME_BYTES;
 use protocol::QA_MODEL_REVISION;
+use protocol::QA_MODEL_TARGET_ENV;
+use protocol::QA_STREAMING_ENV;
 use protocol::QA_WORKER_PROTOCOL;
 
 const INITIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
@@ -351,13 +353,17 @@ fn relay(
                         | QaWorkerReply::ReadyWithDialogue {
                             protocol,
                             model_revision,
+                        }
+                        | QaWorkerReply::ReadyWithStreaming {
+                            protocol,
+                            model_revision,
                         },
                         Phase::Starting | Phase::Pinging,
                     ) if protocol == QA_WORKER_PROTOCOL
-                        && matches!(
-                            model_revision.as_str(),
-                            QA_MODEL_REVISION | QA_CHAT_MODEL_REVISION
-                        ) =>
+                        && (model_revision == QA_MODEL_REVISION
+                            || QaModelTarget::ALL
+                                .into_iter()
+                                .any(|target| model_revision == target.revision())) =>
                     {
                         phase = Phase::Idle;
                         *reply = Some(packet);
@@ -373,7 +379,7 @@ fn relay(
                     }
                     (
                         QaWorkerReply::Event {
-                            event: QaWorkerEvent::Finding { .. },
+                            event: QaWorkerEvent::Finding { .. } | QaWorkerEvent::Delta { .. },
                         },
                         Phase::Answering,
                     ) => {
@@ -426,11 +432,12 @@ fn supervise(
 
 fn serve(stream: UnixStream, worker: &Path, model: &Path, libraries: &Path) -> Result<()> {
     stream.set_nonblocking(true)?;
-    let (report_context, dialogue) = match opening_command(&stream)? {
+    let (report_context, dialogue, streaming) = match opening_command(&stream)? {
         QaWorkerCommand::Shutdown => return confirm_stopped(&stream),
-        QaWorkerCommand::Open => (false, false),
-        QaWorkerCommand::OpenWithContext => (true, false),
-        QaWorkerCommand::OpenWithDialogue => (true, true),
+        QaWorkerCommand::Open => (false, false, false),
+        QaWorkerCommand::OpenWithContext => (true, false, false),
+        QaWorkerCommand::OpenWithDialogue => (true, true, false),
+        QaWorkerCommand::OpenWithStreaming => (true, true, true),
         _ => return Err(anyhow!("invalid QA executor handshake")),
     };
 
@@ -464,6 +471,12 @@ fn serve(stream: UnixStream, worker: &Path, model: &Path, libraries: &Path) -> R
     }
     if dialogue {
         command.env(QA_DIALOGUE_ENV, "1");
+    }
+    if streaming {
+        command.env(QA_STREAMING_ENV, "1");
+    }
+    if let Some(target) = env::var_os(QA_MODEL_TARGET_ENV) {
+        command.env(QA_MODEL_TARGET_ENV, target);
     }
     let mut child = ModelChild(command.spawn()?);
     supervise(&stream, &model_io, &mut child, EXECUTOR_LEASE)

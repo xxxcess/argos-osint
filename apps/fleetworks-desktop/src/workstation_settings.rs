@@ -24,13 +24,15 @@ pub(crate) enum SettingsSection {
     General,
     Appearance,
     Connection,
+    Assistant,
     Models,
 }
 
 impl SettingsSection {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::General,
         Self::Connection,
+        Self::Assistant,
         Self::Appearance,
         Self::Models,
     ];
@@ -40,6 +42,7 @@ impl SettingsSection {
             Self::General => "General",
             Self::Appearance => "Appearance",
             Self::Connection => "Connection",
+            Self::Assistant => "Assistant",
             Self::Models => "Models",
         }
     }
@@ -49,6 +52,7 @@ impl SettingsSection {
             Self::General => "About and workstation readiness",
             Self::Appearance => "Display and motion preferences",
             Self::Connection => "Backend setup and pairing",
+            Self::Assistant => "Local model and readiness",
             Self::Models => "Model routes and provider accounts",
         }
     }
@@ -65,6 +69,15 @@ impl State {
     pub fn fixture_show_workstation_settings(&mut self) {
         if self.fixture {
             self.settings_section = SettingsSection::General;
+            self.settings_open = true;
+        }
+    }
+
+    /// Open the Assistant section in the synthetic review session.
+    #[doc(hidden)]
+    pub fn fixture_show_assistant_settings(&mut self) {
+        if self.fixture {
+            self.settings_section = SettingsSection::Assistant;
             self.settings_open = true;
         }
     }
@@ -146,11 +159,12 @@ fn destination_action(
 
 fn section_content(
     state: &State,
+    section: SettingsSection,
     preferences: ViewPreferences,
     kit: &Kit,
     connection_size: Option<[f32; 2]>,
 ) -> El {
-    match state.settings_section {
+    match section {
         SettingsSection::General => rune::col()
             .w_full()
             .gap(22.0)
@@ -280,12 +294,20 @@ fn section_content(
                 preferences,
                 connection_size,
             ))
-            .child(setting_group(
-                "Backend inference",
-                crate::inbox_qa::settings_content(state, kit, preferences).padding(12.0),
-                preferences,
-                kit,
-            )),
+            .children(state.is_local_backend().then(|| {
+                setting_group(
+                    "Backend inference",
+                    crate::inbox_qa::settings_content(state, kit, preferences).padding(12.0),
+                    preferences,
+                    kit,
+                )
+            })),
+        SettingsSection::Assistant => material::glass_panel(
+            crate::inbox_qa::assistant_settings_content(state, kit)
+                .radius(8.0)
+                .clip_rounded(8.0),
+            preferences,
+        ),
         SettingsSection::Models => rune::col().w_full().gap(22.0).child(setting_group(
             "Routing",
             rune::col().child(setting_row(
@@ -314,6 +336,13 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
         .accessibility
         .for_view(state.fixture, cx.is_reduced_motion());
     let pointer = (!preferences.matte()).then_some(&state.pointer_offset);
+    let assistant_visible = state.assistant_settings_visible();
+    let current_section =
+        if state.settings_section == SettingsSection::Assistant && !assistant_visible {
+            SettingsSection::Connection
+        } else {
+            state.settings_section
+        };
     let page_size = cx.layout_size("page-content");
     let compact = page_size.is_none_or(|size| size[0] < 580.0);
     let height = page_size
@@ -335,7 +364,10 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
         .fill(kit.c.surface_base)
         .border_sides([0.0, 1.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE));
     for section in SettingsSection::ALL {
-        let selected = state.settings_section == section;
+        if section == SettingsSection::Assistant && !assistant_visible {
+            continue;
+        }
+        let selected = current_section == section;
         rail = rail.child(
             rune::row()
                 .key(format!(
@@ -401,7 +433,7 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
                 .gap(4.0)
                 .border_sides([0.0, 0.0, 1.0, 0.0], theme::hex(theme::BORDER_SUBTLE))
                 .child(
-                    rune::text(state.settings_section.title())
+                    rune::text(current_section.title())
                         .key("settings-section-title")
                         .role("heading")
                         .focusable(true)
@@ -410,7 +442,7 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
                         .color(theme::hex(theme::TEXT_PRIMARY)),
                 )
                 .child(
-                    rune::text(state.settings_section.summary())
+                    rune::text(current_section.summary())
                         .font(kit.ty.small)
                         .color(theme::hex(theme::TEXT_MUTED))
                         .wrap(),
@@ -426,7 +458,7 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
                     stick_bottom: false,
                 })
                 .child(
-                    section_content(state, preferences, kit, connection_size)
+                    section_content(state, current_section, preferences, kit, connection_size)
                         .padding(content_padding),
                 ),
         );

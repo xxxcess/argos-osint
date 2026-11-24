@@ -29,12 +29,6 @@ pub(super) struct Fact {
     pub(super) measurement: QaMeasurement,
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum HostSubject {
-    Embedded,
-    ConnectedGateway,
-}
-
 /// Capture the available measurements from the authorized host and Jobs scope.
 pub(super) async fn collect_snapshot(
     state: &ApiState,
@@ -42,7 +36,6 @@ pub(super) async fn collect_snapshot(
     sampler: Option<&SharedSampler>,
     boundary: i64,
     deadline: Instant,
-    subject: HostSubject,
 ) -> Vec<(Metric, Fact)> {
     if Instant::now() >= deadline {
         return Vec::new();
@@ -50,7 +43,7 @@ pub(super) async fn collect_snapshot(
     let (mut facts, jobs) = tokio::join!(
         async {
             if let Some(sampler) = sampler.filter(|_| context.permits(Permission::ReadBackend)) {
-                observe_host(sampler, boundary, deadline, subject).await
+                observe_host(sampler, boundary, deadline).await
             } else {
                 Vec::new()
             }
@@ -67,7 +60,6 @@ async fn observe_host(
     sampler: &SharedSampler,
     boundary: i64,
     deadline: Instant,
-    subject: HostSubject,
 ) -> Vec<(Metric, Fact)> {
     let mut observations = [
         (Metric::Cpu, None),
@@ -90,7 +82,7 @@ async fn observe_host(
             let now = Utc::now();
             for (metric, fact) in &mut observations {
                 if fact.is_none() {
-                    *fact = host_fact(&sample, *metric, boundary, now, subject);
+                    *fact = host_fact(&sample, *metric, boundary, now);
                 }
             }
             // A retained disk reading can precede a new CPU baseline.
@@ -117,37 +109,22 @@ fn host_fact(
     metric: Metric,
     boundary: i64,
     now: DateTime<Utc>,
-    subject: HostSubject,
 ) -> Option<Fact> {
-    let (id, reading) = match metric {
-        Metric::Cpu => ("cpu", sample.cpu?),
-        Metric::Memory => ("memory", sample.memory?),
-        Metric::Disk => ("disk", sample.disk?),
+    let (id, label, reading) = match metric {
+        Metric::Cpu => ("cpu", "API host CPU usage", sample.cpu?),
+        Metric::Memory => ("memory", "API host memory usage", sample.memory?),
+        Metric::Disk => ("disk", "API host storage volume usage", sample.disk?),
         _ => return None,
     };
     if !(0.0..=100.0).contains(&reading.value) || !fresh(reading.observed_at, boundary, now) {
         return None;
     }
-    let label = match (subject, metric) {
-        (HostSubject::Embedded, Metric::Cpu) => "API host CPU usage",
-        (HostSubject::Embedded, Metric::Memory) => "API host memory usage",
-        (HostSubject::Embedded, Metric::Disk) => "API host storage volume usage",
-        (HostSubject::ConnectedGateway, Metric::Cpu) => "Connected gateway host CPU usage",
-        (HostSubject::ConnectedGateway, Metric::Memory) => "Connected gateway host memory usage",
-        (HostSubject::ConnectedGateway, Metric::Disk) => {
-            "Connected gateway host storage volume usage"
-        }
-        _ => return None,
-    };
     let value = (reading.value * 10.0).round() as u64;
-    let subject = label
-        .strip_prefix("Connected ")
-        .map_or_else(|| label.to_owned(), |suffix| format!("connected {suffix}"));
     Some(Fact {
         kind: ChatSourceKind::HostMetric,
         id,
         label,
-        text: format!("The {subject} is {}.{}%.", value / 10, value % 10),
+        text: format!("The {label} is {}.{}%.", value / 10, value % 10),
         observed_at: reading.observed_at,
         measurement: QaMeasurement::new(value, QaMeasurementUnit::PercentTenths, label.to_owned()),
     })
@@ -250,10 +227,8 @@ mod tests {
             next_sample_at: std::time::Instant::now(),
         };
 
-        let embedded = HostSubject::Embedded;
-        let gateway = HostSubject::ConnectedGateway;
         let boundary = disk_at.timestamp_millis();
-        let cpu = host_fact(&sample, Metric::Cpu, boundary, now, embedded).unwrap();
+        let cpu = host_fact(&sample, Metric::Cpu, boundary, now).unwrap();
         assert_eq!(cpu.text, "The API host CPU usage is 0.0%.");
         assert_eq!(
             cpu.measurement,
@@ -265,23 +240,20 @@ mod tests {
         );
         assert_eq!(cpu.observed_at, cpu_at);
 
-        let memory = host_fact(&sample, Metric::Memory, boundary, now, gateway).unwrap();
-        assert_eq!(
-            memory.text,
-            "The connected gateway host memory usage is 47.2%."
-        );
+        let memory = host_fact(&sample, Metric::Memory, boundary, now).unwrap();
+        assert_eq!(memory.text, "The API host memory usage is 47.2%.");
         assert_eq!(
             memory.measurement,
             QaMeasurement::new(
                 472,
                 QaMeasurementUnit::PercentTenths,
-                "Connected gateway host memory usage".into()
+                "API host memory usage".into()
             )
         );
         assert_eq!(memory.observed_at, now);
 
-        assert!(host_fact(&sample, Metric::Disk, boundary, now, embedded).is_none());
-        let disk = host_fact(&sample, Metric::Disk, boundary - 1, now, embedded).unwrap();
+        assert!(host_fact(&sample, Metric::Disk, boundary, now).is_none());
+        let disk = host_fact(&sample, Metric::Disk, boundary - 1, now).unwrap();
         assert_eq!(disk.text, "The API host storage volume usage is 30.5%.");
         assert_eq!(disk.measurement.value, 305);
         assert_eq!(disk.observed_at, disk_at);
@@ -290,7 +262,6 @@ mod tests {
             Metric::Disk,
             0,
             DateTime::from_timestamp_millis(14_001).unwrap(),
-            embedded,
         )
         .is_none());
 
@@ -300,21 +271,14 @@ mod tests {
             observed_at: later,
         });
         sample.cpu = None;
-        let next = host_fact(
-            &sample,
-            Metric::Memory,
-            now.timestamp_millis(),
-            later,
-            gateway,
-        )
-        .unwrap();
+        let next = host_fact(&sample, Metric::Memory, now.timestamp_millis(), later).unwrap();
         assert_eq!(next.measurement.value, 518);
         assert_eq!(next.observed_at, later);
         assert_eq!(
             memory.measurement.value, 472,
             "a later measurement cannot rewrite a frozen fact"
         );
-        assert!(host_fact(&sample, Metric::Cpu, boundary, later, embedded).is_none());
+        assert!(host_fact(&sample, Metric::Cpu, boundary, later).is_none());
     }
 
     #[cfg(feature = "embedded")]
@@ -465,7 +429,6 @@ mod tests {
                 None,
                 0,
                 Instant::now() + Duration::from_secs(4),
-                HostSubject::Embedded,
             )
             .await;
             assert_eq!(facts.len(), 3);

@@ -252,6 +252,8 @@ jobs:
             --scene workstation-settings \
             --scene workstation-settings-matte \
             --scene workstation-settings-reduced-motion \
+            --scene workstation-settings-assistant \
+            --scene workstation-settings-assistant-provisioning \
             --scene tools-catalog-ready \
             --scene tools-catalog-ready-matte \
             --scene models-ready \

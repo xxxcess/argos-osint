@@ -898,10 +898,8 @@ fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
     let filter = rune_kit::TextInput::new(&inbox.query)
         .label("Filter notifications")
         .placeholder("Search Inbox")
-        .on_edit(|state: &mut State| {
-            state.cancel_activity_triage();
-            &mut state.inbox.query
-        })
+        .on_edit(|state: &mut State| &mut state.inbox.query)
+        .on_change(|state: &mut State, _| state.cancel_activity_triage())
         .build(kit)
         .key("inbox-filter")
         .w_full();

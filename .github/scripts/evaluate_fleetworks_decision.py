@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import re
 import signal
 import socket
 import statistics
@@ -27,6 +28,7 @@ TARGETS = {("Linux", "x86_64"): "x86_64-unknown-linux-gnu",
 NONE = "none"
 MAX_BODY = 8192
 EIGHT_CANDIDATE_TRIALS = 8
+MAX_DIAGNOSTIC_BYTES = 4096
 
 
 def require(condition, message):
@@ -257,8 +259,19 @@ def ready(path, process):
     raise ValueError("Pinned decision worker did not become healthy")
 
 
+def worker_diagnostics(log):
+    size = log.seek(0, os.SEEK_END)
+    log.seek(max(0, size - MAX_DIAGNOSTIC_BYTES))
+    tail = log.read(MAX_DIAGNOSTIC_BYTES).decode("utf-8", errors="replace")
+    tail = re.sub(r"https?://\S+|(?<![\w:])/[A-Za-z0-9_./@+-]+", "<path>", tail)
+    return ["".join(char for char in line if char.isprintable())[:512]
+            for line in tail.splitlines()[-16:]]
+
+
 def qualify(args, receipt, workspace, model):
+    receipt["stage"] = "verify_runtime"
     worker = fetch_runtime(workspace, args.target, receipt)
+    receipt["stage"] = "verify_checkpoint"
     checkpoint = fetch(model, workspace)
     socket_path = str(workspace / "score.sock")
     environment = {"HOME": str(workspace), "PATH": os.defpath, "LANG": "C", "LC_ALL": "C"}
@@ -267,14 +280,19 @@ def qualify(args, receipt, workspace, model):
     command = [str(worker), "--model", str(checkpoint), "--alias", args.model,
                "--host", socket_path, "--offline", "--no-webui", "--no-mmproj", "--no-cache-prompt",
                "--no-slots", "--parallel", "1", "--threads", "1", "--threads-batch", "1",
-               "--threads-http", "1", "--ctx-size", "1024", "--n-gpu-layers", "0"]
+               "--threads-http", "1", "--ctx-size", "1024", "--n-gpu-layers", "0", "--log-verbosity", "2"]
     cases = case_data()
     started = time.monotonic()
-    with subprocess.Popen(command, cwd=workspace, env=environment, start_new_session=True,
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as process:
+    receipt["stage"] = "start_worker"
+    with (workspace / "worker.stderr").open("w+b") as log, subprocess.Popen(
+        command, cwd=workspace, env=environment, start_new_session=True,
+        stdout=subprocess.DEVNULL, stderr=log,
+    ) as process:
+        scored_all = False
         try:
             ready(socket_path, process)
             receipt["cold_ready_ms"] = round((time.monotonic() - started) * 1000, 2)
+            receipt["stage"] = "first_decision"
             first_started = time.monotonic()
             first_case = cases["calibration"][0]
             choose(socket_path, args.model, first_case[1], first_case[2])
@@ -284,6 +302,7 @@ def qualify(args, receipt, workspace, model):
             peak = sample_rss(process)
             latencies = []
             for group, group_cases in cases.items():
+                receipt["stage"] = group
                 ambiguous = []
                 scored = []
                 for case in group_cases:
@@ -297,6 +316,7 @@ def qualify(args, receipt, workspace, model):
                     peak = max(peak, sample_rss(process))
                     ambiguous.append(case)
                 evaluated[group] = (ambiguous, scored)
+            receipt["stage"] = "eight_candidate_latency"
             eight_menu_case, = (case for case in cases["held_out"] if len(case[2]) == 8)
             eight_state, eight_menu = eight_menu_case[1:3]
             eight_latencies = []
@@ -306,7 +326,10 @@ def qualify(args, receipt, workspace, model):
                 choose(socket_path, args.model, eight_state, rotated)
                 eight_latencies.append((time.monotonic() - began) * 1000)
                 peak = max(peak, sample_rss(process))
+            scored_all = True
         finally:
+            if not scored_all:
+                receipt["worker_exit_before_cleanup"] = process.poll()
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGTERM)
                 try:
@@ -314,6 +337,8 @@ def qualify(args, receipt, workspace, model):
                 except subprocess.TimeoutExpired:
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait(timeout=5)
+            if not scored_all:
+                receipt["worker_diagnostics"] = worker_diagnostics(log)
     threshold, margin = calibrate(*evaluated["calibration"])
     held_out, decisions = evaluated["held_out"]
     stats = counts(held_out, thresholded(decisions, threshold, margin))
@@ -321,6 +346,7 @@ def qualify(args, receipt, workspace, model):
     eight_latency = sorted(eight_latencies)[math.ceil(0.95 * len(eight_latencies)) - 1]
     receipt.update(
         status="measured",
+        stage="completed",
         calibration={"threshold": threshold, "margin": margin,
                      **counts(evaluated["calibration"][0], thresholded(evaluated["calibration"][1], threshold, margin))},
         held_out=stats, deterministic_at_matched_suggestions=baseline(held_out, stats["displayed"]),

@@ -7,6 +7,7 @@ use argos_osint_core::jobs_view::JobFilter;
 use argos_osint_core::storage::bootstrap;
 use argos_osint_core::storage::connect_registry;
 use argos_osint_core::storage::connect_registry::RegistryAuthority;
+use argos_osint_core::storage::inbox_qa as qa;
 use argos_osint_core::storage::job_context::InteractiveAdmission;
 use argos_osint_core::storage::job_dispatch;
 use argos_osint_core::storage::jobs;
@@ -14,12 +15,20 @@ use argos_osint_core::storage::jobs::NewJob;
 use argos_osint_core::storage::jobs::NewTask;
 use argos_osint_core::storage::jobs_view as view;
 use argos_osint_core::storage::repo::Repository;
+use argos_osint_core::storage::tx::TxError;
 use chrono::Utc;
+use fleetworks_contracts::chat::ChatSourceKind;
+use fleetworks_contracts::chat::ChatSourceReference;
+use fleetworks_contracts::chat::QaTurnRequest;
+use fleetworks_contracts::chat::QaTurnState;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
 use fleetworks_contracts::context::ActivityScope;
 use fleetworks_contracts::context::JobOrigin;
+use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::OriginSource;
 use fleetworks_contracts::context::RegisteredContext;
+use fleetworks_contracts::qa_worker::QaPassage;
+use fleetworks_contracts::qa_worker::QaWorkerRequest;
 use support::Server;
 use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
@@ -272,7 +281,85 @@ async fn shared_reuse_preserves_creator_but_private_fields_and_search_stay_unava
         .expect("member");
     assert!(before.private_details_available);
     assert_eq!(before.job.title, "private-title-shared");
+
+    let actor = qa::Actor::new(
+        "scope-a".into(),
+        "fixture-native".into(),
+        "fixture-access".into(),
+        first.clone(),
+    );
+    let setting = qa::set(&repo, &actor, 0, true).await.expect("enable QA");
+    let source = ChatSourceReference::new(ChatSourceKind::Job, "shared".into()).unwrap();
+    let request = QaTurnRequest::new(
+        "private-job-answer".into(),
+        MutationContext::new(&first),
+        "What happened?".into(),
+        Some(source.clone()),
+    )
+    .unwrap();
+    let id = qa::accepted_turn_id(&actor, &request, setting.generation).unwrap();
+    let at = Utc::now();
+    let evidence = qa::FrozenEvidence {
+        answer_mode: qa::AnswerMode::Grounded,
+        notice: None,
+        conversation: None,
+        request: QaWorkerRequest::new(
+            id.clone(),
+            id,
+            request.question.clone(),
+            vec![QaPassage::new(
+                "passage-0".into(),
+                "Selected job is queued.".into(),
+            )],
+        ),
+        sources: vec![qa::Source {
+            opaque_id: "passage-0".into(),
+            reference: source.clone(),
+            label: "Selected job".into(),
+            observed_at: at.to_rfc3339(),
+            measurement: None,
+            whole_passage: false,
+        }],
+        sampled_at_ms: at.timestamp_millis(),
+    };
+    let metadata = || qa::AdmissionMetadata {
+        subject: Some(source.clone()),
+        observation: None,
+        related_activity: None,
+    };
+    let answer = qa::admit(
+        &repo,
+        &actor,
+        &request,
+        evidence.clone(),
+        metadata(),
+        setting.generation,
+    )
+    .await
+    .expect("private job answer");
+    assert_eq!(answer.state, QaTurnState::Answered);
+    assert_eq!(
+        qa::replay(&repo, &actor, &request).await.unwrap(),
+        Some(answer)
+    );
+
     associate(&repo, &other, "shared", "reuse-other-node", "task").await;
+    assert!(matches!(
+        qa::replay(&repo, &actor, &request).await,
+        Err(TxError::Abort(reason)) if reason == "inbox_qa:missing"
+    ));
+    let mut pending = request;
+    pending.request_id = "private-job-race".into();
+    assert!(matches!(
+        qa::admit(&repo, &actor, &pending, evidence, metadata(), setting.generation).await,
+        Err(TxError::Abort(reason)) if reason == "inbox_qa:missing"
+    ));
+    assert!(qa::latest(&repo, &actor).await.unwrap().is_none());
+    assert!(qa::last_answered_prompt(&repo, &actor)
+        .await
+        .unwrap()
+        .is_none());
+
     for selected in [first_scope, scope(&other, true)] {
         let row = view::get_activity_job(db, "scope-a", &selected, "shared")
             .await

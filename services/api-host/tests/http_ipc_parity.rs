@@ -1583,6 +1583,13 @@ async fn run_shared_flow(
         assert_eq!(refreshed.question, follow_up.question);
         assert_eq!(refreshed.findings[0].source, job);
         assert!(refreshed.findings[0].observed_at > explanation.findings[0].observed_at);
+        assert_eq!(refreshed.findings.len(), 2);
+        assert_eq!(refreshed.findings[1].source, job);
+        assert_eq!(refreshed.findings[1].label, "Previous observation");
+        assert_eq!(
+            refreshed.findings[1].observed_at,
+            explanation.findings[0].observed_at,
+        );
 
         client
             .update_qa_settings(&QaSettingsUpdate::new(

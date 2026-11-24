@@ -218,6 +218,27 @@ impl Source {
     }
 }
 
+/// An independently verified observation, retained for a later explicit recheck.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct Observation {
+    pub source: ChatSourceReference,
+    pub observed_at: String,
+    pub value: ObservationValue,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub enum ObservationValue {
+    State(String),
+    Measurement(QaMeasurement),
+}
+
+/// Trusted request metadata that is independent of any model reply.
+pub struct AdmissionMetadata {
+    pub subject: Option<ChatSourceReference>,
+    pub observation: Option<Observation>,
+    pub related_activity: Option<QaRelatedActivity>,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 struct Exchange {
     actor: Actor,
@@ -229,6 +250,8 @@ struct Exchange {
     resolved_question: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resolved_source: Option<ChatSourceReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observation: Option<Observation>,
 }
 
 impl Exchange {
@@ -803,8 +826,7 @@ pub async fn admit(
     actor: &Actor,
     request: &QaTurnRequest,
     evidence: FrozenEvidence,
-    subject: Option<&ChatSourceReference>,
-    related_activity: Option<QaRelatedActivity>,
+    metadata: AdmissionMetadata,
     expected_generation: i64,
 ) -> Result<QaTurn, TxError> {
     let key = actor.key()?;
@@ -813,7 +835,7 @@ pub async fn admit(
         let key = &key;
         let id = &id;
         let evidence = &evidence;
-        let related_activity = &related_activity;
+        let metadata = &metadata;
         async move {
             actor.validate_in(&tx).await?;
             let state = settings_in(&tx).await?;
@@ -833,7 +855,7 @@ pub async fn admit(
                 }
                 return Ok(exchange.turn);
             }
-            if !subject_visible_in(&tx, actor, subject).await? {
+            if !subject_visible_in(&tx, actor, metadata.subject.as_ref()).await? {
                 return Err(abort("missing"));
             }
             let boundary = boundary_in(&tx, key, state.generation).await?;
@@ -881,9 +903,10 @@ pub async fn admit(
                 evidence: Some(frozen),
                 resolved_question: (request.question != evidence.request.question)
                     .then(|| evidence.request.question.clone()),
-                resolved_source: subject.filter(|source| Some(*source) != request.source.as_ref()).cloned(),
+                resolved_source: metadata.subject.as_ref().filter(|source| Some(*source) != request.source.as_ref()).cloned(),
+                observation: metadata.observation.clone(),
             };
-            exchange.turn.related_activity = related_activity.clone();
+            exchange.turn.related_activity = metadata.related_activity.clone();
             let payload = serde_json::to_string(&exchange).map_err(|_| abort("invalid_store"))?;
             jobs::run(&tx, tx.query(
                 "CREATE $turn SET generation=$gen, owner=$owner, workstation=$workstation, active=true, accepted_at=$at, completed_at=0, payload=$payload RETURN NONE;
@@ -953,6 +976,7 @@ pub async fn latest(
 pub struct AnsweredPrompt {
     pub question: String,
     pub subject: Option<ChatSourceReference>,
+    pub observation: Option<Observation>,
 }
 
 /// Use the most recent cited topic within the short conversation window.
@@ -985,8 +1009,16 @@ pub async fn last_answered_prompt(
                     if !subject_visible_in(&tx, actor, exchange.subject()).await? {
                         return Ok(None);
                     }
+                    let subject = exchange.subject().cloned();
+                    let observation = exchange.observation.filter(|observation| {
+                        exchange.turn.findings.iter().any(|finding| {
+                            finding.source == observation.source
+                                && finding.observed_at == observation.observed_at
+                        })
+                    });
                     return Ok(Some(AnsweredPrompt {
-                        subject: exchange.subject().cloned(),
+                        subject,
+                        observation,
                         question: exchange.resolved_question.unwrap_or(exchange.turn.question),
                     }));
                 }

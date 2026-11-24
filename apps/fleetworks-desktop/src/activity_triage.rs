@@ -182,15 +182,15 @@ impl State {
     }
 
     fn complete_activity_triage(&mut self, revision: u64, result: QaRelatedActivity) {
-        if revision != self.activity_triage.revision
-            || self.activity_triage.lookup.as_ref().is_none_or(|lookup| {
-                !lookup.visible(self) || !matches!(lookup.outcome, Outcome::Pending { .. })
-            })
-        {
+        if revision != self.activity_triage.revision {
             return;
         }
+        // Authorization or selection can change before the next shell poll.
+        self.poll_activity_triage();
         if let Some(lookup) = &mut self.activity_triage.lookup {
-            lookup.outcome = Outcome::Settled(result);
+            if matches!(lookup.outcome, Outcome::Pending { .. }) {
+                lookup.outcome = Outcome::Settled(result);
+            }
         }
     }
 
@@ -557,6 +557,7 @@ mod tests {
         runtime.frame(0.8);
         press(&mut runtime, "triage-find-related", 1.0);
         let current = runtime.state.activity_triage.revision;
+        assert!(current > obsolete);
         runtime.update(move |state, _| {
             state.complete_activity_triage(current, QaRelatedActivity::NoRelatedActivity);
             state.complete_activity_triage(

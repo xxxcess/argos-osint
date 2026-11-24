@@ -38,6 +38,17 @@ pub(super) fn has_explanation(fact: &HealthFact) -> bool {
     fact.reason.is_some() || guidance(fact).is_some()
 }
 
+/// Only observed readiness states that can be compared across samples.
+pub(super) fn comparison_state(fact: &HealthFact) -> Option<&'static str> {
+    Some(match fact.status.as_str() {
+        "ready" => "ready",
+        "failed" | "not ready" | "not_ready" => "not ready",
+        "degraded" => "degraded",
+        "running" => "in progress",
+        _ => return None,
+    })
+}
+
 pub(super) fn explanation(fact: &HealthFact) -> String {
     let mut text = answer(fact);
     if let Some(guidance) = guidance(fact) {

@@ -1,5 +1,6 @@
 //! Authenticated Inbox QA admission and reads over private Embedded IPC.
 
+mod comparison;
 mod metrics;
 mod question;
 mod readiness;
@@ -725,7 +726,7 @@ pub(crate) async fn submit_request(
     } else {
         None
     };
-    let evidence_request = follow_up.as_ref().unwrap_or(&request);
+    let evidence_request = follow_up.as_ref().map_or(&request, |turn| &turn.request);
     require_evidence_permission(
         context,
         question::classify(&evidence_request.question),
@@ -734,6 +735,9 @@ pub(crate) async fn submit_request(
     let runtime = SnapshotRuntime {
         generation: setting.generation,
         availability,
+        previous_observation: follow_up
+            .as_ref()
+            .and_then(|turn| turn.observation.as_ref()),
     };
     loop {
         let snapshot = snapshot(
@@ -752,8 +756,7 @@ pub(crate) async fn submit_request(
             &actor,
             &request,
             snapshot.evidence,
-            evidence_request.source.as_ref(),
-            snapshot.related_activity,
+            snapshot.metadata,
             setting.generation,
         )
         .await
@@ -831,11 +834,14 @@ async fn resolve_follow_up(
     actor: &store::Actor,
     request: &QaTurnRequest,
     deadline: Instant,
-) -> Result<Option<QaTurnRequest>, ApiError> {
+) -> Result<Option<ResolvedFollowUp>, ApiError> {
     let mut resolved = request.clone();
     if resolved.source.is_some() {
         resolved.question = "What happened?".into();
-        return Ok(Some(resolved));
+        return Ok(Some(ResolvedFollowUp {
+            request: resolved,
+            observation: None,
+        }));
     }
     let previous =
         tokio::time::timeout_at(deadline, store::last_answered_prompt(&state.repo, actor))
@@ -864,17 +870,26 @@ async fn resolve_follow_up(
     }
     resolved.question = previous.question;
     resolved.source = previous.subject;
-    Ok(Some(resolved))
+    Ok(Some(ResolvedFollowUp {
+        request: resolved,
+        observation: previous.observation,
+    }))
+}
+
+struct ResolvedFollowUp {
+    request: QaTurnRequest,
+    observation: Option<store::Observation>,
 }
 
 struct Snapshot {
     evidence: store::FrozenEvidence,
-    related_activity: Option<QaRelatedActivity>,
+    metadata: store::AdmissionMetadata,
 }
 
 struct SnapshotRuntime<'a> {
     generation: i64,
     availability: &'a QaRuntimeAvailability,
+    previous_observation: Option<&'a store::Observation>,
 }
 
 async fn snapshot(
@@ -989,6 +1004,7 @@ async fn snapshot(
     let mut notice = None;
     let mut conversation = None;
     let mut related_activity = None;
+    let mut observed_state = None;
     match intent {
         Question::Readiness(check) | Question::ReadinessExplanation(check) => {
             let explanation = matches!(intent, Question::ReadinessExplanation(_));
@@ -998,7 +1014,9 @@ async fn snapshot(
                     .iter()
                     .find(|fact| {
                         fact.id == check.as_str()
-                            && (!explanation || readiness::has_explanation(fact))
+                            && (!explanation
+                                || readiness::has_explanation(fact)
+                                || runtime.previous_observation.is_some())
                     })
                     .map(|fact| (sample, fact))
             }) {
@@ -1007,6 +1025,7 @@ async fn snapshot(
                         .map_err(|_| crate::bad())?;
                 let at = chrono::DateTime::from_timestamp_millis(sample.sampled_at_ms)
                     .ok_or_else(current_health_unavailable)?;
+                observed_state = readiness::comparison_state(fact);
                 push(
                     reference,
                     readiness::label(fact).to_owned(),
@@ -1095,6 +1114,7 @@ async fn snapshot(
                     && activity.status != "unknown"
                     && at.timestamp_millis() > boundary
                 {
+                    observed_state = Some(activity.status);
                     push(
                         source.clone(),
                         activity.label.into(),
@@ -1183,6 +1203,7 @@ async fn snapshot(
                         let observed_at =
                             chrono::DateTime::from_timestamp_millis(sample.sampled_at_ms)
                                 .ok_or_else(current_health_unavailable)?;
+                        observed_state = readiness::comparison_state(fact);
                         push(
                             source.clone(),
                             readiness::label(fact).to_owned(),
@@ -1194,6 +1215,7 @@ async fn snapshot(
                     }
                 } else if let Some((activity, at)) = &selected_activity {
                     if activity.status != "unknown" && at.timestamp_millis() > boundary {
+                        observed_state = Some(activity.status);
                         push(
                             source.clone(),
                             activity.label.into(),
@@ -1275,6 +1297,13 @@ async fn snapshot(
             conversation = Some(QaConversationReply::ContextNeeded);
         }
     }
+    let observation = comparison::single_observation(&sources, observed_state);
+    let compared = runtime
+        .previous_observation
+        .zip(observation.as_ref())
+        .is_some_and(|(previous, current)| {
+            comparison::append(previous, current, &mut passages, &mut sources)
+        });
     let sampled_at_ms = match earliest {
         Some(observed_at) => observed_at,
         None => observation_start(boundary).await,
@@ -1297,7 +1326,7 @@ async fn snapshot(
     };
     let mut worker_request =
         QaWorkerRequest::new(turn_id.clone(), turn_id, request.question.clone(), passages);
-    if let Some(kind) = dialogue.filter(|_| context.permits(Permission::ReadBackend)) {
+    if let Some(kind) = dialogue.filter(|_| !compared && context.permits(Permission::ReadBackend)) {
         answer_mode = store::AnswerMode::Model;
         worker_request.dialogue = Some(QaWorkerDialogue {
             kind,
@@ -1313,7 +1342,11 @@ async fn snapshot(
             sources,
             sampled_at_ms,
         },
-        related_activity,
+        metadata: store::AdmissionMetadata {
+            subject: source.cloned(),
+            observation,
+            related_activity,
+        },
     })
 }
 

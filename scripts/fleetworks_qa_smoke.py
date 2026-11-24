@@ -155,10 +155,10 @@ def report_diagnostics(logs):
     }), file=sys.stderr)
 
 
-def cited_finding(turn, kind, source_id):
-    require(turn["state"] == "answered" and len(turn["findings"]) == 1,
-            f"{source_id} did not produce exactly one answer")
-    finding, = turn["findings"]
+def cited_finding(turn, kind, source_id, *, count=1):
+    require(turn["state"] == "answered" and len(turn["findings"]) == count,
+            f"{source_id} did not produce {count} cited observations")
+    finding = turn["findings"][0]
     require(finding["source"] == {"kind": kind, "id": source_id},
             f"{source_id} answer cited a different source")
     require(0 <= finding["start"] < finding["end"]
@@ -223,8 +223,8 @@ def settled_turn(request, context, case, question, *, source=None, mode="direct"
     return accepted
 
 
-def cited_metric(turn, source_id, label):
-    finding = cited_finding(turn, "host_metric", source_id)
+def cited_metric(turn, source_id, label, *, previous=None):
+    finding = cited_finding(turn, "host_metric", source_id, count=2 if previous else 1)
     measurement = finding["measurement"]
     value = measurement["value"]
     subject = f"API host {label}"
@@ -235,6 +235,15 @@ def cited_metric(turn, source_id, label):
     require(finding["label"] == subject
             and finding["text"] == f"The {subject} is {whole}.{tenths}%.",
             f"{source_id} answer differs from its frozen measurement")
+    if previous:
+        prior = turn["findings"][1]
+        prior_whole, prior_tenths = divmod(previous["value"], 10)
+        also = "also " if previous["value"] == value else ""
+        require(prior["source"] == finding["source"] and prior["label"] == "Previous observation"
+                and prior["observed_at"] == previous["observed_at"]
+                and prior["measurement"] == {**measurement, "value": previous["value"]}
+                and prior["text"] == f"The previous observation was {also}{prior_whole}.{prior_tenths}%.",
+                f"{source_id} did not cite the immediately preceding comparable observation")
     return {"value": value, "unit": measurement["unit"], "observed_at": finding["observed_at"]}
 
 
@@ -504,7 +513,7 @@ def exercise(request, registration, model, readiness, running_jobs):
     preceding = readings["memory_follow_up"]
     for index, question in enumerate(("And now?", "Has that changed?"), start=1):
         turn = ask(f"conversational-follow-up-{index}", question)
-        measured = cited_metric(turn, "memory", "memory usage")
+        measured = cited_metric(turn, "memory", "memory usage", previous=preceding)
         require(turn["question"] == question and observed(measured) > observed(preceding),
                 "a conversational follow-up changed the displayed prompt or reused a metric sample")
         preceding = measured

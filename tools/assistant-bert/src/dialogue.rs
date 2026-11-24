@@ -4,6 +4,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 use anyhow::ensure;
@@ -30,9 +31,13 @@ use super::protocol::QaModelTarget;
 use super::protocol::QaPassage;
 use super::protocol::QaWorkerDialogue;
 use super::protocol::QA_CONTEXT_WINDOW_TOKENS;
+use super::protocol::QA_MAX_DIALOGUE_MESSAGE_BYTES;
+use super::protocol::QA_MAX_VISIBLE_WORDS;
 
 const MAX_OPERATIONAL_PASSAGES: usize = 6;
 const LEGACY_OUTPUT_TOKENS: u16 = 48;
+// Leave time for the Embedded coordinator to cite its current snapshot.
+const OPERATIONAL_DECODE_BUDGET: Duration = Duration::from_millis(2500);
 
 #[derive(Deserialize)]
 struct AssetPin {
@@ -235,6 +240,27 @@ pub(super) fn input_limit(target: QaModelTarget, streaming: bool) -> u16 {
     }
 }
 
+fn conversational_prefix(text: &str) -> &str {
+    let line = text.trim_start();
+    let mut words = 0;
+    let mut in_word = false;
+    for (offset, character) in line.char_indices() {
+        if character.is_control() || offset + character.len_utf8() > QA_MAX_DIALOGUE_MESSAGE_BYTES {
+            return &line[..offset];
+        }
+        if character.is_whitespace() {
+            in_word = false;
+        } else if !in_word {
+            if words == QA_MAX_VISIBLE_WORDS {
+                return &line[..offset];
+            }
+            words += 1;
+            in_word = true;
+        }
+    }
+    line
+}
+
 pub(super) fn generate(
     generator: &Generator,
     request: DecodeRequest<'_>,
@@ -292,6 +318,8 @@ fn decode<G: LanguageGenerator>(
 
     let mut cache = Cache::None;
     let mut generated = Vec::new();
+    let operational = request.dialogue.kind == QaDialogueKind::Operational;
+    let started = Instant::now();
     let output_limit = if request.streaming {
         request.target.output_tokens()
     } else {
@@ -300,6 +328,9 @@ fn decode<G: LanguageGenerator>(
     for _ in 0..output_limit {
         if stopping.load(Ordering::Acquire) {
             return Ok(None);
+        }
+        if operational && started.elapsed() >= OPERATIONAL_DECODE_BUDGET {
+            break;
         }
         let result = generator.forward_t(
             (!encoder_decoder).then_some(&step),
@@ -334,7 +365,16 @@ fn decode<G: LanguageGenerator>(
             && (generated.len() == 1 || generated.len().is_multiple_of(4))
             && !stopping.load(Ordering::Acquire)
         {
-            draft(&tokenizer.decode(&generated, true, false))?;
+            let decoded = tokenizer.decode(&generated, true, false);
+            let text = if operational {
+                decoded.as_str()
+            } else {
+                conversational_prefix(&decoded)
+            };
+            draft(text)?;
+            if !operational && text.len() < decoded.trim_start().len() {
+                break;
+            }
         }
         step = Tensor::f_from_slice(&[token])?.f_unsqueeze(0)?;
     }
@@ -342,10 +382,19 @@ fn decode<G: LanguageGenerator>(
         return Ok(None);
     }
     if request.streaming && generated.len() > 1 && !generated.len().is_multiple_of(4) {
-        draft(&tokenizer.decode(&generated, true, false))?;
+        let decoded = tokenizer.decode(&generated, true, false);
+        draft(if operational {
+            &decoded
+        } else {
+            conversational_prefix(&decoded)
+        })?;
     }
     let decoded = tokenizer.decode(&generated, true, true);
-    let text = decoded.trim();
+    let text = if operational {
+        decoded.trim()
+    } else {
+        conversational_prefix(&decoded).trim_end()
+    };
     Ok(Some(Generation {
         window_tokens,
         input_tokens,
@@ -356,6 +405,24 @@ fn decode<G: LanguageGenerator>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversation_stops_at_a_role_break_and_respects_wire_bounds() {
+        assert_eq!(
+            conversational_prefix("  Hello there.\nEarlier user: retry"),
+            "Hello there."
+        );
+        let repeated = " hello".repeat(QA_MAX_VISIBLE_WORDS + 3);
+        assert_eq!(
+            conversational_prefix(&repeated).split_whitespace().count(),
+            QA_MAX_VISIBLE_WORDS
+        );
+        let unicode = "é".repeat(QA_MAX_DIALOGUE_MESSAGE_BYTES);
+        assert_eq!(
+            conversational_prefix(&unicode).len(),
+            QA_MAX_DIALOGUE_MESSAGE_BYTES
+        );
+    }
 
     #[test]
     fn recall_prompt_orders_and_quotes_history() {

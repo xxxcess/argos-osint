@@ -36,6 +36,7 @@ use rust_bert::pipelines::question_answering::QaInput;
 use rust_bert::pipelines::question_answering::QuestionAnsweringConfig;
 use rust_bert::pipelines::question_answering::QuestionAnsweringModel;
 use rust_bert::resources::LocalResource;
+use rust_bert::t5::T5Generator;
 use sha2::Digest;
 use sha2::Sha256;
 use tch::Device;
@@ -225,7 +226,7 @@ fn initial_model(
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             ensure!(enable_dialogue, "QA generator was not enabled");
-            let model = ResidentModel::Dialogue(Box::new(dialogue::load(&generator_dir, target)?));
+            let model = ResidentModel::Dialogue(dialogue::load(&generator_dir, target)?);
             Ok((model, Some(generator_dir), target.revision()))
         }
         Err(error) => Err(error.into()),
@@ -235,7 +236,7 @@ fn initial_model(
 enum ResidentModel {
     Unloaded,
     Extractive(Box<QuestionAnsweringModel>),
-    Dialogue(Box<dialogue::Generator>),
+    Dialogue(Box<T5Generator>),
 }
 
 impl ResidentModel {
@@ -275,7 +276,7 @@ impl ResidentModel {
             else {
                 return skipped;
             };
-            *self = Self::Dialogue(Box::new(generator));
+            *self = Self::Dialogue(generator);
         }
         if stopping.load(Ordering::Acquire) {
             return skipped;

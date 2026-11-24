@@ -158,7 +158,7 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
                  "RAYON_NUM_THREADS": "1", "FLEETWORKS_QA_DIALOGUE": "1",
                  "FLEETWORKS_QA_CONTEXT_USAGE": "1", "FLEETWORKS_QA_STREAMING": "1",
                  "FLEETWORKS_QA_MODEL_TARGET": chat_model}
-    window = 896 if chat_model.startswith("gpt2-") else 512
+    window = 512
     started = time.monotonic()
     worker = root / pack.WORKER
     model = model_directory or root / "model"

@@ -327,6 +327,27 @@ fn protected(mut response: Response) -> Response {
     response
 }
 
+/// Return recent counts for one private job using the same authority as Ops Logs.
+pub(crate) async fn qa_job_counts(
+    state: &ApiState,
+    context: &ResolvedRequest,
+    job_id: &str,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<ScopedLogCounts>, ApiError> {
+    let query = LogQuery {
+        job_id: Some(job_id.to_owned()),
+        since: Some((observed_at - chrono::Duration::hours(1)).to_rfc3339()),
+        limit: Some(1),
+        ..LogQuery::default()
+    };
+    let (snapshot, plan) = initial(state, context, &query).await?;
+    if !matches!(plan, CohortPlan::Complete(ref cohort) if !cohort.excluded_shared()) {
+        return Ok(None);
+    }
+    let (page, shared) = read(state, context, &snapshot, LogDirection::Older, None, None).await?;
+    Ok((!shared).then_some(page.counts))
+}
+
 pub(crate) struct LogExportPayload {
     pub(crate) bytes: Vec<u8>,
     pub(crate) next_cursor: Option<String>,

@@ -67,6 +67,10 @@ pub enum QaAvailabilityReason {
     SandboxUnsupported,
     /// The companion could not start or warm an isolated model worker.
     WorkerStartFailed,
+    /// Available workstation memory cannot safely accommodate even Small.
+    InsufficientResources,
+    /// The selected model assets are unavailable or could not be verified.
+    ModelProvisionFailed,
 }
 
 /// Inference settings and caller-specific management authority.
@@ -119,8 +123,6 @@ pub struct QaSettingsUpdate {
     pub context: MutationContext,
     pub expected_revision: u64,
     pub enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_target: Option<QaModelTarget>,
 }
 
 impl QaSettingsUpdate {
@@ -131,14 +133,7 @@ impl QaSettingsUpdate {
             context,
             expected_revision,
             enabled,
-            model_target: None,
         }
-    }
-
-    #[must_use]
-    pub fn with_model_target(mut self, target: QaModelTarget) -> Self {
-        self.model_target = Some(target);
-        self
     }
 }
 

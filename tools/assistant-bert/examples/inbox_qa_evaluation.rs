@@ -6,11 +6,9 @@ use std::time::Instant;
 use anyhow::ensure;
 use anyhow::Context;
 use anyhow::Result;
-use rust_bert::gpt2::GPT2Generator;
 use rust_bert::pipelines::common::ModelResource;
 use rust_bert::pipelines::common::ModelType;
 use rust_bert::pipelines::generation_utils::GenerateConfig;
-use rust_bert::pipelines::generation_utils::GenerateOptions;
 use rust_bert::pipelines::generation_utils::LanguageGenerator;
 use rust_bert::resources::LocalResource;
 use rust_bert::resources::ResourceProvider;
@@ -33,8 +31,8 @@ struct Prompt {
 fn main() -> Result<()> {
     let arguments: Vec<_> = env::args_os().skip(1).collect();
     ensure!(
-        arguments.len() == 2,
-        "expected model family and model directory"
+        arguments.len() == 2 && arguments[0] == "t5",
+        "expected t5 and a model directory"
     );
     let dir = Path::new(&arguments[1]);
     let prompts: Vec<Prompt> = serde_json::from_reader(io::stdin().lock())?;
@@ -50,41 +48,25 @@ fn main() -> Result<()> {
     tch::set_num_interop_threads(1);
     let started = Instant::now();
 
-    match arguments[0].to_str() {
-        Some("t5") => run(
-            T5Generator::new(config(dir, ModelType::T5)).context("load T5 checkpoint")?,
-            &prompts,
-            ModelType::T5,
-            started,
-        ),
-        Some("gpt2") => run(
-            GPT2Generator::new(config(dir, ModelType::GPT2)).context("load GPT-2 checkpoint")?,
-            &prompts,
-            ModelType::GPT2,
-            started,
-        ),
-        _ => anyhow::bail!("unsupported model family"),
-    }
+    run(
+        T5Generator::new(config(dir)).context("load T5 checkpoint")?,
+        &prompts,
+        started,
+    )
 }
 
-fn config(dir: &Path, model_type: ModelType) -> GenerateConfig {
+fn config(dir: &Path) -> GenerateConfig {
     let resource = |name| -> Box<dyn ResourceProvider + Send> {
         Box::new(LocalResource {
             local_path: dir.join(name),
         })
     };
-    let (weights, vocab, merges_resource) = if model_type == ModelType::T5 {
-        ("model.safetensors", "spiece.model", None)
-    } else {
-        ("rust_model.ot", "vocab.json", Some(resource("merges.txt")))
-    };
-
     GenerateConfig {
-        model_type,
-        model_resource: ModelResource::Torch(resource(weights)),
+        model_type: ModelType::T5,
+        model_resource: ModelResource::Torch(resource("model.safetensors")),
         config_resource: resource("config.json"),
-        vocab_resource: resource(vocab),
-        merges_resource,
+        vocab_resource: resource("spiece.model"),
+        merges_resource: None,
         min_length: 0,
         max_length: Some(MAX_OUTPUT_TOKENS + 1),
         do_sample: false,
@@ -104,12 +86,7 @@ fn config(dir: &Path, model_type: ModelType) -> GenerateConfig {
     }
 }
 
-fn run(
-    generator: impl LanguageGenerator,
-    prompts: &[Prompt],
-    model_type: ModelType,
-    started: Instant,
-) -> Result<()> {
+fn run(generator: impl LanguageGenerator, prompts: &[Prompt], started: Instant) -> Result<()> {
     println!(
         "{}",
         json!({"model_load_ms": started.elapsed().as_millis()})
@@ -120,11 +97,9 @@ fn run(
         let started = Instant::now();
         let tokens = tokenizer.tokenize_with_offsets(&prompt.text).tokens;
         let mut ids = tokenizer.convert_tokens_to_ids(&tokens);
-        if model_type == ModelType::T5 {
-            let eos = tokenizer.get_eos_id().context("T5 tokenizer lacks EOS")?;
-            if ids.last() != Some(&eos) {
-                ids.push(eos);
-            }
+        let eos = tokenizer.get_eos_id().context("T5 tokenizer lacks EOS")?;
+        if ids.last() != Some(&eos) {
+            ids.push(eos);
         }
         ensure!(
             (1..=MAX_INPUT_TOKENS).contains(&ids.len()),
@@ -132,27 +107,13 @@ fn run(
             prompt.id
         );
         let input = Tensor::f_from_slice(&ids)?.f_unsqueeze(0)?;
-        let options = if model_type == ModelType::T5 {
-            None
-        } else {
-            Some(GenerateOptions {
-                max_new_tokens: Some(MAX_OUTPUT_TOKENS),
-                ..Default::default()
-            })
-        };
-        let outputs = generator.generate_from_ids_and_past(input, None, options)?;
+        let outputs = generator.generate_from_ids_and_past(input, None, None)?;
         let output = outputs.first().context("no generation returned")?;
-        let reply = if model_type == ModelType::T5 {
-            // The first token is T5's decoder start token.
-            output
-                .indices
-                .get(1..)
-                .context("T5 omitted decoder start")?
-        } else {
-            // Score only the tokens GPT-2 added. The source facts remain in its prefix.
-            let reply = output.indices.strip_prefix(ids.as_slice());
-            reply.context("GPT-2 output does not preserve the prompt tokens")?
-        };
+        // The first token is T5's decoder start token.
+        let reply = output
+            .indices
+            .get(1..)
+            .context("T5 omitted decoder start")?;
         let answer = tokenizer.decode(reply, true, false);
         println!(
             "{}",

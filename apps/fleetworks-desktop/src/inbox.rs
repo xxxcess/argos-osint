@@ -145,6 +145,7 @@ pub struct Inbox {
     seen_job_events: VecDeque<String>,
     pub(crate) open: bool,
     pub(crate) at_bottom: bool,
+    focus_return: Option<&'static str>,
     query: TextEdit,
     expanded: BTreeSet<Topic>,
     selected: Option<u64>,
@@ -254,6 +255,7 @@ impl Inbox {
         self.open = false;
         self.query = TextEdit::new("");
         self.selected = None;
+        self.focus_return = None;
     }
 
     fn mark_group_read(&mut self, topic: &Topic) {
@@ -562,13 +564,28 @@ pub(crate) fn age_label(now: f64, at: f64) -> String {
 
 impl State {
     pub(crate) fn open_inbox(&mut self) {
+        self.open_inbox_from("inbox-toggle");
+    }
+
+    pub(crate) fn open_inbox_from(&mut self, trigger: &'static str) {
         self.inbox.open = true;
+        self.inbox.focus_return = Some(trigger);
         self.inbox_qa.request_resume();
     }
 
+    fn inbox_focus_return(&self) -> &'static str {
+        self.inbox
+            .focus_return
+            .filter(|&trigger| {
+                trigger != crate::views::WORKSTATION_ASSISTANT || self.inbox_qa_visible()
+            })
+            .unwrap_or("inbox-toggle")
+    }
+
     pub(crate) fn close_inbox(&mut self, tx: &mut Tx) {
+        let trigger = self.inbox_focus_return();
         self.inbox.close();
-        tx.focus("inbox-toggle", tx.focus_visible());
+        tx.focus(trigger, tx.focus_visible());
     }
 
     /// Populate the Inbox with a compact synthetic notification and room for a QA exchange.
@@ -756,7 +773,7 @@ pub(crate) fn drawer(
             .h_full()
             .role("dialog")
             .label("Inbox")
-            .focus_return("inbox-toggle")
+            .focus_return(state.inbox_focus_return())
             .modal_tx(false, State::close_inbox)
             .child(scrim)
             .child(

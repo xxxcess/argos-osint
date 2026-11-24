@@ -26,6 +26,7 @@ use anyhow::Result;
 use argos_osint_api::inbox_qa::CancellationToken;
 use argos_osint_api::inbox_qa::QaInference;
 use argos_osint_api::inbox_qa::QaInferenceFuture;
+use argos_osint_core::hardware;
 use fleetworks_contracts::chat::QaAvailabilityReason;
 use fleetworks_contracts::chat::QaModelTarget;
 use fleetworks_contracts::chat::QaStartupStage;
@@ -71,6 +72,35 @@ const TURN_LIMIT: Duration = Duration::from_secs(25);
 const PING_LIMIT: Duration = Duration::from_secs(2);
 const UNLOAD_LIMIT: Duration = Duration::from_secs(3);
 const MIB: u64 = 1024 * 1024;
+const WORKSTATION_RESERVE: u64 = 1024 * MIB;
+const SMALL_RESIDENT_LIMIT: u64 = 1536 * MIB;
+const BASE_RESIDENT_LIMIT: u64 = 3584 * MIB;
+
+fn configured_u16(name: &str) -> Option<u16> {
+    env::var(name).ok()?.parse().ok()
+}
+
+fn select_target(available_memory: u64, operator_limit: u64) -> Option<QaModelTarget> {
+    let limit = available_memory
+        .saturating_sub(WORKSTATION_RESERVE)
+        .min(operator_limit);
+    if limit >= BASE_RESIDENT_LIMIT {
+        Some(QaModelTarget::FlanT5Base)
+    } else if limit >= SMALL_RESIDENT_LIMIT {
+        Some(QaModelTarget::FlanT5Small)
+    } else {
+        None
+    }
+}
+
+async fn select_workstation_model() -> Result<QaModelTarget> {
+    let available = tokio::task::spawn_blocking(hardware::available_memory_bytes).await?;
+    let operator_limit = configured_u16("FLEETWORKS_QA_MEMORY_MIB")
+        .filter(|n| (512..=6144).contains(n))
+        .map_or(u64::MAX, |limit| u64::from(limit) * MIB);
+    select_target(available, operator_limit)
+        .ok_or_else(|| WarmFailure(QaAvailabilityReason::InsufficientResources).into())
+}
 
 struct WorkerLimits {
     threads: u16,
@@ -79,27 +109,14 @@ struct WorkerLimits {
 
 impl WorkerLimits {
     fn for_target(target: QaModelTarget) -> Self {
-        let default_mib = match target {
-            QaModelTarget::FlanT5Small => 1536,
-            QaModelTarget::FlanT5Base => 3584,
-            QaModelTarget::Gpt2Small => 2048,
-            QaModelTarget::Gpt2Medium => 4608,
-            _ => 1536,
-        };
-        let configured = |name: &str| {
-            env::var(name)
-                .ok()
-                .and_then(|value| value.parse::<u16>().ok())
-        };
         Self {
-            threads: configured("FLEETWORKS_QA_CPU_THREADS")
+            threads: configured_u16("FLEETWORKS_QA_CPU_THREADS")
                 .filter(|n| (1..=4).contains(n))
                 .unwrap_or(1),
-            resident_bytes: u64::from(
-                configured("FLEETWORKS_QA_MEMORY_MIB")
-                    .filter(|n| (512..=6144).contains(n))
-                    .unwrap_or(default_mib),
-            ) * MIB,
+            resident_bytes: match target {
+                QaModelTarget::FlanT5Base => BASE_RESIDENT_LIMIT,
+                _ => SMALL_RESIDENT_LIMIT,
+            },
         }
     }
 }
@@ -210,7 +227,8 @@ impl QaWorkerSupervisor {
 
     async fn connect(
         &self,
-        target: QaModelTarget,
+        mut target: QaModelTarget,
+        selected_model: &(dyn Fn(QaModelTarget) + Sync),
         progress: &(dyn Fn(QaStartupStage) + Sync),
     ) -> Result<WorkerSession> {
         let state_dir = self.state_dir.clone();
@@ -229,31 +247,41 @@ impl QaWorkerSupervisor {
             sandbox::protect_state(&state_dir, &pack).map_err(|error| {
                 warm_error("sandbox_state_boundary", error.context(invalid_pack()))
             })?;
-            Ok::<_, anyhow::Error>((pack, packed_target == Some(target)))
+            Ok::<_, anyhow::Error>((pack, packed_target))
         });
         if pointer_observed.await.is_ok() {
             progress(QaStartupStage::VerifyingPack);
         }
         let verified = timeout(WARM_LIMIT, verification).await;
         stage.finish();
-        let (pack, selected) = verified?.map_err(|_| {
+        let (pack, packed_target) = verified?.map_err(|_| {
             warm_error(
                 "pack_verification",
                 anyhow!("QA pack verification did not finish"),
             )
         })??;
-        let model = if selected {
+        let model = if packed_target == Some(target) {
             pack.join("model")
         } else {
             progress(QaStartupStage::DownloadingPack);
-            crate::qa_model_assets::provision(&self.state_dir, target)
-                .await
-                .map_err(|error| {
-                    warm_error(
+            match crate::qa_model_assets::provision(&self.state_dir, target).await {
+                Ok(model) => model,
+                Err(error)
+                    if target == QaModelTarget::FlanT5Base
+                        && packed_target == Some(QaModelTarget::FlanT5Small) =>
+                {
+                    let _ = warm_error("base_model_provision", error);
+                    target = QaModelTarget::FlanT5Small;
+                    selected_model(target);
+                    pack.join("model")
+                }
+                Err(error) => {
+                    return Err(warm_error(
                         "model_provision",
-                        error.context(WarmFailure(QaAvailabilityReason::PackInvalid)),
-                    )
-                })?
+                        error.context(WarmFailure(QaAvailabilityReason::ModelProvisionFailed)),
+                    ));
+                }
+            }
         };
         let model = tokio::fs::canonicalize(model).await?;
         sandbox::protect_state(&self.state_dir, &model)?;
@@ -266,13 +294,14 @@ impl QaWorkerSupervisor {
         target: QaModelTarget,
         stopped: &mut watch::Receiver<()>,
         cancel: &CancellationToken,
+        selected_model: &(dyn Fn(QaModelTarget) + Sync),
         progress: &(dyn Fn(QaStartupStage) + Sync),
     ) -> Result<WorkerSession> {
         let mut session = tokio::select! {
             biased;
             _ = stopped.changed() => return Err(anyhow!("QA worker is stopping")),
             _ = cancel.cancelled() => return Err(anyhow!("QA request was canceled")),
-            result = self.connect(target, progress) => result?,
+            result = self.connect(target, selected_model, progress) => result?,
         };
         let child_pid = session.child_id();
         let mut stage = WarmStage::new("worker_ready_frame");
@@ -310,7 +339,7 @@ impl QaWorkerSupervisor {
 
     pub(crate) async fn warm_with_progress(
         &self,
-        target: QaModelTarget,
+        selected_model: &(dyn Fn(QaModelTarget) + Sync),
         progress: &(dyn Fn(QaStartupStage) + Sync),
     ) -> Result<()> {
         let mut stopped = self.stopping.subscribe();
@@ -318,9 +347,11 @@ impl QaWorkerSupervisor {
         if let Some(old) = slot.take() {
             old.stop().await?;
         }
+        let target = select_workstation_model().await?;
+        selected_model(target);
         let cancel = CancellationToken::new();
         *slot = Some(
-            self.connect_ready(target, &mut stopped, &cancel, progress)
+            self.connect_ready(target, &mut stopped, &cancel, selected_model, progress)
                 .await?,
         );
         Ok(())
@@ -990,6 +1021,38 @@ fn host_target() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selects_largest_model_with_memory_left_for_the_workstation() {
+        use super::{
+            select_target, BASE_RESIDENT_LIMIT, SMALL_RESIDENT_LIMIT, WORKSTATION_RESERVE,
+        };
+        use fleetworks_contracts::chat::QaModelTarget;
+
+        let base_available = BASE_RESIDENT_LIMIT + WORKSTATION_RESERVE;
+        let small_available = SMALL_RESIDENT_LIMIT + WORKSTATION_RESERVE;
+        assert_eq!(
+            select_target(base_available, u64::MAX),
+            Some(QaModelTarget::FlanT5Base)
+        );
+        assert_eq!(
+            select_target(base_available - 1, u64::MAX),
+            Some(QaModelTarget::FlanT5Small)
+        );
+        assert_eq!(
+            select_target(base_available, SMALL_RESIDENT_LIMIT),
+            Some(QaModelTarget::FlanT5Small)
+        );
+        assert_eq!(
+            select_target(small_available, u64::MAX),
+            Some(QaModelTarget::FlanT5Small)
+        );
+        assert_eq!(select_target(small_available - 1, u64::MAX), None);
+        assert_eq!(
+            select_target(base_available, SMALL_RESIDENT_LIMIT - 1),
+            None
+        );
+    }
+
     use std::os::unix::fs::PermissionsExt;
 
     use fleetworks_contracts::qa_worker::{

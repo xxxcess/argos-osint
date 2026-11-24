@@ -15,6 +15,7 @@ import time
 
 from fleetworks_local_backend_smoke import check_zero_bound_sockets, resolve_companion_binary
 from fleetworks_qa_pack import install_gated_fixture
+from fleetworks_qa_smoke import FIXTURE_MODEL_MEMORY_MIB
 
 SUMMARY_QUESTION = "What is the current workstation readiness?"
 MEMORY_QUESTION = "What's our RAM consumption right now?"
@@ -74,7 +75,9 @@ def companion_proxy(home, app):
     proxy = home / "argos-api-host"
     journal = home / "qa-ipc-journal.jsonl"
     observer = Path(__file__).resolve().with_name("fleetworks_qa_ipc_observer.py")
-    command = ["/usr/bin/python3", "-B", str(observer), str(resolve_companion_binary(app=app)), str(journal)]
+    # The real launcher strips ambient settings before starting the fixture proxy.
+    command = ["/usr/bin/env", f"FLEETWORKS_QA_MEMORY_MIB={FIXTURE_MODEL_MEMORY_MIB}",
+               "/usr/bin/python3", "-B", str(observer), str(resolve_companion_binary(app=app)), str(journal)]
     proxy.write_text("#!/bin/sh\nexec " + shlex.join(command) + ' "$@"\n')
     proxy.chmod(0o700)
     return proxy, journal

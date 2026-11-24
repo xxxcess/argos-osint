@@ -198,6 +198,48 @@ fn run(args: &[&str]) -> Option<String> {
     }
 }
 
+/// Fresh physical memory headroom, constrained by Linux cgroup limits when available.
+#[must_use]
+pub fn available_memory_bytes() -> u64 {
+    let mut system = System::new();
+    system.refresh_memory();
+    let available = system.available_memory().min(system.total_memory());
+    if available == 0 {
+        return 0;
+    }
+    system
+        .cgroup_limits()
+        .map_or(available, |limits| available.min(limits.free_memory))
+}
+
+/// Free bytes available to the current user on the filesystem containing the path.
+#[must_use]
+pub fn filesystem_available_bytes(path: &std::path::Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut output = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        // SAFETY: path is NUL terminated and output is valid syscall storage.
+        if unsafe { libc::statvfs(path.as_ptr(), output.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        // SAFETY: successful statvfs initialized the complete output.
+        let output = unsafe { output.assume_init() };
+        // Field widths vary across Unix; retain the u64 overflow boundary.
+        let available = u128::from(output.f_bavail);
+        let fragment_size = u128::from(output.f_frsize);
+        u64::try_from(available * fragment_size).ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 fn disk_totals() -> (f64, f64) {
     let disks = Disks::new_with_refreshed_list();
     let mut total = 0u64;

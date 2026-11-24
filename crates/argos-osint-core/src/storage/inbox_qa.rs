@@ -233,7 +233,6 @@ struct SettingsRow {
     generation: i64,
     epoch: String,
     changed_at: i64,
-    model_target: Option<String>,
 }
 
 #[derive(SurrealValue)]
@@ -252,7 +251,6 @@ pub struct Setting {
     pub generation: i64,
     pub revision: i64,
     pub changed_at_ms: i64,
-    pub model_target: QaModelTarget,
 }
 
 impl SettingsRow {
@@ -262,11 +260,6 @@ impl SettingsRow {
             generation: self.generation,
             revision: self.revision,
             changed_at_ms: self.changed_at,
-            model_target: self
-                .model_target
-                .as_deref()
-                .and_then(QaModelTarget::from_slug)
-                .unwrap_or_default(),
         }
     }
 }
@@ -286,7 +279,7 @@ fn decode(payload: &str) -> Result<Exchange, TxError> {
 async fn settings_row(tx: &Tx) -> Result<SettingsRow, TxError> {
     let mut result = jobs::run(
         tx,
-        tx.query("SELECT enabled,revision,generation,epoch,changed_at,model_target FROM ONLY inbox_qa_settings:current"),
+        tx.query("SELECT enabled,revision,generation,epoch,changed_at FROM ONLY inbox_qa_settings:current"),
     )
     .await?;
     Ok(jobs::take::<Option<SettingsRow>>(&mut result, 0)?.unwrap_or_default())
@@ -373,7 +366,6 @@ pub async fn set(
     actor: &Actor,
     expected_revision: i64,
     enabled: bool,
-    model_target: Option<QaModelTarget>,
 ) -> Result<Setting, TxError> {
     Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
         actor.validate_in(&tx).await?;
@@ -383,17 +375,16 @@ pub async fn set(
         }
         let deployment = connect_registry::deployment_state_in(&tx).await?;
         let current = row.state(&deployment.configuration_epoch);
-        let model_target = model_target.unwrap_or(current.model_target);
-        if current.enabled == enabled && current.model_target == model_target {
+        if current.enabled == enabled {
             return Ok(current);
         }
         let revision = row.revision.checked_add(1).ok_or_else(|| abort("revision"))?;
         let generation = row.generation.checked_add(1).ok_or_else(|| abort("revision"))?;
         let changed_at_ms = now_ms();
         jobs::run(&tx, tx.query(
-            "UPSERT inbox_qa_settings:current SET enabled=$enabled, revision=$revision, generation=$generation, epoch=$epoch, changed_at=$at, model_target=$model RETURN NONE;",
+            "UPSERT inbox_qa_settings:current SET enabled=$enabled, revision=$revision, generation=$generation, epoch=$epoch, changed_at=$at RETURN NONE;",
         ).bind(("enabled", enabled)).bind(("revision", revision)).bind(("generation", generation))
-          .bind(("epoch", deployment.configuration_epoch)).bind(("at", changed_at_ms)).bind(("model", model_target.slug()))).await?;
+          .bind(("epoch", deployment.configuration_epoch)).bind(("at", changed_at_ms))).await?;
         // A disabled generation cannot retain private prompts or open Jobs leases.
         let mut reply = jobs::run(&tx, tx.query(
             "SELECT VALUE record::id(id) FROM inbox_qa_exchange LIMIT $limit;",
@@ -401,7 +392,7 @@ pub async fn set(
         retire_in(&tx, jobs::take::<Vec<String>>(&mut reply, 0)?).await?;
         jobs::run(&tx, tx.query("DELETE inbox_qa_latest RETURN NONE; DELETE inbox_qa_exchange RETURN NONE; DELETE inbox_qa_health:current RETURN NONE;")).await?;
         bump_event_revision(&tx).await?;
-        Ok(Setting { enabled, revision, generation, changed_at_ms, model_target })
+        Ok(Setting { enabled, revision, generation, changed_at_ms })
     }).await?.value)
 }
 
@@ -825,7 +816,7 @@ pub async fn admit(
                     }
                     QaTurnState::Answered
                 };
-                exchange.turn.context = Some(QaContextUsage::new(state.model_target.input_tokens(), 0, 0));
+                exchange.turn.context = Some(QaContextUsage::new(QaModelTarget::default().input_tokens(), 0, 0));
                 append_in(&tx, key, state.generation, &mut exchange, terminal, None).await?;
                 return Ok(exchange.turn);
             }

@@ -164,7 +164,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Exercise Base and Medium generators using the verified worker
+      - name: Exercise FLAN-T5 Base using the verified worker
         if: inputs.probe-all-models
         shell: bash
         run: |
@@ -175,12 +175,8 @@ jobs:
           receipt="$RUNNER_TEMP/inbox-qa-pack/digests.json"
           cp "$receipt" "$evidence/flan-t5-small.json"
           manifest="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["manifest_sha256"])' "$receipt")"
-          status=0
-          for model in flan-t5-base gpt2-medium; do
-            python3 -B scripts/fleetworks_qa_ci.py probe --target "$QA_TARGET" --chat-model "$model" \
-              --runtime "$output/installed" --manifest-sha256 "$manifest" > "$evidence/$model.json" || status=1
-          done
-          exit "$status"
+          python3 -B scripts/fleetworks_qa_ci.py probe --target "$QA_TARGET" --chat-model flan-t5-base \
+            --runtime "$output/installed" --manifest-sha256 "$manifest" > "$evidence/flan-t5-base.json"
       - name: Retain the isolated generator workload receipts
         if: always() && inputs.probe-all-models
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

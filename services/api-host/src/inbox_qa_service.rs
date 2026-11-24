@@ -18,9 +18,7 @@ use chrono::Utc;
 use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::QA_MAX_FINDINGS;
 use fleetworks_contracts::chat::QA_MAX_WORDS;
-use fleetworks_contracts::chat::{
-    QaAvailabilityReason, QaFinding, QaModelTarget, QaStartupStage, QaTurnState,
-};
+use fleetworks_contracts::chat::{QaAvailabilityReason, QaFinding, QaStartupStage, QaTurnState};
 use fleetworks_contracts::qa_worker::{
     verified_operational_sources, QaContextUsage, QaDialogueKind, QaWorkerEvent, QaWorkerOutcome,
     QaWorkerSequence, QA_CONTEXT_WINDOW_TOKENS,
@@ -170,10 +168,7 @@ impl Executor {
                 match claim {
                     Ok(Ok(store::ReplicaClaim::Warm)) => {
                         self.lease_held = true;
-                        if self
-                            .warm(setting.generation, setting.model_target, stop)
-                            .await
-                        {
+                        if self.warm(setting.generation, stop).await {
                             loaded = Some(setting.generation);
                             self.record_availability(setting.generation, None);
                             tracing::info!(qa_replica_stage = "ready", "Inbox QA replica ready");
@@ -252,10 +247,15 @@ impl Executor {
         }
     }
 
-    async fn warm(&self, generation: i64, model: QaModelTarget, stop: &CancellationToken) -> bool {
+    async fn warm(&self, generation: i64, stop: &CancellationToken) -> bool {
         if !self.renew_replica(generation, false, "warm_lease").await {
             return false;
         }
+        let selected_model = |model| {
+            if let Some(availability) = &self.availability {
+                availability.record_model(generation, model);
+            }
+        };
         let progress = |stage| {
             if let Some(availability) = &self.availability {
                 availability.record_stage(generation, stage);
@@ -263,7 +263,7 @@ impl Executor {
         };
         let warm = timeout(
             WARM_TIMEOUT,
-            self.model.warm_with_progress(model, &progress),
+            self.model.warm_with_progress(&selected_model, &progress),
         );
         tokio::pin!(warm);
         let mut next = Instant::now() + CHECK;

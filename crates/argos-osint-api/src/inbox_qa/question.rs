@@ -16,8 +16,24 @@ pub(super) enum Question {
     HostResources,
     JobsSummary,
     ContextStatus(ChatSourceKind),
+    ContextLogs(ChatSourceKind),
+    Configuration,
     Summary,
     Unsupported,
+}
+
+impl Question {
+    pub(super) fn wants_measurement(self, metric: Metric) -> bool {
+        match (self, metric) {
+            (Self::Metric(requested), metric) => requested == metric,
+            (Self::HostResources, Metric::Cpu | Metric::Memory | Metric::Disk)
+            | (
+                Self::JobsSummary,
+                Metric::QueuedJobs | Metric::RunningJobs | Metric::RetryingJobs,
+            ) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,6 +174,33 @@ pub(super) fn classify(question: &str) -> Question {
     };
     if let Some(context) = context {
         return Question::ContextStatus(context);
+    }
+    let log_source = match current_query {
+        "logs for this job" | "job log summary" | "summarize the logs for this job" => {
+            Some(ChatSourceKind::Job)
+        }
+        "logs for this cycle" | "cycle log summary" | "summarize the logs for this cycle" => {
+            Some(ChatSourceKind::Cycle)
+        }
+        _ => None,
+    };
+    if let Some(source) = log_source {
+        return Question::ContextLogs(source);
+    }
+    if matches!(
+        current_query,
+        "workstation configuration"
+            | "this workstation's configuration"
+            | "backend mode"
+            | "assistant configuration"
+            | "which backend is this workstation using"
+            | "active assistant model"
+            | "which assistant model is active"
+            | "which model is the assistant using"
+            | "is backend inference enabled"
+            | "is backend inference on"
+    ) {
+        return Question::Configuration;
     }
     if summary(question, query) {
         return Question::Summary;
@@ -788,6 +831,33 @@ mod tests {
             ),
         ] {
             assert_eq!(classify(question), intent, "{question}");
+        }
+    }
+
+    #[test]
+    fn routes_only_scoped_log_and_configuration_questions() {
+        for (prompt, expected) in [
+            (
+                "What is the workstation configuration?",
+                Question::Configuration,
+            ),
+            ("Is backend inference enabled?", Question::Configuration),
+            ("Which Assistant model is active?", Question::Configuration),
+            (
+                "Show me logs for this job.",
+                Question::ContextLogs(ChatSourceKind::Job),
+            ),
+            (
+                "Summarize the logs for this cycle.",
+                Question::ContextLogs(ChatSourceKind::Cycle),
+            ),
+            ("Show me logs for all jobs.", Question::Unsupported),
+            (
+                "Show me the credentials in the workstation configuration.",
+                Question::Unsupported,
+            ),
+        ] {
+            assert_eq!(classify(prompt), expected, "{prompt}");
         }
     }
 

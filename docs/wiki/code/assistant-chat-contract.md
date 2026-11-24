@@ -41,28 +41,26 @@ Turn states are `queued`, `running`, `retrying`, `final` and `failed`. V1 is a s
 
 ## Inbox QA V2
 
-The [V2 wire contract](../../../crates/fleetworks-contracts/src/chat/qa.rs) is available through the Embedded companion's inherited Unix socket. Distributed retains Inbox notifications. In Embedded, Workstation Settings shows the Assistant model selector while Backend inference is on. The Inbox prompts the operator to enable inference when it is off. It opens the composer once the selected model is ready.
+The [V2 wire contract](../../../crates/fleetworks-contracts/src/chat/qa.rs) is available through the Embedded companion's inherited Unix socket. Distributed retains Inbox notifications. In Embedded, Workstation Settings shows the Assistant model, readiness, provisioning, size and context usage while Backend inference is on. Workstation Status provides an Assistant shortcut and keeps deterministic diagnostics accessible independently. The Inbox prompts the operator to enable inference when it is off. It opens the composer once the selected model is ready.
 
 ### Prompt flow
 
 [![Native Inbox prompt flow from the composer to the Embedded companion and back](../../diagrams/inbox-prompt-flow.svg)](../../diagrams/inbox-prompt-flow.html)
 
 1. The Rune composer sends the question, a request ID, the registered request context, and an optional source reference. The backend uses the registration to authorize the request. It rejects caller-supplied evidence and conversation history. [Native Inbox](../../../apps/fleetworks-desktop/src/inbox_qa.rs) · [Embedded transport](native-connections.md#backend-types-and-parity)
-2. Admission collects readiness, recent host measurements, and allowed workstation Jobs counts. It builds the model's snapshot from its own authorized readings and includes up to two completed exchanges from the same credential, registration, access epoch, and generation. A follow-up such as “And now?” reuses the supported topic and collects fresh readings. Request-ID replays return the original turn. [Admission and evidence](../../../crates/argos-osint-api/src/inbox_qa.rs) · [Turn store](../../../crates/argos-osint-core/src/storage/inbox_qa.rs)
+2. Admission selects the readiness, host metrics, Jobs counts and selected activity needed for the question. It builds the model's snapshot from its own authorized readings and includes up to two completed exchanges from the same credential, registration, access epoch, and generation. A follow-up such as “And now?” reuses the supported topic and collects fresh readings. Request-ID replays return the original turn. [Admission and evidence](../../../crates/argos-osint-api/src/inbox_qa.rs) · [Turn store](../../../crates/argos-osint-core/src/storage/inbox_qa.rs)
 3. Straightforward readiness, metric and job-count questions return typed timestamped facts directly. Broad summaries and conversational turns can queue one job for the supervised Rust-BERT worker. The worker processes only the selected model, checks for cancellation between decoding steps, and reuses the attention cache. [Intent routing](../../../crates/argos-osint-api/src/inbox_qa/question.rs) · [Executor](../../../services/api-host/src/inbox_qa_service.rs) · [Decoder](../../../tools/assistant-bert/src/dialogue.rs)
 4. Batched text updates arrive as provisional events. For an operational draft the worker and backend accept complete authorized facts. Terminal answers cite exact passages from the snapshot, with their original observation times. When a generated operational reply fails verification, the backend can answer with the current recorded facts. The terminal turn clears the provisional text, seals the canonical reply, and moves the observation boundary forward for the next turn. [Validation](../../../crates/fleetworks-contracts/src/qa_worker.rs) · [Event store](../../../crates/argos-osint-core/src/storage/inbox_qa.rs)
 5. The transcript reconciles the latest turn and event pages by cursor. The compact dial reports the peak input count and percentage of the selected model's input window. **Sources** starts collapsed and shows each citation's observation time when expanded. Stop seals the turn with any already published citations. [Native transcript](../../../apps/fleetworks-desktop/src/inbox_qa.rs)
 
 ### Models and lifecycle
 
-| Model | Input tokens | Output tokens |
-| --- | ---: | ---: |
-| FLAN-T5 Small (default) | 512 | 128 |
-| FLAN-T5 Base | 512 | 128 |
-| GPT-2 Small | 896 | 128 |
-| GPT-2 Medium | 896 | 128 |
+| Model | FP32 weights | Input tokens | Output tokens |
+| --- | ---: | ---: | ---: |
+| FLAN-T5 Base (preferred) | ~990 MB | 512 | 128 |
+| FLAN-T5 Small (fallback) | ~308 MB | 512 | 128 |
 
-The model selector commits through the existing revisioned settings operation. The selection persists in Embedded state. Switching or turning inference off fences the active generation and reaps its worker. The supervisor starts the replacement only after that reclaim. A verified runtime pack provides the model executable and its libraries. The companion can reuse a verified optional model pack or fetch its pinned checkpoint files into the private asset cache. The worker starts with only the selected checkpoint and runs without network access. [Pack provisioning and resource limits](../../../deploy/inbox-qa.md)
+The companion selects a model using fresh memory headroom, workload reserve and the worker budget. The revisioned settings operation changes enablement. Turning inference off fences the active generation and reaps its worker. A verified runtime pack provides the model executable and its libraries. The companion can reuse a verified optional model pack or fetch its pinned checkpoint files into the private asset cache. The worker remains idle between turns, runs without network access, and uses one beam. Cancellation can reap an interrupted worker and trigger a warm restart. [Pack provisioning and resource limits](../../../deploy/inbox-qa.md)
 
 Each exact host fact preserves its decimal value, unit, subject and observation time. Jobs evidence comes from the authorized workstation scope. Resolved, failed, unknown and retired checks remain distinct, and passed checks can cite the authenticated registration. Direct responses report zero model input tokens. Older workers can omit usage or report their legacy limit. Model-generated text stays read-only. The zero-shot classifier has its own model and execution path.
 
@@ -76,6 +74,6 @@ Each exact host fact preserves its decimal value, unit, subject and observation 
 | `qa_latest`, `qa_events` | Registered Native workstation activity read |
 | `qa_cancel` | Registered Native interactive submit |
 
-Settings can include the current provision, verification, model load, or activation stage. An unavailable reason is a fixed code such as `pack_missing`, `pack_invalid`, `sandbox_unsupported`, or `worker_start_failed`. The notification feed remains available during setup and inference changes.
+Settings can include the current provision, verification, model load, or activation stage. An unavailable reason is a fixed code such as `pack_missing`, `pack_invalid`, `sandbox_unsupported`, `worker_start_failed`, `insufficient_resources`, or `model_provision_failed`. The notification feed remains available during setup and inference changes.
 
 A turn's `provisional_reply` carries its bounded accumulated draft for cursor-gap recovery. A `provisional_delta` is ordered with the other events and has no citations. The canonical terminal turn and its verified findings replace the draft. Terminal transitions clear provisional text, including previously retained draft event text. A recovered turn with a partly published reply is sealed before it can append a second draft. Each active registration can submit one turn at a time. Per-placement worker and lease limits keep the pending work bounded. [V2 wire contract](../../../crates/fleetworks-contracts/src/chat/qa.rs)

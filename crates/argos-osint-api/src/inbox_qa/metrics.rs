@@ -13,6 +13,7 @@ use fleetworks_contracts::context::Permission;
 use tokio::time::Instant;
 
 use super::question::Metric;
+use super::question::Question;
 use crate::activity;
 use crate::host_metrics;
 use crate::host_metrics::SharedSampler;
@@ -34,6 +35,7 @@ pub(super) async fn collect_snapshot(
     state: &ApiState,
     context: &ResolvedRequest,
     sampler: Option<&SharedSampler>,
+    intent: Question,
     boundary: i64,
     deadline: Instant,
 ) -> Vec<(Metric, Fact)> {
@@ -43,21 +45,41 @@ pub(super) async fn collect_snapshot(
     let (mut facts, jobs) = tokio::join!(
         async {
             if let Some(sampler) = sampler.filter(|_| context.permits(Permission::ReadBackend)) {
-                observe_host(sampler, boundary, deadline).await
+                observe_host(sampler, intent, boundary, deadline).await
             } else {
                 Vec::new()
             }
         },
-        tokio::time::timeout_at(deadline, observe_jobs(state, context, boundary)),
+        async {
+            if [
+                Metric::QueuedJobs,
+                Metric::RunningJobs,
+                Metric::RetryingJobs,
+            ]
+            .into_iter()
+            .any(|metric| intent.wants_measurement(metric))
+            {
+                tokio::time::timeout_at(deadline, observe_jobs(state, context, boundary))
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        },
     );
-    facts.extend(jobs.ok().flatten().unwrap_or_default());
+    facts.extend(jobs);
     let now = Utc::now();
-    facts.retain(|(_, fact)| fresh(fact.observed_at, boundary, now));
+    facts.retain(|(metric, fact)| {
+        intent.wants_measurement(*metric) && fresh(fact.observed_at, boundary, now)
+    });
     facts
 }
 
 async fn observe_host(
     sampler: &SharedSampler,
+    intent: Question,
     boundary: i64,
     deadline: Instant,
 ) -> Vec<(Metric, Fact)> {
@@ -66,13 +88,22 @@ async fn observe_host(
         (Metric::Memory, None),
         (Metric::Disk, None),
     ];
+    let requested_is_complete = |observations: &[(Metric, Option<Fact>)]| {
+        observations
+            .iter()
+            .all(|(metric, fact)| !intent.wants_measurement(*metric) || fact.is_some())
+    };
+    if requested_is_complete(&observations) {
+        return Vec::new();
+    }
     for can_retry in [true, true, false] {
         if Instant::now() >= deadline {
             break;
         }
-        let needs_disk = observations
-            .iter()
-            .any(|(metric, fact)| *metric == Metric::Disk && fact.is_none());
+        let needs_disk = intent.wants_measurement(Metric::Disk)
+            && observations
+                .iter()
+                .any(|(metric, fact)| *metric == Metric::Disk && fact.is_none());
         let disk_required_after =
             needs_disk.then(|| boundary.max(Utc::now().timestamp_millis() - MAX_EVIDENCE_AGE_MS));
         let sample =
@@ -81,7 +112,7 @@ async fn observe_host(
         let next_sample_at = if let Some(sample) = sample {
             let now = Utc::now();
             for (metric, fact) in &mut observations {
-                if fact.is_none() {
+                if intent.wants_measurement(*metric) && fact.is_none() {
                     *fact = host_fact(&sample, *metric, boundary, now);
                 }
             }
@@ -90,10 +121,7 @@ async fn observe_host(
         } else {
             retry_floor
         };
-        if !can_retry
-            || observations.iter().all(|(_, fact)| fact.is_some())
-            || next_sample_at >= deadline
-        {
+        if !can_retry || requested_is_complete(&observations) || next_sample_at >= deadline {
             break;
         }
         tokio::time::sleep_until(next_sample_at).await;
@@ -427,6 +455,7 @@ mod tests {
                 &state,
                 request,
                 None,
+                Question::JobsSummary,
                 0,
                 Instant::now() + Duration::from_secs(4),
             )

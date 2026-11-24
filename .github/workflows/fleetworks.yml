@@ -50,7 +50,7 @@ on:
       inbox_qa_evaluation:
         description: Compare pinned Inbox reply candidates on GitHub Linux without building or publishing packages
         type: choice
-        options: [none, flan-t5-small, flan-t5-base, gpt2-small, gpt2-medium, all]
+        options: [none, flan-t5-small, flan-t5-base, all]
         default: none
 
 permissions:

@@ -373,7 +373,14 @@ impl LocalGateway {
                 .await?,
             ),
             IpcOperation::QaTurnSubmit(request) => json_payload(
-                inbox_qa::submit_request(&self.state, &context, &self.qa, request).await?,
+                inbox_qa::submit_request(
+                    &self.state,
+                    &context,
+                    &self.qa,
+                    &self.qa_availability,
+                    request,
+                )
+                .await?,
             ),
             IpcOperation::QaLatest => {
                 json_payload(inbox_qa::latest_request(&self.state, &context).await?)

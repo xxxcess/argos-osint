@@ -692,6 +692,7 @@ mod native {
             ..Default::default()
         });
         jobs_scenes::install(state, Vec::new());
+        state.seed_inbox_qa_fixture(QaSettings::new(true, QaPhase::Ready, 2, 1, true), None);
         state.workstation_status_checks_open = true;
     }
 
@@ -719,7 +720,22 @@ mod native {
             settings.model_target = QaModelTarget::FlanT5Base;
             settings.startup_stage = Some(QaStartupStage::DownloadingPack);
         }
-        state.seed_inbox_qa_fixture(settings, None);
+        let turn = (!provisioning).then(|| {
+            let mut turn = QaTurn::queued(
+                "settings-fixture-turn".into(),
+                "settings-fixture-request".into(),
+                "Summarize workstation readiness.".into(),
+            );
+            turn.state = QaTurnState::Answered;
+            turn.cursor = 3;
+            turn.context = Some(QaContextUsage::new(
+                settings.model_target.input_tokens(),
+                448,
+                1,
+            ));
+            turn
+        });
+        state.seed_inbox_qa_fixture(settings, turn);
         state.fixture_show_assistant_settings();
     }
 
@@ -905,6 +921,10 @@ mod native {
                     state.fixture_show_gateway_qa_details();
                 }),
                 ("workstation-status-checks-mixed", workstation_status),
+                ("workstation-status-compact", |state| {
+                    workstation_status(state);
+                    state.workstation_status_checks_open = false;
+                }),
                 ("workstation-settings", workstation_settings),
                 ("workstation-settings-assistant", |state| {
                     assistant_settings(state, false);

@@ -18,8 +18,9 @@ use argos_osint_core::storage::tx::TxError;
 use axum::http::StatusCode;
 use fleetworks_contracts::chat::{
     ChatSourceKind, ChatSourceReference, QaAvailabilityReason, QaCancelRequest,
-    QaConversationReply, QaEventPage, QaEventQuery, QaPhase, QaSettings, QaSettingsUpdate,
-    QaStartupStage, QaTurn, QaTurnNotice, QaTurnRequest, QA_MAX_FINDINGS, QA_MAX_WORDS,
+    QaConversationReply, QaEventPage, QaEventQuery, QaModelTarget, QaPhase, QaSettings,
+    QaSettingsUpdate, QaStartupStage, QaTurn, QaTurnNotice, QaTurnRequest, QA_MAX_FINDINGS,
+    QA_MAX_WORDS,
 };
 use fleetworks_contracts::context::{CredentialPurpose, MutationContext, Permission};
 use fleetworks_contracts::qa_worker::{
@@ -30,7 +31,7 @@ use futures_util::StreamExt;
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::time::Instant;
 
-use self::question::{Metric, Question};
+use self::question::Question;
 use crate::actor_search::SearchClient;
 use crate::host_metrics::SharedSampler;
 use crate::request_context::{ContextFailure, ResolvedRequest};
@@ -77,6 +78,7 @@ pub struct QaRuntimeAvailability(watch::Sender<Option<GenerationAvailability>>);
 struct GenerationAvailability {
     generation: i64,
     observation: Option<StartupObservation>,
+    model: Option<QaModelTarget>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,13 +117,36 @@ impl QaRuntimeAvailability {
         });
     }
 
+    /// Report the automatically selected model for the current generation.
+    pub fn record_model(&self, generation: i64, model: QaModelTarget) {
+        self.update(generation, |state| state.model = Some(model));
+    }
+
+    fn model(&self, generation: i64) -> Option<QaModelTarget> {
+        self.0
+            .borrow()
+            .filter(|current| current.generation == generation)
+            .and_then(|current| current.model)
+    }
+
     fn publish(&self, generation: i64, observation: Option<StartupObservation>) {
+        self.update(generation, |state| state.observation = observation);
+    }
+
+    fn update(&self, generation: i64, update: impl FnOnce(&mut GenerationAvailability)) {
         self.0.send_modify(|current| {
-            if current.is_none_or(|previous| previous.generation <= generation) {
+            if current.is_some_and(|previous| previous.generation > generation) {
+                return;
+            }
+            if current.is_none_or(|previous| previous.generation < generation) {
                 *current = Some(GenerationAvailability {
                     generation,
-                    observation,
+                    observation: None,
+                    model: None,
                 });
+            }
+            if let Some(state) = current.as_mut() {
+                update(state);
             }
         });
     }
@@ -151,22 +176,48 @@ pub trait QaInference: Send + Sync {
 /// Every active long poll on a target shares a single backend subscription.
 struct EventWake {
     revision: watch::Sender<i64>,
-    waiters: watch::Sender<usize>,
+    waiters: watch::Sender<EventWaitCounts>,
     observer: OnceLock<()>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct EventWaitCounts {
+    polls: usize,
+    refreshers: usize,
+}
+
+impl EventWaitCounts {
+    fn active(self) -> bool {
+        self.polls > 0 || self.refreshers > 0
+    }
+
+    fn counter(&mut self, kind: EventWaitKind) -> &mut usize {
+        match kind {
+            EventWaitKind::Poll => &mut self.polls,
+            EventWaitKind::Refresh => &mut self.refreshers,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EventWaitKind {
+    Poll,
+    Refresh,
 }
 
 impl EventWake {
     fn new() -> Self {
         Self {
             revision: watch::channel(0).0,
-            waiters: watch::channel(0).0,
+            waiters: watch::channel(EventWaitCounts::default()).0,
             observer: OnceLock::new(),
         }
     }
 
-    fn subscribe(&self, repo: &Repository) -> EventWaiter<'_> {
+    fn subscribe(&self, repo: &Repository, kind: EventWaitKind) -> EventWaiter<'_> {
         let revision = self.revision.subscribe();
-        self.waiters.send_modify(|count| *count += 1);
+        self.waiters
+            .send_modify(|counts| *counts.counter(kind) += 1);
         self.observer.get_or_init(|| {
             tokio::spawn(observe_events(
                 repo.clone(),
@@ -177,6 +228,7 @@ impl EventWake {
         EventWaiter {
             wake: self,
             revision,
+            kind,
         }
     }
 }
@@ -184,34 +236,41 @@ impl EventWake {
 struct EventWaiter<'a> {
     wake: &'a EventWake,
     revision: watch::Receiver<i64>,
+    kind: EventWaitKind,
 }
 
 impl Drop for EventWaiter<'_> {
     fn drop(&mut self) {
-        self.wake.waiters.send_modify(|count| *count -= 1);
+        self.wake
+            .waiters
+            .send_modify(|counts| *counts.counter(self.kind) -= 1);
     }
 }
 
 async fn observe_events(
     repo: Repository,
-    mut waiters: watch::Receiver<usize>,
+    mut waiters: watch::Receiver<EventWaitCounts>,
     revision: watch::Sender<i64>,
 ) {
     const FALLBACK: Duration = Duration::from_millis(200);
     const RESAMPLE: Duration = Duration::from_secs(1);
-    while waiters.wait_for(|count| *count > 0).await.is_ok() {
+    while waiters.wait_for(|counts| counts.active()).await.is_ok() {
         let mut live = tokio::select! {
             result = tokio::time::timeout(FALLBACK, store::event_changes(&repo)) => result.ok().and_then(Result::ok),
-            _ = waiters.wait_for(|count| *count == 0) => continue,
+            _ = waiters.wait_for(|counts| !counts.active()) => continue,
         };
+        let mut next_sample = Instant::now();
         loop {
-            // Subscribe before the first read so a change during setup is observed by at
-            // least one mechanism. Resample even on a quiet live connection after a reconnect.
-            let sample = tokio::time::timeout(FALLBACK, store::event_revision(&repo)).await;
-            if let Ok(Ok(sample)) = sample {
-                wake_at(&revision, sample);
+            let counts = *waiters.borrow_and_update();
+            if !counts.active() {
+                break;
             }
-            let delay = if live.is_some() { RESAMPLE } else { FALLBACK };
+            let delay = match (counts.polls > 0, live.is_some()) {
+                (true, true) => RESAMPLE,
+                (true, false) => FALLBACK,
+                (false, true) => Duration::from_secs(5),
+                (false, false) => Duration::from_secs(2),
+            };
             let notice = async {
                 if let Some(stream) = live.as_mut() {
                     stream.next().await
@@ -220,11 +279,24 @@ async fn observe_events(
                 }
             };
             tokio::select! {
-                _ = waiters.wait_for(|count| *count == 0) => break,
-                _ = tokio::time::sleep(delay) => {},
+                changed = waiters.changed() => {
+                    if changed.is_err() { return; }
+                    next_sample = next_sample.min(Instant::now() + FALLBACK);
+                }
+                _ = tokio::time::sleep_until(next_sample) => {
+                    // Subscribe before the first read; periodically resample a quiet connection.
+                    let sample = tokio::time::timeout(FALLBACK, store::event_revision(&repo)).await;
+                    if let Ok(Ok(sample)) = sample {
+                        wake_at(&revision, sample);
+                    }
+                    next_sample = Instant::now() + delay;
+                }
                 notice = notice => match notice {
                     Some(Ok(sample)) => wake_at(&revision, sample),
-                    _ => live = None,
+                    _ => {
+                        live = None;
+                        next_sample = Instant::now();
+                    }
                 },
             }
         }
@@ -352,11 +424,8 @@ impl QaTarget {
         if self.readiness.is_none() {
             return;
         }
+        let mut events = self.events.subscribe(&state.repo, EventWaitKind::Refresh);
         loop {
-            tokio::select! {
-                () = stop.cancelled() => break,
-                () = tokio::time::sleep(Duration::from_secs(1)) => {}
-            }
             let refresh = async {
                 if let Ok(setting) = store::setting(&state.repo).await {
                     if setting.enabled {
@@ -367,6 +436,15 @@ impl QaTarget {
             tokio::select! {
                 () = stop.cancelled() => break,
                 _ = tokio::time::timeout(Duration::from_secs(4), refresh) => {}
+            }
+            tokio::select! {
+                () = stop.cancelled() => break,
+                _ = async {
+                    // Coalesce provisional deltas. Terminal events invalidate the durable
+                    // cache; the fallback also retries a failed refresh on a quiet backend.
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    let _ = tokio::time::timeout(Duration::from_secs(4), events.revision.changed()).await;
+                } => {}
             }
         }
     }
@@ -511,7 +589,11 @@ async fn settings_value(
         settings.availability_reason = reason;
     }
     settings.startup_stage = startup_stage;
-    settings.model_target = setting.model_target;
+    if let Some(model) =
+        availability.and_then(|availability| availability.model(setting.generation))
+    {
+        settings.model_target = model;
+    }
     Ok(settings)
 }
 
@@ -597,15 +679,9 @@ pub(crate) async fn update_request(
     let actor = require(context, Permission::ManageInboxQa, Some(&request.context))?;
     let revision = i64::try_from(request.expected_revision).map_err(|_| crate::bad())?;
     context.revalidate(&state.repo).await?;
-    let setting = store::set(
-        &state.repo,
-        &actor,
-        revision,
-        request.enabled,
-        request.model_target,
-    )
-    .await
-    .map_err(|error| settings_storage_error("write_setting", error))?;
+    let setting = store::set(&state.repo, &actor, revision, request.enabled)
+        .await
+        .map_err(|error| settings_storage_error("write_setting", error))?;
     settings_value(state, context, setting, availability).await
 }
 
@@ -613,6 +689,7 @@ pub(crate) async fn submit_request(
     state: &ApiState,
     context: &ResolvedRequest,
     target: &QaTarget,
+    availability: &QaRuntimeAvailability,
     request: QaTurnRequest,
 ) -> Result<QaTurn, ApiError> {
     let actor = require(
@@ -663,6 +740,7 @@ pub(crate) async fn submit_request(
                         | Question::Metric(_)
                         | Question::HostResources
                         | Question::JobsSummary
+                        | Question::Configuration
                         | Question::Summary
                 )
             })
@@ -683,6 +761,7 @@ pub(crate) async fn submit_request(
             &actor,
             evidence_request,
             setting.generation,
+            availability,
             deadline,
         )
         .await?;
@@ -706,6 +785,7 @@ async fn snapshot(
     actor: &store::Actor,
     request: &QaTurnRequest,
     generation: i64,
+    availability: &QaRuntimeAvailability,
     deadline: Instant,
 ) -> Result<store::FrozenEvidence, ApiError> {
     let _permit = target.probes.try_acquire().map_err(|_| {
@@ -714,17 +794,20 @@ async fn snapshot(
             "Backend health observation is busy",
         )
     })?;
-    let boundary = store::freshness_boundary(&state.repo, actor)
+    let terminal_boundary = store::freshness_boundary(&state.repo, actor)
         .await
-        .map_err(storage_error)?
-        .max(chrono::Utc::now().timestamp_millis() - 1);
+        .map_err(storage_error)?;
+    let now = chrono::Utc::now().timestamp_millis();
+    // Leave headroom for decoding within the five-second evidence budget.
+    let health_boundary = terminal_boundary.max(now - 1_000);
+    let boundary = terminal_boundary.max(now - 1);
     let intent = question::classify(&request.question);
     let source = request.source.as_ref();
     let mut selected_activity = None;
     if let Some(source) = source {
         match source.kind {
             ChatSourceKind::Job | ChatSourceKind::Cycle => {
-                let observed_at = chrono::Utc::now();
+                let observed_at = observation_start(boundary).await;
                 let (label, status) =
                     tokio::time::timeout_at(deadline, activity_fact(state, context, source))
                         .await
@@ -736,11 +819,26 @@ async fn snapshot(
         }
     }
 
+    let readiness_source = source.filter(|source| source.kind == ChatSourceKind::Readiness);
     let health_probe = async {
+        if readiness_source.is_none()
+            && !matches!(
+                intent,
+                Question::Readiness(_)
+                    | Question::ReadinessExplanation(_)
+                    | Question::StatusChecks(_)
+                    | Question::Summary
+            )
+        {
+            return Ok(None);
+        }
         tokio::time::timeout_at(deadline, async {
             loop {
-                if let Some(sample) = target.observe(state, generation, boundary, true).await? {
-                    return Ok::<_, ApiError>(sample);
+                if let Some(sample) = target
+                    .observe(state, generation, health_boundary, true)
+                    .await?
+                {
+                    return Ok::<_, ApiError>(Some(sample));
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -748,19 +846,25 @@ async fn snapshot(
         .await
         .map_err(|_| current_health_unavailable())?
     };
-    // Keep one current, authorized projection for the turn. Select the relevant
-    // facts only after the host, Jobs and readiness observations have settled.
+    // Independent observations run together when a turn needs both.
     let (health, measurements) = tokio::join!(
         health_probe,
-        metrics::collect_snapshot(state, context, target.sampler.as_ref(), boundary, deadline),
+        metrics::collect_snapshot(
+            state,
+            context,
+            target.sampler.as_ref(),
+            intent,
+            boundary,
+            deadline
+        ),
     );
-    if let Some(source) = source.filter(|source| source.kind == ChatSourceKind::Readiness) {
-        let sample = health.as_ref().map_err(|_| current_health_unavailable())?;
+    let health = health.ok().flatten();
+    if let Some(source) = readiness_source {
+        let sample = health.as_ref().ok_or_else(current_health_unavailable)?;
         if !sample.facts.iter().any(|fact| fact.id == source.id) {
             return Err(crate::missing());
         }
     }
-    let health = health.ok();
 
     let mut passages = Vec::new();
     let mut sources = Vec::new();
@@ -788,13 +892,14 @@ async fn snapshot(
     let mut conversation = None;
     match intent {
         Question::Readiness(check) | Question::ReadinessExplanation(check) => {
+            let explanation = matches!(intent, Question::ReadinessExplanation(_));
             if let Some((sample, fact)) = health.as_ref().and_then(|sample| {
-                let explanation = matches!(intent, Question::ReadinessExplanation(_));
                 sample
                     .facts
                     .iter()
                     .find(|fact| {
-                        fact.id == check.as_str() && (!explanation || fact.reason.is_some())
+                        fact.id == check.as_str()
+                            && (!explanation || readiness::has_explanation(fact))
                     })
                     .map(|fact| (sample, fact))
             }) {
@@ -806,10 +911,14 @@ async fn snapshot(
                 push(
                     reference,
                     readiness::label(fact).to_owned(),
-                    readiness::answer(fact),
+                    if explanation {
+                        readiness::explanation(fact)
+                    } else {
+                        readiness::answer(fact)
+                    },
                     at,
                     None,
-                    false,
+                    explanation,
                 );
             }
         }
@@ -868,19 +977,7 @@ async fn snapshot(
             }
         }
         Question::Metric(_) | Question::HostResources | Question::JobsSummary => {
-            let relevant = |metric| match (intent, metric) {
-                (Question::Metric(requested), metric) => requested == metric,
-                (Question::HostResources, Metric::Cpu | Metric::Memory | Metric::Disk)
-                | (
-                    Question::JobsSummary,
-                    Metric::QueuedJobs | Metric::RunningJobs | Metric::RetryingJobs,
-                ) => true,
-                _ => false,
-            };
-            for (_, fact) in measurements
-                .into_iter()
-                .filter(|(metric, _)| relevant(*metric))
-            {
+            for (_, fact) in measurements {
                 let reference = ChatSourceReference::new(fact.kind, fact.id.into())
                     .map_err(|_| crate::bad())?;
                 push(
@@ -907,6 +1004,59 @@ async fn snapshot(
                 }
             }
         }
+        Question::ContextLogs(kind) => {
+            if let (Some(source), Some((label, _, _))) = (
+                source.filter(|source| source.kind == kind),
+                selected_activity,
+            ) {
+                let at = observation_start(boundary).await;
+                let counts = tokio::time::timeout_at(
+                    deadline,
+                    crate::operational_logs::qa_job_counts(state, context, &source.id, at),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten();
+                if let Some(counts) = counts {
+                    push(
+                        source.clone(),
+                        format!("{label} logs"),
+                        format!(
+                            "{label} recorded {} log entries over the last hour, including {} at error severity and {} at warning severity.",
+                            counts.total, counts.error, counts.warn,
+                        ),
+                        at,
+                        None,
+                        false,
+                    );
+                }
+            } else {
+                notice = Some(QaTurnNotice::OutOfScope);
+                conversation = Some(QaConversationReply::ContextNeeded);
+            }
+        }
+        Question::Configuration => {
+            // Admission atomically verifies that this Embedded generation is enabled and ready.
+            let reference = ChatSourceReference::new(
+                ChatSourceKind::Readiness,
+                "embedded_inference".to_owned(),
+            )
+            .map_err(|_| crate::bad())?;
+            let mut text = "This workstation is connected to the Embedded backend. Backend inference is on and the Assistant worker is ready.".to_owned();
+            if let Some(model) = availability.model(generation) {
+                use std::fmt::Write as _;
+                let _ = write!(text, " The active model is {}.", model.label());
+            }
+            push(
+                reference,
+                "Backend inference".to_owned(),
+                text,
+                observation_start(boundary).await,
+                None,
+                false,
+            );
+        }
         Question::ExplainSelected => {
             if let Some(source) = source {
                 if source.kind == ChatSourceKind::Readiness {
@@ -923,10 +1073,10 @@ async fn snapshot(
                         push(
                             source.clone(),
                             readiness::label(fact).to_owned(),
-                            readiness::answer(fact),
+                            readiness::explanation(fact),
                             observed_at,
                             None,
-                            false,
+                            true,
                         );
                     }
                 } else if let Some((label, status, at)) = selected_activity {
@@ -1008,14 +1158,23 @@ async fn snapshot(
             conversation = Some(QaConversationReply::ContextNeeded);
         }
     }
-    let sampled_at_ms = earliest.unwrap_or_else(chrono::Utc::now).timestamp_millis();
+    let sampled_at_ms = match earliest {
+        Some(observed_at) => observed_at,
+        None => observation_start(boundary).await,
+    }
+    .timestamp_millis();
     let turn_id = store::accepted_turn_id(actor, request, generation).map_err(storage_error)?;
     let dialogue = match intent {
         Question::Greeting => Some(QaDialogueKind::Greeting),
         Question::Acknowledgement => Some(QaDialogueKind::Acknowledgement),
         Question::Help => Some(QaDialogueKind::Help),
         Question::Recall => Some(QaDialogueKind::Recall),
-        Question::Summary if !passages.is_empty() => Some(QaDialogueKind::Operational),
+        Question::Summary | Question::ReadinessExplanation(_) if !passages.is_empty() => {
+            Some(QaDialogueKind::Operational)
+        }
+        Question::ExplainSelected if readiness_source.is_some() && !passages.is_empty() => {
+            Some(QaDialogueKind::Operational)
+        }
         _ => None,
     };
     let mut worker_request =
@@ -1035,6 +1194,15 @@ async fn snapshot(
         sources,
         sampled_at_ms,
     })
+}
+
+async fn observation_start(boundary: i64) -> chrono::DateTime<chrono::Utc> {
+    let mut at = chrono::Utc::now();
+    if at.timestamp_millis() <= boundary {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        at = chrono::Utc::now();
+    }
+    at
 }
 
 async fn activity_fact(
@@ -1096,7 +1264,10 @@ pub(crate) async fn events_request(
                 "Inbox event subscribers are at capacity",
             )
         })?;
-        Some((permit, target.events.subscribe(&state.repo)))
+        Some((
+            permit,
+            target.events.subscribe(&state.repo, EventWaitKind::Poll),
+        ))
     };
     let mut long_poll = long_poll;
     loop {

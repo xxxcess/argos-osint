@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TERMINAL = {"answered", "insufficient_context", "canceled", "failed"}
 SUMMARY_QUESTION = "What is the current workstation readiness?"
 CONTEXT_WINDOW_TOKENS = 512
+FIXTURE_MODEL_MEMORY_MIB = 1536
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 DIAGNOSTIC = re.compile(r'\b(qa_(?:warm|replica|queue|turn|settings)_stage)="?([a-z0-9_]{1,40})\b')
 DIAGNOSTIC_DETAIL = re.compile(
@@ -323,50 +324,10 @@ def stop_model(request, registration, model, settings):
     require(not model(), "Off retained a live model process")
 
 
-def switch_model(request, registration, model, settings, target):
-    previous, = model()
-    started = time.monotonic()
-    updated = request("settings", {"context": authorize(registration), "expected_revision": settings["revision"],
-                                   "enabled": True, "model_target": target})
-    require(updated["enabled"] and updated["model_target"] == target
-            and updated["generation"] > settings["generation"], "Model change did not create a new generation")
-    stages = set()
-    ready = ready_model(request, target, updated=updated, stages=stages)
-    active = model()
-    require(len(active) == 1 and active[0] != previous, "Model change did not replace its sole worker")
-    try:
-        os.kill(previous, 0)
-    except ProcessLookupError:
-        pass
-    else:
-        raise ValueError("The previous model process was not reaped before the new model was ready")
-    return ready, {"target": target, "ready_ms": round((time.monotonic() - started) * 1000, 1),
-                   "startup_stages": sorted(stages), "previous_worker_reaped": True, "worker_count": len(active)}
-
-
-def exercise_model_switch(request, registration, model, readiness, current):
-    alternate, first = switch_model(request, registration, model, current, "gpt2-small")
-    require("downloading_pack" in first["startup_stages"] or "loading_model" in first["startup_stages"],
-            "The offline model change did not report provisioning or loading")
-    turn = request("turns", {"request_id": "inbox-qa-smoke-gpt2-small", "context": authorize(registration),
-                             "question": SUMMARY_QUESTION}, expected=(200, 201, 202))
-    query = {"turn_id": turn["turn_id"], "after": 0, "wait_seconds": 0}
-    complete = until(lambda: request("events", query=query)["turn"],
-                     lambda value: value["state"] in TERMINAL, "GPT-2 Small turn did not complete", timeout=45)
-    require(complete["state"] == "answered" and complete["findings"] and not complete.get("provisional_reply"),
-            "GPT-2 Small did not answer from the frozen workstation observations")
-    first["context"] = require_context(complete, inferred=True, window=896)
-    restored, second = switch_model(request, registration, model, alternate, pack.DEFAULT_CHAT_MODEL)
-    require(readiness(), "The same companion stopped serving readiness after its model changed")
-    return restored, [first, second]
-
-
-def exercise(request, registration, model, readiness, running_jobs, *, verify_switch=False):
+def exercise(request, registration, model, readiness, running_jobs):
     """Run the QA lifecycle over the packaged companion's private socket."""
     before = request("settings")
-    require(not before["enabled"] and before["phase"] == "off"
-            and before["model_target"] == pack.DEFAULT_CHAT_MODEL,
-            "QA did not default to Off with FLAN-T5 Small selected")
+    require(not before["enabled"] and before["phase"] == "off", "QA did not default to Off")
     require(not model(), "Off retained a live model process")
     require(request("latest") is None, "Off exposes an exchange")
     turn = {"request_id": "inbox-qa-smoke-1", "context": authorize(registration), "question": SUMMARY_QUESTION}
@@ -377,7 +338,7 @@ def exercise(request, registration, model, readiness, running_jobs, *, verify_sw
     updated = request("settings", {"context": authorize(registration), "expected_revision": revision, "enabled": True})
     stages = set()
     try:
-        current = ready_model(request, pack.DEFAULT_CHAT_MODEL, updated=updated, stages=stages)
+        current = ready_model(request, "flan-t5-small", updated=updated, stages=stages)
     except TimeoutError:
         current = request("settings")
         phase = current.get("phase")
@@ -558,10 +519,7 @@ def exercise(request, registration, model, readiness, running_jobs, *, verify_sw
             and unsupported.get("conversation") == "context_needed",
             "the assistant did not ask for grounding context")
 
-    switched = None
-    if verify_switch:
-        current, switched = exercise_model_switch(request, registration, model, readiness, current)
-
+    require(model() == active, "Ordinary turns replaced or unloaded the resident model")
     started = time.monotonic()
     stop_model(request, registration, model, current)
     require(request("latest") is None, "Off retained latest question and answer")
@@ -576,7 +534,8 @@ def exercise(request, registration, model, readiness, running_jobs, *, verify_sw
             "live_metrics": True, "unsupported_context": True,
             "resource_snapshot": True, "greeting": True, "conversational_follow_ups": True,
             "generated_dialogue": True, "startup_stages": sorted(stages),
-            "model_switches": switched, "local_dialogue_rss_bytes": dialogue_rss_bytes,
+            "automatic_model_target": current["model_target"], "worker_reused": True,
+            "local_dialogue_rss_bytes": dialogue_rss_bytes,
             "frozen_samples": readings}
 
 
@@ -1316,8 +1275,9 @@ def run_catalog(args):
 
 
 @contextmanager
-def embedded_qa_session(binary, state):
-    session = embedded.LocalIpcSession(binary, state, client_name="fleetworks-qa-smoke")
+def embedded_qa_session(binary, state, *, reject_model_target=False):
+    session = embedded.LocalIpcSession(binary, state, client_name="fleetworks-qa-smoke",
+                                       qa_memory_mib=FIXTURE_MODEL_MEMORY_MIB)
     try:
         session.hello()
         ensured, _ = session.request_json({"op": "registration_ensure", "args": {
@@ -1349,8 +1309,20 @@ def embedded_qa_session(binary, state):
             return None
 
         yield session, registration, request
-        _, exit_code = session.shutdown()
-        require(exit_code == 0, "companion shutdown failed after QA")
+        if reject_model_target:
+            # Unknown typed operation fields are rejected at the IPC frame boundary.
+            session.send_request({"op": "qa_settings_update", "args": {
+                "context": authorize(registration), "expected_revision": request("settings")["revision"],
+                "enabled": True, "model_target": "flan-t5-base",
+            }}, registration=registration)
+            frame = embedded.read_frame(session.reader)
+            while frame is not None and frame.get("frame") == "event":
+                frame = embedded.read_frame(session.reader)
+            require(frame is None and session.proc.wait(timeout=40) == 0,
+                    "The companion did not fail closed on a caller-selected model")
+        else:
+            _, exit_code = session.shutdown()
+            require(exit_code == 0, "companion shutdown failed after QA")
     except Exception:
         report_diagnostics(session.stderr_excerpt())
         raise
@@ -1364,8 +1336,6 @@ def run_embedded(args):
         ".cache/torch", ".cache/huggingface", ".cache/.rustbert")), "use a fresh HOME for the offline smoke")
     binary = embedded.resolve_companion_binary(app=args.app)
     digests = json.loads(args.digests.read_text())
-    if args.gpt2_small_assets is not None:
-        require(digests["target"] == "x86_64-unknown-linux-gnu", "Offline model-switch smoke requires Linux x86-64")
     with tempfile.TemporaryDirectory(prefix="fleetworks-embedded-qa-") as temporary:
         root = Path(temporary)
         state = root / "state"
@@ -1373,9 +1343,7 @@ def run_embedded(args):
         pack.install(argparse.Namespace(archive=args.archive, output=root / "pack", state_dir=state,
                                         target=digests["target"], archive_sha256=digests["archive_sha256"],
                                         manifest_sha256=digests["manifest_sha256"]))
-        if args.gpt2_small_assets is not None:
-            pack.materialize_model_assets(args.gpt2_small_assets, state, "gpt2-small")
-        with embedded_qa_session(binary, state) as (session, registration, request):
+        with embedded_qa_session(binary, state, reject_model_target=True) as (session, registration, request):
 
             def model():
                 return embedded_tree(session.proc.pid)
@@ -1396,8 +1364,7 @@ def run_embedded(args):
                     require(settings["phase"] == "off" and settings.get("startup_stage") == stage and not model(),
                             f"Embedded did not expose the advisory {stage} installer stage")
             require(not request("settings").get("startup_stage"), "Installer progress lingered after its producer exited")
-            result = exercise(request, registration, model, readiness, running_jobs,
-                              verify_switch=args.gpt2_small_assets is not None)
+            result = exercise(request, registration, model, readiness, running_jobs)
             result["installer_stages"] = ["downloading_pack", "verifying_pack"]
             attestation = session.transport_attestation
 
@@ -1420,7 +1387,7 @@ def run_embedded(args):
             stop_model(request, registration, gated_model, request("settings"))
 
     return {"runtime": attestation["transport"], "transport_attestation": attestation, "target": digests["target"],
-            "source_sha": digests["source_sha"], **result, **cancellation}
+            "source_sha": digests["source_sha"], "manual_model_target_rejected": True, **result, **cancellation}
 
 
 def main():
@@ -1431,7 +1398,6 @@ def main():
     local.add_argument("--archive", type=Path, required=True)
     local.add_argument("--digests", type=Path, required=True)
     local.add_argument("--gated-worker", type=Path, required=True)
-    local.add_argument("--gpt2-small-assets", type=Path, help="Pre-fetched pinned assets for the offline Linux model switch")
     catalog = modes.add_parser("catalog", help="Run the offline bundled catalog smoke for the verified Linux PR package")
     catalog.add_argument("--app", type=Path, required=True)
     catalog.add_argument("--revision", required=True)

@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        candidate: ${{ fromJSON(inputs.selection == 'all' && '["flan-t5-small","flan-t5-base","gpt2-small","gpt2-medium"]' || format('["{0}"]', inputs.selection)) }}
+        candidate: ${{ fromJSON(inputs.selection == 'all' && '["flan-t5-small","flan-t5-base"]' || format('["{0}"]', inputs.selection)) }}
     defaults:
       run:
         shell: bash
@@ -47,7 +47,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$CANDIDATE" in
-            flan-t5-small|flan-t5-base|gpt2-small|gpt2-medium) ;;
+            flan-t5-small|flan-t5-base) ;;
             *) exit 2 ;;
           esac
           test "$GITHUB_EVENT_NAME" = workflow_dispatch

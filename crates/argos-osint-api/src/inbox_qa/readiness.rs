@@ -34,6 +34,40 @@ pub(super) fn answer(fact: &HealthFact) -> String {
     answer
 }
 
+pub(super) fn has_explanation(fact: &HealthFact) -> bool {
+    fact.reason.is_some() || guidance(fact).is_some()
+}
+
+pub(super) fn explanation(fact: &HealthFact) -> String {
+    let mut text = answer(fact);
+    if let Some(guidance) = guidance(fact) {
+        text.push(' ');
+        text.push_str(guidance);
+    }
+    text
+}
+
+fn guidance(fact: &HealthFact) -> Option<&'static str> {
+    Some(match (fact.id.as_str(), fact.status.as_str()) {
+        ("actor_catalog", "not ready" | "not_ready") => {
+            "Open the Actor catalog diagnostic in Workstation Status to review the Seed actors action."
+        }
+        ("actor_search", "not ready" | "not_ready") => {
+            "Review the catalog first, then open the Actor search diagnostic to review the index action."
+        }
+        ("actor_search", "running") => {
+            "Check the indexing progress in Workstation Status before starting another index build."
+        }
+        ("classifier_inference", "unknown" | "unavailable") => {
+            "Review Atlas Rust-BERT inference in Workstation Status for the latest verification result."
+        }
+        ("datastore", "unavailable") => {
+            "Open the Datastore diagnostic in Workstation Status for the current connection failure."
+        }
+        _ => return None,
+    })
+}
+
 /// Summarize the same fresh status groups used by the Workstation view.
 pub(super) fn status_check_summary<'a>(
     facts: impl Iterator<Item = &'a HealthFact>,
@@ -143,6 +177,7 @@ pub fn validated_summary_finding<'a>(
 #[cfg(test)]
 mod tests {
     use super::answer;
+    use super::explanation;
     use super::status_check_summary;
     use super::validated_summary_finding;
     use super::StatusChecks;
@@ -189,6 +224,21 @@ mod tests {
             answer(&fact("classifier_training", "running", None)),
             "Legacy Natural training has unfinished resource work.",
         );
+    }
+
+    #[test]
+    fn explanations_pair_current_observations_with_verified_actions() {
+        let failed = fact(
+            "actor_search",
+            "not ready",
+            Some("No serving index was observed."),
+        );
+        assert_eq!(
+            explanation(&failed),
+            "Actor search is not ready. No serving index was observed. Review the catalog first, then open the Actor search diagnostic to review the index action.",
+        );
+        let passed = fact("actor_search", "ready", None);
+        assert_eq!(explanation(&passed), "Actor search is ready.");
     }
 
     #[test]

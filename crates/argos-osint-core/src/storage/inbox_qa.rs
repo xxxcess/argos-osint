@@ -1,12 +1,14 @@
 //! Transactional Inbox state. Model processes never receive this repository.
 
 use chrono::Utc;
+use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::chat::QaConversationReply;
 use fleetworks_contracts::chat::QaEvent;
 use fleetworks_contracts::chat::QaFinding;
 use fleetworks_contracts::chat::QaMeasurement;
 use fleetworks_contracts::chat::QaModelTarget;
+use fleetworks_contracts::chat::QaRelatedActivity;
 use fleetworks_contracts::chat::QaTurn;
 use fleetworks_contracts::chat::QaTurnNotice;
 use fleetworks_contracts::chat::QaTurnRequest;
@@ -36,6 +38,7 @@ use super::connect_registry;
 use super::connect_registry::RegistryAuthority;
 use super::job_dispatch;
 use super::jobs;
+use super::jobs_view;
 use super::repo::Repository;
 use super::tx::run_tx;
 use super::tx::RetryPolicy;
@@ -224,6 +227,48 @@ struct Exchange {
     evidence: Option<FrozenEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resolved_question: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolved_source: Option<ChatSourceReference>,
+}
+
+impl Exchange {
+    fn subject(&self) -> Option<&ChatSourceReference> {
+        self.resolved_source.as_ref().or(self.source.as_ref())
+    }
+}
+
+fn private_subject(source: &ChatSourceReference) -> bool {
+    matches!(source.kind, ChatSourceKind::Job | ChatSourceKind::Cycle)
+}
+
+async fn subject_visible_in(
+    tx: &Tx,
+    actor: &Actor,
+    source: Option<&ChatSourceReference>,
+) -> Result<bool, TxError> {
+    let Some(source) = source.filter(|source| private_subject(source)) else {
+        return Ok(true);
+    };
+    let query = format!(
+        "SELECT VALUE true FROM ONLY $job WHERE kind != 'service' AND {} AND ({}) AND ({})",
+        jobs_view::ELIGIBLE,
+        jobs_view::activity_membership(),
+        jobs_view::activity_private()
+    );
+    let mut result = jobs::run(
+        tx,
+        tx.query(query)
+            .bind(("job", jobs::rid("job", &source.id)))
+            .bind(("activity_scope", actor.scope.clone()))
+            .bind(("activity_deployment", actor.context.deployment_id.clone()))
+            .bind(("activity_node", actor.context.workstation_id.clone()))
+            .bind((
+                "cutoff",
+                jobs::ts(Utc::now() - chrono::Duration::hours(jobs::EXECUTION_WINDOW_HOURS)),
+            )),
+    )
+    .await?;
+    Ok(jobs::take::<Option<bool>>(&mut result, 0)? == Some(true))
 }
 
 #[derive(Clone, Debug, Default, SurrealValue)]
@@ -579,6 +624,9 @@ pub async fn replay(
             if !matching_request(&exchange, request) {
                 return Err(abort("id_conflict"));
             }
+            if !subject_visible_in(&tx, actor, exchange.subject()).await? {
+                return Err(abort("missing"));
+            }
             Ok(Some(exchange.turn))
         }
     })
@@ -640,6 +688,35 @@ fn grounded_findings(evidence: &FrozenEvidence) -> Result<Vec<QaFinding>, TxErro
         .collect()
 }
 
+fn fallback_findings(evidence: &FrozenEvidence) -> Result<Vec<QaFinding>, TxError> {
+    evidence
+        .request
+        .validate()
+        .map_err(|_| abort("invalid_part"))?;
+    let passages = &evidence.request.passages;
+    if passages.len() != evidence.sources.len() {
+        return Err(abort("invalid_part"));
+    }
+    let mut remaining_words = QA_MAX_WORDS;
+    let mut findings = Vec::new();
+    for (passage, source) in passages.iter().zip(&evidence.sources) {
+        if passage.source_id != source.opaque_id {
+            return Err(abort("invalid_part"));
+        }
+        let Some(words) = remaining_words.checked_sub(passage.text.split_whitespace().count())
+        else {
+            continue;
+        };
+        let end = u32::try_from(passage.text.chars().count()).map_err(|_| abort("invalid_part"))?;
+        findings.push(source.finding(passage.text.clone(), 0, end));
+        remaining_words = words;
+        if findings.len() == QA_MAX_FINDINGS {
+            break;
+        }
+    }
+    Ok(findings)
+}
+
 fn dialogue_line(text: &str) -> &str {
     text[..text.floor_char_boundary(QA_MAX_DIALOGUE_MESSAGE_BYTES.min(text.len()))].trim()
 }
@@ -676,7 +753,16 @@ async fn recent_dialogue_in(
     let retained = recent_completed_in(tx, owner, generation, now, MAX_PER_REGISTRATION).await?;
     let mut history = Vec::with_capacity(QA_MAX_DIALOGUE_HISTORY);
     for row in retained {
-        let turn = decode(&row.payload)?.turn;
+        let exchange = decode(&row.payload)?;
+        // Keep private job and cycle observations outside the model history.
+        if exchange.subject().is_some_and(private_subject)
+            || exchange.turn.findings.iter().any(|finding| {
+                private_subject(&finding.source) || finding.source.kind == ChatSourceKind::JobCount
+            })
+        {
+            continue;
+        }
+        let turn = exchange.turn;
         let answer = if let Some(reply) = turn.reply {
             reply
         } else if turn.state == QaTurnState::Answered && !turn.findings.is_empty() {
@@ -717,6 +803,8 @@ pub async fn admit(
     actor: &Actor,
     request: &QaTurnRequest,
     evidence: FrozenEvidence,
+    subject: Option<&ChatSourceReference>,
+    related_activity: Option<QaRelatedActivity>,
     expected_generation: i64,
 ) -> Result<QaTurn, TxError> {
     let key = actor.key()?;
@@ -725,6 +813,7 @@ pub async fn admit(
         let key = &key;
         let id = &id;
         let evidence = &evidence;
+        let related_activity = &related_activity;
         async move {
             actor.validate_in(&tx).await?;
             let state = settings_in(&tx).await?;
@@ -739,7 +828,13 @@ pub async fn admit(
                 if !matching_request(&exchange, request) {
                     return Err(abort("id_conflict"));
                 }
+                if !subject_visible_in(&tx, actor, exchange.subject()).await? {
+                    return Err(abort("missing"));
+                }
                 return Ok(exchange.turn);
+            }
+            if !subject_visible_in(&tx, actor, subject).await? {
+                return Err(abort("missing"));
             }
             let boundary = boundary_in(&tx, key, state.generation).await?;
             let now = Utc::now();
@@ -761,23 +856,21 @@ pub async fn admit(
               .bind(("workstation", actor.workstation())).bind(("active_cap", MAX_ACTIVE)).bind(("owner_cap", MAX_PER_REGISTRATION))
               .bind(("retained_cap", MAX_RETAINED))).await?;
             let ready = jobs::take::<Vec<bool>>(&mut reply, 1)?.len() as i64;
-            if ready == 0 {
-                return Err(abort("unavailable"));
-            }
+            let needs_model = matches!(evidence.answer_mode, AnswerMode::Model) && ready > 0;
             if !jobs::take::<Vec<bool>>(&mut reply, 2)?.is_empty() {
                 return Err(abort("active"));
             }
             let active = jobs::take::<Option<i64>>(&mut reply, 3)?.ok_or_else(|| abort("invalid_store"))?;
             let owner_retained = jobs::take::<Option<i64>>(&mut reply, 4)?.ok_or_else(|| abort("invalid_store"))?;
             let total_retained = jobs::take::<Option<i64>>(&mut reply, 5)?.ok_or_else(|| abort("invalid_store"))?;
-            if active >= MAX_ACTIVE.min(ready * 2)
+            if (needs_model && active >= MAX_ACTIVE.min(ready * 2))
                 || owner_retained >= MAX_PER_REGISTRATION
                 || total_retained >= MAX_RETAINED
             {
                 return Err(abort("busy"));
             }
             let mut frozen = evidence.clone();
-            if let Some(dialogue) = frozen.request.dialogue.as_mut() {
+            if let Some(dialogue) = frozen.request.dialogue.as_mut().filter(|_| needs_model) {
                 dialogue.history = recent_dialogue_in(&tx, key, state.generation, timestamp).await?;
             }
             let mut exchange = Exchange {
@@ -788,7 +881,9 @@ pub async fn admit(
                 evidence: Some(frozen),
                 resolved_question: (request.question != evidence.request.question)
                     .then(|| evidence.request.question.clone()),
+                resolved_source: subject.filter(|source| Some(*source) != request.source.as_ref()).cloned(),
             };
+            exchange.turn.related_activity = related_activity.clone();
             let payload = serde_json::to_string(&exchange).map_err(|_| abort("invalid_store"))?;
             jobs::run(&tx, tx.query(
                 "CREATE $turn SET generation=$gen, owner=$owner, workstation=$workstation, active=true, accepted_at=$at, completed_at=0, payload=$payload RETURN NONE;
@@ -796,13 +891,17 @@ pub async fn admit(
             ).bind(("turn", jobs::rid("inbox_qa_exchange", id))).bind(("gen", state.generation))
               .bind(("owner", key.clone())).bind(("workstation", actor.workstation())).bind(("at", timestamp)).bind(("payload", payload))
               .bind(("latest", jobs::rid("inbox_qa_latest", key))).bind(("boundary", boundary))).await?;
-            if matches!(evidence.answer_mode, AnswerMode::Grounded) {
+            if !needs_model {
                 // Exact facts need no worker lease. Publish the canonical turn and its
                 // events in the admission transaction so Off need not race settlement.
                 let findings = if (0..=MAX_EVIDENCE_AGE_MS)
                     .contains(&now_ms().saturating_sub(evidence.sampled_at_ms))
                 {
-                    grounded_findings(evidence)?
+                    if matches!(evidence.answer_mode, AnswerMode::Grounded) {
+                        grounded_findings(evidence)?
+                    } else {
+                        fallback_findings(evidence)?
+                    }
                 } else {
                     Vec::new()
                 };
@@ -850,11 +949,17 @@ pub async fn latest(
         .map(|exchange| (exchange.turn, exchange.events)))
 }
 
+/// The latest answered intent and its typed subject after registration validation.
+pub struct AnsweredPrompt {
+    pub question: String,
+    pub subject: Option<ChatSourceReference>,
+}
+
 /// Use the most recent cited topic within the short conversation window.
 pub async fn last_answered_prompt(
     repo: &Repository,
     actor: &Actor,
-) -> Result<Option<String>, TxError> {
+) -> Result<Option<AnsweredPrompt>, TxError> {
     let key = actor.key()?;
     Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
         let key = &key;
@@ -877,9 +982,13 @@ pub async fn last_answered_prompt(
                 if exchange.turn.state == QaTurnState::Answered
                     && !exchange.turn.findings.is_empty()
                 {
-                    return Ok(Some(
-                        exchange.resolved_question.unwrap_or(exchange.turn.question),
-                    ));
+                    if !subject_visible_in(&tx, actor, exchange.subject()).await? {
+                        return Ok(None);
+                    }
+                    return Ok(Some(AnsweredPrompt {
+                        subject: exchange.subject().cloned(),
+                        question: exchange.resolved_question.unwrap_or(exchange.turn.question),
+                    }));
                 }
             }
             Ok(None)
@@ -905,7 +1014,11 @@ async fn latest_exchange(repo: &Repository, actor: &Actor) -> Result<Option<Exch
             let Some(row) = exchange_in(&tx, &turn_id).await? else {
                 return Ok(None);
             };
-            decode(&row.payload).map(Some)
+            let exchange = decode(&row.payload)?;
+            if !subject_visible_in(&tx, actor, exchange.subject()).await? {
+                return Ok(None);
+            }
+            Ok(Some(exchange))
         }
     })
     .await?
@@ -1015,6 +1128,9 @@ pub async fn cancel(repo: &Repository, actor: &Actor, id: &str) -> Result<QaTurn
                 })
                 .ok_or_else(|| abort("missing"))?;
             let mut exchange = decode(&row.payload)?;
+            if !subject_visible_in(&tx, actor, exchange.subject()).await? {
+                return Err(abort("missing"));
+            }
             if row.active {
                 append_in(
                     &tx,
@@ -1056,8 +1172,24 @@ async fn live_exchange_in(
     {
         return Ok(None);
     }
-    let exchange = decode(&row.payload)?;
+    let mut exchange = decode(&row.payload)?;
     exchange.actor.validate_in(tx).await?;
+    if !subject_visible_in(tx, &exchange.actor, exchange.subject()).await? {
+        exchange.turn.findings.clear();
+        exchange.turn.related_activity = None;
+        exchange.events.clear();
+        append_in(
+            tx,
+            &row.owner,
+            row.generation,
+            &mut exchange,
+            QaTurnState::Canceled,
+            None,
+        )
+        .await?;
+        retire_in(tx, vec![exchange.turn.turn_id.clone()]).await?;
+        return Ok(None);
+    }
     Ok(Some((row, exchange)))
 }
 

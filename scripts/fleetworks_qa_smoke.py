@@ -1280,9 +1280,9 @@ def run_catalog(args):
 
 
 @contextmanager
-def embedded_qa_session(binary, state, *, reject_model_target=False):
+def embedded_qa_session(binary, state, *, reject_model_target=False, qa_memory_mib=FIXTURE_MODEL_MEMORY_MIB):
     session = embedded.LocalIpcSession(binary, state, client_name="fleetworks-qa-smoke",
-                                       qa_memory_mib=FIXTURE_MODEL_MEMORY_MIB)
+                                       qa_memory_mib=qa_memory_mib)
     try:
         session.hello()
         ensured, _ = session.request_json({"op": "registration_ensure", "args": {
@@ -1335,12 +1335,44 @@ def embedded_qa_session(binary, state, *, reject_model_target=False):
         session.close_unconditionally()
 
 
+def named_small_startup(args, binary, digests):
+    with tempfile.TemporaryDirectory(prefix="fleetworks-embedded-qa-named-") as temporary:
+        root = Path(temporary)
+        state = root / "state"
+        state.mkdir(mode=0o700)
+        pack.install(argparse.Namespace(archive=args.archive, output=root / "pack", state_dir=state,
+                                        target=digests["target"], archive_sha256=digests["archive_sha256"],
+                                        manifest_sha256=digests["manifest_sha256"], chat_model="flan-t5-small"))
+        require((state / "qa-model-packs/flan-t5-small.json").is_file()
+                and not (state / "qa-pack.json").exists()
+                and not (state / "qa-model-assets").exists(),
+                "Named Small fallback requires only the named pack and an empty model cache")
+        with embedded_qa_session(binary, state, qa_memory_mib=None) as (session, registration, request):
+            context = authorize(registration)
+            before = request("settings")
+            enabled = request("settings", {"context": context, "expected_revision": before["revision"],
+                                           "enabled": True})
+            ready = ready_model(request, "flan-t5-small", updated=enabled)
+            require("base_model_provision" in session.stderr_excerpt(),
+                    "The offline fixture did not attempt Base with the available memory headroom")
+            answer = settled_turn(request, context, "named-small-fallback", SUMMARY_QUESTION, mode="operational")
+            require(all(finding["source"]["kind"] == "readiness" for finding in answer["findings"]),
+                    "Named Small fallback did not preserve grounded readiness citations")
+            stop_model(request, registration, lambda: embedded_tree(session.proc.pid), ready)
+        return {"base_provision_attempted": True, "selected_model": "flan-t5-small",
+                "grounded_answer": True}
+
+
 def run_embedded(args):
     # Run this program inside a network-denied environment for release verification.
     require(not any((Path.home() / path).exists() for path in (
         ".cache/torch", ".cache/huggingface", ".cache/.rustbert")), "use a fresh HOME for the offline smoke")
     binary = embedded.resolve_companion_binary(app=args.app)
     digests = json.loads(args.digests.read_text())
+    linux = digests["target"] == "x86_64-unknown-linux-gnu"
+    if linux:
+        require({name for _, name in socket.if_nameindex()} == {"lo"},
+                "Run the Linux QA smoke in a network namespace with only loopback")
     with tempfile.TemporaryDirectory(prefix="fleetworks-embedded-qa-") as temporary:
         root = Path(temporary)
         state = root / "state"
@@ -1372,6 +1404,9 @@ def run_embedded(args):
             result = exercise(request, registration, model, readiness, running_jobs)
             result["installer_stages"] = ["downloading_pack", "verifying_pack"]
             attestation = session.transport_attestation
+
+    if linux:
+        result["named_small_fallback"] = named_small_startup(args, binary, digests)
 
     with tempfile.TemporaryDirectory(prefix="fleetworks-embedded-qa-stop-") as temporary:
         root = Path(temporary)

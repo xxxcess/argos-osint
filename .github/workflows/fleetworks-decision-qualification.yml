@@ -1,0 +1,64 @@
+name: Measure pinned Fleetworks decision candidates
+
+on:
+  workflow_call:
+    inputs:
+      head:
+        type: string
+        required: true
+      platform:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    name: ${{ matrix.model }} on ${{ matrix.native.target }}
+    runs-on: ${{ matrix.native.runner }}
+    timeout-minutes: 16
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [julia-1, vllm-d3-edge]
+        native: ${{ fromJSON(inputs.platform == 'linux' && '[{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu"}]' || '[{"runner":"macos-15-intel","target":"x86_64-apple-darwin"},{"runner":"macos-15","target":"aarch64-apple-darwin"}]') }}
+    env:
+      EXPECTED_HEAD: ${{ inputs.head }}
+      PLATFORM: ${{ inputs.platform }}
+      TARGET: ${{ matrix.native.target }}
+      MODEL: ${{ matrix.model }}
+      PYTHONDONTWRITEBYTECODE: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          lfs: false
+      - name: Require exact manual workflow revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          [[ "$PLATFORM" == linux || "$PLATFORM" == macos ]]
+          [[ "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          test "$EXPECTED_HEAD" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Verify pinned files and score synthetic incidents over a private socket
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B .github/scripts/evaluate_fleetworks_decision.py \
+            --model "$MODEL" --target "$TARGET" --head "$EXPECTED_HEAD" \
+            --output "$RUNNER_TEMP/fleetworks-decision/receipt.json"
+      - name: Retain candidate receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Fleetworks-decision-${{ matrix.model }}-${{ matrix.native.target }}-${{ github.sha }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fleetworks-decision/receipt.json
+          if-no-files-found: ignore
+          retention-days: 14

@@ -12,6 +12,7 @@ pub use crate::qa_worker::QaModelTarget;
 use super::identity;
 use super::request_id;
 use super::ChatInputError;
+use super::ChatSourceKind;
 use super::ChatSourceReference;
 use super::MAX_EVENT_WAIT_SECS;
 use super::MAX_ID_BYTES;
@@ -22,6 +23,11 @@ pub const QA_TURNS_PATH: &str = "/api/v2/workstation/chat/turns";
 pub const QA_LATEST_PATH: &str = "/api/v2/workstation/chat/latest";
 pub const QA_EVENTS_PATH: &str = "/api/v2/workstation/chat/events";
 pub const QA_CANCEL_PATH: &str = "/api/v2/workstation/chat/cancel";
+/// Embedded capability for direct Assistant answers and inline triage.
+pub const QA_TRIAGE_FEATURE: &str = "inbox-qa-triage-v1";
+/// Read-only related activity lookup over private Embedded IPC.
+pub const QA_RELATED_ACTIVITY_PATH: &str = "/api/v2/workstation/chat/related-activity";
+
 /// Opt in to typed metric citations on the gateway's V2 Inbox response routes.
 pub const QA_EVIDENCE_HEADER: &str = "x-fleetworks-inbox-evidence";
 pub const QA_EVIDENCE_VERSION: &str = "1";
@@ -134,6 +140,72 @@ impl QaSettingsUpdate {
             expected_revision,
             enabled,
         }
+    }
+}
+
+/// One explicitly selected job or readiness check for read-only triage.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct QaRelatedActivityRequest {
+    pub source: ChatSourceReference,
+}
+
+impl fmt::Debug for QaRelatedActivityRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("QaRelatedActivityRequest(..)")
+    }
+}
+
+impl QaRelatedActivityRequest {
+    pub fn new(source: ChatSourceReference) -> Result<Self, ChatInputError> {
+        let request = Self { source };
+        request.validate()?;
+        Ok(request)
+    }
+
+    /// Limit triage to supported typed sources.
+    pub fn validate(&self) -> Result<(), ChatInputError> {
+        self.source.validate()?;
+        match self.source.kind {
+            ChatSourceKind::Job | ChatSourceKind::Readiness => Ok(()),
+            _ => Err(ChatInputError::InvalidIdentity),
+        }
+    }
+}
+
+/// A backend-verified reason for offering navigation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaRelationshipReason {
+    CurrentStatus,
+    StageCheck,
+    SharedOperation,
+}
+
+/// Canonical outcome of a bounded Assistant lookup.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+#[non_exhaustive]
+pub enum QaRelatedActivity {
+    Found {
+        target: ChatSourceReference,
+        reason: QaRelationshipReason,
+    },
+    NoRelatedActivity,
+    TriageUnavailable,
+    Clarify,
+}
+
+impl fmt::Debug for QaRelatedActivity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Found { .. } => "QaRelatedActivity::Found(..)",
+            Self::NoRelatedActivity => "QaRelatedActivity::NoRelatedActivity",
+            Self::TriageUnavailable => "QaRelatedActivity::TriageUnavailable",
+            Self::Clarify => "QaRelatedActivity::Clarify",
+        })
     }
 }
 
@@ -299,6 +371,7 @@ pub enum QaConversationReply {
     Help,
     ContextNeeded,
     FollowUpNeedsTopic,
+    ChooseSubject,
     RecallNeedsHistory,
     #[serde(other)]
     Unknown,
@@ -395,6 +468,8 @@ pub struct QaTurn {
     pub reply: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provisional_reply: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related_activity: Option<QaRelatedActivity>,
     pub cursor: u64,
 }
 
@@ -422,6 +497,7 @@ impl QaTurn {
             context: None,
             reply: None,
             provisional_reply: None,
+            related_activity: None,
             cursor: 0,
         }
     }
@@ -471,6 +547,31 @@ impl QaEventPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn related_activity_rejects_untyped_inputs_and_keeps_targets_internal() {
+        let request = serde_json::json!({"source": {"kind": "job", "id": "job-1"}});
+        assert!(
+            serde_json::from_value::<QaRelatedActivityRequest>(request.clone())
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
+        let mut supplied_evidence = request;
+        supplied_evidence["candidate"] = serde_json::json!({"kind": "job", "id": "job-2"});
+        assert!(serde_json::from_value::<QaRelatedActivityRequest>(supplied_evidence).is_err());
+        let unsupported =
+            ChatSourceReference::new(ChatSourceKind::Actor, "actor-1".into()).unwrap();
+        assert!(QaRelatedActivityRequest::new(unsupported).is_err());
+
+        let result = serde_json::json!({
+            "status": "found",
+            "target": {"kind": "readiness", "id": "gateway"},
+            "reason": "current_status",
+            "url": "https://example.invalid"
+        });
+        assert!(serde_json::from_value::<QaRelatedActivity>(result).is_err());
+    }
 
     #[test]
     fn turn_context_cannot_be_supplied_by_the_frontend() {

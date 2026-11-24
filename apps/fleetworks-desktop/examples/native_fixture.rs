@@ -21,10 +21,13 @@ mod native {
     use fleetworks_contracts::chat::QaFinding;
     use fleetworks_contracts::chat::QaModelTarget;
     use fleetworks_contracts::chat::QaPhase;
+    use fleetworks_contracts::chat::QaRelatedActivity;
+    use fleetworks_contracts::chat::QaRelationshipReason;
     use fleetworks_contracts::chat::QaSettings;
     use fleetworks_contracts::chat::QaStartupStage;
     use fleetworks_contracts::chat::QaTurn;
     use fleetworks_contracts::chat::QaTurnState;
+    use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
     use fleetworks_contracts::connect::RegistrationReceipt;
     use fleetworks_contracts::context::JobOrigin;
     use fleetworks_contracts::context::OriginSource;
@@ -681,6 +684,36 @@ mod native {
         );
     }
 
+    fn triage_connection(state: &mut State, phase: QaPhase) {
+        state.backend_kind = BackendKind::Local;
+        state.connection.origin = TextEdit::new("local://embedded");
+        if let Some(capabilities) = &mut state.connection.capabilities {
+            capabilities.features.push(QA_TRIAGE_FEATURE.into());
+        }
+        state.seed_inbox_qa_fixture(QaSettings::new(true, phase, 2, 1, true), None);
+    }
+
+    fn jobs_related_activity(state: &mut State) {
+        jobs_ready(state);
+        triage_connection(state, QaPhase::Ready);
+        state.seed_activity_triage_fixture(QaRelatedActivity::Found {
+            target: ChatSourceReference::new(ChatSourceKind::Readiness, "actor_catalog".into())
+                .expect("synthetic triage target"),
+            reason: QaRelationshipReason::StageCheck,
+        });
+    }
+
+    fn inbox_related_activity(state: &mut State) {
+        readiness_scenes::observed(state);
+        triage_connection(state, QaPhase::Starting);
+        state.fixture_show_triage_notice();
+        state.seed_activity_triage_fixture(QaRelatedActivity::Found {
+            target: ChatSourceReference::new(ChatSourceKind::Readiness, "actor_search".into())
+                .expect("synthetic current readiness"),
+            reason: QaRelationshipReason::CurrentStatus,
+        });
+    }
+
     fn workstation_status(state: &mut State) {
         readiness_scenes::mixed_status_checks(state);
         state.backend_kind = BackendKind::Local;
@@ -1086,6 +1119,8 @@ mod native {
                 ("maintenance-preview", maintenance_preview),
                 ("jobs-offline", |state| state.page = Page::Jobs),
                 ("jobs-ready", jobs_ready),
+                ("jobs-related-activity", jobs_related_activity),
+                ("inbox-related-activity-limited", inbox_related_activity),
                 ("jobs-filters-ready", jobs_scenes::filters_ready),
                 ("jobs-page-two", jobs_scenes::page_two),
                 ("jobs-no-matches", jobs_scenes::no_matches),

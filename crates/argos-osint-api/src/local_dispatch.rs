@@ -21,6 +21,8 @@ use axum::body::Bytes;
 use axum::http::StatusCode;
 use fleetworks_contracts::capabilities::Capabilities;
 use fleetworks_contracts::capabilities::CONNECT_REGISTRY_FEATURE;
+use fleetworks_contracts::chat::ChatSourceKind;
+use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
 use fleetworks_contracts::context::CredentialPurpose;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::context::RegisteredContext;
@@ -294,6 +296,7 @@ impl LocalGateway {
             op @ (IpcOperation::QaSettings
             | IpcOperation::QaSettingsUpdate(_)
             | IpcOperation::QaTurnSubmit(_)
+            | IpcOperation::QaRelatedActivity(_)
             | IpcOperation::QaLatest
             | IpcOperation::QaEvents(_)
             | IpcOperation::QaCancel(_)) => {
@@ -342,6 +345,15 @@ impl LocalGateway {
         let permission = match &op {
             IpcOperation::QaSettings => Permission::ReadBackend,
             IpcOperation::QaSettingsUpdate(_) => Permission::ManageInboxQa,
+            IpcOperation::QaRelatedActivity(request) => {
+                request
+                    .validate()
+                    .map_err(|_| DispatchError::bad_request("Invalid Assistant source"))?;
+                match request.source.kind {
+                    ChatSourceKind::Job => Permission::ReadWorkstationActivity,
+                    _ => Permission::ReadBackend,
+                }
+            }
             IpcOperation::QaLatest | IpcOperation::QaEvents(_) => {
                 Permission::ReadWorkstationActivity
             }
@@ -381,6 +393,10 @@ impl LocalGateway {
                     request,
                 )
                 .await?,
+            ),
+            IpcOperation::QaRelatedActivity(request) => json_payload(
+                inbox_qa::related_activity_request(&self.state, &context, &self.qa, request)
+                    .await?,
             ),
             IpcOperation::QaLatest => {
                 json_payload(inbox_qa::latest_request(&self.state, &context).await?)
@@ -1245,6 +1261,7 @@ impl LocalGateway {
             "actor-discovery",
             "workstation-cycle-history-v1",
             crate::inbox_qa::FEATURE,
+            QA_TRIAGE_FEATURE,
         ]
         .into_iter()
         .map(str::to_owned)

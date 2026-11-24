@@ -3,6 +3,9 @@
 mod metrics;
 mod question;
 mod readiness;
+mod triage;
+
+pub(crate) use triage::related_activity_request;
 
 pub use readiness::validated_summary_finding;
 
@@ -18,9 +21,9 @@ use argos_osint_core::storage::tx::TxError;
 use axum::http::StatusCode;
 use fleetworks_contracts::chat::{
     ChatSourceKind, ChatSourceReference, QaAvailabilityReason, QaCancelRequest,
-    QaConversationReply, QaEventPage, QaEventQuery, QaModelTarget, QaPhase, QaSettings,
-    QaSettingsUpdate, QaStartupStage, QaTurn, QaTurnNotice, QaTurnRequest, QA_MAX_FINDINGS,
-    QA_MAX_WORDS,
+    QaConversationReply, QaEventPage, QaEventQuery, QaModelTarget, QaPhase, QaRelatedActivity,
+    QaSettings, QaSettingsUpdate, QaStartupStage, QaTurn, QaTurnNotice, QaTurnRequest,
+    QA_MAX_FINDINGS, QA_MAX_WORDS,
 };
 use fleetworks_contracts::context::{CredentialPurpose, MutationContext, Permission};
 use fleetworks_contracts::qa_worker::{
@@ -697,16 +700,16 @@ pub(crate) async fn submit_request(
         Permission::SubmitInteractive,
         Some(&request.context),
     )?;
-    if !context.permits(Permission::ReadBackend) {
-        return Err(ContextFailure::forbidden().into());
-    }
     request.validate().map_err(|_| crate::bad())?;
     context.revalidate(&state.repo).await?;
+    let intent = question::classify(&request.question);
+    require_evidence_permission(context, intent, request.source.as_ref())?;
     if let Some(turn) = store::replay(&state.repo, &actor, &request)
         .await
         .map_err(storage_error)?
     {
         context.revalidate(&state.repo).await?;
+        require_turn_evidence_permission(context, &turn)?;
         return Ok(turn);
     }
     let setting = store::setting(&state.repo).await.map_err(storage_error)?;
@@ -716,49 +719,24 @@ pub(crate) async fn submit_request(
             "Backend inference is off",
         ));
     }
-    if !store::replica_present(&state.repo, setting.generation)
-        .await
-        .map_err(storage_error)?
-    {
-        return Err(ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Backend inference has no ready worker",
-        ));
-    }
     let deadline = Instant::now() + Duration::from_secs(4);
-    let follow_up = if question::classify(&request.question) == Question::FollowUp {
-        tokio::time::timeout_at(deadline, store::last_answered_prompt(&state.repo, &actor))
-            .await
-            .map_err(|_| current_health_unavailable())?
-            .map_err(storage_error)?
-            .filter(|previous| {
-                matches!(
-                    question::classify(previous),
-                    Question::Readiness(_)
-                        | Question::ReadinessExplanation(_)
-                        | Question::StatusChecks(_)
-                        | Question::Metric(_)
-                        | Question::HostResources
-                        | Question::JobsSummary
-                        | Question::Configuration
-                        | Question::Summary
-                )
-            })
-            .map(|question| {
-                let mut resolved = request.clone();
-                resolved.question = question;
-                resolved
-            })
+    let follow_up = if intent == Question::FollowUp {
+        resolve_follow_up(state, &actor, &request, deadline).await?
     } else {
         None
     };
     let evidence_request = follow_up.as_ref().unwrap_or(&request);
+    require_evidence_permission(
+        context,
+        question::classify(&evidence_request.question),
+        evidence_request.source.as_ref(),
+    )?;
     let runtime = SnapshotRuntime {
         generation: setting.generation,
         availability,
     };
     loop {
-        let evidence = snapshot(
+        let snapshot = snapshot(
             state,
             context,
             target,
@@ -769,9 +747,20 @@ pub(crate) async fn submit_request(
         )
         .await?;
         context.revalidate(&state.repo).await?;
-        match store::admit(&state.repo, &actor, &request, evidence, setting.generation).await {
+        match store::admit(
+            &state.repo,
+            &actor,
+            &request,
+            snapshot.evidence,
+            evidence_request.source.as_ref(),
+            snapshot.related_activity,
+            setting.generation,
+        )
+        .await
+        {
             Ok(turn) => {
                 context.revalidate(&state.repo).await?;
+                require_turn_evidence_permission(context, &turn)?;
                 return Ok(turn);
             }
             Err(TxError::Abort(reason))
@@ -779,6 +768,108 @@ pub(crate) async fn submit_request(
             Err(error) => return Err(storage_error(error)),
         }
     }
+}
+
+fn require_evidence_permission(
+    context: &ResolvedRequest,
+    intent: Question,
+    source: Option<&ChatSourceReference>,
+) -> Result<(), ApiError> {
+    let selected_job = source
+        .is_some_and(|source| matches!(source.kind, ChatSourceKind::Job | ChatSourceKind::Cycle));
+    let selected_readiness = source.is_some_and(|source| source.kind == ChatSourceKind::Readiness);
+    let activity = context.permits(Permission::ReadWorkstationActivity);
+    let backend = context.permits(Permission::ReadBackend);
+    let allowed = match intent {
+        Question::JobsSummary | Question::ContextStatus(_) | Question::ContextLogs(_) => activity,
+        Question::Metric(metric) => match metric {
+            question::Metric::Cpu | question::Metric::Memory | question::Metric::Disk => backend,
+            _ => activity,
+        },
+        Question::Readiness(_)
+        | Question::ReadinessExplanation(_)
+        | Question::StatusChecks(_)
+        | Question::HostResources
+        | Question::Configuration
+        | Question::Summary => backend,
+        _ => backend || activity,
+    };
+    if allowed && (!selected_job || activity) && (!selected_readiness || backend) {
+        Ok(())
+    } else {
+        Err(ContextFailure::forbidden().into())
+    }
+}
+
+fn require_turn_evidence_permission(
+    context: &ResolvedRequest,
+    turn: &QaTurn,
+) -> Result<(), ApiError> {
+    let visible = |source: &ChatSourceReference| match source.kind {
+        ChatSourceKind::Job | ChatSourceKind::Cycle | ChatSourceKind::JobCount => {
+            context.permits(Permission::ReadWorkstationActivity)
+        }
+        ChatSourceKind::Readiness | ChatSourceKind::HostMetric => {
+            context.permits(Permission::ReadBackend)
+        }
+        _ => false,
+    };
+    if turn.findings.iter().all(|finding| visible(&finding.source))
+        && match &turn.related_activity {
+            Some(QaRelatedActivity::Found { target, .. }) => visible(target),
+            _ => true,
+        }
+    {
+        Ok(())
+    } else {
+        Err(ContextFailure::forbidden().into())
+    }
+}
+
+async fn resolve_follow_up(
+    state: &ApiState,
+    actor: &store::Actor,
+    request: &QaTurnRequest,
+    deadline: Instant,
+) -> Result<Option<QaTurnRequest>, ApiError> {
+    let mut resolved = request.clone();
+    if resolved.source.is_some() {
+        resolved.question = "What happened?".into();
+        return Ok(Some(resolved));
+    }
+    let previous =
+        tokio::time::timeout_at(deadline, store::last_answered_prompt(&state.repo, actor))
+            .await
+            .map_err(|_| current_health_unavailable())?
+            .map_err(storage_error)?;
+    let Some(previous) = previous else {
+        return Ok(None);
+    };
+    let supported = match question::classify(&previous.question) {
+        Question::ContextStatus(_) | Question::ContextLogs(_) | Question::ExplainSelected => {
+            previous.subject.is_some()
+        }
+        Question::Readiness(_)
+        | Question::ReadinessExplanation(_)
+        | Question::StatusChecks(_)
+        | Question::Metric(_)
+        | Question::HostResources
+        | Question::JobsSummary
+        | Question::Configuration
+        | Question::Summary => true,
+        _ => false,
+    };
+    if !supported {
+        return Ok(None);
+    }
+    resolved.question = previous.question;
+    resolved.source = previous.subject;
+    Ok(Some(resolved))
+}
+
+struct Snapshot {
+    evidence: store::FrozenEvidence,
+    related_activity: Option<QaRelatedActivity>,
 }
 
 struct SnapshotRuntime<'a> {
@@ -794,7 +885,7 @@ async fn snapshot(
     request: &QaTurnRequest,
     runtime: &SnapshotRuntime<'_>,
     deadline: Instant,
-) -> Result<store::FrozenEvidence, ApiError> {
+) -> Result<Snapshot, ApiError> {
     let _permit = target.probes.try_acquire().map_err(|_| {
         ApiError(
             StatusCode::TOO_MANY_REQUESTS,
@@ -815,11 +906,11 @@ async fn snapshot(
         match source.kind {
             ChatSourceKind::Job | ChatSourceKind::Cycle => {
                 let observed_at = observation_start(boundary).await;
-                let (label, status) =
-                    tokio::time::timeout_at(deadline, activity_fact(state, context, source))
+                let activity =
+                    tokio::time::timeout_at(deadline, triage::activity(state, context, source))
                         .await
                         .map_err(|_| current_health_unavailable())??;
-                selected_activity = Some((label, status, observed_at));
+                selected_activity = Some((activity, observed_at));
             }
             ChatSourceKind::Readiness => {}
             _ => return Err(crate::missing()),
@@ -897,6 +988,7 @@ async fn snapshot(
     let mut answer_mode = store::AnswerMode::Grounded;
     let mut notice = None;
     let mut conversation = None;
+    let mut related_activity = None;
     match intent {
         Question::Readiness(check) | Question::ReadinessExplanation(check) => {
             let explanation = matches!(intent, Question::ReadinessExplanation(_));
@@ -998,13 +1090,16 @@ async fn snapshot(
             }
         }
         Question::ContextStatus(kind) => {
-            if let (Some(source), Some((label, status, at))) = (source, selected_activity) {
-                if source.kind == kind && status != "unknown" && at.timestamp_millis() > boundary {
+            if let (Some(source), Some((activity, at))) = (source, &selected_activity) {
+                if source.kind == kind
+                    && activity.status != "unknown"
+                    && at.timestamp_millis() > boundary
+                {
                     push(
                         source.clone(),
-                        label.into(),
-                        format!("{label} is {status}."),
-                        at,
+                        activity.label.into(),
+                        format!("{} is {}.", activity.label, activity.status),
+                        *at,
                         None,
                         false,
                     );
@@ -1012,10 +1107,11 @@ async fn snapshot(
             }
         }
         Question::ContextLogs(kind) => {
-            if let (Some(source), Some((label, _, _))) = (
+            if let (Some(source), Some((activity, _))) = (
                 source.filter(|source| source.kind == kind),
-                selected_activity,
+                &selected_activity,
             ) {
+                let label = activity.label;
                 let at = observation_start(boundary).await;
                 let counts = tokio::time::timeout_at(
                     deadline,
@@ -1044,16 +1140,26 @@ async fn snapshot(
             }
         }
         Question::Configuration => {
-            // Admission atomically verifies that this Embedded generation is enabled and ready.
+            // Admission atomically verifies that this Embedded generation is enabled.
             let reference = ChatSourceReference::new(
                 ChatSourceKind::Readiness,
                 "embedded_inference".to_owned(),
             )
             .map_err(|_| crate::bad())?;
-            let mut text = "This workstation is connected to the Embedded backend. Backend inference is on and the Assistant worker is ready.".to_owned();
-            if let Some(model) = runtime.availability.model(runtime.generation) {
-                use std::fmt::Write as _;
-                let _ = write!(text, " The active model is {}.", model.label());
+            let ready = store::replica_present(&state.repo, runtime.generation)
+                .await
+                .map_err(storage_error)?;
+            let mut text =
+                "This workstation is connected to the Embedded backend. Backend inference is on."
+                    .to_owned();
+            if ready {
+                text.push_str(" The Assistant worker is ready.");
+                if let Some(model) = runtime.availability.model(runtime.generation) {
+                    use std::fmt::Write as _;
+                    let _ = write!(text, " The active model is {}.", model.label());
+                }
+            } else {
+                text.push_str(" The Assistant worker is unavailable.");
             }
             push(
                 reference,
@@ -1086,16 +1192,28 @@ async fn snapshot(
                             true,
                         );
                     }
-                } else if let Some((label, status, at)) = selected_activity {
-                    if status != "unknown" && at.timestamp_millis() > boundary {
+                } else if let Some((activity, at)) = &selected_activity {
+                    if activity.status != "unknown" && at.timestamp_millis() > boundary {
                         push(
                             source.clone(),
-                            label.into(),
-                            format!("{label} is {status}."),
-                            at,
+                            activity.label.into(),
+                            activity.explanation(),
+                            *at,
                             None,
                             false,
                         );
+                    }
+                    if context.permits(Permission::ReadBackend) {
+                        if let Some(check) = activity.check {
+                            related_activity = triage::current_status(
+                                target,
+                                state,
+                                runtime.generation,
+                                check.as_str(),
+                                deadline,
+                            )
+                            .await;
+                        }
                     }
                 }
             } else {
@@ -1129,18 +1247,6 @@ async fn snapshot(
                         true,
                     );
                 }
-                if let (Some(source), Some((label, status, observed_at))) =
-                    (source, selected_activity)
-                {
-                    push(
-                        source.clone(),
-                        label.into(),
-                        format!("{label} is {status}."),
-                        observed_at,
-                        None,
-                        true,
-                    );
-                }
             }
         }
         Question::Greeting => notice = Some(QaTurnNotice::Greeting),
@@ -1155,6 +1261,10 @@ async fn snapshot(
         Question::FollowUp => {
             notice = Some(QaTurnNotice::OutOfScope);
             conversation = Some(QaConversationReply::FollowUpNeedsTopic);
+        }
+        Question::ChooseSubject => {
+            notice = Some(QaTurnNotice::OutOfScope);
+            conversation = Some(QaConversationReply::ChooseSubject);
         }
         Question::Recall => {
             notice = Some(QaTurnNotice::OutOfScope);
@@ -1187,20 +1297,23 @@ async fn snapshot(
     };
     let mut worker_request =
         QaWorkerRequest::new(turn_id.clone(), turn_id, request.question.clone(), passages);
-    if let Some(kind) = dialogue {
+    if let Some(kind) = dialogue.filter(|_| context.permits(Permission::ReadBackend)) {
         answer_mode = store::AnswerMode::Model;
         worker_request.dialogue = Some(QaWorkerDialogue {
             kind,
             history: Vec::new(),
         });
     }
-    Ok(store::FrozenEvidence {
-        answer_mode,
-        notice,
-        conversation,
-        request: worker_request,
-        sources,
-        sampled_at_ms,
+    Ok(Snapshot {
+        evidence: store::FrozenEvidence {
+            answer_mode,
+            notice,
+            conversation,
+            request: worker_request,
+            sources,
+            sampled_at_ms,
+        },
+        related_activity,
     })
 }
 
@@ -1213,35 +1326,6 @@ async fn observation_start(boundary: i64) -> chrono::DateTime<chrono::Utc> {
     at
 }
 
-async fn activity_fact(
-    state: &ApiState,
-    context: &ResolvedRequest,
-    source: &ChatSourceReference,
-) -> Result<(&'static str, &'static str), ApiError> {
-    let scope = crate::activity::scope_for_request(&state.repo, context, None).await?;
-    let row = crate::activity::authorized_job(&state.repo, context, &scope, &source.id).await?;
-    let label = if source.kind == ChatSourceKind::Cycle {
-        if fleetworks_contracts::AtlasCycleReceipt::from_job_id(&row.job.id).is_none() {
-            return Err(crate::missing());
-        }
-        "Selected cycle"
-    } else {
-        "Selected job"
-    };
-    let status = match row.job.state.as_str() {
-        "queued" => "queued",
-        "running" => "running",
-        "reconciling" => "reconciling",
-        "succeeded" | "completed" => "completed",
-        "failed" => "failed",
-        "cancelled" | "canceled" => "canceled",
-        "partial" => "partially completed",
-        "paused" => "paused",
-        _ => "unknown",
-    };
-    Ok((label, status))
-}
-
 pub(crate) async fn latest_request(
     state: &ApiState,
     context: &ResolvedRequest,
@@ -1251,7 +1335,12 @@ pub(crate) async fn latest_request(
         .await
         .map_err(storage_error)?;
     context.revalidate(&state.repo).await?;
-    Ok(latest.map(|(turn, _)| turn))
+    if let Some((turn, _)) = latest {
+        require_turn_evidence_permission(context, &turn)?;
+        Ok(Some(turn))
+    } else {
+        Ok(None)
+    }
 }
 
 pub(crate) async fn events_request(
@@ -1286,6 +1375,7 @@ pub(crate) async fn events_request(
         else {
             return Err(crate::missing());
         };
+        require_turn_evidence_permission(context, &turn)?;
         let gap = query.after > turn.cursor
             || events
                 .first()
@@ -1321,6 +1411,7 @@ pub(crate) async fn cancel_request(
         .await
         .map_err(storage_error)?;
     context.revalidate(&state.repo).await?;
+    require_turn_evidence_permission(context, &turn)?;
     Ok(turn)
 }
 

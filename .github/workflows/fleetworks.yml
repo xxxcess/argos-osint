@@ -52,13 +52,18 @@ on:
         type: choice
         options: [none, flan-t5-small, flan-t5-base, all]
         default: none
+      decision_qualification:
+        description: Measure pinned workstation decision candidates on the selected hosted platform
+        type: choice
+        options: [none, linux, macos]
+        default: none
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: fleetworks-${{ github.event_name }}-${{ github.event_name == 'push' && github.ref != 'refs/heads/nightly' && 'stable' || github.event.pull_request.number || github.ref }}-${{ inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none' && format('inbox-qa-{0}', inputs.inbox_qa_evaluation) || inputs.depot_linux_native_pilot && 'depot-linux-native-pilot' || inputs.stage || 'standard' }}
+  group: fleetworks-${{ github.event_name }}-${{ github.event_name == 'push' && github.ref != 'refs/heads/nightly' && 'stable' || github.event.pull_request.number || github.ref }}-${{ (inputs.decision_qualification == 'linux' || inputs.decision_qualification == 'macos') && format('decision-qualification-{0}', inputs.decision_qualification) || inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none' && format('inbox-qa-{0}', inputs.inbox_qa_evaluation) || inputs.depot_linux_native_pilot && 'depot-linux-native-pilot' || inputs.stage || 'standard' }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
@@ -71,9 +76,17 @@ env:
   CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
+  decision_qualification:
+    name: Measure workstation decision candidates
+    if: github.event_name == 'workflow_dispatch' && (inputs.decision_qualification == 'linux' || inputs.decision_qualification == 'macos')
+    uses: ./.github/workflows/fleetworks-decision-qualification.yml
+    with:
+      head: ${{ inputs.head }}
+      platform: ${{ inputs.decision_qualification }}
+
   inbox_qa_evaluation:
     name: Compare Inbox reply candidates
-    if: github.event_name == 'workflow_dispatch' && inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none'
+    if: github.event_name == 'workflow_dispatch' && inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none' && !(inputs.decision_qualification == 'linux' || inputs.decision_qualification == 'macos')
     uses: ./.github/workflows/fleetworks-inbox-qa-evaluation.yml
     with:
       selection: ${{ inputs.inbox_qa_evaluation }}
@@ -81,7 +94,7 @@ jobs:
 
   linux_native_depot_pilot:
     name: Linux native Depot pilot
-    if: github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot && (inputs.inbox_qa_evaluation == '' || inputs.inbox_qa_evaluation == 'none')
+    if: github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot && (inputs.inbox_qa_evaluation == '' || inputs.inbox_qa_evaluation == 'none') && !(inputs.decision_qualification == 'linux' || inputs.decision_qualification == 'macos')
     uses: ./.github/workflows/fleetworks-native-linux-depot-pilot.yml
     with:
       expected-head: ${{ inputs.head }}
@@ -90,7 +103,7 @@ jobs:
 
   scope:
     name: Select verification scopes
-    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.depot_linux_native_pilot || (inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none'))) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.depot_linux_native_pilot || (inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none') || (inputs.decision_qualification == 'linux' || inputs.decision_qualification == 'macos'))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -702,7 +715,7 @@ jobs:
   source_checks:
     name: ${{ inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none' && 'Regular source checks' || inputs.stage == 'second' && 'Fleetworks second pass source checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual source checks' || 'Fleetworks source checks' }}
     needs: [scope, gsd_core, gsd_ui, images_buildx, images_depot, native_embedded_image, inbox_qa_packs, inbox_qa_embedded]
-    if: always() && !(github.event_name == 'workflow_dispatch' && (inputs.depot_linux_native_pilot || (inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none')))
+    if: always() && !(github.event_name == 'workflow_dispatch' && (inputs.depot_linux_native_pilot || (inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none') || (inputs.decision_qualification == 'linux' || inputs.decision_qualification == 'macos')))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -917,7 +930,7 @@ jobs:
   prepublish:
     name: ${{ inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none' && 'Regular artifact checks' || inputs.stage == 'second' && 'Fleetworks second pass artifact checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual artifact checks' || 'Fleetworks artifact checks' }}
     needs: [scope, source_checks, release_images, release_images_nightly]
-    if: always() && !(github.event_name == 'workflow_dispatch' && (inputs.depot_linux_native_pilot || (inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none')))
+    if: always() && !(github.event_name == 'workflow_dispatch' && (inputs.depot_linux_native_pilot || (inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none') || (inputs.decision_qualification == 'linux' || inputs.decision_qualification == 'macos')))
     runs-on: ubuntu-24.04
     steps:
       - name: Require source checks and every selected release image
@@ -1010,7 +1023,7 @@ jobs:
   required:
     name: ${{ inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none' && 'Regular verification' || inputs.stage == 'second' && 'Fleetworks second pass' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual verification' || 'Fleetworks required' }}
     needs: [scope, prepublish, publish]
-    if: always() && !(github.event_name == 'workflow_dispatch' && (inputs.depot_linux_native_pilot || (inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none')))
+    if: always() && !(github.event_name == 'workflow_dispatch' && (inputs.depot_linux_native_pilot || (inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none') || (inputs.decision_qualification == 'linux' || inputs.decision_qualification == 'macos')))
     runs-on: ubuntu-24.04
     steps:
       - name: Require every selected check and publication

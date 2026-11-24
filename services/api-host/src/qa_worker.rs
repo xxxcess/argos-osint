@@ -139,10 +139,7 @@ pub(crate) fn availability_reason(error: &anyhow::Error) -> QaAvailabilityReason
 }
 
 fn pack_pointer_error(error: anyhow::Error) -> anyhow::Error {
-    let reason = if error
-        .downcast_ref::<io::Error>()
-        .is_some_and(|error| error.kind() == io::ErrorKind::NotFound)
-    {
+    let reason = if pointer_missing(&error) {
         QaAvailabilityReason::PackMissing
     } else {
         QaAvailabilityReason::PackInvalid
@@ -756,35 +753,40 @@ fn protect_private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn pointer_missing(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<io::Error>()
+        .is_some_and(|error| error.kind() == io::ErrorKind::NotFound)
+}
+
 fn worker_pack_pointer(state_dir: &Path, target: QaModelTarget) -> Result<PackPointer> {
     if let Some(pointer) = override_pack()? {
         return Ok(pointer);
     }
-    protect_private_directory(state_dir)?;
-    let targets = state_dir.join("qa-model-packs");
-    match protect_private_directory(&targets) {
-        Ok(()) => {
-            let path = targets.join(format!("{}.json", target.slug()));
-            match read_pointer(&path) {
-                Err(error)
-                    if error
-                        .downcast_ref::<io::Error>()
-                        .is_some_and(|error| error.kind() == io::ErrorKind::NotFound) => {}
-                other => return other,
-            }
-        }
-        Err(error)
-            if error
-                .downcast_ref::<io::Error>()
-                .is_some_and(|error| error.kind() == io::ErrorKind::NotFound) => {}
-        Err(error) => return Err(error),
-    }
-    load_installed_pointer(state_dir)
+    load_installed_pointer(state_dir, target)
 }
 
-fn load_installed_pointer(state_dir: &Path) -> Result<PackPointer> {
+fn load_installed_pointer(state_dir: &Path, target: QaModelTarget) -> Result<PackPointer> {
     protect_private_directory(state_dir)?;
-    read_pointer(&state_dir.join("qa-pack.json"))
+    let targets = state_dir.join("qa-model-packs");
+    let named = match protect_private_directory(&targets) {
+        Ok(()) => true,
+        Err(error) if pointer_missing(&error) => false,
+        Err(error) => return Err(error),
+    };
+    if named {
+        match read_pointer(&targets.join(format!("{}.json", target.slug()))) {
+            Err(error) if pointer_missing(&error) => {}
+            other => return other,
+        }
+    }
+    match read_pointer(&state_dir.join("qa-pack.json")) {
+        Err(error) if pointer_missing(&error) && named && target == QaModelTarget::FlanT5Base => {
+            // A named Small pack also contains the shared verified generator runtime.
+            read_pointer(&targets.join("flan-t5-small.json"))
+        }
+        other => other,
+    }
 }
 
 fn read_pointer(path: &Path) -> Result<PackPointer> {
@@ -1082,7 +1084,9 @@ mod tests {
     fn classifies_missing_and_invalid_local_pack_and_startup_failure() {
         let state = tempfile::tempdir().unwrap();
         fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let reason = || match load_installed_pointer(state.path()).map_err(pack_pointer_error) {
+        let reason = || match load_installed_pointer(state.path(), QaModelTarget::FlanT5Small)
+            .map_err(pack_pointer_error)
+        {
             Ok(_) => panic!("fixture must not load a pack"),
             Err(error) => availability_reason(&error),
         };
@@ -1095,6 +1099,44 @@ mod tests {
             availability_reason(&anyhow!("private synthetic worker failure")),
             QaAvailabilityReason::WorkerStartFailed
         );
+    }
+
+    #[test]
+    fn base_admission_finds_named_small_runtime_only_when_preferred_pointers_are_missing() {
+        let state = tempfile::tempdir().unwrap();
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let targets = state.path().join("qa-model-packs");
+        fs::create_dir(&targets).unwrap();
+        fs::set_permissions(&targets, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = select_target(BASE_RESIDENT_LIMIT + WORKSTATION_RESERVE, u64::MAX).unwrap();
+        assert_eq!(target, QaModelTarget::FlanT5Base);
+        assert!(!state.path().join("qa-model-assets").exists());
+
+        let small = targets.join("flan-t5-small.json");
+        let base = targets.join("flan-t5-base.json");
+        let generic = state.path().join("qa-pack.json");
+        let write = |path: &Path, root: &str| {
+            let pointer = serde_json::json!({
+                "root": root,
+                "manifest_sha256": "a".repeat(64)
+            });
+            fs::write(path, pointer.to_string()).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        let found = || load_installed_pointer(state.path(), target).map(|pointer| pointer.root);
+        write(&small, "/named-small");
+        assert_eq!(found().unwrap(), Path::new("/named-small"));
+
+        write(&generic, "/default-pack");
+        assert_eq!(found().unwrap(), Path::new("/default-pack"));
+        write(&base, "/named-base");
+        assert_eq!(found().unwrap(), Path::new("/named-base"));
+
+        fs::write(&base, b"malformed pointer").unwrap();
+        assert!(!pointer_missing(&found().unwrap_err()));
+        fs::remove_file(&base).unwrap();
+        fs::write(&generic, b"malformed pointer").unwrap();
+        assert!(!pointer_missing(&found().unwrap_err()));
     }
 
     #[tokio::test]

@@ -38,12 +38,14 @@ use crate::capabilities::Capabilities;
 use crate::chat::ChatTurnRequest;
 use crate::chat::QaCancelRequest;
 use crate::chat::QaEventQuery;
+use crate::chat::QaRelatedActivityRequest;
 use crate::chat::QaSettingsUpdate;
 use crate::chat::QaTurnRequest;
 use crate::chat::CHAT_TURNS_PATH;
 use crate::chat::QA_CANCEL_PATH;
 use crate::chat::QA_EVENTS_PATH;
 use crate::chat::QA_LATEST_PATH;
+use crate::chat::QA_RELATED_ACTIVITY_PATH;
 use crate::chat::QA_SETTINGS_PATH;
 use crate::chat::QA_TURNS_PATH;
 use crate::classifier_activation::ActivationRequest;
@@ -722,6 +724,7 @@ pub enum IpcOperation {
     QaSettings,
     QaSettingsUpdate(QaSettingsUpdate),
     QaTurnSubmit(QaTurnRequest),
+    QaRelatedActivity(QaRelatedActivityRequest),
     QaLatest,
     QaEvents(QaEventQuery),
     QaCancel(QaCancelRequest),
@@ -809,6 +812,7 @@ impl fmt::Debug for IpcOperation {
             Self::QaSettings => f.write_str("QaSettings"),
             Self::QaSettingsUpdate(_) => f.write_str("QaSettingsUpdate(..)"),
             Self::QaTurnSubmit(_) => f.write_str("QaTurnSubmit(..)"),
+            Self::QaRelatedActivity(_) => f.write_str("QaRelatedActivity(..)"),
             Self::QaLatest => f.write_str("QaLatest"),
             Self::QaEvents(_) => f.write_str("QaEvents(..)"),
             Self::QaCancel(_) => f.write_str("QaCancel(..)"),
@@ -883,6 +887,7 @@ impl IpcOperation {
         "qa_settings",
         "qa_settings_update",
         "qa_turn_submit",
+        "qa_related_activity",
         "qa_latest",
         "qa_events",
         "qa_cancel",
@@ -943,6 +948,7 @@ impl IpcOperation {
             Self::QaSettings => "qa_settings",
             Self::QaSettingsUpdate(_) => "qa_settings_update",
             Self::QaTurnSubmit(_) => "qa_turn_submit",
+            Self::QaRelatedActivity(_) => "qa_related_activity",
             Self::QaLatest => "qa_latest",
             Self::QaEvents(_) => "qa_events",
             Self::QaCancel(_) => "qa_cancel",
@@ -1003,6 +1009,7 @@ impl IpcOperation {
             Self::QaSettings => (IpcMethod::Get, QA_SETTINGS_PATH),
             Self::QaSettingsUpdate(_) => (IpcMethod::Post, QA_SETTINGS_PATH),
             Self::QaTurnSubmit(_) => (IpcMethod::Post, QA_TURNS_PATH),
+            Self::QaRelatedActivity(_) => (IpcMethod::Post, QA_RELATED_ACTIVITY_PATH),
             Self::QaLatest => (IpcMethod::Get, QA_LATEST_PATH),
             Self::QaEvents(_) => (IpcMethod::Get, QA_EVENTS_PATH),
             Self::QaCancel(_) => (IpcMethod::Post, QA_CANCEL_PATH),
@@ -1096,6 +1103,7 @@ impl IpcOperation {
             CHAT_TURNS_PATH => decode_body(body_bytes).map(Self::ChatTurnSubmit),
             QA_SETTINGS_PATH => decode_body(body_bytes).map(Self::QaSettingsUpdate),
             QA_TURNS_PATH => decode_body(body_bytes).map(Self::QaTurnSubmit),
+            QA_RELATED_ACTIVITY_PATH => decode_body(body_bytes).map(Self::QaRelatedActivity),
             QA_CANCEL_PATH => decode_body(body_bytes).map(Self::QaCancel),
             MODELS_DEFAULTS_SET_PATH => decode_body(body_bytes).map(Self::ModelRoleSet),
             PROFILE_ACCOUNTS_UPSERT_PATH => decode_body(body_bytes).map(Self::ProfileAccountUpsert),

@@ -713,6 +713,8 @@ mod tests {
             "CPU usage is 26.5%.",
             "CPU usage is 25.5% and all jobs completed.",
             "CPU usage is 25.5%. All jobs completed.",
+            "CPU usage is 25.5%. Indexing failed because the disk was full.",
+            "CPU usage is 25.5%. Open https://example.invalid for the job.",
             "Here is the current status.",
         ] {
             assert!(verified_operational_sources(&request, reply).is_none());

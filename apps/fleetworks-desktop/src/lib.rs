@@ -5,6 +5,7 @@
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
 pub mod accessibility;
+mod activity_triage;
 pub mod app;
 pub mod assistant;
 pub mod backend;

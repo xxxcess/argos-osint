@@ -56,13 +56,20 @@ use argos_osint_core::storage::server;
 use argos_osint_core::storage::setup_jobs as core_setup_jobs;
 use fleetworks_contracts::actor_index::ActorIndexLimits;
 use fleetworks_contracts::capabilities::Capabilities;
+use fleetworks_contracts::chat::ChatSourceKind;
+use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::chat::ChatTurnAck;
 use fleetworks_contracts::chat::QaCancelRequest;
 use fleetworks_contracts::chat::QaEventQuery;
 use fleetworks_contracts::chat::QaPhase;
+use fleetworks_contracts::chat::QaRelatedActivity;
+use fleetworks_contracts::chat::QaRelatedActivityRequest;
+use fleetworks_contracts::chat::QaRelationshipReason;
 use fleetworks_contracts::chat::QaSettingsUpdate;
 use fleetworks_contracts::chat::QaTurnRequest;
+use fleetworks_contracts::chat::QaTurnState;
 use fleetworks_contracts::chat::CHAT_TURNS_PATH;
+use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
 use fleetworks_contracts::classifier_activation::ActivationRequest;
 use fleetworks_contracts::classifier_activation::ActiveModelRevision;
 use fleetworks_contracts::classifier_activation::CandidateIdentity;
@@ -1441,11 +1448,29 @@ async fn run_shared_flow(
         None,
     )
     .expect("valid QA turn");
+    let related = QaRelatedActivityRequest::new(
+        ChatSourceReference::new(ChatSourceKind::Readiness, "gateway".into())
+            .expect("valid readiness source"),
+    )
+    .expect("valid triage lookup");
+    assert_eq!(
+        caps.features
+            .iter()
+            .any(|feature| feature == QA_TRIAGE_FEATURE),
+        local
+    );
     if local {
         let qa_settings = client.qa_settings().await.expect("registered QA settings");
         assert!(!qa_settings.enabled, "Embedded Assistant defaults to Off");
         assert_eq!(qa_settings.phase, QaPhase::Off);
         assert!(qa_settings.can_manage);
+        assert_eq!(
+            client
+                .qa_related_activity(&related)
+                .await
+                .expect("registered inline lookup"),
+            QaRelatedActivity::TriageUnavailable,
+        );
         assert!(
             client
                 .latest_qa_turn()
@@ -1469,9 +1494,111 @@ async fn run_shared_flow(
             client.submit_qa_turn(&qa_turn).await.unwrap_err(),
             ClientError::Status(503),
         );
+        let enabled = client
+            .update_qa_settings(&QaSettingsUpdate::new(
+                qa_context.clone(),
+                qa_settings.revision,
+                true,
+            ))
+            .await
+            .expect("enable Embedded Assistant without a pack");
+        assert_ne!(enabled.phase, QaPhase::Ready);
+        let lookup = client
+            .qa_related_activity(&related)
+            .await
+            .expect("read-only relation without a model");
+        assert!(matches!(
+            lookup,
+            QaRelatedActivity::Found { target, reason: QaRelationshipReason::CurrentStatus }
+                if target == related.source
+        ));
+        assert!(
+            client
+                .latest_qa_turn()
+                .await
+                .expect("read latest QA")
+                .is_none(),
+            "inline triage must not create a transcript"
+        );
+        let count = QaTurnRequest::new(
+            format!("parity-failed-count-{transport}"),
+            qa_context.clone(),
+            "How many jobs failed?".into(),
+            None,
+        )
+        .expect("valid scoped count question");
+        let answered = client.submit_qa_turn(&count).await.expect("direct answer");
+        assert_eq!(answered.state, QaTurnState::Answered);
+        assert_eq!(answered.findings.len(), 1);
+        assert_eq!(answered.findings[0].source.kind, ChatSourceKind::JobCount);
+        let usage = answered.context.expect("direct answer context usage");
+        assert_eq!(usage.model_windows, 0);
+        assert_eq!(usage.peak_input_tokens, 0);
+        assert_eq!(
+            client.submit_qa_turn(&count).await.expect("direct replay"),
+            answered
+        );
+
+        let job = ChatSourceReference::new(ChatSourceKind::Job, seed_receipt.job_id.clone())
+            .expect("private seed job reference");
+        let related_job = client
+            .qa_related_activity(&QaRelatedActivityRequest::new(job.clone()).unwrap())
+            .await
+            .expect("selected private job lookup");
+        assert!(matches!(
+            &related_job,
+            QaRelatedActivity::Found { target, .. }
+                if target.kind == ChatSourceKind::Readiness && target.id == "actor_catalog"
+        ));
+        assert_eq!(
+            client.latest_qa_turn().await.expect("read latest QA"),
+            Some(answered)
+        );
+        let explain = QaTurnRequest::new(
+            format!("parity-explain-job-{transport}"),
+            qa_context.clone(),
+            "What happened?".into(),
+            Some(job.clone()),
+        )
+        .expect("selected job question");
+        let explanation = client
+            .submit_qa_turn(&explain)
+            .await
+            .expect("direct job explanation");
+        assert_eq!(explanation.state, QaTurnState::Answered);
+        assert_eq!(explanation.findings[0].source, job);
+        assert_eq!(explanation.related_activity, Some(related_job));
+        let follow_up = QaTurnRequest::new(
+            format!("parity-follow-job-{transport}"),
+            qa_context.clone(),
+            "What about now?".into(),
+            None,
+        )
+        .expect("follow-up after focus was cleared");
+        let refreshed = client
+            .submit_qa_turn(&follow_up)
+            .await
+            .expect("new observation for the retained subject");
+        assert_eq!(refreshed.state, QaTurnState::Answered);
+        assert_eq!(refreshed.question, follow_up.question);
+        assert_eq!(refreshed.findings[0].source, job);
+        assert!(refreshed.findings[0].observed_at > explanation.findings[0].observed_at);
+
+        client
+            .update_qa_settings(&QaSettingsUpdate::new(
+                qa_context.clone(),
+                enabled.revision,
+                false,
+            ))
+            .await
+            .expect("reset Assistant after parity scenario");
     } else {
         let missing = ClientError::Status(404);
         assert_eq!(client.qa_settings().await.unwrap_err(), missing);
+        assert_eq!(
+            client.qa_related_activity(&related).await.unwrap_err(),
+            missing
+        );
         assert_eq!(client.latest_qa_turn().await.unwrap_err(), missing);
         assert_eq!(
             client
@@ -1504,6 +1631,7 @@ async fn run_shared_flow(
         "qa_settings",
         "qa_settings_update",
         "qa_turn_submit",
+        "qa_related_activity",
         "qa_latest",
         "qa_events",
         "qa_cancel",
@@ -1817,6 +1945,7 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
             "qa_settings",
             "qa_settings_update",
             "qa_turn_submit",
+            "qa_related_activity",
             "qa_latest",
             "qa_events",
             "qa_cancel",

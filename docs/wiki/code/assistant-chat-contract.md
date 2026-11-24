@@ -41,17 +41,23 @@ Turn states are `queued`, `running`, `retrying`, `final` and `failed`. V1 is a s
 
 ## Inbox QA V2
 
-The [V2 wire contract](../../../crates/fleetworks-contracts/src/chat/qa.rs) is available through the Embedded companion's inherited Unix socket. Distributed retains Inbox notifications. In Embedded, Workstation Settings shows the Assistant model, readiness, provisioning, size and context usage while Backend inference is on. Workstation Status provides an Assistant shortcut and keeps deterministic diagnostics accessible independently. The Inbox prompts the operator to enable inference when it is off. It opens the composer once the selected model is ready.
+The [V2 wire contract](../../../crates/fleetworks-contracts/src/chat/qa.rs) is available through the Embedded companion's inherited Unix socket. Distributed retains Inbox notifications. In Embedded, Workstation Settings shows the Assistant model, readiness, provisioning, size and context usage while Backend inference is on. Workstation Status provides an Assistant shortcut and keeps deterministic diagnostics accessible independently. The Inbox prompts the operator to enable inference when it is off. On a companion advertising `inbox-qa-triage-v1`, the composer can answer supported direct questions while model inference is starting or unavailable.
 
 ### Prompt flow
 
 [![Native Inbox prompt flow from the composer to the Embedded companion and back](../../diagrams/inbox-prompt-flow.svg)](../../diagrams/inbox-prompt-flow.html)
 
 1. The Rune composer sends the question, a request ID, the registered request context, and an optional source reference. The backend uses the registration to authorize the request. It rejects caller-supplied evidence and conversation history. [Native Inbox](../../../apps/fleetworks-desktop/src/inbox_qa.rs) · [Embedded transport](native-connections.md#backend-types-and-parity)
-2. Admission selects the readiness, host metrics, Jobs counts and selected activity needed for the question. It builds the model's snapshot from its own authorized readings and includes up to two completed exchanges from the same credential, registration, access epoch, and generation. A follow-up such as “And now?” reuses the supported topic and collects fresh readings. Request-ID replays return the original turn. [Admission and evidence](../../../crates/argos-osint-api/src/inbox_qa.rs) · [Turn store](../../../crates/argos-osint-core/src/storage/inbox_qa.rs)
-3. Straightforward readiness, metric and job-count questions return typed timestamped facts directly. Broad summaries and conversational turns can queue one job for the supervised Rust-BERT worker. The worker processes only the selected model, checks for cancellation between decoding steps, and reuses the attention cache. [Intent routing](../../../crates/argos-osint-api/src/inbox_qa/question.rs) · [Executor](../../../services/api-host/src/inbox_qa_service.rs) · [Decoder](../../../tools/assistant-bert/src/dialogue.rs)
+2. Admission selects the readiness, host metrics, Jobs counts and selected activity needed for the question. It builds the model's snapshot from its own authorized readings and includes up to two completed exchanges from the same credential, registration, access epoch, and generation. A follow-up such as “What about now?” reuses the authorized subject and supported intent when they are available, then collects fresh readings. A new explicit selection takes precedence. Request-ID replays preserve the original turn and its authorization boundary. [Admission and evidence](../../../crates/argos-osint-api/src/inbox_qa.rs) · [Turn store](../../../crates/argos-osint-core/src/storage/inbox_qa.rs)
+3. Straightforward readiness, metric and job-count questions return typed timestamped facts directly, including the terminal time window on failed-job counts. Broad summaries and conversational turns can queue one job for the supervised Rust-BERT worker. The worker processes only the selected model, checks for cancellation between decoding steps, and reuses the attention cache. [Intent routing](../../../crates/argos-osint-api/src/inbox_qa/question.rs) · [Executor](../../../services/api-host/src/inbox_qa_service.rs) · [Decoder](../../../tools/assistant-bert/src/dialogue.rs)
 4. Batched text updates arrive as provisional events. For an operational draft the worker and backend accept complete authorized facts. Terminal answers cite exact passages from the snapshot, with their original observation times. When a generated operational reply fails verification, the backend can answer with the current recorded facts. The terminal turn clears the provisional text, seals the canonical reply, and moves the observation boundary forward for the next turn. [Validation](../../../crates/fleetworks-contracts/src/qa_worker.rs) · [Event store](../../../crates/argos-osint-core/src/storage/inbox_qa.rs)
 5. The transcript reconciles the latest turn and event pages by cursor. The compact dial reports the peak input count and percentage of the selected model's input window. **Sources** starts collapsed and shows each citation's observation time when expanded. Stop seals the turn with any already published citations. [Native transcript](../../../apps/fleetworks-desktop/src/inbox_qa.rs)
+
+### Jobs and Inbox triage
+
+Use **Find related activity** on a selected private job or expanded readiness notice. The companion resolves a typed job or readiness reference in the current registration. An explicit stage/check relation can open the associated diagnostic. A historical readiness notice links to **Current status**. A current check alone provides no evidence of the earlier cause. Missing relations, ambiguous choices and unavailable inference have distinct outcomes.
+
+The inline lookup returns one compact result and creates no Assistant exchange or job. **Explain in Assistant** fills the composer with the selected subject for the operator to submit. Both flows use scoped activity and fresh readiness. Navigation is a typed native action that runs after operator input and uses the ordinary destination authorization.
 
 ### Models and lifecycle
 
@@ -64,13 +70,20 @@ The companion selects a model using fresh memory headroom, workload reserve and 
 
 Each exact host fact preserves its decimal value, unit, subject and observation time. Jobs evidence comes from the authorized workstation scope. Resolved, failed, unknown and retired checks remain distinct, and passed checks can cite the authenticated registration. Direct responses report zero model input tokens. Older workers can omit usage or report their legacy limit. Model-generated text stays read-only. The zero-shot classifier has its own model and execution path.
 
+### Decision model qualification
+
+Explicit relationships and unambiguous facts resolve in the companion. When multiple eligible sources remain, the Assistant reports that triage is unavailable. The operator can narrow the subject in the composer. Decision models are not yet available in Workstation Settings.
+
+The [hosted scoring workflow](../../../.github/workflows/fleetworks-decision-qualification.yml) accepts an exact PR SHA through `Fleetworks` dispatch with `decision_qualification=linux` or `macos`. It verifies pinned Julia-1 and vLLM d3-edge assets, calibrates on a separate incident group, and records held-out precision, coverage, out-of-scope choices and warm eight-candidate p95. Its receipts describe isolated scoring. Release qualification also requires combined answer and navigation checks, resource measurements with FLAN and indexing active, and separate evidence for each native target. The Liquid pack also requires distribution license review.
+
 ### Operations
 
 | Private operation | Permission |
 | --- | --- |
 | `qa_settings` | Registered Native backend read |
 | `qa_settings_update` | Registered Native `manage_inbox_qa`, current setting revision |
-| `qa_turn_submit` | Registered Native interactive submit and backend read |
+| `qa_turn_submit` | Registered Native interactive submit and the evidence source’s read grant |
+| `qa_related_activity` | Registered Native backend read for readiness or workstation activity read for a job |
 | `qa_latest`, `qa_events` | Registered Native workstation activity read |
 | `qa_cancel` | Registered Native interactive submit |
 

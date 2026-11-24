@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use fleetworks_contracts::chat::ChatSourceKind;
+use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::chat::QaAvailabilityReason;
 use fleetworks_contracts::chat::QaCancelRequest;
 use fleetworks_contracts::chat::QaConversationReply;
@@ -11,6 +12,7 @@ use fleetworks_contracts::chat::QaEventPage;
 use fleetworks_contracts::chat::QaEventQuery;
 use fleetworks_contracts::chat::QaModelTarget;
 use fleetworks_contracts::chat::QaPhase;
+use fleetworks_contracts::chat::QaRelatedActivity;
 use fleetworks_contracts::chat::QaSettings;
 use fleetworks_contracts::chat::QaSettingsUpdate;
 use fleetworks_contracts::chat::QaStartupStage;
@@ -20,6 +22,7 @@ use fleetworks_contracts::chat::QaTurnRequest;
 use fleetworks_contracts::chat::QaTurnState;
 use fleetworks_contracts::chat::MAX_EVENT_WAIT_SECS;
 use fleetworks_contracts::chat::MAX_INPUT_BYTES;
+use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
 use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::context::RegisteredContext;
@@ -37,6 +40,7 @@ use rune_kit::Kit;
 use rune_kit::ProgressCircle;
 
 use crate::accessibility::ViewPreferences;
+use crate::activity_triage::Anchor;
 use crate::assistant;
 use crate::chat_ui;
 use crate::connection::GatewayEffects;
@@ -152,7 +156,7 @@ pub(crate) struct InboxQa {
     latest: Option<QaTurn>,
     pending: Option<Pending>,
     draft: TextEdit,
-    source: Option<assistant::Context>,
+    source: Option<ChatSourceReference>,
     status: Option<&'static str>,
     settings_loaded: bool,
     details_open: bool,
@@ -371,6 +375,20 @@ impl State {
                 })
     }
 
+    pub(crate) fn supports_workstation_triage(&self) -> bool {
+        self.supports_inbox_qa()
+            && self
+                .connection
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| {
+                    capabilities
+                        .features
+                        .iter()
+                        .any(|feature| feature == QA_TRIAGE_FEATURE)
+                })
+    }
+
     fn inbox_qa_settings(&self) -> Option<&QaSettings> {
         (self.supports_inbox_qa()
             && self.inbox_qa.settings_loaded
@@ -398,16 +416,80 @@ impl State {
                 .is_some_and(|settings| settings.enabled && settings.phase != QaPhase::Stopping)
     }
 
+    pub(crate) fn triage_generation(&self) -> Option<u64> {
+        if !self.supports_workstation_triage() || !self.assistant_settings_visible() {
+            return None;
+        }
+        self.inbox_qa_settings().map(|settings| settings.generation)
+    }
+
     pub(crate) fn inbox_qa_visible(&self) -> bool {
-        self.permission(Permission::ReadWorkstationActivity) && self.assistant_settings_visible()
+        self.assistant_settings_visible()
+            && (self.supports_workstation_triage()
+                || self.permission(Permission::ReadWorkstationActivity))
+    }
+
+    pub(crate) fn can_prefill_inbox_question(&self) -> bool {
+        self.supports_workstation_triage()
+            && self.inbox_qa_visible()
+            && self.permission(Permission::SubmitInteractive)
+            && self.inbox_qa.pending.is_none()
+            && self.inbox_qa.active().is_none()
+    }
+
+    pub(crate) fn prefill_inbox_question(
+        &mut self,
+        source: &ChatSourceReference,
+        anchor: Anchor,
+        tx: &mut Tx,
+    ) {
+        if !self.can_prefill_inbox_question() {
+            return;
+        }
+        let prompt = match source.kind {
+            ChatSourceKind::Job => "What happened with this job?",
+            ChatSourceKind::Readiness => "What happened with this readiness check?",
+            _ => return,
+        };
+        if !self.inbox.open && !self.has_active_confirmation() {
+            debug_assert_eq!(anchor, Anchor::Job);
+            self.open_inbox_from("triage-explain");
+        }
+        if !self.inbox.open {
+            return;
+        }
+        if self.inbox_qa.draft.text.trim().is_empty() {
+            self.inbox_qa.draft = TextEdit::new(prompt);
+        }
+        self.inbox_qa.source = Some(source.clone());
+        tx.focus(COMPOSER, true);
+    }
+
+    pub(crate) fn canonical_related_activity(&self) -> Option<&QaRelatedActivity> {
+        if !self.supports_workstation_triage() || !self.inbox_qa_visible() {
+            return None;
+        }
+        let qa = &self.inbox_qa;
+        if qa.pending.is_some() {
+            return None;
+        }
+        qa.latest
+            .as_ref()
+            .filter(|turn| {
+                matches!(
+                    turn.state,
+                    QaTurnState::Answered | QaTurnState::InsufficientContext
+                )
+            })
+            .and_then(|turn| turn.related_activity.as_ref())
     }
 
     fn can_send_inbox_qa(&self) -> bool {
         self.inbox_qa_visible()
             && self.permission(Permission::SubmitInteractive)
-            && self
-                .inbox_qa_settings()
-                .is_some_and(|settings| settings.phase == QaPhase::Ready)
+            && self.inbox_qa_settings().is_some_and(|settings| {
+                settings.phase == QaPhase::Ready || self.supports_workstation_triage()
+            })
             && !self.inbox_qa.resume
             && self.inbox_qa.pending.is_none()
             && self.inbox_qa.active().is_none()
@@ -677,11 +759,7 @@ impl State {
             self.inbox_qa.status = Some("Could not prepare the question. Try again.");
             return;
         };
-        let source = self
-            .inbox_qa
-            .source
-            .as_ref()
-            .and_then(assistant::source_for);
+        let source = self.inbox_qa.source.clone();
         let Ok(request) = QaTurnRequest::new(
             request_id,
             MutationContext::new(context),
@@ -1043,6 +1121,9 @@ fn answer_state(turn: &QaTurn) -> (chat_ui::TurnState, &'static str) {
         Some(QaConversationReply::FollowUpNeedsTopic) => {
             "What would you like me to check again? Try “What’s the current memory usage?” or select the job you mean."
         }
+        Some(QaConversationReply::ChooseSubject) => {
+            "Which should I check first? Select a job or ask about one subject."
+        }
         Some(QaConversationReply::RecallNeedsHistory) => "Ask me a question first, then I can recap our recent exchange.",
         _ => match turn.notice {
             Some(QaTurnNotice::Greeting) => {
@@ -1261,7 +1342,10 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
                 .key("inbox-qa-live-answer")
                 .live_region(live_region),
         )
-        .child(context_dial(usage, kit));
+        .child(context_dial(usage, kit))
+        .children(state.canonical_related_activity().map(|related| {
+            crate::activity_triage::result_view(state, related, None, kit, preferences)
+        }));
     // Admission and streaming keep the same request key as the queued draft.
     let turn = crate::inbox::enter_from_below(
         rune::col()
@@ -1291,24 +1375,28 @@ fn footer_content(state: &State, kit: &Kit, preferences: ViewPreferences) -> El 
     } else {
         startup_label(state)
     };
-    if let Some(label) = progress {
-        return footer_layer(
-            hint(label, kit)
-                .key("inbox-qa-startup-status")
-                .role("status")
-                .live_region(LiveRegion::Polite),
-            preferences,
-        );
-    }
-    if let Some(problem) = embedded_problem(state) {
-        return footer_layer(problem_content(state, problem, kit), preferences);
+    let problem = embedded_problem(state);
+    let triage = state.supports_workstation_triage() && state.inbox_qa_visible();
+    if !triage {
+        if let Some(label) = progress {
+            return footer_layer(
+                hint(label, kit)
+                    .key("inbox-qa-startup-status")
+                    .role("status")
+                    .live_region(LiveRegion::Polite),
+                preferences,
+            );
+        }
+        if let Some(problem) = problem {
+            return footer_layer(problem_content(state, problem, kit), preferences);
+        }
     }
     if !state.inbox_qa_visible() {
         return nudge(state, kit, preferences);
     }
     let qa = &state.inbox_qa;
     let phase = state.inbox_qa_settings().map(|settings| settings.phase);
-    if phase != Some(QaPhase::Ready) {
+    if phase != Some(QaPhase::Ready) && !triage {
         let label = if matches!(phase, Some(QaPhase::Off | QaPhase::Starting)) {
             "Preparing backend inference…"
         } else {
@@ -1346,24 +1434,25 @@ fn footer_content(state: &State, kit: &Kit, preferences: ViewPreferences) -> El 
     let mut row = rune::row().w_full().flex_wrap().center_y().gap(7.0);
     if let Some(source) = &qa.source {
         row = row.child(
-            ActionButton::new(format!("Remove {} source", source.kind.to_lowercase()))
-                .key("inbox-qa-clear-source")
-                .finish(MetalFinish::Gunmetal)
-                .disabled(qa.pending.is_some())
-                .on_press(|state: &mut State| state.inbox_qa.source = None)
-                .build(kit, preferences, None),
+            ActionButton::new(format!(
+                "Remove {} source",
+                citation_kind(source.kind).to_lowercase()
+            ))
+            .key("inbox-qa-clear-source")
+            .finish(MetalFinish::Gunmetal)
+            .disabled(qa.pending.is_some())
+            .on_press(|state: &mut State| state.inbox_qa.source = None)
+            .build(kit, preferences, None),
         );
     } else {
         let current = assistant::current_context(state);
-        if assistant::source_for(&current).is_some() {
+        if let Some(source) = assistant::source_for(&current) {
             row = row.child(
                 ActionButton::new(format!("Include {}", current.kind.to_lowercase()))
                     .key("inbox-qa-pin-source")
                     .finish(MetalFinish::Gunmetal)
                     .disabled(qa.pending.is_some())
-                    .on_press(move |state: &mut State| {
-                        state.inbox_qa.source = Some(current.clone())
-                    })
+                    .on_press(move |state: &mut State| state.inbox_qa.source = Some(source.clone()))
                     .build(kit, preferences, None),
             );
         }
@@ -1389,6 +1478,20 @@ fn footer_content(state: &State, kit: &Kit, preferences: ViewPreferences) -> El 
         );
     }
     let mut content = rune::col().w_full().gap(7.0);
+    if phase != Some(QaPhase::Ready) {
+        let reason = progress
+            .or_else(|| problem.map(|problem| problem.status))
+            .unwrap_or("Language model unavailable");
+        content = content.child(
+            hint(
+                &format!("{reason}. Direct facts and verified links are available."),
+                kit,
+            )
+            .key("inbox-qa-limited")
+            .role("status")
+            .live_region(LiveRegion::Polite),
+        );
+    }
     if let Some(status) = qa.status {
         content = content.child(hint(status, kit).role("status"));
     }
@@ -1897,6 +2000,11 @@ mod tests {
                 QaTurnNotice::OutOfScope,
                 Some(QaConversationReply::FollowUpNeedsTopic),
                 "What’s the current memory usage?",
+            ),
+            (
+                QaTurnNotice::OutOfScope,
+                Some(QaConversationReply::ChooseSubject),
+                "Which should I check first?",
             ),
             (
                 QaTurnNotice::ObservationUnavailable,

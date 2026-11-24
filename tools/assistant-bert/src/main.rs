@@ -641,7 +641,9 @@ pub(crate) fn run(mut output: impl FnMut(QaWorkerReply) -> io::Result<()>) -> Re
                 }
             }
             QaWorkerCommand::Shutdown => return Ok(()),
-            QaWorkerCommand::Open | QaWorkerCommand::OpenWithContext => {
+            QaWorkerCommand::Open
+            | QaWorkerCommand::OpenWithContext
+            | QaWorkerCommand::OpenWithDialogue => {
                 return Err(anyhow!("unexpected QA worker handshake"));
             }
         }

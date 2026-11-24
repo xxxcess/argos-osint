@@ -68,7 +68,7 @@ fn main() -> Result<()> {
 }
 
 fn config(dir: &Path, model_type: ModelType) -> GenerateConfig {
-    let resource = |name| -> Box<dyn ResourceProvider> {
+    let resource = |name| -> Box<dyn ResourceProvider + Send> {
         Box::new(LocalResource {
             local_path: dir.join(name),
         })

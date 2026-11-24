@@ -47,13 +47,18 @@ on:
         description: Compare Depot cold and warm Linux native builds with a same-revision GitHub baseline
         type: boolean
         default: false
+      inbox_qa_evaluation:
+        description: Compare pinned Inbox reply candidates on GitHub Linux without building or publishing packages
+        type: choice
+        options: [none, flan-t5-small, flan-t5-base, gpt2-small, gpt2-medium, all]
+        default: none
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: fleetworks-${{ github.event_name }}-${{ github.event_name == 'push' && github.ref != 'refs/heads/nightly' && 'stable' || github.event.pull_request.number || github.ref }}-${{ inputs.depot_linux_native_pilot && 'depot-linux-native-pilot' || inputs.stage || 'standard' }}
+  group: fleetworks-${{ github.event_name }}-${{ github.event_name == 'push' && github.ref != 'refs/heads/nightly' && 'stable' || github.event.pull_request.number || github.ref }}-${{ inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none' && format('inbox-qa-{0}', inputs.inbox_qa_evaluation) || inputs.depot_linux_native_pilot && 'depot-linux-native-pilot' || inputs.stage || 'standard' }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
@@ -66,9 +71,17 @@ env:
   CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
+  inbox_qa_evaluation:
+    name: Compare Inbox reply candidates
+    if: github.event_name == 'workflow_dispatch' && inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none'
+    uses: ./.github/workflows/fleetworks-inbox-qa-evaluation.yml
+    with:
+      selection: ${{ inputs.inbox_qa_evaluation }}
+      head: ${{ inputs.head || github.sha }}
+
   linux_native_depot_pilot:
     name: Linux native Depot pilot
-    if: github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot
+    if: github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot && (inputs.inbox_qa_evaluation == '' || inputs.inbox_qa_evaluation == 'none')
     uses: ./.github/workflows/fleetworks-native-linux-depot-pilot.yml
     with:
       expected-head: ${{ inputs.head }}
@@ -77,7 +90,7 @@ jobs:
 
   scope:
     name: Select verification scopes
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.depot_linux_native_pilot || (inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none'))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -715,9 +728,9 @@ jobs:
           retention-days: 7
 
   source_checks:
-    name: ${{ inputs.stage == 'second' && 'Fleetworks second pass source checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual source checks' || 'Fleetworks source checks' }}
+    name: ${{ inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none' && 'Regular source checks' || inputs.stage == 'second' && 'Fleetworks second pass source checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual source checks' || 'Fleetworks source checks' }}
     needs: [scope, gsd_core, gsd_ui, images_buildx, images_depot, native_embedded_image, inbox_qa_packs, inbox_qa_embedded, inbox_qa_distributed]
-    if: always() && !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot)
+    if: always() && !(github.event_name == 'workflow_dispatch' && (inputs.depot_linux_native_pilot || (inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none')))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -937,9 +950,9 @@ jobs:
     steps: *release_image_steps
 
   prepublish:
-    name: ${{ inputs.stage == 'second' && 'Fleetworks second pass artifact checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual artifact checks' || 'Fleetworks artifact checks' }}
+    name: ${{ inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none' && 'Regular artifact checks' || inputs.stage == 'second' && 'Fleetworks second pass artifact checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual artifact checks' || 'Fleetworks artifact checks' }}
     needs: [scope, source_checks, release_images, release_images_nightly]
-    if: always() && !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot)
+    if: always() && !(github.event_name == 'workflow_dispatch' && (inputs.depot_linux_native_pilot || (inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none')))
     runs-on: ubuntu-24.04
     steps:
       - name: Require source checks and every selected release image
@@ -1030,9 +1043,9 @@ jobs:
             --directory "$RUNNER_TEMP/release"
 
   required:
-    name: ${{ inputs.stage == 'second' && 'Fleetworks second pass' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual verification' || 'Fleetworks required' }}
+    name: ${{ inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none' && 'Regular verification' || inputs.stage == 'second' && 'Fleetworks second pass' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual verification' || 'Fleetworks required' }}
     needs: [scope, prepublish, publish]
-    if: always() && !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot)
+    if: always() && !(github.event_name == 'workflow_dispatch' && (inputs.depot_linux_native_pilot || (inputs.inbox_qa_evaluation && inputs.inbox_qa_evaluation != 'none')))
     runs-on: ubuntu-24.04
     steps:
       - name: Require every selected check and publication

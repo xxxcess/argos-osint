@@ -1170,7 +1170,8 @@ async fn snapshot(
         None => observation_start(boundary).await,
     }
     .timestamp_millis();
-    let turn_id = store::accepted_turn_id(actor, request, generation).map_err(storage_error)?;
+    let turn_id =
+        store::accepted_turn_id(actor, request, runtime.generation).map_err(storage_error)?;
     let dialogue = match intent {
         Question::Greeting => Some(QaDialogueKind::Greeting),
         Question::Acknowledgement => Some(QaDialogueKind::Acknowledgement),

@@ -14,6 +14,7 @@ use argos_osint_core::storage::job_dispatch::{
     self, DeliveryClaim, DeliveryFinish, DeliveryLease, DeliveryOutcome, Envelope,
 };
 use argos_osint_core::storage::repo::Repository;
+use argos_osint_core::storage::tx::TxError;
 use chrono::DateTime;
 use chrono::Utc;
 use fleetworks_contracts::chat::ChatSourceKind;
@@ -52,7 +53,45 @@ struct Executor {
     owner: String,
     placement: String,
     availability: Option<QaRuntimeAvailability>,
-    lease_held: bool,
+    replica_lease: ReplicaLease,
+}
+
+#[derive(Default)]
+enum ReplicaLease {
+    #[default]
+    Unclaimed,
+    Claimed,
+    Reaped,
+}
+
+impl ReplicaLease {
+    async fn release(
+        &mut self,
+        shutdown: impl Future<Output = Result<()>>,
+        forget: impl Future<Output = Result<(), TxError>>,
+    ) {
+        if matches!(self, Self::Claimed) {
+            *self = Self::Unclaimed;
+            if !matches!(timeout(STOP_TIMEOUT, shutdown).await, Ok(Ok(()))) {
+                tracing::warn!(
+                    qa_replica_stage = "reap_confirmation",
+                    "Inbox QA model reap is unconfirmed"
+                );
+                return;
+            }
+            *self = Self::Reaped;
+        }
+        if matches!(self, Self::Reaped) {
+            if matches!(timeout(AUTH_TIMEOUT, forget).await, Ok(Ok(()))) {
+                *self = Self::Unclaimed;
+            } else {
+                tracing::warn!(
+                    qa_replica_stage = "reap_record",
+                    "Inbox QA reap confirmation could not be recorded"
+                );
+            }
+        }
+    }
 }
 
 pub(crate) async fn run(
@@ -70,7 +109,7 @@ pub(crate) async fn run(
         owner: format!("assistant-qa-{}", argos_osint_core::store::new_id()),
         placement,
         availability,
-        lease_held: false,
+        replica_lease: ReplicaLease::default(),
     };
     let stop = CancellationToken::new();
     let result = {
@@ -100,6 +139,14 @@ impl Executor {
         let mut next_store_notice = Instant::now();
         let mut next_queue_notice = Instant::now();
         while !stop.is_cancelled() {
+            if matches!(self.replica_lease, ReplicaLease::Reaped) {
+                // A transient datastore error must not strand the Off transition.
+                self.unload().await;
+                if matches!(self.replica_lease, ReplicaLease::Reaped) {
+                    self.pause(stop).await;
+                    continue;
+                }
+            }
             let setting = match timeout(AUTH_TIMEOUT, store::setting(&self.repo)).await {
                 Ok(Ok(setting)) => setting,
                 _ => {
@@ -158,7 +205,11 @@ impl Executor {
                 }
                 initialized = true;
             }
-            if setting.enabled && loaded.is_none() && Instant::now() >= next_warm {
+            if setting.enabled
+                && loaded.is_none()
+                && matches!(self.replica_lease, ReplicaLease::Unclaimed)
+                && Instant::now() >= next_warm
+            {
                 next_warm = Instant::now() + WARM_RETRY;
                 let claim = timeout(
                     AUTH_TIMEOUT,
@@ -172,7 +223,7 @@ impl Executor {
                 .await;
                 match claim {
                     Ok(Ok(store::ReplicaClaim::Warm)) => {
-                        self.lease_held = true;
+                        self.replica_lease = ReplicaLease::Claimed;
                         if self
                             .warm(setting.generation, setting.generator_preference, stop)
                             .await
@@ -188,7 +239,7 @@ impl Executor {
                         }
                     }
                     Ok(Ok(store::ReplicaClaim::ConfirmReap)) => {
-                        self.lease_held = true;
+                        self.replica_lease = ReplicaLease::Claimed;
                         self.unload().await;
                     }
                     Ok(Ok(store::ReplicaClaim::Wait)) => {}
@@ -361,32 +412,12 @@ impl Executor {
     }
 
     async fn unload(&mut self) {
-        if !std::mem::take(&mut self.lease_held) {
-            return;
-        }
-        if !matches!(
-            timeout(STOP_TIMEOUT, self.model.shutdown()).await,
-            Ok(Ok(()))
-        ) {
-            tracing::warn!(
-                qa_replica_stage = "reap_confirmation",
-                "Inbox QA model reap is unconfirmed"
-            );
-            return;
-        }
-        if !matches!(
-            timeout(
-                AUTH_TIMEOUT,
+        self.replica_lease
+            .release(
+                self.model.shutdown(),
                 store::forget_replica(&self.repo, &self.placement, &self.owner),
             )
-            .await,
-            Ok(Ok(()))
-        ) {
-            tracing::warn!(
-                qa_replica_stage = "reap_record",
-                "Inbox QA reap confirmation could not be recorded"
-            );
-        }
+            .await;
     }
 
     async fn relay(&self) -> Result<()> {
@@ -1173,6 +1204,35 @@ mod tests {
     use fleetworks_contracts::qa_worker::QaWorkerRequest;
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_recording_confirmed_reap_without_repeating_shutdown() {
+        let mut lease = ReplicaLease::Claimed;
+        lease
+            .release(std::future::ready(Ok(())), std::future::pending())
+            .await;
+        assert!(matches!(lease, ReplicaLease::Reaped));
+
+        lease
+            .release(
+                async { panic!("confirmed reap must not shut down the worker again") },
+                std::future::ready(Ok(())),
+            )
+            .await;
+        assert!(matches!(lease, ReplicaLease::Unclaimed));
+    }
+
+    #[tokio::test]
+    async fn does_not_forget_a_replica_without_confirmed_reap() {
+        let mut lease = ReplicaLease::Claimed;
+        lease
+            .release(
+                std::future::ready(Err(anyhow!("worker reap failed"))),
+                async { panic!("an unconfirmed reap must not release the durable permit") },
+            )
+            .await;
+        assert!(matches!(lease, ReplicaLease::Unclaimed));
+    }
 
     #[tokio::test]
     async fn keeps_drained_worker_only_after_a_successful_terminal_frame() {

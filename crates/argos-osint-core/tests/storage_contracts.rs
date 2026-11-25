@@ -19,13 +19,19 @@
 #![cfg(feature = "surreal")]
 
 mod support;
+#[path = "support/workstation.rs"]
+mod workstation;
 
 use argos_osint_core::storage;
+use argos_osint_core::storage::inbox_qa as qa;
+use argos_osint_core::storage::tx::TxError;
+use fleetworks_contracts::chat::QaTurnState;
 use support::*;
 use surrealdb::engine::any::{connect, Any};
 use surrealdb::opt::auth::Root;
 use surrealdb::types::{QueryError, SurrealValue};
 use surrealdb::Surreal;
+use workstation::{register, start_qa_fixture};
 
 #[tokio::test]
 async fn authentication_rejects_bad_and_missing_credentials() {
@@ -634,4 +640,79 @@ async fn concurrent_diskann_inserts_with_filtered_search() {
             Some(format!("c{n:03}"))
         );
     }
+}
+
+#[tokio::test]
+async fn qa_fallback_seals_all_findings_atomically_under_the_live_lease() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "workstation_assistant_fallback").await;
+    let context = register(&repo, "node-a", "research").await;
+    let actor = qa::Actor::new(
+        "scope-a".into(),
+        "fixture-native".into(),
+        "fixture-access".into(),
+        context.clone(),
+    );
+    let enabled = qa::set(
+        &repo,
+        &actor,
+        qa::setting(&repo).await.unwrap().revision,
+        true,
+    )
+    .await
+    .unwrap();
+    let (_, lease) = start_qa_fixture(&repo, &actor, &context, enabled, "fallback-batch").await;
+    let evidence = qa::start(&repo, &lease).await.unwrap().unwrap();
+    let findings: Vec<_> = evidence
+        .request
+        .passages
+        .iter()
+        .zip(&evidence.sources)
+        .map(|(passage, source)| {
+            source.finding(
+                passage.text.clone(),
+                0,
+                u32::try_from(passage.text.chars().count()).unwrap(),
+            )
+        })
+        .collect();
+    let before = qa::latest(&repo, &actor).await.unwrap().unwrap().0;
+    let duplicate = [findings[0].clone(), findings[0].clone()];
+    assert!(matches!(
+        qa::publish_findings_and_complete(
+            &repo, &lease, QaTurnState::Answered, &duplicate, qa::ModelResult::default(),
+        )
+        .await,
+        Err(TxError::Abort(reason)) if reason == "inbox_qa:invalid_part"
+    ));
+    let (running, _) = qa::latest(&repo, &actor).await.unwrap().unwrap();
+    assert_eq!(running.state, QaTurnState::Running);
+    assert_eq!(running.cursor, before.cursor);
+    assert!(running.findings.is_empty());
+
+    assert!(qa::publish_findings_and_complete(
+        &repo,
+        &lease,
+        QaTurnState::Answered,
+        &findings,
+        qa::ModelResult::default(),
+    )
+    .await
+    .unwrap());
+    let (answered, events) = qa::latest(&repo, &actor).await.unwrap().unwrap();
+    assert_eq!(answered.state, QaTurnState::Answered);
+    assert_eq!(answered.findings, findings);
+    assert_eq!(answered.cursor, before.cursor + 3);
+    assert_eq!(events.last().unwrap().state, QaTurnState::Answered);
+    assert!(!qa::publish_findings_and_complete(
+        &repo,
+        &lease,
+        QaTurnState::Answered,
+        &findings,
+        qa::ModelResult::default(),
+    )
+    .await
+    .unwrap());
 }

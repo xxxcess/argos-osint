@@ -24,6 +24,23 @@ pub(super) enum Question {
 }
 
 impl Question {
+    /// Keep canonical, single-fact requests on the direct path.
+    pub(super) fn is_exact_fact(self, question: &str) -> bool {
+        let question = question.trim().trim_end_matches(['?', '.', '!']);
+        let canonical = match self {
+            Self::Metric(Metric::Cpu) => "What is the current CPU utilization",
+            Self::Metric(Metric::Memory) => "What is the current memory usage",
+            Self::Metric(Metric::Disk) => "What is the current disk usage",
+            Self::Metric(Metric::QueuedJobs) => "How many jobs are queued",
+            Self::Metric(Metric::RunningJobs) => "How many jobs are running",
+            Self::Metric(Metric::RetryingJobs) => "How many jobs are retrying",
+            Self::Metric(Metric::FailedJobs) => "How many jobs failed in the past 24 hours",
+            Self::Readiness(ReadinessCheckId::ActorCatalog) => "Does the catalog need seeding",
+            _ => return false,
+        };
+        question.eq_ignore_ascii_case(canonical)
+    }
+
     pub(super) fn wants_measurement(self, metric: Metric) -> bool {
         match (self, metric) {
             (Self::Metric(requested), metric) => requested == metric,
@@ -668,6 +685,8 @@ fn summary(question: &str, query: &str) -> bool {
     if matches!(
         question,
         "how's everything"
+            | "how's everything doing"
+            | "how's everything looking"
             | "how is everything"
             | "how is everything doing"
             | "how is everything looking"
@@ -686,6 +705,20 @@ fn summary(question: &str, query: &str) -> bool {
     let query = strip_any_prefix(question, &["summarize ", "summarise "]).unwrap_or(query);
     let query = strip_article(query);
     let query = strip_any_prefix(query, &["overall ", "current "]).unwrap_or(query);
+    if let Some(subject) = strip_any_prefix(
+        query,
+        &[
+            "can you give me the big picture on ",
+            "could you give me the big picture on ",
+            "give me the big picture on ",
+            "big picture on ",
+        ],
+    ) {
+        return matches!(
+            subject,
+            "this workstation" | "the workstation" | "the backend"
+        );
+    }
     health_subject(query)
         .or_else(|| how_is_subject(question))
         .or_else(|| {

@@ -271,6 +271,20 @@ pub fn valid_dialogue_reply(reply: &str) -> bool {
     bounded_text(reply, QA_MAX_DIALOGUE_MESSAGE_BYTES)
         && reply.split_whitespace().count() <= QA_MAX_VISIBLE_WORDS
         && !reply.chars().any(char::is_control)
+        && !contains_prompt_marker(reply)
+}
+
+fn contains_prompt_marker(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    [
+        "earlier user",
+        "earlier assistant",
+        "current user",
+        "approved observations:",
+        "reply:",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
 }
 
 /// Admit only complete, quoted operational facts and harmless introductory wording.
@@ -476,16 +490,15 @@ impl QaWorkerSequence {
                 }
                 let previous_length = self.draft.len();
                 self.draft.push_str(text);
-                if request
-                    .dialogue
-                    .as_ref()
-                    .is_some_and(|dialogue| dialogue.kind == QaDialogueKind::Operational)
-                    && verified_operational_sources(request, &self.draft).is_none()
+                if contains_prompt_marker(&self.draft)
+                    || (request
+                        .dialogue
+                        .as_ref()
+                        .is_some_and(|dialogue| dialogue.kind == QaDialogueKind::Operational)
+                        && verified_operational_sources(request, &self.draft).is_none())
                 {
                     self.draft.truncate(previous_length);
-                    return Err(invalid(
-                        "QA worker returned an unverified operational draft",
-                    ));
+                    return Err(invalid("QA worker returned an invalid draft"));
                 }
                 self.delta_count += 1;
             }
@@ -606,6 +619,37 @@ fn invalid(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_prompt_roles_in_final_and_streamed_conversation() {
+        assert!(valid_dialogue_reply("Hi! How can I help?"));
+        for reply in [
+            "Earlier user: summarize the workstation",
+            "Hi! EARLIER ASSISTANT: all checks passed.",
+            "Current user: Hi!",
+            "Approved observations: Ready.",
+            "Reply: Hello there.",
+        ] {
+            assert!(!valid_dialogue_reply(reply), "{reply}");
+        }
+
+        let mut request =
+            QaWorkerRequest::new("turn".into(), "snapshot".into(), "Hi!".into(), vec![]);
+        request.dialogue = Some(QaWorkerDialogue {
+            kind: QaDialogueKind::Greeting,
+            history: vec![],
+        });
+        let mut sequence = QaWorkerSequence::default();
+        let delta = |sequence, text: &str| QaWorkerEvent::Delta {
+            turn_id: request.turn_id.clone(),
+            sequence,
+            text: text.into(),
+        };
+        assert!(sequence.accept(&request, &delta(1, "Hi! Earlier")).is_ok());
+        assert!(sequence
+            .accept(&request, &delta(2, " user: summarize the workstation"))
+            .is_err());
+    }
 
     #[test]
     fn unicode_spans_are_exact_and_half_open() {

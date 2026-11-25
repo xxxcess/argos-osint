@@ -63,6 +63,7 @@ use crate::State;
 const SETTINGS_REFRESH: f64 = 5.0;
 const STARTUP_REFRESH: f64 = 1.0;
 const MIN_EVENT_INTERVAL: f64 = 0.2;
+const GREETING: &str = "inbox-qa-greeting";
 const COMPOSER: &str = "inbox-qa-composer";
 const SOURCES_TOGGLE: &str = "inbox-qa-sources-toggle";
 const SOURCES_CONTENT: &str = "inbox-qa-sources";
@@ -1671,6 +1672,16 @@ fn context_dial(usage: Option<QaContextUsage>, kit: &Kit) -> El {
     }))
 }
 
+pub(crate) fn greeting(state: &State, kit: &Kit) -> Option<El> {
+    state.can_send_inbox_qa().then(|| {
+        chat_ui::greeting(
+            GREETING,
+            "Hi! Ask me about workstation readiness, memory usage, or running jobs.",
+            kit,
+        )
+    })
+}
+
 pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -> Option<El> {
     if !state.inbox_qa_visible() {
         return None;
@@ -2019,6 +2030,10 @@ mod tests {
     }
 
     fn active_drawer(size: (f32, f32)) -> Runtime<State> {
+        qa_drawer(size, Some(turn(QaTurnState::Running, 1)))
+    }
+
+    fn qa_drawer(size: (f32, f32), latest: Option<QaTurn>) -> Runtime<State> {
         let mut state = crate::tests::registered_fixture();
         state.page = crate::app::Page::Workstation;
         state.backend_kind = BackendKind::Local;
@@ -2035,10 +2050,7 @@ mod tests {
             ..Default::default()
         });
         state.seed_inbox_qa_drawer_fixture();
-        state.seed_inbox_qa_fixture(
-            QaSettings::new(true, QaPhase::Ready, 1, 1, true),
-            Some(turn(QaTurnState::Running, 1)),
-        );
+        state.seed_inbox_qa_fixture(QaSettings::new(true, QaPhase::Ready, 1, 1, true), latest);
         let mut runtime = Runtime::new(
             state,
             crate::app::view,
@@ -2061,6 +2073,57 @@ mod tests {
                 .flatten()
                 .map(|child| accessibility_nodes_with_key(child, key))
                 .sum::<usize>()
+    }
+
+    #[test]
+    fn empty_inbox_shows_a_static_assistant_greeting() {
+        for size in [(640.0, 480.0), (1280.0, 800.0)] {
+            let mut runtime = qa_drawer(size, None);
+            let tree = runtime.accessibility_json();
+            assert_eq!(accessibility_nodes_with_key(&tree, GREETING), 1);
+            let rendered = tree.to_string();
+            assert!(rendered.contains("Assistant message"));
+            assert!(rendered.contains("workstation readiness, memory usage, or running jobs"));
+            assert!(runtime.find(COMPOSER).is_some());
+            assert!(runtime.find(SOURCES_TOGGLE).is_none());
+            assert!(runtime.find(CONTEXT_DIAL).is_none());
+            assert!(runtime.state.inbox_qa.latest.is_none());
+            assert!(runtime.state.inbox_qa.pending.is_none());
+            let (greeting, _) = runtime.presented(GREETING).unwrap();
+            let (scroll, _) = runtime.presented(crate::inbox::SCROLL).unwrap();
+            assert!(greeting[1] >= scroll[1] - 0.5);
+            assert!(greeting[1] + greeting[3] <= scroll[1] + scroll[3] + 0.5);
+
+            runtime.update(|state, _| state.inbox_qa.request_resume());
+            runtime.frame(0.75);
+            assert!(runtime.find(GREETING).is_none());
+
+            runtime.update(|state, tx| {
+                let context = MutationContext::new(state.registration.context.as_ref().unwrap());
+                let request = QaTurnRequest::new(
+                    "fixture-queued".into(),
+                    context,
+                    "What is the current memory usage?".into(),
+                    None,
+                )
+                .unwrap();
+                state.inbox_qa.resume = false;
+                state.inbox_qa.pending = Some(Pending { request });
+                tx.scroll_to_bottom_instant(crate::inbox::SCROLL);
+            });
+            runtime.frame(1.0);
+            assert!(runtime.find(GREETING).is_none());
+            assert!(runtime.find(REPLY).is_some());
+            assert_eq!(runtime.scroll_at_bottom(crate::inbox::SCROLL), Some(true));
+
+            runtime.update(|state, _| {
+                state.inbox_qa.pending = None;
+                state.inbox_qa.adopt(Some(turn(QaTurnState::Answered, 3)));
+            });
+            runtime.frame(1.25);
+            assert!(runtime.find(GREETING).is_none());
+            assert!(runtime.accessibility_json().to_string().contains(FINDING));
+        }
     }
 
     #[test]

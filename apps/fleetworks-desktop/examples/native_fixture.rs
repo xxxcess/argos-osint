@@ -644,6 +644,12 @@ mod native {
         state.seed_inbox_qa_fixture(settings, None);
     }
 
+    fn inbox_qa_ready(state: &mut State) {
+        registered(state);
+        state.seed_inbox_qa_drawer_fixture();
+        triage_connection(state, QaPhase::Ready);
+    }
+
     fn inbox_qa_turn(state: &mut State, stage: QaTurnState) {
         registered(state);
         state.seed_inbox_qa_drawer_fixture();
@@ -955,6 +961,7 @@ mod native {
                 ("inbox-qa-off-distributed", |state| {
                     inbox_qa_off(state, BackendKind::Remote);
                 }),
+                ("inbox-qa-ready", inbox_qa_ready),
                 ("inbox-qa-pending", |state| {
                     inbox_qa_turn(state, QaTurnState::Running);
                 }),

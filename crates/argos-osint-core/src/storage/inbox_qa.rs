@@ -172,6 +172,8 @@ impl Actor {
 
 /// Maximum age of evidence admitted to an Inbox turn.
 pub const MAX_EVIDENCE_AGE_MS: i64 = 5_000;
+/// Label for the approved historical side of an observation comparison.
+pub const PREVIOUS_OBSERVATION_LABEL: &str = "Previous observation";
 
 /// Decide whether a frozen request is answered from an exact fact or sent to the model.
 #[derive(Clone, Copy, Default, Deserialize, Serialize)]
@@ -1058,7 +1060,12 @@ pub async fn admit(
             }
             let mut frozen = evidence.clone();
             if let Some(dialogue) = frozen.request.dialogue.as_mut().filter(|_| needs_model) {
-                dialogue.history = recent_dialogue_in(&tx, key, generation, timestamp).await?;
+                if dialogue.kind == QaDialogueKind::Operational {
+                    // The snapshot already resolves the approved subject and comparison.
+                    frozen.request.question = request.question.clone();
+                } else if dialogue.kind == QaDialogueKind::Recall {
+                    dialogue.history = recent_dialogue_in(&tx, key, generation, timestamp).await?;
+                }
             }
             let mut exchange = Exchange {
                 actor: actor.clone(),

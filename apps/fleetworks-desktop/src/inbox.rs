@@ -941,26 +941,28 @@ fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
     }
     let exchange = crate::inbox_qa::exchange(state, kit, preferences);
     let stick_bottom = exchange.is_some();
+    let chat = exchange.or_else(|| crate::inbox_qa::greeting(state, kit));
+    let show_chat = chat.is_some();
     let list = rune::col()
         .key("inbox-content")
         .w_full()
         .grow(1.0)
         .padding(12.0)
         .child(rows)
-        .children(stick_bottom.then(|| {
+        .children(show_chat.then(|| {
             rune::spacer()
                 .key("inbox-chat-space")
                 .min_h(8.0)
                 .a11y_hidden()
         }))
-        .children(stick_bottom.then(|| {
+        .children(show_chat.then(|| {
             rune::rule(1.0, theme::hex(theme::BORDER_CONTROL))
                 .key("inbox-chat-divider")
                 .w_full()
                 .mb(8.0)
                 .a11y_hidden()
         }))
-        .children(exchange);
+        .children(chat);
     rune::col()
         .key("inbox-body")
         .child(

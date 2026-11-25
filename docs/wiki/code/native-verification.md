@@ -30,6 +30,10 @@ and the command overlay in their glass and opaque forms, and `catalog` and
 Linux lane captures the glass ones. They send nothing and use no
 backend.
 
+The `inbox-qa-ready` scene renders the initial greeting in the empty production
+Inbox transcript. Capture it at compact and wide sizes to check that the
+Assistant message remains visible above the composer.
+
 A selected baseline capture:
 
 ```sh

@@ -199,8 +199,11 @@ def settled_turn(request, context, case, question, *, source=None, mode="direct"
                     f"{case} did not produce a grounded explanation")
     else:
         require(accepted["state"] in TERMINAL, f"{case} did not finish within admission")
-    usage = require_context(accepted, inferred=inferred)
-    if inferred:
+    # Generation-preferred operational turns may finish with the same typed
+    # facts if generation cannot produce a verifiable reply.
+    used_model = inferred and (mode != "preferred" or bool((accepted.get("context") or {}).get("model_windows")))
+    usage = require_context(accepted, inferred=used_model)
+    if used_model:
         require(usage["model_windows"] == 1, f"{case} did not use a single model input window")
     page = request("events", query=query)
     require(page["turn"] == accepted and not page["gap"], f"{case} admission differed from its event snapshot")
@@ -442,7 +445,7 @@ def exercise(request, registration, model, readiness, running_jobs):
         return settled_turn(request, context, case, question, mode=mode)
 
     def check_status_group(question, group, prior_observation):
-        status_turn = ask(f"{group}-status-checks", question)
+        status_turn = ask(f"{group}-status-checks", question, mode="preferred")
         findings = status_turn["findings"]
         require(status_turn["state"] == "answered" and status_turn["question"] == question
                 and 1 <= len(findings) <= 3,
@@ -500,7 +503,7 @@ def exercise(request, registration, model, readiness, running_jobs):
     for source_id, metric_question, label in questions:
         metric = ask(source_id, metric_question)
         readings[source_id] = cited_metric(metric, source_id, label)
-    memory_again = ask("memory-follow-up", "How much memory consumption we are at?")
+    memory_again = ask("memory-follow-up", "How much memory consumption we are at?", mode="preferred")
     readings["memory_follow_up"] = cited_metric(memory_again, "memory", "memory usage")
     require(datetime.fromisoformat(readings["memory_follow_up"]["observed_at"])
             > datetime.fromisoformat(readings["memory"]["observed_at"]),
@@ -512,12 +515,12 @@ def exercise(request, registration, model, readiness, running_jobs):
     dialogue_rss_bytes = embedded.read_process_rss_bytes(worker)
     preceding = readings["memory_follow_up"]
     for index, question in enumerate(("And now?", "Has that changed?"), start=1):
-        turn = ask(f"conversational-follow-up-{index}", question)
+        turn = ask(f"conversational-follow-up-{index}", question, mode="preferred")
         measured = cited_metric(turn, "memory", "memory usage", previous=preceding)
         require(turn["question"] == question and observed(measured) > observed(preceding),
                 "a conversational follow-up changed the displayed prompt or reused a metric sample")
         preceding = measured
-    resources = ask("resources", "What is our resource usage?")
+    resources = ask("resources", "What is our resource usage?", mode="preferred")
     require(resources["state"] == "answered"
             and {part["source"]["id"] for part in resources["findings"]} == {"cpu", "memory", "disk"}
             and len(resources["findings"]) == 3

@@ -787,6 +787,7 @@ pub(crate) async fn submit_request(
         generation: setting.generation,
         history_generation: setting.history_generation,
         availability,
+        is_follow_up: follow_up.is_some(),
         previous_observation: follow_up
             .as_ref()
             .and_then(|turn| turn.observation.as_ref()),
@@ -942,7 +943,30 @@ struct SnapshotRuntime<'a> {
     generation: i64,
     history_generation: i64,
     availability: &'a QaRuntimeAvailability,
+    is_follow_up: bool,
     previous_observation: Option<&'a store::Observation>,
+}
+
+fn dialogue_kind(
+    intent: Question,
+    question: &str,
+    has_evidence: bool,
+    is_follow_up: bool,
+    may_read_backend: bool,
+) -> Option<QaDialogueKind> {
+    match intent {
+        Question::Greeting if may_read_backend => Some(QaDialogueKind::Greeting),
+        Question::Acknowledgement if may_read_backend => Some(QaDialogueKind::Acknowledgement),
+        Question::Help if may_read_backend => Some(QaDialogueKind::Help),
+        Question::Recall if may_read_backend => Some(QaDialogueKind::Recall),
+        _ if may_read_backend
+            && has_evidence
+            && (is_follow_up || !intent.is_exact_fact(question)) =>
+        {
+            Some(QaDialogueKind::Operational)
+        }
+        _ => None,
+    }
 }
 
 async fn snapshot(
@@ -1053,7 +1077,6 @@ async fn snapshot(
             whole_passage,
         });
     };
-    let mut answer_mode = store::AnswerMode::Grounded;
     let mut notice = None;
     let mut conversation = None;
     let mut related_activity = None;
@@ -1298,7 +1321,6 @@ async fn snapshot(
         }
         Question::Summary => {
             if let Some(sample) = health.filter(|sample| !sample.facts.is_empty()) {
-                answer_mode = store::AnswerMode::Model;
                 let at = chrono::DateTime::from_timestamp_millis(sample.sampled_at_ms)
                     .ok_or_else(current_health_unavailable)?;
                 let mut facts = sample
@@ -1351,12 +1373,9 @@ async fn snapshot(
         }
     }
     let observation = comparison::single_observation(&sources, observed_state);
-    let compared = runtime
-        .previous_observation
-        .zip(observation.as_ref())
-        .is_some_and(|(previous, current)| {
-            comparison::append(previous, current, &mut passages, &mut sources)
-        });
+    if let Some((previous, current)) = runtime.previous_observation.zip(observation.as_ref()) {
+        comparison::append(previous, current, &mut passages, &mut sources);
+    }
     let sampled_at_ms = match earliest {
         Some(observed_at) => observed_at,
         None => observation_start(boundary).await,
@@ -1364,28 +1383,24 @@ async fn snapshot(
     .timestamp_millis();
     let turn_id = store::accepted_turn_id(actor, request, runtime.history_generation)
         .map_err(storage_error)?;
-    let dialogue = match intent {
-        Question::Greeting => Some(QaDialogueKind::Greeting),
-        Question::Acknowledgement => Some(QaDialogueKind::Acknowledgement),
-        Question::Help => Some(QaDialogueKind::Help),
-        Question::Recall => Some(QaDialogueKind::Recall),
-        Question::Summary | Question::ReadinessExplanation(_) if !passages.is_empty() => {
-            Some(QaDialogueKind::Operational)
-        }
-        Question::ExplainSelected if readiness_source.is_some() && !passages.is_empty() => {
-            Some(QaDialogueKind::Operational)
-        }
-        _ => None,
-    };
+    let dialogue = dialogue_kind(
+        intent,
+        &request.question,
+        !passages.is_empty(),
+        runtime.is_follow_up,
+        context.permits(Permission::ReadBackend),
+    );
     let mut worker_request =
         QaWorkerRequest::new(turn_id.clone(), turn_id, request.question.clone(), passages);
-    if let Some(kind) = dialogue.filter(|_| !compared && context.permits(Permission::ReadBackend)) {
-        answer_mode = store::AnswerMode::Model;
+    let answer_mode = if let Some(kind) = dialogue {
         worker_request.dialogue = Some(QaWorkerDialogue {
             kind,
             history: Vec::new(),
         });
-    }
+        store::AnswerMode::Model
+    } else {
+        store::AnswerMode::Grounded
+    };
     Ok(Snapshot {
         evidence: store::FrozenEvidence {
             answer_mode,
@@ -1504,6 +1519,56 @@ pub(crate) async fn cancel_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routes_only_exact_facts_directly_when_evidence_is_available() {
+        for prompt in [
+            "What is the current CPU utilization?",
+            "How many jobs are running?",
+            "How many jobs failed in the past 24 hours?",
+            "Does the catalog need seeding?",
+        ] {
+            let intent = question::classify(prompt);
+            assert_ne!(intent, Question::Unsupported, "{prompt}");
+            assert!(
+                dialogue_kind(intent, prompt, true, false, true).is_none(),
+                "{prompt} is an exact fact"
+            );
+            assert!(matches!(
+                dialogue_kind(intent, prompt, true, true, true),
+                Some(QaDialogueKind::Operational)
+            ));
+        }
+
+        for prompt in [
+            "How much memory consumption we are at?",
+            "How's everything looking?",
+            "Can you give me the big picture on this workstation?",
+            "What needs attention?",
+            "Are any jobs running?",
+            "What does this mean?",
+        ] {
+            let intent = question::classify(prompt);
+            assert_ne!(intent, Question::Unsupported, "{prompt}");
+            assert!(
+                matches!(
+                    dialogue_kind(intent, prompt, true, false, true),
+                    Some(QaDialogueKind::Operational)
+                ),
+                "{prompt} should use the generator with approved evidence"
+            );
+            assert!(dialogue_kind(intent, prompt, false, false, true).is_none());
+        }
+
+        let activity = "Are any jobs running?";
+        assert!(
+            dialogue_kind(question::classify(activity), activity, true, false, false).is_none()
+        );
+
+        let unsupported = "Can you give me the big picture on this workstation and reboot it?";
+        assert_eq!(question::classify(unsupported), Question::Unsupported);
+        assert!(dialogue_kind(Question::Unsupported, unsupported, false, false, true).is_none());
+    }
 
     #[test]
     fn reports_only_the_current_embedded_enablement_generation() {

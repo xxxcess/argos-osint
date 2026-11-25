@@ -144,37 +144,60 @@ pub(crate) fn bubble(message: &ChatMessage, kit: &Kit) -> El {
 }
 
 pub(crate) fn bubble_with_sources(message: &ChatMessage, sources: Option<El>, kit: &Kit) -> El {
-    let operator = message.role == Role::Operator;
+    let state = message
+        .state
+        .chip()
+        .map(|(label, tone)| chip(label, tone, kit).key(format!("chat-state-{}", message.id)));
+    message_bubble(
+        message_key(&message.id),
+        message.role,
+        &message.text,
+        state,
+        sources,
+        kit,
+    )
+}
+
+pub(crate) fn greeting(key: &str, text: &str, kit: &Kit) -> El {
+    message_bubble(key.to_owned(), Role::Assistant, text, None, None, kit)
+}
+
+fn message_bubble(
+    key: String,
+    role: Role,
+    text: &str,
+    state: Option<El>,
+    sources: Option<El>,
+    kit: &Kit,
+) -> El {
+    let operator = role == Role::Operator;
     let tone = if operator {
         StatusTone::Accent
     } else {
         StatusTone::Neutral
     };
     let mut body = rune::col().w_full().gap(6.0).child(
-        rune::text(message.role.label())
+        rune::text(role.label())
             .font(kit.ty.small_medium)
             .color(theme::hex(theme::TEXT_MUTED)),
     );
-    if !message.text.is_empty() {
+    if !text.is_empty() {
         body = body.child(
-            rune::text(message.text.clone())
+            rune::text(text)
                 .font(kit.ty.small)
                 .color(theme::hex(theme::TEXT_PRIMARY))
                 .wrap_anywhere(),
         );
     }
-    if let Some((label, chip_tone)) = message.state.chip() {
-        body = body.child(chip(label, chip_tone, kit).key(format!("chat-state-{}", message.id)));
-    }
     let surface = rune::col()
-        .key(message_key(&message.id))
-        .label(format!("{} message", message.role.label()))
+        .key(key)
+        .label(format!("{} message", role.label()))
         .max_w(BUBBLE_MAX)
         .padding(10.0)
         .radius(10.0)
         .fill(tone.bg())
         .border(1.0, tone.border())
-        .child(body.children(sources));
+        .child(body.children(state).children(sources));
     let row = rune::row().w_full();
     if operator {
         row.child(rune::spacer()).child(surface)

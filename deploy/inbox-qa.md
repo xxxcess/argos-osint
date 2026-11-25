@@ -30,4 +30,19 @@ At startup, the companion reserves 1 GiB of available memory for the workstation
 
 The offline package smoke uses a 1,536 MiB ceiling and verifies Small without network access. The Linux pack job exercises Base separately. Turning inference off cancels active work, unloads workers, and leaves the preferences and Inbox notifications available.
 
+## Workstation question benchmark
+
+Run the workstation questions with **Generator → Automatic** and **Decision → Rules only** through a packaged Embedded companion in a fresh private state directory. Use the Small pack directory and manifest SHA-256 from a verified installation or artifact receipt.
+
+```sh
+mkdir -p .agent-scratch
+python3 -B scripts/fleetworks_workstation_bench.py \
+  --app "$FLEETWORKS_APP" --pack-dir "$QA_PACK_DIR" \
+  --manifest-sha256 "$QA_MANIFEST_SHA256" > .agent-scratch/workstation-bench.json
+```
+
+Add `--base-model-assets "$PINNED_BASE_MODEL_DIR"` if you have the verified Base files cached and want Automatic to choose with the host's actual memory headroom. With only the Small pack present, the benchmark caps generator memory at 1,536 MiB to stay offline. Each run creates a synthetic registration, checks that a Rules only lookup resolves the catalog's current status without creating an exchange, and reads readiness and job counts over private IPC. Resource checks use the frozen samples cited in each turn.
+
+The JSON records answer text, citations, expected and observed response paths, and first-draft and terminal latency per question. It also flags repeated sentences and echoed prompt labels. Read factual checks and generated-reply counts together. Exact facts can pass with zero model input, and a turn with model input can still finish using verified evidence. A completed run reports quality failures in its cases and summary. A launch, setup, or transport failure exits with an error.
+
 [Assistant contract](../docs/wiki/code/assistant-chat-contract.md) · [Hosted verification](../docs/wiki/code/ci.md)

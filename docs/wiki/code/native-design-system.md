@@ -1,6 +1,6 @@
 # Native workstation design
 
-[Native client](../../../apps/fleetworks-desktop/README.md) · [Connections](native-connections.md) · [Identity](native-workspaces.md) · [UX verification status](../../../.planning/2026-11-13-native-immersive-ux/acceptance.md) · [Pairing verification](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md)
+[Native client](../../../apps/fleetworks-desktop/README.md) · [Connections](native-connections.md) · [Identity](native-workspaces.md) · [UX verification status](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-13-native-immersive-ux/acceptance.md) · [Pairing verification](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md)
 
 Rune macOS and Linux x86_64 client (`apps/fleetworks-desktop`). One selected destination; backend boundaries remain governed by the connection/runtime contracts. Intel Web shares paint/branding (`@tag:look-and-feel`) and workstation Connect while keeping its navigation and topology/list behavior.
 
@@ -148,7 +148,7 @@ Source status, not visual or runtime approval. Items below not listed here remai
 
 ## Required evidence
 
-Inspect production Rune Runtime PNGs, trees and input traces for affected surfaces at desktop and `640×480` minimum sizes. Include glass, opaque and reduced-motion states. Check material boundaries, text and keyboard focus, rock-textured actions, the brand mark, retained live content and finite cursor continuation. Record visual inspection, unit tests, installed GUI and accessibility, backend integration, and hosted platform results separately. [Verification workflow](native-verification.md) · [UX overhaul verification](../../../.planning/2026-11-13-native-immersive-ux/acceptance.md) · [Pairing acceptance baseline](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md)
+Inspect production Rune Runtime PNGs, trees and input traces for affected surfaces at desktop and `640×480` minimum sizes. Include glass, opaque and reduced-motion states. Check material boundaries, text and keyboard focus, rock-textured actions, the brand mark, retained live content and finite cursor continuation. Record visual inspection, unit tests, installed GUI and accessibility, backend integration, and hosted platform results separately. [Verification workflow](native-verification.md) · [UX overhaul verification](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-13-native-immersive-ux/acceptance.md) · [Pairing acceptance baseline](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md)
 
 ### Opaque materials preference
 

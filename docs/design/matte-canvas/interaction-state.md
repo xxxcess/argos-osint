@@ -1,6 +1,6 @@
 # Matte Canvas interaction and state contract
 
-[Theme](theme.md) · [Motion and startup](motion.md) · [Implementation handoff](../../../.planning/2026-11-16-matte-canvas/handoff.md) · [Native verification](../../wiki/code/native-verification.md)
+[Theme](theme.md) · [Motion and startup](motion.md) · [Implementation handoff](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-16-matte-canvas/handoff.md) · [Native verification](../../wiki/code/native-verification.md)
 
 **Status: approved design target; runtime implementation and verification pending.** This document specifies the approved native and shared web interaction behavior. The documentation change does not implement these behaviors. The audited source baseline is `nightly` at `00b700afd77ddac6cba2e2bd7ae91ab3802b7197` (tree `5051474185a8eb14b38e607480bb24c65352fff0`). Source inspection identifies mechanisms; it does not establish a reproduced temporal defect or a product-test pass.
 

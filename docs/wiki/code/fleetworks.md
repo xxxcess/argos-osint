@@ -12,7 +12,7 @@ Venture, the six Fleetworks terminal clients and the legacy `argos` executable a
 
 ## Build and connect the native app
 
-The [native connection guide](native-connections.md#backend-types-and-parity) describes both backend types and their shared contracts. [Verification status](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md) distinguishes implemented behavior from pending runtime/platform evidence.
+The [native connection guide](native-connections.md#backend-types-and-parity) describes both backend types and their shared contracts. [Verification status](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md) distinguishes implemented behavior from pending runtime/platform evidence.
 
 ```sh
 python3 scripts/fleetworks_candidate.py build-native --target host --profile debug

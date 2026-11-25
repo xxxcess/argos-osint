@@ -26,7 +26,7 @@ an agent session does not make it a repository deliverable.
 | Raw simulation JSON, tool output, diagnostic logs, generated cells/PNGs/galleries and duplicate capture runs | Local evidence; ignored in named task directories. Promote only a small, referenced fixture selection to `docs/screenshots/` when it demonstrates a distinct contract. |
 | `.planning/.active_plan`, host handoffs, session IDs, caches and environments | Local runtime state. OpenCode automatic handoffs stay in plugin storage. |
 
-For a cutover, record a reviewed disposition for each shared plan or archive before moving it. Keep revision-bound evidence and open obligations. Link superseded instructions to the maintained contract in the disposition record. The [Fleetworks dispositions](../../../.planning/2026-11-09-fleetworks-overhaul/decisions.md) identify the retained, superseded and pending surfaces. The already-tracked Fleetworks plan remains the shared handoff for this cutover.
+For a cutover, record a reviewed disposition for each shared plan or archive before moving it. Keep revision-bound evidence and open obligations. Link superseded instructions to the maintained contract in the disposition record. The [Fleetworks dispositions](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-09-fleetworks-overhaul/decisions.md) identify the retained, superseded and pending surfaces. The already-tracked Fleetworks plan remains the shared handoff for this cutover.
 
 When an ad hoc task needs planning artifacts, use `.planning/<YYYY-MM-DD-slug>/`. Git ignores their contents by
 default, with exceptions for the curated Markdown names above and numbered
@@ -55,7 +55,7 @@ when safe, and repair references first. Never delete unrelated plans or unresolv
 TUI evidence follows [tui-verification.md](tui-verification.md).
 
 For the initial semantic-versioning setup, retain the curated
-[acceptance record](../../../.planning/2026-10-11-semantic-versioning/acceptance.md).
+[acceptance record](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-10-11-semantic-versioning/acceptance.md).
 Its session plan, research, progress, intermediate `validation.md` and raw
 `release-simulation.json` remain local; the maintained policy is
 [versioning.md](versioning.md).

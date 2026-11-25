@@ -1,6 +1,6 @@
 # Native connections and registered context
 
-[Client](../../../apps/fleetworks-desktop/README.md) · [Protected identity](native-workspaces.md) · [Control/design guide](native-design-system.md) · [Verification](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md)
+[Client](../../../apps/fleetworks-desktop/README.md) · [Protected identity](native-workspaces.md) · [Control/design guide](native-design-system.md) · [Verification](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md)
 
 [![Native pairing and authenticated reconnect](../../diagrams/native-connections.svg)](../../diagrams/native-connections.html)
 
@@ -59,7 +59,7 @@ Cmd/Ctrl+K opens a fixed list of navigation actions for pages, Connection settin
 
 ## Pairing and Keychain
 
-**Distributed flow:** Gateway URL → operator approval once → macOS Keychain or Linux D-Bus Secret Service (or explicit Linux session-only mode) → authenticated reconnect. [Verification status](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md) records actual checks; injected secret-store tests do not establish live Keychain/Secret Service or installed-app passes.
+**Distributed flow:** Gateway URL → operator approval once → macOS Keychain or Linux D-Bus Secret Service (or explicit Linux session-only mode) → authenticated reconnect. [Verification status](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md) records actual checks; injected secret-store tests do not establish live Keychain/Secret Service or installed-app passes.
 
 | Step | Behavior |
 | --- | --- |
@@ -171,4 +171,4 @@ Cycles use bounded workstation summaries and revision/idempotency-bound associat
 
 [Contracts/SDK](../../../crates/fleetworks-contracts/src/) · [Native effects](../../../apps/fleetworks-desktop/src/) · [Protected settings](../../../crates/fleetworks-workstation/src/native/) · [Registry](../../../crates/argos-osint-core/src/storage/connect_registry.rs) · [Job context](../../../crates/argos-osint-core/src/storage/job_context.rs) · [Gateway boundary](../../../crates/argos-osint-api/src/context_boundary.rs)
 
-The [acceptance tracker](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md) separates implementation, actual focused/gate results, inspected Runtime evidence, hosted platforms and installed-app checks. A source audit or generated image is not runtime approval.
+The [acceptance tracker](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md) separates implementation, actual focused/gate results, inspected Runtime evidence, hosted platforms and installed-app checks. A source audit or generated image is not runtime approval.

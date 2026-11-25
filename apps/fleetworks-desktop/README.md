@@ -4,7 +4,7 @@
 
 The Rune/rune-kit macOS and Linux x86_64 API client supports **Embedded** and **Distributed** backends. Embedded uses a bundled companion started explicitly by the user over a private Unix socket. Distributed connects to an operator-managed gateway. Backend engines run outside the desktop process. Its six sidebar destinations are Actor Maintenance, News Cycles, Brain Search, Tool Box, Model Assignments and Jobs & Logs. The brand avatar opens Workstation Status. It groups actor search and workstation activity under **Services**, followed by **Status checks** and **Diagnostics**. **Settings → Connection** walks through setup and selects the backend type after launch. **Settings → General** shows the app name and version. Distributed setup uses a gateway URL, operator approval and macOS Keychain or Linux D-Bus Secret Service, with explicit Linux session-only mode also available.
 
-[Design and control allowlist](../../docs/wiki/code/native-design-system.md) · [Connection contracts](../../docs/wiki/code/native-connections.md) · [Protected identity](../../docs/wiki/code/native-workspaces.md) · [Implementation/verification status](../../.planning/2026-11-12-native-pairing-implementation/acceptance.md)
+[Design and control allowlist](../../docs/wiki/code/native-design-system.md) · [Connection contracts](../../docs/wiki/code/native-connections.md) · [Protected identity](../../docs/wiki/code/native-workspaces.md) · [Implementation/verification status](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md)
 
 [![Six destinations and selected content](../../docs/diagrams/native-workstation-layout.svg)](../../docs/diagrams/native-workstation-layout.html)
 

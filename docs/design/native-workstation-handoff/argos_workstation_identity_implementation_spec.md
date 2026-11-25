@@ -1,6 +1,6 @@
 # ARGOS_NATIVE_WORKSTATION_IMPLEMENTATION_HANDOFF
 
-> Historical identity-migration handoff. Its baseline and execution evidence remain dated. The approved [matte canvas theme](../matte-canvas/theme.md), [live-state/continuous-scroll contract](../matte-canvas/interaction-state.md) and [current handoff](../../../.planning/2026-11-16-matte-canvas/handoff.md) supersede its former styling and pager presentation. Current credential/control authority is in the maintained [native contract](../../wiki/code/native-design-system.md).
+> Historical identity-migration handoff. Its baseline and execution evidence remain dated. The approved [matte canvas theme](../matte-canvas/theme.md), [live-state/continuous-scroll contract](../matte-canvas/interaction-state.md) and [current handoff](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-16-matte-canvas/handoff.md) supersede its former styling and pager presentation. Current credential/control authority is in the maintained [native contract](../../wiki/code/native-design-system.md).
 
 Baseline: `xxxcess/argos-osint` · `feat/atlas-zero-shot` · `d219d5964a29d50fa99de4cdcf2b228391576b4a` · revalidated November 13, 2026. Remote ref and comparison confirm the branch is unchanged from the earlier audit; latest commit: November 12, 20:21 UTC. Read-only source audit; no checked-out repository changes or product tests. [Branch baseline][baseline]
 

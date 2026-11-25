@@ -214,7 +214,7 @@ The later bounded-parser/local-worker-pressure/exact-task-fence increment has
 separate tests, including
 [seed execution](../../../crates/argos-osint-core/tests/storage_actor_seed_execution.rs);
 its evidence must be recorded after actual execution. The
-[acceptance tracker](../../../.planning/2026-11-11-rune-macos-cutover/acceptance.md)
+[acceptance tracker](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-11-rune-macos-cutover/acceptance.md)
 owns current pass/fail/skip results. Use the existing required storage harness,
 matching shared debug graph and one build owner through
 [testing/cache guidance](contributing.md#build-cache-hygiene).

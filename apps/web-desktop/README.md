@@ -36,7 +36,7 @@ Linux execution, public TLS/ingress or installed native behavior.
 
 The [approved Glass Canvas design](../../docs/design/matte-canvas/README.md) aligns
 paint/logo, shared loading treatment and continuous-list presentation within existing web routes, evidence layout and topology/list behavior. Layered smoked/frosted dark glass surfaces with static liquid-metal rim highlights, warm molten-gold & cyan accents, symbol-only crescent + molten-core branding, and fractured crescent-moon textures on committing/brand actions replace flat matte restrictions, while keeping deterministic opaque reduced-transparency fallbacks. Runtime adoption is tracked separately.
-[Verification status](../../.planning/2026-11-12-native-workstation-redesign/acceptance.md)
+[Verification status](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-workstation-redesign/acceptance.md)
 
 ## Footer and search
 

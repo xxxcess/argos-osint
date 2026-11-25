@@ -12,13 +12,20 @@ The Rune/rune-kit macOS and Linux x86_64 API client supports **Embedded** and **
 
 ### macOS quick start
 
-Open the repository root in RustRover and select **Build and open Fleetworks (Embedded)** from the run configurations. It builds the desktop and its bundled companion from the main repository checkout, opens the validated app under `target/native/<platform>/<profile>/`, and starts Embedded in its isolated profile. The startup automation uses macOS Accessibility. The same command works from the repository root in a terminal. To start Embedded by hand, omit `--start-embedded`. [Shared RustRover configuration](../../.idea/runConfigurations/Build_and_open_Fleetworks_Embedded.xml)
+You’ll need the pinned Rust **1.95.0** toolchain, Python 3, Xcode Command Line Tools, and the bundled actor catalog checked out through Git LFS. Quit Fleetworks before rebuilding an open app.
+
+**RustRover.** Open the repository root, choose **Build and open Fleetworks (Embedded)** from the run configuration menu, and click **Run**. [Shared run configuration](../../.idea/runConfigurations/Build_and_open_Fleetworks_Embedded.xml)
+
+**Terminal.** Run the same command from the repository root.
 
 ```sh
-python3 scripts/fleetworks_quick_start.py --start-embedded
+PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=1 \
+  python3 -B scripts/fleetworks_quick_start.py --profile debug --start-embedded
 ```
 
-The launcher shares the repository’s Cargo cache and keeps one app bundle per target and profile at `target/native/<platform>/<profile>/Fleetworks.app`. On Apple Silicon, the default is `target/native/aarch64-apple-darwin/debug/Fleetworks.app`. Use `--profile release` for the optimized app in the sibling `release` directory. The launcher prints the app path before building and keeps Embedded data in `.agent-scratch/native-quick-start-profile/`. Close a running bundle before replacing it. Use `--help` for worktree selection, custom paths, and verified offline artifacts.
+The launcher builds and opens the app, then starts its bundled Embedded companion. Automatic startup uses macOS Accessibility. If macOS asks for permission, allow RustRover or Terminal under **System Settings → Privacy & Security → Accessibility**. To start the companion by hand, omit `--start-embedded`, then click **Start Embedded Backend** in Fleetworks.
+
+The launcher reuses the repository's Cargo cache and prints the app path before building. The debug bundle is `target/native/aarch64-apple-darwin/debug/Fleetworks.app` on Apple Silicon and `target/native/x86_64-apple-darwin/debug/Fleetworks.app` on Intel. Use `--profile release` for the optimized bundle in the sibling `release` directory. Embedded data stays in `.agent-scratch/native-quick-start-profile/` across rebuilds. Use `--help` for custom paths and verified offline artifacts.
 
 ### Build and backend options
 

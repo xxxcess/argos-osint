@@ -14,9 +14,22 @@ The [matte canvas design reference](docs/design/matte-canvas/README.md) defines 
 
 ## Quick start
 
-### Native app
+### macOS with Embedded
 
-Install the pinned Rust **1.95.0** toolchain and the [host build prerequisites](apps/fleetworks-desktop/README.md#build-and-provision). Build a debug app for the physical macOS or Linux x86_64 host from the repository root:
+Open the repository root in RustRover, select **Build and open Fleetworks (Embedded)** from the run configuration menu, and click **Run**. Quit Fleetworks before rebuilding an open app.
+
+To use Terminal, run the same launcher from the repository root.
+
+```sh
+PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=1 \
+  python3 -B scripts/fleetworks_quick_start.py --profile debug --start-embedded
+```
+
+The launcher builds and opens `target/native/<target>/debug/Fleetworks.app` and starts its bundled companion in a dedicated local profile. See the [macOS Quick Start](apps/fleetworks-desktop/README.md#macos-quick-start) for prerequisites, Accessibility permissions, and output locations.
+
+### Linux and manual native builds
+
+Install the pinned Rust **1.95.0** toolchain and the [host build prerequisites](apps/fleetworks-desktop/README.md#build-and-provision). Run this from the repository root on macOS or Linux x86_64.
 
 ```sh
 python3 scripts/fleetworks_candidate.py build-native --target host --profile debug

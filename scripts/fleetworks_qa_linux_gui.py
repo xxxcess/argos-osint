@@ -20,7 +20,8 @@ from fleetworks_qa_pack import install_gated_fixture
 from fleetworks_qa_smoke import FIXTURE_MODEL_MEMORY_MIB
 
 SUMMARY_QUESTION = "What is the current workstation readiness?"
-MEMORY_QUESTION = "What's our RAM consumption right now?"
+# The middle turn exercises direct admission while the worker fixture gates model replies.
+MEMORY_QUESTION = "What is the current memory usage ?"
 SOURCES_TOGGLE = "inbox-qa-sources-toggle"
 SOURCES_CONTENT = "inbox-qa-sources"
 DRAWER = "inbox-layer"

@@ -1542,6 +1542,7 @@ mod tests {
         for prompt in [
             "What is the current CPU utilization?",
             "  What  is the current CPU utilization ? ",
+            "What is the current memory usage ?",
             "How many jobs are running?",
             "How many jobs failed in the past 24 hours?",
             "Does the catalog need seeding?",
@@ -1560,6 +1561,7 @@ mod tests {
 
         for prompt in [
             "How much memory consumption we are at?",
+            "What's our RAM consumption right now?",
             "How's everything looking?",
             "Can you give me the big picture on this workstation?",
             "What needs attention?",

@@ -1250,6 +1250,16 @@ async fn append_event_in(
     finding: Option<QaFinding>,
     provisional_delta: Option<String>,
 ) -> Result<(), TxError> {
+    record_event(exchange, state, finding, provisional_delta)?;
+    persist_events_in(tx, owner, generation, exchange).await
+}
+
+fn record_event(
+    exchange: &mut Exchange,
+    state: QaTurnState,
+    finding: Option<QaFinding>,
+    provisional_delta: Option<String>,
+) -> Result<(), TxError> {
     if let Some(part) = &finding {
         let words = exchange
             .turn
@@ -1265,16 +1275,10 @@ async fn append_event_in(
         }
         exchange.turn.findings.push(part.clone());
     }
-    // Serialize a publication with a generation transition or a placement handover.
-    jobs::run(
-        tx,
-        tx.query("UPDATE inbox_qa_settings:current SET admission += 1 RETURN NONE"),
-    )
-    .await?;
-    let terminal = state.is_terminal();
     exchange.turn.cursor += 1;
     exchange.turn.state = state;
-    if terminal {
+    if state.is_terminal() {
+        exchange.evidence = None;
         exchange.turn.provisional_reply = None;
         for event in &mut exchange.events {
             event.provisional_delta = None;
@@ -1283,15 +1287,24 @@ async fn append_event_in(
     let mut event = QaEvent::new(exchange.turn.cursor, state, finding);
     event.provisional_delta = provisional_delta;
     exchange.events.push(event);
+    Ok(())
+}
+
+async fn persist_events_in(
+    tx: &Tx,
+    owner: &str,
+    generation: i64,
+    exchange: &Exchange,
+) -> Result<(), TxError> {
+    let terminal = exchange.turn.state.is_terminal();
     let at = if terminal { now_ms() } else { 0 };
-    if terminal {
-        exchange.evidence = None;
-    }
     let payload = serde_json::to_string(exchange).map_err(|_| abort("invalid_store"))?;
     jobs::run(
         tx,
+        // Serialize the publication with a generation transition or placement handover.
         tx.query(
-            "UPDATE $turn SET payload=$payload, active=$active, completed_at=$at RETURN NONE;",
+            "UPDATE inbox_qa_settings:current SET admission += 1 RETURN NONE;
+             UPDATE $turn SET payload=$payload, active=$active, completed_at=$at RETURN NONE;",
         )
         .bind((
             "turn",
@@ -1537,17 +1550,70 @@ pub async fn publish_with_model_result(
     finding: Option<QaFinding>,
     result: ModelResult,
 ) -> Result<bool, TxError> {
+    publish_parts(repo, lease, state, finding, None, result).await
+}
+
+/// Commit fallback findings and the terminal state together under the live lease.
+/// Rechecks operational freshness after acquiring the writer, before recording the batch.
+pub async fn publish_findings_and_complete(
+    repo: &Repository,
+    lease: &job_dispatch::DeliveryLease,
+    state: QaTurnState,
+    findings: &[QaFinding],
+    result: ModelResult,
+) -> Result<bool, TxError> {
+    if !state.is_terminal() || (state != QaTurnState::Answered && !findings.is_empty()) {
+        return Err(abort("invalid_part"));
+    }
+    publish_parts(repo, lease, state, None, Some(findings), result).await
+}
+
+async fn publish_parts(
+    repo: &Repository,
+    lease: &job_dispatch::DeliveryLease,
+    state: QaTurnState,
+    finding: Option<QaFinding>,
+    terminal_findings: Option<&[QaFinding]>,
+    result: ModelResult,
+) -> Result<bool, TxError> {
     Ok(write(repo, |tx| {
         let finding = finding.clone();
         let ModelResult {
             context,
-            reply,
+            mut reply,
             model_target,
         } = result.clone();
         async move {
             let Some((row, mut exchange)) = live_exchange_in(&tx, lease).await? else {
                 return Ok(false);
             };
+            let mut state = state;
+            if let Some(findings) = terminal_findings {
+                let expired = exchange.evidence.as_ref().is_some_and(|evidence| {
+                    evidence
+                        .request
+                        .dialogue
+                        .as_ref()
+                        .is_some_and(|dialogue| dialogue.kind == QaDialogueKind::Operational)
+                        && !(0..=MAX_EVIDENCE_AGE_MS)
+                            .contains(&now_ms().saturating_sub(evidence.sampled_at_ms))
+                });
+                if expired {
+                    reply = None;
+                    if state == QaTurnState::Answered && exchange.turn.findings.is_empty() {
+                        state = QaTurnState::InsufficientContext;
+                    }
+                } else {
+                    for finding in findings {
+                        record_event(
+                            &mut exchange,
+                            QaTurnState::Running,
+                            Some(finding.clone()),
+                            None,
+                        )?;
+                    }
+                }
+            }
             let dialogue_evidence = exchange
                 .evidence
                 .as_ref()

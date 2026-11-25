@@ -36,7 +36,6 @@ use rust_bert::pipelines::question_answering::QaInput;
 use rust_bert::pipelines::question_answering::QuestionAnsweringConfig;
 use rust_bert::pipelines::question_answering::QuestionAnsweringModel;
 use rust_bert::resources::LocalResource;
-use rust_bert::t5::T5Generator;
 use sha2::Digest;
 use sha2::Sha256;
 use tch::Device;
@@ -236,7 +235,7 @@ fn initial_model(
 enum ResidentModel {
     Unloaded,
     Extractive(Box<QuestionAnsweringModel>),
-    Dialogue(Box<T5Generator>),
+    Dialogue(Box<dialogue::Generator>),
 }
 
 impl ResidentModel {

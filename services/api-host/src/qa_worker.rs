@@ -319,26 +319,24 @@ impl QaWorkerSupervisor {
 
     async fn connect_ready(
         &self,
+        slot: &mut Option<WorkerSession>,
         target: QaModelTarget,
         preference: QaGeneratorPreference,
         stopped: &mut watch::Receiver<()>,
-        cancel: &CancellationToken,
         selected_model: &(dyn Fn(QaModelTarget) + Sync),
         progress: &(dyn Fn(QaStartupStage) + Sync),
-    ) -> Result<WorkerSession> {
-        let mut session = tokio::select! {
+    ) -> Result<()> {
+        let session = slot.insert(tokio::select! {
             biased;
             _ = stopped.changed() => return Err(anyhow!("QA worker is stopping")),
-            _ = cancel.cancelled() => return Err(anyhow!("QA request was canceled")),
             result = self.connect(target, preference, selected_model, progress) => result?,
-        };
+        });
         let child_pid = session.child_id();
         let mut stage = WarmStage::new("worker_ready_frame");
         let resident_limit = session.resident_limit;
         let (ready, failure_stage) = tokio::select! {
             biased;
             _ = stopped.changed() => (Err(anyhow!("QA worker is stopping")), None),
-            _ = cancel.cancelled() => (Err(anyhow!("QA request was canceled")), None),
             error = guard_resident(child_pid, resident_limit) => (Err(error), Some("worker_memory_limit")),
             result = timeout(WARM_LIMIT, session.ready()) => match result {
                 Ok(result) => (result, Some("worker_ready_frame")),
@@ -360,10 +358,11 @@ impl QaWorkerSupervisor {
                     "Inbox QA worker warmup failed"
                 );
             }
-            let _ = session.stop().await;
+            let _ = stop_worker(slot).await;
             return Err(error);
         }
-        Ok(session)
+        session.lifecycle = WorkerLifecycle::Ready;
+        Ok(())
     }
 
     pub(crate) async fn warm_with_progress(
@@ -375,24 +374,18 @@ impl QaWorkerSupervisor {
         let mut stopped = self.stopping.subscribe();
         let _admission = self.model_admission.lock().await;
         let mut slot = self.session.lock().await;
-        if let Some(old) = slot.take() {
-            old.stop().await?;
-        }
+        stop_worker(&mut slot).await?;
         let target = select_workstation_model(preference).await?;
         selected_model(target);
-        let cancel = CancellationToken::new();
-        *slot = Some(
-            self.connect_ready(
-                target,
-                preference,
-                &mut stopped,
-                &cancel,
-                selected_model,
-                progress,
-            )
-            .await?,
-        );
-        Ok(())
+        self.connect_ready(
+            &mut slot,
+            target,
+            preference,
+            &mut stopped,
+            selected_model,
+            progress,
+        )
+        .await
     }
 
     pub(crate) async fn active_model(&self) -> Option<QaModelTarget> {
@@ -400,6 +393,7 @@ impl QaWorkerSupervisor {
             .lock()
             .await
             .as_ref()
+            .filter(|session| session.lifecycle == WorkerLifecycle::Ready)
             .map(|session| session.model_target)
     }
 
@@ -407,6 +401,7 @@ impl QaWorkerSupervisor {
         let mut slot = self.session.lock().await;
         let session = slot
             .as_mut()
+            .filter(|session| session.lifecycle == WorkerLifecycle::Ready)
             .ok_or_else(|| anyhow!("QA worker unavailable"))?;
         let child_pid = session.child_id();
         let resident_limit = session.resident_limit;
@@ -430,6 +425,7 @@ impl QaInference for QaWorkerSupervisor {
             let mut slot = self.session.lock().await;
             let session = slot
                 .as_mut()
+                .filter(|session| session.lifecycle == WorkerLifecycle::Ready)
                 .ok_or_else(|| anyhow!("QA worker unavailable"))?;
             let child_pid = session.child_id();
             let resident_limit = session.resident_limit;
@@ -467,9 +463,7 @@ impl QaInference for QaWorkerSupervisor {
                         "Inbox QA worker could not finish the turn"
                     );
                 }
-                if let Some(session) = slot.take() {
-                    let _ = session.stop().await;
-                }
+                let _ = stop_worker(&mut slot).await;
             }
             result
         })
@@ -479,15 +473,28 @@ impl QaInference for QaWorkerSupervisor {
         Box::pin(async move {
             self.stopping.send_modify(|_| {});
             let mut slot = self.session.lock().await;
-            if let Some(session) = slot.take() {
-                session.stop().await?;
-            }
-            Ok(())
+            stop_worker(&mut slot).await
         })
     }
 }
 
+async fn stop_worker(slot: &mut Option<WorkerSession>) -> Result<()> {
+    if let Some(session) = slot.as_mut() {
+        session.stop().await?;
+        *slot = None;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum WorkerLifecycle {
+    Starting,
+    Ready,
+    Stopping,
+}
+
 struct WorkerSession {
+    lifecycle: WorkerLifecycle,
     input: Box<dyn AsyncWrite + Send + Unpin>,
     output: Box<dyn AsyncRead + Send + Unpin>,
     child: Option<Child>,
@@ -531,6 +538,7 @@ impl WorkerSession {
             .take()
             .ok_or_else(|| warm_error("worker_spawn", anyhow!("missing QA worker output")))?;
         Ok(Self {
+            lifecycle: WorkerLifecycle::Starting,
             input: Box::new(input),
             output: Box::new(output),
             child: Some(child),
@@ -655,19 +663,29 @@ impl WorkerSession {
         }
     }
 
-    async fn stop(mut self) -> Result<()> {
-        if let Some(mut child) = self.child.take() {
-            if matches!(
-                timeout(UNLOAD_LIMIT, async {
-                    self.send(&QaWorkerCommand::Shutdown).await?;
-                    child.wait().await?;
-                    Ok::<_, anyhow::Error>(())
-                })
-                .await,
-                Ok(Ok(()))
-            ) {
+    async fn stop(&mut self) -> Result<()> {
+        let try_graceful = self.lifecycle != WorkerLifecycle::Stopping;
+        self.lifecycle = WorkerLifecycle::Stopping;
+        if self.child.is_some() {
+            if try_graceful
+                && matches!(
+                    timeout(UNLOAD_LIMIT, async {
+                        self.send(&QaWorkerCommand::Shutdown).await?;
+                        self.child
+                            .as_mut()
+                            .expect("owned worker child")
+                            .wait()
+                            .await?;
+                        Ok::<_, anyhow::Error>(())
+                    })
+                    .await,
+                    Ok(Ok(()))
+                )
+            {
                 return Ok(());
             }
+            // Keep the handle in the supervisor slot if this wait is interrupted.
+            let child = self.child.as_mut().expect("owned worker child");
             if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
                 // SAFETY: An unreaped child owns its PID and was spawned as process group leader.
                 unsafe { libc::kill(-pid, libc::SIGKILL) };
@@ -1253,12 +1271,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retry_reaps_an_interrupted_shutdown_without_reusing_the_worker() {
+        let (io, mut peer) = UnixStream::pair().unwrap();
+        let (reader, writer) = io.into_split();
+        let child = Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        let target = QaModelTarget::FlanT5Small;
+        let supervisor = QaWorkerSupervisor::embedded_for_state(PathBuf::new());
+        *supervisor.session.lock().await = Some(WorkerSession {
+            lifecycle: WorkerLifecycle::Ready,
+            input: Box::new(writer),
+            output: Box::new(reader),
+            child: Some(child),
+            streaming: true,
+            model_target: target,
+            resident_limit: WorkerLimits::for_target(target).resident_bytes,
+        });
+        {
+            let shutdown = supervisor.shutdown();
+            tokio::pin!(shutdown);
+            let command = timeout(PING_LIMIT, async {
+                tokio::select! {
+                    result = &mut shutdown => panic!("worker exited before interrupted wait: {result:?}"),
+                    command = read_command(&mut peer) => command,
+                }
+            })
+            .await
+            .unwrap();
+            assert!(matches!(command, QaWorkerCommand::Shutdown));
+        }
+        assert_eq!(
+            supervisor
+                .session
+                .lock()
+                .await
+                .as_ref()
+                .and_then(WorkerSession::child_id),
+            Some(pid)
+        );
+        assert_eq!(supervisor.active_model().await, None);
+        assert!(supervisor.check_ready().await.is_err());
+
+        supervisor.shutdown().await.unwrap();
+        assert!(supervisor.session.lock().await.is_none());
+    }
+
+    #[tokio::test]
     async fn streaming_draft_arrives_before_the_canonical_completion() {
         let (io, mut peer) = UnixStream::pair().unwrap();
         let (input, output) = io.into_split();
         let target = QaModelTarget::FlanT5Small;
         let usage = QaContextUsage::new(target.input_tokens(), 82, 1);
         let mut session = WorkerSession {
+            lifecycle: WorkerLifecycle::Starting,
             input: Box::new(output),
             output: Box::new(input),
             child: None,

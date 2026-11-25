@@ -71,7 +71,6 @@ impl ReplicaLease {
         forget: impl Future<Output = Result<(), TxError>>,
     ) {
         if matches!(self, Self::Claimed) {
-            *self = Self::Unclaimed;
             if !matches!(timeout(STOP_TIMEOUT, shutdown).await, Ok(Ok(()))) {
                 tracing::warn!(
                     qa_replica_stage = "reap_confirmation",
@@ -139,10 +138,10 @@ impl Executor {
         let mut next_store_notice = Instant::now();
         let mut next_queue_notice = Instant::now();
         while !stop.is_cancelled() {
-            if matches!(self.replica_lease, ReplicaLease::Reaped) {
-                // A transient datastore error must not strand the Off transition.
+            if loaded.is_none() && !matches!(self.replica_lease, ReplicaLease::Unclaimed) {
+                // Retry unfinished shutdown or record removal before warming another worker.
                 self.unload().await;
-                if matches!(self.replica_lease, ReplicaLease::Reaped) {
+                if !matches!(self.replica_lease, ReplicaLease::Unclaimed) {
                     self.pause(stop).await;
                     continue;
                 }
@@ -243,10 +242,15 @@ impl Executor {
                         self.unload().await;
                     }
                     Ok(Ok(store::ReplicaClaim::Wait)) => {}
-                    _ => tracing::warn!(
-                        qa_replica_stage = "replica_claim",
-                        "Inbox QA replica could not claim startup"
-                    ),
+                    _ => {
+                        // The claim may have committed before the reply was lost. No model
+                        // was opened, so only the owner-fenced record needs cleanup.
+                        self.replica_lease = ReplicaLease::Reaped;
+                        tracing::warn!(
+                            qa_replica_stage = "replica_claim",
+                            "Inbox QA replica could not claim startup"
+                        );
+                    }
                 }
             }
             let Some(generation) = loaded else {
@@ -592,6 +596,27 @@ impl Executor {
         generation: i64,
         stop: &CancellationToken,
     ) -> RunResult {
+        // Only this executor can replace the generator while it owns the delivery lease.
+        let model_target = match evidence.answer_mode {
+            AnswerMode::Model => self.model.active_model().await,
+            AnswerMode::Grounded => None,
+        };
+        let mut publication = Publication {
+            model_target,
+            ..Publication::default()
+        };
+        let operational = is_operational(evidence);
+        let budget = inference_budget(evidence, Utc::now().timestamp_millis());
+        if stop.is_cancelled() {
+            return RunResult::Stopped;
+        }
+        if operational && budget.is_zero() {
+            return self
+                .operational_fallback(&publication, lease, evidence)
+                .await;
+        }
+
+        let deadline = Instant::now() + budget;
         let (sender, mut receiver) = mpsc::channel(4);
         let cancel = CancellationToken::new();
         let inference: argos_osint_api::inbox_qa::QaInferenceFuture<'_> = match evidence.answer_mode
@@ -607,20 +632,9 @@ impl Executor {
         };
         tokio::pin!(inference);
         let mut next_check = Instant::now() + CHECK;
-        let deadline = Instant::now() + inference_budget(evidence, Utc::now().timestamp_millis());
-        // Only this executor can replace the generator while it owns the delivery lease.
-        let model_target = match evidence.answer_mode {
-            AnswerMode::Model => self.model.active_model().await,
-            AnswerMode::Grounded => None,
-        };
-        let mut publication = Publication {
-            model_target,
-            ..Publication::default()
-        };
         let mut model_finished = false;
         let mut model_polled = false;
         let mut received_event = false;
-        let operational = is_operational(evidence);
         let mut publication_deadline_elapsed = false;
         let mut result = loop {
             tokio::select! {
@@ -686,30 +700,24 @@ impl Executor {
             if !publication_deadline_elapsed {
                 cancel.cancel();
             }
-            result = match timeout(
-                AUTH_TIMEOUT,
-                publication.publish_operational_fallback(&self.repo, lease, evidence),
-            )
-            .await
+            result = self
+                .operational_fallback(&publication, lease, evidence)
+                .await;
+            if model_polled
+                && matches!(result, RunResult::Completed)
+                && (!publication_deadline_elapsed
+                    || !drain_operational_worker(
+                        &mut inference,
+                        &mut receiver,
+                        &mut model_finished,
+                        stop,
+                    )
+                    .await)
             {
-                Ok(Ok(true)) => RunResult::CompletedReset,
-                Ok(Ok(false)) => RunResult::Fenced,
-                _ => RunResult::Error,
-            };
-            if publication_deadline_elapsed
-                && matches!(result, RunResult::CompletedReset)
-                && drain_operational_worker(
-                    &mut inference,
-                    &mut receiver,
-                    &mut model_finished,
-                    stop,
-                )
-                .await
-            {
-                result = RunResult::Completed;
+                result = RunResult::CompletedReset;
             }
         }
-        if !model_finished {
+        if model_polled && !model_finished {
             if !matches!(result, RunResult::Completed) {
                 cancel.cancel();
             }
@@ -730,6 +738,24 @@ impl Executor {
             return RunResult::CompletedReset;
         }
         result
+    }
+
+    async fn operational_fallback(
+        &self,
+        publication: &Publication,
+        lease: &DeliveryLease,
+        evidence: &FrozenEvidence,
+    ) -> RunResult {
+        match timeout(
+            AUTH_TIMEOUT,
+            publication.publish_operational_fallback(&self.repo, lease, evidence),
+        )
+        .await
+        {
+            Ok(Ok(true)) => RunResult::Completed,
+            Ok(Ok(false)) => RunResult::Fenced,
+            _ => RunResult::Error,
+        }
     }
 
     async fn renew(
@@ -909,19 +935,6 @@ fn requires_complete_snapshot(evidence: &FrozenEvidence) -> bool {
     is_operational(evidence) && evidence.sources.iter().any(|source| !source.whole_passage)
 }
 
-fn deduplicate_operational_sentences(reply: &str) -> String {
-    let mut seen = BTreeSet::new();
-    let mut text = reply
-        .split(". ")
-        .filter(|sentence| seen.insert(sentence.trim_end_matches('.')))
-        .collect::<Vec<_>>()
-        .join(". ");
-    if reply.ends_with('.') && !text.ends_with('.') {
-        text.push('.');
-    }
-    text
-}
-
 fn fallback_findings(evidence: &FrozenEvidence, now_ms: i64) -> Vec<(&str, QaFinding)> {
     if !matches!(evidence.answer_mode, AnswerMode::Model)
         || !observation_is_fresh(evidence.sampled_at_ms, now_ms)
@@ -973,7 +986,7 @@ fn fallback_findings(evidence: &FrozenEvidence, now_ms: i64) -> Vec<(&str, QaFin
     candidates.sort_by_key(|(priority, _, _, _)| *priority);
 
     let mut remaining_words = QA_MAX_WORDS;
-    candidates
+    let findings: Vec<_> = candidates
         .into_iter()
         .filter_map(|(_, source, complete, end)| {
             remaining_words = remaining_words.checked_sub(complete.split_whitespace().count())?;
@@ -983,7 +996,11 @@ fn fallback_findings(evidence: &FrozenEvidence, now_ms: i64) -> Vec<(&str, QaFin
             ))
         })
         .take(QA_MAX_FINDINGS)
-        .collect()
+        .collect();
+    if complete_snapshot && findings.len() != evidence.sources.len() {
+        return Vec::new();
+    }
+    findings
 }
 
 #[derive(Default)]
@@ -995,50 +1012,30 @@ struct Publication {
 }
 
 impl Publication {
-    async fn publish_fallback_findings(
-        &mut self,
-        repo: &Repository,
-        lease: &DeliveryLease,
-        evidence: &FrozenEvidence,
-    ) -> Result<bool> {
-        for (id, finding) in fallback_findings(evidence, Utc::now().timestamp_millis()) {
-            if self.published_sources.contains(id) {
-                continue;
-            }
-            if !observation_is_fresh(evidence.sampled_at_ms, Utc::now().timestamp_millis()) {
-                break;
-            }
-            if !store::publish(repo, lease, QaTurnState::Running, Some(finding)).await? {
-                return Ok(false);
-            }
-            self.published_sources.insert(id.to_owned());
-        }
-        Ok(true)
-    }
-
     async fn publish_operational_fallback(
-        &mut self,
+        &self,
         repo: &Repository,
         lease: &DeliveryLease,
         evidence: &FrozenEvidence,
     ) -> Result<bool> {
-        if (self.published_sources.is_empty() || requires_complete_snapshot(evidence))
-            && !self
-                .publish_fallback_findings(repo, lease, evidence)
-                .await?
-        {
-            return Ok(false);
-        }
-        let state = if self.published_sources.is_empty() {
+        let findings: Vec<_> = if self.published_sources.is_empty() {
+            fallback_findings(evidence, Utc::now().timestamp_millis())
+                .into_iter()
+                .map(|(_, finding)| finding)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let state = if self.published_sources.is_empty() && findings.is_empty() {
             QaTurnState::InsufficientContext
         } else {
             QaTurnState::Answered
         };
-        store::publish_with_model_result(
+        store::publish_findings_and_complete(
             repo,
             lease,
             state,
-            None,
+            &findings,
             store::ModelResult {
                 context: Some(QaContextUsage::new(
                     self.model_target.unwrap_or_default().input_tokens(),
@@ -1060,7 +1057,7 @@ impl Publication {
         event: QaWorkerEvent,
     ) -> Result<RunResult> {
         self.sequence.accept(&evidence.request, &event)?;
-        let (state, context, reply) = match event {
+        let (state, context, reply, findings) = match event {
             QaWorkerEvent::Delta { text, .. } => {
                 if is_operational(evidence)
                     && (requires_complete_snapshot(evidence)
@@ -1129,34 +1126,23 @@ impl Publication {
                         )
                 });
                 let had_finding = !self.published_sources.is_empty();
-                if (!had_finding || requires_complete_snapshot(evidence))
+                let fallback = if !had_finding
                     && (matches!(
                         outcome,
                         QaWorkerOutcome::Answered | QaWorkerOutcome::InsufficientContext
                     ) || (is_operational(evidence) && outcome == QaWorkerOutcome::Failed))
-                    && !self
-                        .publish_fallback_findings(repo, lease, evidence)
-                        .await?
                 {
-                    return Ok(RunResult::Fenced);
-                }
-                let reply = reply
-                    .filter(|_| {
-                        self.cited_sources.is_subset(&self.published_sources)
-                            && (!is_operational(evidence)
-                                || observation_is_fresh(
-                                    evidence.sampled_at_ms,
-                                    Utc::now().timestamp_millis(),
-                                ))
+                    fallback_findings(evidence, now)
+                } else {
+                    Vec::new()
+                };
+                let reply = reply.filter(|_| {
+                    self.cited_sources.iter().all(|id| {
+                        self.published_sources.contains(id)
+                            || fallback.iter().any(|(source, _)| *source == id.as_str())
                     })
-                    .map(|text| {
-                        if is_operational(evidence) {
-                            deduplicate_operational_sentences(&text)
-                        } else {
-                            text
-                        }
-                    });
-                let has_finding = !self.published_sources.is_empty();
+                });
+                let has_finding = had_finding || !fallback.is_empty();
                 let state = match outcome {
                     QaWorkerOutcome::Answered if has_finding || reply.is_some() => {
                         QaTurnState::Answered
@@ -1174,7 +1160,11 @@ impl Publication {
                     QaWorkerOutcome::Cancelled => QaTurnState::Canceled,
                     _ => return Err(anyhow!("unsupported Inbox QA outcome")),
                 };
-                (state, context, reply)
+                let findings = fallback
+                    .into_iter()
+                    .map(|(_, finding)| finding)
+                    .collect::<Vec<_>>();
+                (state, context, reply, findings)
             }
             _ => return Err(anyhow!("unsupported Inbox QA event")),
         };
@@ -1183,7 +1173,7 @@ impl Publication {
             reply,
             model_target: self.model_target,
         };
-        if !store::publish_with_model_result(repo, lease, state, None, result).await? {
+        if !store::publish_findings_and_complete(repo, lease, state, &findings, result).await? {
             return Ok(RunResult::Fenced);
         }
         Ok(if state.is_terminal() {
@@ -1222,14 +1212,25 @@ mod tests {
         assert!(matches!(lease, ReplicaLease::Unclaimed));
     }
 
-    #[tokio::test]
-    async fn does_not_forget_a_replica_without_confirmed_reap() {
+    #[tokio::test(start_paused = true)]
+    async fn retries_shutdown_after_an_error_and_timeout() {
         let mut lease = ReplicaLease::Claimed;
         lease
             .release(
                 std::future::ready(Err(anyhow!("worker reap failed"))),
                 async { panic!("an unconfirmed reap must not release the durable permit") },
             )
+            .await;
+        assert!(matches!(lease, ReplicaLease::Claimed));
+        lease
+            .release(std::future::pending(), async {
+                panic!("a timed-out reap must not release the durable permit")
+            })
+            .await;
+        assert!(matches!(lease, ReplicaLease::Claimed));
+
+        lease
+            .release(std::future::ready(Ok(())), std::future::ready(Ok(())))
             .await;
         assert!(matches!(lease, ReplicaLease::Unclaimed));
     }
@@ -1268,33 +1269,6 @@ mod tests {
                 keep_warm
             );
         }
-    }
-
-    #[test]
-    fn removes_repeated_operational_sentences_without_changing_citations() {
-        let request = QaWorkerRequest::new(
-            "turn".into(),
-            "snapshot".into(),
-            "What needs attention?".into(),
-            vec![
-                QaPassage::new("search".into(), "Index visibility is incomplete.".into()),
-                QaPassage::new("catalog".into(), "Actor catalog is not ready.".into()),
-            ],
-        );
-        let reply = "Index visibility is incomplete. Actor catalog is not ready. Index visibility is incomplete.";
-        let deduplicated = deduplicate_operational_sentences(reply);
-        assert_eq!(
-            deduplicated,
-            "Index visibility is incomplete. Actor catalog is not ready."
-        );
-        let cited = |text: &str| {
-            verified_operational_sources(&request, text)
-                .unwrap()
-                .into_iter()
-                .map(|passage| passage.source_id.as_str())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(cited(reply), cited(&deduplicated));
     }
 
     #[test]
@@ -1351,9 +1325,11 @@ mod tests {
             inference_budget(&evidence, now),
             Duration::from_millis(4_500)
         );
+        assert!(inference_budget(&evidence, 14_500).is_zero());
+        assert_eq!(fallback_findings(&evidence, 14_500).len(), 2);
         assert!(fallback_findings(&evidence, 15_001).is_empty());
         evidence.sources[1].label = "API host memory usage".into();
-        assert_eq!(fallback_findings(&evidence, now).len(), 1);
+        assert!(fallback_findings(&evidence, now).is_empty());
     }
 
     #[test]

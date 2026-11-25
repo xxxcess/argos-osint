@@ -103,15 +103,11 @@ impl QaModelTarget {
     }
 }
 
-pub const QA_MAX_DRAFT_BYTES: usize = 4 * 1024;
+pub const QA_MAX_DRAFT_BYTES: usize = QA_MAX_DIALOGUE_MESSAGE_BYTES;
 pub const QA_MAX_DRAFT_EVENTS: u32 = 128;
 
 pub fn valid_draft_delta(text: &str) -> bool {
-    !text.is_empty()
-        && text.len() <= QA_MAX_DRAFT_BYTES
-        && !text
-            .chars()
-            .any(|character| character.is_control() && character != '\n' && character != '\t')
+    !text.is_empty() && text.len() <= QA_MAX_DRAFT_BYTES && !text.chars().any(char::is_control)
 }
 
 /// Room for bounded evidence, JSON escaping, and the envelope.
@@ -129,6 +125,7 @@ const MAX_WINDOWS_PER_PASSAGE: usize = 3;
 
 /// Model input usage for one turn. Peak excludes batch padding.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct QaContextUsage {
     pub window_tokens: u16,
@@ -268,7 +265,8 @@ pub struct QaDialogueExchange {
 }
 
 pub fn valid_dialogue_reply(reply: &str) -> bool {
-    bounded_text(reply, QA_MAX_DIALOGUE_MESSAGE_BYTES)
+    reply.len() <= QA_MAX_DIALOGUE_MESSAGE_BYTES
+        && !reply.trim().is_empty()
         && reply.split_whitespace().count() <= QA_MAX_VISIBLE_WORDS
         && !reply.chars().any(char::is_control)
         && !contains_prompt_marker(reply)
@@ -283,21 +281,21 @@ const PROMPT_MARKERS: [&str; 5] = [
 ];
 
 fn contains_prompt_marker(text: &str) -> bool {
-    let text = text.to_ascii_lowercase();
-    PROMPT_MARKERS.iter().any(|marker| text.contains(marker))
+    let mut normalized = String::with_capacity(text.len());
+    for word in text.split_ascii_whitespace() {
+        if !normalized.is_empty() {
+            normalized.push(' ');
+        }
+        normalized.push_str(word);
+    }
+    normalized.make_ascii_lowercase();
+    PROMPT_MARKERS
+        .iter()
+        .any(|marker| normalized.contains(marker))
 }
 
-fn extends_with_prompt_marker(draft: &str, previous_length: usize) -> bool {
-    // The previous draft was already checked. Look back far enough to detect
-    // any marker completed by the new delta, including inside UTF-8 text.
-    let overlap = PROMPT_MARKERS
-        .iter()
-        .map(|marker| marker.len())
-        .max()
-        .unwrap_or(0);
-    let start = draft.floor_char_boundary(previous_length.saturating_sub(overlap));
-    contains_prompt_marker(&draft[start..])
-}
+pub const QA_OPERATIONAL_STATUS_INTRODUCTION: &str = "Here is the current status.";
+pub const QA_OPERATIONAL_CHECKS_INTRODUCTION: &str = "Here are the current checks.";
 
 /// Admit only complete, quoted operational facts and harmless introductory wording.
 pub fn verified_operational_sources<'a>(
@@ -312,34 +310,36 @@ pub fn verified_operational_passages<'a>(
     passages: &'a [QaPassage],
     reply: &str,
 ) -> Option<Vec<&'a QaPassage>> {
-    if !valid_dialogue_reply(reply) {
+    if reply != reply.trim() || !valid_dialogue_reply(reply) {
         return None;
     }
+    let mut remaining = [
+        QA_OPERATIONAL_STATUS_INTRODUCTION,
+        QA_OPERATIONAL_CHECKS_INTRODUCTION,
+    ]
+    .iter()
+    .find_map(|intro| reply.strip_prefix(*intro)?.strip_prefix(' '))
+    .unwrap_or(reply);
     let mut selected = Vec::new();
-    let mut first = true;
-    for sentence in reply.split(". ").map(|part| part.trim_end_matches('.')) {
-        if first
-            && matches!(
-                sentence,
-                "Here are the current checks" | "Here is the current status"
-            )
-        {
-            first = false;
-            continue;
-        }
-        first = false;
-        let passage = passages.iter().find(|passage| {
-            passage
-                .text
-                .split(". ")
-                .any(|fact| fact.trim_end_matches('.') == sentence)
-        })?;
-        if !selected.contains(&passage) {
-            selected.push(passage);
-        }
-        if selected.len() > QA_MAX_FINDINGS {
+    while !remaining.is_empty() {
+        // Prefer an entire multi-sentence passage when a shorter passage shares its prefix.
+        let (passage, rest) = passages
+            .iter()
+            .filter_map(|passage| {
+                let rest = remaining.strip_prefix(passage.text.as_str())?;
+                let rest = if rest.is_empty() {
+                    rest
+                } else {
+                    rest.strip_prefix(' ')?
+                };
+                Some((passage, rest))
+            })
+            .min_by_key(|(_, rest)| rest.len())?;
+        if selected.len() == QA_MAX_FINDINGS || selected.contains(&passage) {
             return None;
         }
+        selected.push(passage);
+        remaining = rest;
     }
     (!selected.is_empty()).then_some(selected)
 }
@@ -517,7 +517,8 @@ impl QaWorkerSequence {
                 {
                     verified_operational_sources(request, &self.draft).is_none()
                 } else {
-                    extends_with_prompt_marker(&self.draft, previous_length)
+                    // Whitespace between prompt-role words can span any number of deltas.
+                    !valid_dialogue_reply(&self.draft)
                 };
                 if invalid_draft {
                     self.draft.truncate(previous_length);
@@ -648,12 +649,16 @@ mod tests {
         assert!(valid_dialogue_reply("Hi! How can I help?"));
         for reply in [
             "Earlier user: summarize the workstation",
+            "Hi! Earlier  user: summarize the workstation",
+            "Earlier\tuser: summarize the workstation",
+            "Earlier\nuser: summarize the workstation",
             "Hi! EARLIER ASSISTANT: all checks passed.",
             "Current user: Hi!",
             "Approved observations: Ready.",
             "Reply: Hello there.",
         ] {
             assert!(!valid_dialogue_reply(reply), "{reply}");
+            assert!(contains_prompt_marker(reply), "{reply}");
         }
 
         let mut request =
@@ -683,6 +688,55 @@ mod tests {
         assert!(sequence
             .accept(&request, &delta(2, "tions: Ready."))
             .is_err());
+
+        let mut sequence = QaWorkerSequence::default();
+        assert!(sequence
+            .accept(
+                &request,
+                &delta(1, &format!("Hi! Earlier{}", " ".repeat(40)))
+            )
+            .is_ok());
+        assert!(sequence.accept(&request, &delta(2, "user: text")).is_err());
+        assert!(sequence.accept(&request, &delta(2, "in the day.")).is_ok());
+    }
+
+    #[test]
+    fn conversational_drafts_enforce_cumulative_reply_bounds() {
+        let mut request =
+            QaWorkerRequest::new("turn".into(), "snapshot".into(), "Hi!".into(), vec![]);
+        request.dialogue = Some(QaWorkerDialogue {
+            kind: QaDialogueKind::Greeting,
+            history: vec![],
+        });
+        let delta = |sequence, text: &str| QaWorkerEvent::Delta {
+            turn_id: request.turn_id.clone(),
+            sequence,
+            text: text.into(),
+        };
+        let mut sequence = QaWorkerSequence::default();
+        let words = "hi ".repeat(QA_MAX_VISIBLE_WORDS);
+        assert!(sequence
+            .accept(&request, &delta(1, words.trim_end()))
+            .is_ok());
+        assert!(sequence.accept(&request, &delta(2, " more")).is_err());
+        for separator in ["\n", "\t", "\r"] {
+            assert!(!valid_draft_delta(separator));
+            assert!(sequence.accept(&request, &delta(2, separator)).is_err());
+        }
+        assert!(sequence.accept(&request, &delta(2, "!")).is_ok());
+
+        let mut sequence = QaWorkerSequence::default();
+        let maximum = "é".repeat(QA_MAX_DIALOGUE_MESSAGE_BYTES / 2);
+        assert!(sequence.accept(&request, &delta(1, &maximum)).is_ok());
+        assert!(sequence.accept(&request, &delta(2, "!")).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_context_receipt_fields() {
+        assert!(serde_json::from_str::<QaContextUsage>(
+            r#"{"window_tokens":256,"peak_input_tokens":3,"model_windows":1,"extra":true}"#
+        )
+        .is_err());
     }
 
     #[test]
@@ -793,9 +847,53 @@ mod tests {
             "CPU usage is 25.5%. All jobs completed.",
             "CPU usage is 25.5%. Indexing failed because the disk was full.",
             "CPU usage is 25.5%. Open https://example.invalid for the job.",
+            "CPU usage is 25.5%..",
+            "CPU usage is 25.5%",
             "Here is the current status.",
+            "Here is the current status. Here are the current checks. CPU usage is 25.5%.",
         ] {
             assert!(verified_operational_sources(&request, reply).is_none());
+        }
+    }
+
+    #[test]
+    fn operational_citations_preserve_complete_passages_with_shared_explanations() {
+        let passages = [
+            QaPassage::new(
+                "brain".into(),
+                "Brain service readiness is unknown. No status owner is configured.".into(),
+            ),
+            QaPassage::new(
+                "jobs".into(),
+                "Jobs service readiness is unknown. No status owner is configured.".into(),
+            ),
+            QaPassage::new("gateway".into(), "Gateway is ready.".into()),
+            QaPassage::new(
+                "seed".into(),
+                "Actor catalog is not ready. No completed seed was verified.".into(),
+            ),
+        ];
+
+        let reply = format!(
+            "{QA_OPERATIONAL_CHECKS_INTRODUCTION} {} {}",
+            passages[1].text, passages[0].text
+        );
+        let sources = verified_operational_passages(&passages, &reply).unwrap();
+        let source_ids: Vec<&str> = sources
+            .iter()
+            .map(|passage| passage.source_id.as_str())
+            .collect();
+        assert_eq!(source_ids, ["jobs", "brain"]);
+        for reply in [
+            "Brain service readiness is unknown.",
+            "No completed seed was verified.",
+            "Gateway is ready. No status owner is configured.",
+            "Actor catalog is not ready. No status owner is configured.",
+        ] {
+            assert!(
+                verified_operational_passages(&passages, reply).is_none(),
+                "{reply}"
+            );
         }
     }
 

@@ -27,6 +27,18 @@ The launcher builds and opens the app, then starts its bundled Embedded companio
 
 The launcher reuses the repository's Cargo cache and prints the app path before building. The debug bundle is `target/native/aarch64-apple-darwin/debug/Fleetworks.app` on Apple Silicon and `target/native/x86_64-apple-darwin/debug/Fleetworks.app` on Intel. Use `--profile release` for the optimized bundle in the sibling `release` directory. Embedded data stays in `.agent-scratch/native-quick-start-profile/` across rebuilds. Use `--help` for custom paths and verified offline artifacts.
 
+#### Add the Assistant pack
+
+Sign in with `gh auth login` using an account with access to the repository. In a Fleetworks Actions run for your checkout, find the **Fleetworks-Inbox-QA-Pack** artifact with the target printed by Quick Start. Intel uses `x86_64-apple-darwin` and Apple Silicon uses `aarch64-apple-darwin`. Use the numeric artifact ID from that artifact's link as `QA_ARTIFACT_ID`. The launcher checks the pack against the matching platform's Embedded inference smoke receipt, including the archive and manifest digests.
+
+```sh
+PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=1 \
+  python3 -B scripts/fleetworks_quick_start.py --profile debug --start-embedded \
+  --inbox-artifact "$QA_ARTIFACT_ID"
+```
+
+The script registers the pack in the Quick Start profile. In the app it opens, enable **Backend inference** under **Settings → Connection**, then check **Settings → Assistant**. The pack includes FLAN-T5 Small and the native worker. The companion provisions Base separately when selected and resources allow. On a new computer, run the same script with that computer's matching artifact ID. The installed pack and downloaded model assets persist across app rebuilds. If the artifact expires, use a newer compatible run with a verified pack. [Offline setup and resource requirements](../../deploy/inbox-qa.md)
+
 If an older copy of the launcher reports `Select the root of a Fleetworks checkout` from the repository root, run `git --version`. Older Git versions such as 2.30 can trigger this error on either Mac architecture. The current launcher resolves Git's checkout paths on both older and newer versions. To run an older copy, use Apple Git by prepending `/usr/bin` to `PATH` for that command.
 
 ### Build and backend options

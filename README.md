@@ -16,16 +16,16 @@ The [matte canvas design reference](docs/design/matte-canvas/README.md) defines 
 
 ### macOS with Embedded
 
-Open the repository root in RustRover, select **Build and open Fleetworks (Embedded)** from the run configuration menu, and click **Run**. Quit Fleetworks before rebuilding an open app.
-
-To use Terminal, run the same launcher from the repository root.
+From the repository root, run the **Build and open Fleetworks** script:
 
 ```sh
 PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=1 \
   python3 -B scripts/fleetworks_quick_start.py --profile debug --start-embedded
 ```
 
-The launcher builds and opens `target/native/<target>/debug/Fleetworks.app` and starts its bundled companion in a dedicated local profile. See the [macOS Quick Start](apps/fleetworks-desktop/README.md#macos-quick-start) for prerequisites, Accessibility permissions, and output locations.
+The script builds and opens the complete app for your Mac and starts Embedded in the Quick Start profile. In RustRover, **Build and open Fleetworks (Embedded)** runs the same script. Quit Fleetworks normally before rebuilding its bundle.
+
+**Enable Assistant on a new Mac.** Sign in with `gh auth login`, then add `--inbox-artifact "$QA_ARTIFACT_ID"` to the command above. Set `QA_ARTIFACT_ID` to the numeric Actions artifact ID for the **Fleetworks-Inbox-QA-Pack** from a compatible checkout's verified Embedded smoke run. Choose `x86_64-apple-darwin` on Intel or `aarch64-apple-darwin` on Apple Silicon. After installation, enable **Backend inference** in **Settings → Connection**. [Prerequisites, bundle paths, and QA pack setup](apps/fleetworks-desktop/README.md#macos-quick-start)
 
 ### Linux and manual native builds
 

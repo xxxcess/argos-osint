@@ -66,6 +66,7 @@ DESKTOP_WORKFLOW = "Fleetworks quick start (hosted companion)"
 MANIFEST_LIMIT = 1024**2
 NON_APP_DIRECTORIES = (".agents/", ".planning/", "docs/")
 CI_ROUTING_INPUTS = {
+    ".gitignore",
     "README.md",
     "apps/fleetworks-desktop/README.md",
     ".github/scripts/fleetworks_ci.py",
@@ -74,6 +75,7 @@ CI_ROUTING_INPUTS = {
     ".github/workflows/fleetworks-inbox-qa-smoke.yml",
     ".github/workflows/fleetworks-native-linux-route.yml",
     "scripts/fleetworks_quick_start.py",
+    "scripts/test_fleetworks_quick_start.py",
 }
 EMBEDDED_BUTTONS = r"""
 on run arguments
@@ -132,16 +134,19 @@ def build_inputs_match(revision, *, local_desktop=False):
     return all(path.startswith(NON_APP_DIRECTORIES) or path in CI_ROUTING_INPUTS for path in paths)
 
 
-def artifact_metadata(identity, target, families):
+def artifact_metadata(identity, target, families, *, require_success=True):
     require(identity > 0, "An Actions artifact ID must be a positive integer")
     artifact = gh_json(f"actions/artifacts/{identity}")
-    require(not artifact["expired"], "The selected Actions artifact expired")
+    require(artifact["id"] == identity and not artifact["expired"],
+            "The selected Actions artifact is unavailable or expired")
     run_info = artifact["workflow_run"]
     run = gh_json(f"actions/runs/{run_info['id']}")
     require(run_info["head_repository_id"] == run_info["repository_id"]
             and run["path"] == ".github/workflows/fleetworks.yml"
-            and run["status"] == "completed" and run["conclusion"] == "success"
+            and run["id"] == run_info["id"] and run["status"] == "completed"
             and run["head_sha"] == run_info["head_sha"],
+            "Select an artifact from a completed Fleetworks run in the upstream repository")
+    require(not require_success or run["conclusion"] == "success",
             "Select an artifact from a successful Fleetworks run in the upstream repository")
     family_pattern = "|".join(re.escape(family) for family in families)
     suffix = f"-{target}-{run['head_sha']}-{run['id']}."
@@ -482,7 +487,11 @@ def app_profile_matches(pid, profile):
 
 
 def start_companion(app, pid, state):
-    subprocess.run(["osascript", "-", str(pid)], input=EMBEDDED_BUTTONS, text=True, check=True, timeout=30)
+    try:
+        subprocess.run(["osascript", "-", str(pid)], input=EMBEDDED_BUTTONS, text=True, check=True, timeout=30)
+    except subprocess.SubprocessError as error:
+        raise ValueError("Could not start Embedded through macOS Accessibility. "
+                         "In Fleetworks, choose Embedded and click Start Embedded Backend, then rerun Quick Start.") from error
     wait_for(lambda: embedded_running(app, pid, state), "The Embedded companion did not start for this profile")
 
 
@@ -509,14 +518,53 @@ def open_app(app, profile, *, start_embedded):
     return pid, state
 
 
+def inbox_smoke_receipt(run, target, pack_attempt, temporary):
+    family = "Fleetworks-Inbox-QA-Embedded"
+    run_id = run["id"]
+    revision = run["head_sha"]
+    for attempt in range(int(pack_attempt), run["run_attempt"] + 1):
+        name = f"{family}-{target}-{revision}-{run_id}.{attempt}"
+        result = gh_json(f"actions/runs/{run_id}/artifacts?name={name}")
+        matches = [item for item in result["artifacts"] if item["name"] == name and not item["expired"]]
+        if not matches:
+            continue
+        require(len(matches) == 1, "Expected one exact Embedded Inbox smoke artifact for this attempt")
+        smoke, smoke_run, smoke_attempt = artifact_metadata(
+            matches[0]["id"], target, (family,), require_success=False,
+        )
+        require(smoke_run["id"] == run_id and smoke_run["head_sha"] == revision and int(smoke_attempt) == attempt,
+                "The Embedded Inbox smoke artifact belongs to a different run or attempt")
+        with download_artifact(smoke, temporary, MANIFEST_LIMIT) as outer:
+            report_name = f"embedded-{target}.json"
+            receipt_name = f"pack-digests-{target}.json"
+            names = outer.namelist()
+            if not {report_name, receipt_name}.issubset(names):
+                continue
+            require(names.count(report_name) == names.count(receipt_name) == 1,
+                    "The Embedded Inbox smoke artifact contains duplicate evidence")
+            receipt = read_json_member(outer, receipt_name, 64 * 1024)
+            if str(receipt["run_attempt"]) != pack_attempt:
+                continue
+            report = read_json_member(outer, report_name, 64 * 1024)
+            require(report.get("generated_dialogue") is True,
+                    "The Embedded Inbox smoke did not generate a dialog response")
+            evidence_file = temporary / report_name
+            evidence_file.write_text(json.dumps(report), encoding="utf-8")
+            subprocess.run([sys.executable, "-B", str(ROOT / ".github/scripts/inbox_qa_smoke_receipt.py"),
+                            "--evidence", str(evidence_file), "--target", target, "--head", revision],
+                           check=True, timeout=30)
+            return receipt
+    raise ValueError(f"No verified Embedded Inbox smoke receipt is available for the {target} pack in run {run_id}")
+
+
 def install_inbox(identity, target, profile, state):
     require(state.is_dir() and state.resolve().is_relative_to(profile)
             and not state.is_symlink() and stat.S_IMODE(state.stat().st_mode) == 0o700,
             "Start Embedded in the isolated profile before installing Inbox support")
     pointer = state / "qa-pack.json"
-    if pointer.exists():
-        require(not pointer.is_symlink() and pointer.stat().st_uid == os.getuid()
-                and stat.S_IMODE(pointer.stat().st_mode) == 0o600 and pointer.stat().st_size <= 4096,
+    if pointer.exists() or pointer.is_symlink():
+        require(pointer.is_file() and not pointer.is_symlink() and pointer.stat().st_uid == os.getuid()
+                and stat.S_IMODE(pointer.stat().st_mode) == 0o600 and 0 < pointer.stat().st_size <= 4096,
                 "The existing Inbox pack pointer is not private and bounded")
         config = json.loads(pointer.read_text())
         pack = Path(config["root"])
@@ -524,19 +572,23 @@ def install_inbox(identity, target, profile, state):
                 "This profile already points to a different Inbox pack; use a separate profile")
         qa.verify_directory(pack, target, config["manifest_sha256"])
         return
-    artifact, run, attempt = artifact_metadata(identity, target, ("Fleetworks-Inbox-QA-Pack",))
+    artifact, run, attempt = artifact_metadata(identity, target, ("Fleetworks-Inbox-QA-Pack",), require_success=False)
     require(build_inputs_match(run["head_sha"], local_desktop=True), "The Inbox worker inputs differ from this checkout")
     installed = profile / f"qa-pack-{artifact['id']}"
     with tempfile.TemporaryDirectory(prefix=".inbox-quick-start-", dir=profile) as temp:
         temporary = Path(temp)
+        smoke = inbox_smoke_receipt(run, target, attempt, temporary)
         progress = getattr(qa, "pack_progress", None)
         stage = progress(state, "downloading_pack") if progress else nullcontext()
         with stage, download_artifact(artifact, temporary, qa.MAX_COMPRESSED + 1024**2) as outer:
-            evidence = read_json_member(outer, "digests.json")
-            require(evidence["source_sha"] == run["head_sha"] and str(evidence["run_id"]) == str(run["id"])
-                    and str(evidence["run_attempt"]) == attempt and evidence["target"] == target,
-                    "The Inbox worker receipt does not match the verified artifact")
             name = f"Fleetworks-Inbox-QA-Pack-{target}.tar.gz"
+            require(sorted(outer.namelist()) == sorted([name, "digests.json"]),
+                    "The Inbox pack artifact contains unexpected files")
+            evidence = read_json_member(outer, "digests.json", 64 * 1024)
+            require(evidence == smoke and evidence["source_sha"] == run["head_sha"]
+                    and str(evidence["run_id"]) == str(run["id"]) and str(evidence["run_attempt"]) == attempt
+                    and evidence["target"] == target and outer.getinfo(name).file_size == evidence["archive_bytes"],
+                    "The Inbox pack archive and receipt do not match the verified Embedded smoke")
             archive = temporary / name
             copy_member(outer, name, archive, qa.MAX_COMPRESSED)
         reserve_space(profile, archive.stat().st_size + qa.MAX_UNPACKED)
@@ -598,7 +650,7 @@ def main():
                 install_inbox(args.inbox_artifact, target, profile, state)
                 print("Offline Inbox pack installed. Enable Backend inference in Settings → Connection.")
             if embedded_running(app, pid, state):
-                print(f"Embedded is running in {state}")
+                print(f"Embedded companion launched with state in {state}")
             else:
                 print('Choose Embedded, then "Start Embedded Backend".')
     except (BadZipFile, KeyError, OSError, TypeError, ValueError, subprocess.SubprocessError) as error:

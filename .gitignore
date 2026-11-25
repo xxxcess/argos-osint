@@ -1,4 +1,5 @@
 /target
+/dist/native/
 **/*.rs.bk
 .DS_Store
 *.db

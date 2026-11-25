@@ -32,7 +32,7 @@ The offline package smoke uses a 1,536 MiB ceiling and verifies Small without ne
 
 ## Workstation question benchmark
 
-Run the workstation questions through a packaged Embedded companion in a fresh private state directory. The benchmark checks that **Generator → Automatic** and **Decision → Rules only** are the defaults, then enables Backend inference with those preferences. Use the Small pack directory and manifest SHA-256 from a verified installation or artifact receipt.
+Run the workstation questions through a packaged Embedded companion with private state, home and temporary directories. The benchmark checks the bundle target and companion SHA-256 against the app manifest before launch. It checks that **Generator → Automatic** and **Decision → Rules only** are the defaults, then enables Backend inference with those preferences. Use the Small pack directory and manifest SHA-256 from a verified installation or artifact receipt.
 
 ```sh
 mkdir -p .agent-scratch
@@ -43,6 +43,8 @@ python3 -B scripts/fleetworks_workstation_bench.py \
 
 Add `--base-model-assets "$PINNED_BASE_MODEL_DIR"` if you have the verified Base files cached and want Automatic to choose with the host's actual memory headroom. With only the Small pack present, the benchmark caps generator memory at 1,536 MiB to stay offline. Each run creates a synthetic registration, checks that a Rules only lookup resolves the catalog's current status without creating an exchange, and reads readiness and job counts over private IPC. Resource checks use the frozen samples cited in each turn.
 
-The JSON records answer text, citations, expected and observed response paths, and first-draft and terminal latency per question. It also flags repeated sentences and echoed prompt labels. The summary counts verified operational model replies and verified conversational replies. The current worker uses the model to select operational wording and evidence from approved options, and generates conversational text token by token. Exact facts can pass with zero model input, and a turn with model input can still finish using verified evidence. A completed run reports quality failures in its cases and summary. A launch, setup, or transport failure exits with an error.
+The JSON records answer text, citations, expected and observed response paths, and admission, first-draft and terminal latency per question. Post-admission latency includes execution and IPC polling. On Linux the report also records peak resident worker memory observed from the kernel. The benchmark verifies complete cited passages, checks conversational text for repeated sentences, and flags echoed prompt labels. Exact facts can pass with zero model input, and a turn with model input can still finish using verified evidence.
+
+Use `--warmup-turns` for unmeasured greetings and `--iterations` to repeat the measured cases with a new isolated registration each time. A completed run reports case failures in JSON. Use `--fail-on-error` to also exit nonzero on a fact, route, or reply-style check failure. Launch, setup, and transport errors always exit nonzero.
 
 [Assistant contract](../docs/wiki/code/assistant-chat-contract.md) · [Hosted verification](../docs/wiki/code/ci.md)

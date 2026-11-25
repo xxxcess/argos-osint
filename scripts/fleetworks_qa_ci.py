@@ -77,7 +77,7 @@ def torch_environment():
     return root, key, env
 
 
-def linux_libraries(binary, directory, env, installed=False):
+def linux_libraries(binary, directory, env, *, torch_root=None):
     result = run("ldd", str(binary), env=env, capture=True, timeout=60)
     pack.check("not found" not in result, "Inbox QA worker library could not be resolved")
     paths = []
@@ -85,9 +85,11 @@ def linux_libraries(binary, directory, env, installed=False):
         if name in LINUX_SYSTEM:
             continue
         source = Path(source)
-        if installed:
+        if torch_root is None:
             pack.check(source.resolve().parent == directory.resolve(), "Inbox QA linked outside its pack")
         else:
+            wheel_dirs = (torch_root / "lib", torch_root.parent / "torch.libs")
+            pack.check(source.resolve().parent in wheel_dirs, "Inbox QA linked a library outside the pinned wheel")
             shutil.copyfile(source, directory / name)
         paths.append(directory / name)
     versions = run("readelf", "--version-info", str(binary), *map(str, paths), capture=True, timeout=60)
@@ -142,13 +144,18 @@ def prepare_assets(directory, chat_model):
     directory.mkdir(mode=0o700, parents=True)
     url = f"https://huggingface.co/{pin['repository']}/resolve/{pin['revision']}"
     for name, asset in pin["files"].items():
-        destination = directory / name
-        run("curl", "--fail", "--silent", "--show-error", "--location",
-            "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "5",
-            "--retry", "3", "--max-time", "1200", "--max-filesize", str(asset["bytes"]),
-            f"{url}/{name}", "--output", str(destination), timeout=1240)
-        pack.check(destination.stat().st_size == asset["bytes"] and pack.sha256(destination) == asset["sha256"],
-                   f"{name} does not match the pinned chat model")
+        with tempfile.NamedTemporaryFile(dir=directory, prefix=f".{name}-", delete=False) as output:
+            temporary = Path(output.name)
+        try:
+            run("curl", "--fail", "--silent", "--show-error", "--location",
+                "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "5",
+                "--retry", "3", "--max-time", "1200", "--max-filesize", str(asset["bytes"]),
+                f"{url}/{name}", "--output", str(temporary), timeout=1240)
+            pack.check(temporary.stat().st_size == asset["bytes"] and pack.sha256(temporary) == asset["sha256"],
+                       f"{name} does not match the pinned chat model")
+            os.replace(temporary, directory / name)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODEL, *, model_directory=None):
@@ -391,7 +398,7 @@ def build(target, directory, chat_model=pack.DEFAULT_CHAT_MODEL):
     for path in (binary, listener):
         shutil.copy2(ROOT / "target/agents/release" / path.name, path)
     native = (mac_libraries(binary, libraries, torch_root) if target in DARWIN_WHEELS
-              else linux_libraries(binary, libraries, env))
+              else linux_libraries(binary, libraries, env, torch_root=torch_root))
     notices = []
     for info in sorted(torch_root.parent.glob("torch-*.dist-info")):
         for source in sorted([*info.glob("LICENSE"), *info.glob("NOTICE*")]):
@@ -410,7 +417,7 @@ def build(target, directory, chat_model=pack.DEFAULT_CHAT_MODEL):
                                     manifest_sha256=digests["manifest_sha256"]))
     if target not in DARWIN_WHEELS:
         linux_libraries(installed / pack.WORKER, installed / "lib",
-                        {**env, loader_key: str(installed / "lib")}, installed=True)
+                        {**env, loader_key: str(installed / "lib")})
     digests["checkpoint_smoke"] = verify_inference(installed, loader_key, target, chat_model)
     (directory / "digests.json").write_text(json.dumps(digests, sort_keys=True) + "\n")
     print(json.dumps(digests, sort_keys=True))

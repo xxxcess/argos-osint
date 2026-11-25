@@ -441,8 +441,14 @@ def exercise(request, registration, model, readiness, running_jobs):
 
     context = authorize(registration)
 
+    preferred_model_fallback_count = 0
+
     def ask(case, question, *, mode="direct"):
-        return settled_turn(request, context, case, question, mode=mode)
+        nonlocal preferred_model_fallback_count
+        turn = settled_turn(request, context, case, question, mode=mode)
+        if mode == "preferred" and not turn.get("reply"):
+            preferred_model_fallback_count += 1
+        return turn
 
     def check_status_group(question, group, prior_observation):
         status_turn = ask(f"{group}-status-checks", question, mode="preferred")
@@ -544,6 +550,7 @@ def exercise(request, registration, model, readiness, running_jobs):
     request("events", query=query, expected=404)
     return {"model_warm_ms": ready_ms, "admission_ms": admission_ms, "first_cited_finding_ms": first_finding_ms,
             "completion_ms": completed_ms, "unload_ms": round((time.monotonic() - started) * 1000, 1),
+            "preferred_model_fallback_count": preferred_model_fallback_count,
             "model_pid_count": len(active), "warm_model_rss_bytes": worker_rss_bytes,
             "model_context": model_context,
             "fresh_observation": True, "terminal_events": terminal_events, "terminal_state": snapshot["state"],
@@ -1292,9 +1299,10 @@ def run_catalog(args):
 
 
 @contextmanager
-def embedded_qa_session(binary, state, *, reject_model_target=False, qa_memory_mib=FIXTURE_MODEL_MEMORY_MIB):
+def embedded_qa_session(binary, state, *, reject_model_target=False, qa_memory_mib=FIXTURE_MODEL_MEMORY_MIB,
+                        isolated_root=None):
     session = embedded.LocalIpcSession(binary, state, client_name="fleetworks-qa-smoke",
-                                       qa_memory_mib=qa_memory_mib)
+                                       qa_memory_mib=qa_memory_mib, isolated_root=isolated_root)
     try:
         session.hello()
         ensured, _ = session.request_json({"op": "registration_ensure", "args": {

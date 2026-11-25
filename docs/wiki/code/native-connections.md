@@ -49,7 +49,7 @@ When Backend inference is on, an Embedded companion with the triage capability a
 
 The app keeps at most 50 items and clears them when the connection authority changes. Notifications cover visible job completion, readiness transitions, and connection success or failure. Item text uses fixed wording and bounded titles without exposing error text, URLs, or credentials.
 
-The contextual **Assistant** dock is built and tested but **disabled** (`Assistant::enabled` is false). It needs the typed chat capability, which the backend does not advertise yet, so sending would stay gated even if shown. While it is disabled the original context rail stays in place. When enabled it docks at 380 pt if the center view keeps at least 640 pt, stays hidden otherwise, and floats over the right edge only when the operator asks. Enter sends, Shift+Enter adds a line, and an input method that is composing keeps Enter. The draft stays with its pinned context, and a new connection authority clears both.
+The contextual **Assistant** dock is built and tested but **disabled by default** (`Assistant::enabled` is `false`). The backend does advertise `Capabilities.chat = Supported` and serves `POST /api/v1/workstation/chat/turns` (and IPC `chat_turn_submit`), which validates and acknowledges turns without storing threads or generating replies yet; active user-facing Q&A ships in **Inbox** via [Inbox QA V2](assistant-chat-contract.md#inbox-qa-v2) (`inbox-qa-v2`, `inbox-qa-triage-v1`, `inbox-qa-model-settings-v1`). While the contextual dock is disabled the original context rail stays in place. When enabled it docks at 380 pt if the center view keeps at least 640 pt, stays hidden otherwise, and floats over the right edge only when the operator asks. Enter sends, Shift+Enter adds a line, and an input method that is composing keeps Enter. The draft stays with its pinned context, and a new connection authority clears both.
 
 ## Command panel
 
@@ -117,7 +117,7 @@ Normal GUI setup needs no token file. Explicit `--api-origin <origin> --api-toke
 | Invalidation | Gateway/access changes fence old clients, reads, caches and confirmations. Missing registration or optional services disables only dependent actions; permitted shared reads remain usable. |
 | Retirement | Fence admission and sessions; drain associated jobs and uncertain effects, then retire the workstation. Retained v1 folders keep their protection; accepted causal work may finish while retiring. |
 
-Schema 10 adds pairing and credential records. Coordinate bootstrap and compatible readers/writers using the existing deployment selection; preserve scope, installation/workstation identity, registration mappings, unresolved requests and immutable origins. The earlier workstation-v2 migration fences legacy registrations/sessions and requires fresh proof for those migrated entries; pairing does not replace retained static/headless credentials. [Registry migration](../../diagrams/connect-registry.html)
+Schema 12 covers pairing and revocation records (v10), dataset upload tickets (v11), and Embedded Inbox QA state (v12). Coordinate bootstrap and compatible readers/writers using the existing deployment selection; preserve scope, installation/workstation identity, registration mappings, unresolved requests and immutable origins. The earlier workstation-v2 migration fences legacy registrations/sessions and requires fresh proof for those migrated entries; pairing does not replace retained static/headless credentials. [Registry migration](../../diagrams/connect-registry.html)
 
 ## Browser handoff
 
@@ -147,7 +147,7 @@ Jobs SQLite owns safe summaries, not provider stdout/payloads. Membership/privat
 
 Richer backend APIs retain independent permissions. Opaque cursors bind proof/scope/snapshot, expire and require restart after invalidation. Follow/export stay bounded; partial exports and unavailable counts remain explicit.
 
-**Layout.** When the Jobs page is at least 940 pt wide, the paged list is a 300 pt column beside the selected job's detail. Below that the two stack, and below 660 pt the list and detail alternate with **Back to jobs**. Refreshes keep the selected job and page.
+**Layout.** When the Jobs page is at least 940 pt wide, the continuous cursor-loaded list is a 300 pt column beside the selected job's detail. Below that the two stack, and below 660 pt the list and detail alternate with **Back to jobs**. Refreshes preserve the selected job and loaded scroll window (`jobs_query.rs`).
 
 ## Readiness and maintenance
 

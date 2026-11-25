@@ -95,7 +95,7 @@ class ReviewAuthorityTests(unittest.TestCase):
         for cross_repository, actor_can_write, track, expected in (
             (False, True, "core", True), (False, False, "core", False),
             (True, True, "core", False), (None, True, "core", False),
-            (False, True, "ui", False),
+            (False, True, "ui", False), (False, True, "perf-security", False),
         ):
             with self.subTest(fork=cross_repository, writer=actor_can_write, track=track):
                 pr = {
@@ -128,6 +128,16 @@ class ReviewAuthorityTests(unittest.TestCase):
                 self.assertEqual(bool(report["spec_prs"]), expected)
                 if cross_repository is not False:
                     self.assertEqual(entries[0]["push_scope"], "operator_authorization_required")
+
+    def test_verification_tracks_include_perf_security(self):
+        rollup = [
+            {"name": "Nightly Performance & Security / Static audit", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"name": "GSD Nightly: Core / Backend", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        ]
+        tracks = gsd_poll.verification_tracks(rollup)
+        self.assertEqual(tracks["perf_security"]["status"], "green")
+        self.assertEqual(tracks["core"]["status"], "green")
+        self.assertEqual(tracks["ui"]["status"], "unavailable")
 
 
 if __name__ == "__main__":

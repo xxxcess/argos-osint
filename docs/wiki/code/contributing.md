@@ -148,7 +148,7 @@ Never run blanket `cargo clean`, remove locks to bypass contention or erase user
 
 Detect the native host with `uname -ms` and `rustc -vV | grep '^host:'`. Reuse one feature graph and `target/agents`. The workspace `.cargo/config.toml` sets `jobs = 2` to avoid OOM on hosts with 8 GB RAM — override with `CARGO_BUILD_JOBS=4` on larger machines.
 
-**Desktop app (lightweight).** The native app depends only on `fleetworks-contracts`, `fleetworks-workstation`, and `fleetworks-broker` — no RocksDB, tract-core, or tokenizers. Build or test just the app:
+**Desktop app (lightweight).** The native app depends only on `fleetworks-contracts` and `fleetworks-workstation` — no RocksDB, `fleetworks-broker`, tract-core, or tokenizers. Build or test just the app:
 
 ```sh
 cargo check -p fleetworks-desktop

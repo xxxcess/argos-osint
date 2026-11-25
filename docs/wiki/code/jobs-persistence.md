@@ -39,7 +39,7 @@ Resolve pending publication proposals before acknowledging conflicting cancellat
 | Scope | Required result | Current boundary |
 | --- | --- | --- |
 | SQLite ownership | Persisted operational primitives, standalone logs, private HTTP and Jobs-only disk mount | Implemented; focused persistence and HTTP checks pass |
-| Embedded delivery | RocksDB queue, Atlas adapter, visibility recovery and standalone deployment | Native Atlas smoke passes; Docker image/deployment gate pending |
+| Embedded delivery | RocksDB queue, Atlas adapter, visibility recovery and standalone deployment | Implemented; built and smoked by [`compose.native-review.yml`](../../../deploy/compose.native-review.yml), [`compose.atlas.yml`](../../../deploy/compose.atlas.yml), [`deploy/verify.py`](../../../deploy/verify.py), and [`fleetworks.yml`](../../../.github/workflows/fleetworks.yml) |
 | Operational authority | Route scheduling, attempts, process heartbeat/recovery, retry/cancel and dashboard reads through Jobs together | Planned; production scheduling still uses SurrealDB |
 | Domain handoff | Admission intents, publication reconciliation, cancellation/expiry/generation fences | Planned; existing domain transactions remain authoritative |
 | Telemetry | Move writes, hourly/daily rollups, retention and Profile readers together | Planned; do not move only writers |
@@ -57,4 +57,4 @@ Treat performance as a measured outcome. Compare core-domain write latency under
 
 Acceptance requires fresh initialization, disk reopen and process-kill recovery, single-owner claim races, stale epoch rejection, duplicate publication/ack replay, delayed retries, dead letters, cross-store handoff crash points and restart fencing. Exercise cancellation, expiry and source replacement during domain publication. Run synthetic isolated HTTP/startup fixtures; keep the user's stack untouched. A primitive store test is not evidence that full scheduler isolation is complete.
 
-Implementation entry points: [operational store](../../../crates/fleetworks-jobs), [Jobs host](../../../services/api-host/src/jobs_service.rs), [log adapter](../../../crates/argos-osint-core/src/storage/jobs_client.rs), and [transitional domain dispatch](../../../crates/argos-osint-core/src/storage/job_dispatch.rs).
+Implementation entry points: [operational store](../../../crates/fleetworks-jobs), [Jobs host](../../../services/api-host/src/jobs_service.rs), [log adapter](../../../crates/argos-osint-core/src/storage/jobs_client.rs), [transitional domain dispatch](../../../crates/argos-osint-core/src/storage/job_dispatch.rs), and [standalone RabbitMQ (`lapin`) transport crate](../../../crates/fleetworks-broker).

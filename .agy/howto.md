@@ -1,22 +1,16 @@
 # Antigravity teamwork
 
-Use this guide only for Antigravity `/teamwork`; the [canonical agent workflow](../docs/wiki/code/agent-workflow.md) owns execution, scope control and evidence. Do not import OpenCode-only role restrictions. Use this host's configured roles/models; never copy another host's model IDs or silently substitute unavailable models.
+For Antigravity `/teamwork` only. The [canonical workflow](../docs/wiki/code/agent-workflow.md) ([scope and finish line](../docs/wiki/code/agent-workflow.md#scope-and-finish-line)) governs execution, scope freeze, and evidence. Do not import OpenCode-only restrictions; use this host's configured roles/models without copying another host's IDs or silently substituting unavailable models.
 
-## Scope and team
+Pick [lite](lite-team.md) for bounded changes or [heavy](heavy-team.md) for independent areas/cross-cutting contracts. Delegate early only when useful, with disjoint ownership and one build owner.
 
-Follow the canonical [scope and finish line](../docs/wiki/code/agent-workflow.md#scope-and-finish-line): agree outcome/non-goals/acceptance, review risk early, freeze after required changes and limit late work to demonstrated in-scope blockers. Defer independent improvements; wrap-up stops new work with an honest handoff. Existing authorization remains valid; no extra approval gate.
+## Host contracts
 
-Use [lite](lite-team.md) for bounded changes and [heavy](heavy-team.md) for independent areas or cross-cutting contracts. Delegate early only when useful, with disjoint ownership and one build owner; follow the canonical workflow for worker wakeups, resources and evidence reuse.
-
-## Host-specific contracts
-
-- Start at [the wiki](../docs/index.md), then [contributing](../docs/wiki/code/contributing.md) and [testing](../.opencode/skills/argos-testing/SKILL.md). Preserve unrelated work, locks and services; `.github` changes remain Code Architect-owned.
-- One owner maintains `.planning/<date-slug>/` under the [planning/retention contract](../docs/wiki/code/planning-artifacts.md). Scratch belongs in `.agent-scratch/`; Cargo uses `python3 scripts/agent_cargo.py` and its shared `target/agents` cache. Worktrees are edit-only; the build owner follows [cache hygiene](../docs/wiki/code/contributing.md#build-cache-hygiene).
-- Respect the user's approved verification scope. Use scoped Fleetworks checks for its clients and services. Use native embedded storage and its final gate for affected compatibility paths. Hosted CI owns server and platform matrices and mutation execution. Missing evidence stays unverified.
-- Follow the [development loops](../docs/wiki/code/contributing.md#development-loops-local-cli-and-docker). Workers edit only. The build owner runs the host native loop first, then at most one Docker image or web-dev loop for the affected target, using a dedicated workspace, `COMPOSE_PROJECT_NAME` and ports. Never stop or rebuild the user's stack. Docker evidence is unverified until run and authorized.
-- Keep existing source/UI conventions, React Compiler, accessible topology/list twin and offline fixtures. Use canonical instructions for visual previews and final evidence.
-- Rune app work follows [fleetworks-rune-verify](../.opencode/skills/fleetworks-rune-verify/SKILL.md) and [native verification](../docs/wiki/code/native-verification.md): same-view Runtime/input, selected PNG/tree/scripts and actual inspection. Native stays API-only; backend-global resources and registered origin are distinct. Linux engine/integration and physical-Mac GUI evidence keep their own gates; terminal evidence is historical.
+- **Orient & plans:** Start at [the wiki](../docs/index.md), [contributing](../docs/wiki/code/contributing.md), and [testing](../.opencode/skills/argos-testing/SKILL.md). Preserve unrelated work, locks, and services; `.github` is Code Architect-owned. One owner maintains `.planning/<date-slug>/` per [planning retention](../docs/wiki/code/planning-artifacts.md); keep scratch in `.agent-scratch/`.
+- **Builds & loops:** Worktrees are edit-only; one build owner runs `python3 scripts/agent_cargo.py` (`target/agents`), follows [cache hygiene](../docs/wiki/code/contributing.md#build-cache-hygiene), and uses the narrowest [development loop](../docs/wiki/code/contributing.md#development-loops-local-cli-and-docker) (host native first, then at most one authorized Docker/web-dev loop with dedicated workspace, `COMPOSE_PROJECT_NAME`, and ports—never touching the user's stack).
+- **Verification:** Honor approved scope: scoped Fleetworks checks for clients/services, native embedded gate for compatibility paths, hosted CI for server/platform matrices and Rust mutation. Unrun checks stay unverified.
+- **UI:** Preserve React Compiler, accessible topology/list twin, and offline fixtures. Rune work follows [fleetworks-rune-verify](../.opencode/skills/fleetworks-rune-verify/SKILL.md) and [native verification](../docs/wiki/code/native-verification.md) (same-view Runtime/input, inspected PNG/tree, API-only native client; terminal evidence is historical).
 
 ## Handoff
 
-Assignments include scope/non-goals, integration root/base, owned paths, references, acceptance and existing evidence. Return changed paths, actual checks/exits/counts, skips, artifacts and blockers. On continuation, inspect existing processes/logs before starting another build; use the host's explicit wake/resume operation for idle workers. Commits/pushes require the customer's authorization.
+Include scope/non-goals, integration root/base, owned paths, refs, acceptance, and existing evidence. Return changed paths, commands/exits/counts, skips, artifacts, and blockers. Before starting another build on continuation, inspect running processes/logs and explicitly wake idle workers. Commits/pushes require customer authorization.

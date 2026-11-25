@@ -44,7 +44,7 @@ Atlas scores the six `strategic-domains-v1` domains independently. Admission req
 
 [atlas_taxonomy.rs](../../../crates/argos-osint-core/src/atlas_taxonomy.rs) — leaf owning the six domain IDs + official names + `strategic-domains-v1` + explicit legacy identifiers + membership/validation helpers; integration direction `atlas_taxonomy ← {classifier, atlas, related_articles, storage, intel_service, article_discovery}`; the leaf does not import the classifier engine, nlp, storage, or orchestration.
 
-Read the [taxonomy concept](../concepts/strategic-domains-taxonomy.md), [classifier code map](classifier.md) and public `tests/classifier_{contract,artifact,training_calibration,dataset,readiness}.rs` contracts together.
+Read the [taxonomy concept](../concepts/strategic-domains-taxonomy.md), [classifier code map](classifier.md) and public `tests/classifier_{contract,artifact,training_calibration,dataset,readiness}.rs` contracts together. Review export/import and recalibration live in [storage/classifier_review.rs](../../../crates/argos-osint-core/src/storage/classifier_review.rs) and [storage/classifier_learning.rs](../../../crates/argos-osint-core/src/storage/classifier_learning.rs) (with model fitting in [storage/classifier_learning_fit.rs](../../../crates/argos-osint-core/src/storage/classifier_learning_fit.rs)).
 
 Classifier status vocabulary: `missing / ready / training / invalid / incompatible / unavailable`; rejection reasons vs. model/queue/storage faults — faults are blocked or retryable, never `unk`.
 
@@ -52,9 +52,9 @@ Classifier status vocabulary: `missing / ready / training / invalid / incompatib
 
 `@tag:brain-memory`
 
-[brain.rs](../../../crates/argos-osint-core/src/brain.rs) defines memory/provenance concepts and recall scoring; [store.rs](../../../crates/argos-osint-core/src/store.rs) exposes persistence-facing operations. Follow [storage/recall.rs](../../../crates/argos-osint-core/src/storage/recall.rs) for retrieval. Read [source lifecycle](../../diagrams/brain-source-lifecycle.html) and [topology](../concepts/topology-mapper.md) before changing eligibility or associations.
+[brain.rs](../../../crates/argos-osint-core/src/brain.rs) defines memory/provenance concepts and recall scoring; [store.rs](../../../crates/argos-osint-core/src/store.rs) exposes persistence-facing operations. Follow [storage/recall.rs](../../../crates/argos-osint-core/src/storage/recall.rs) for retrieval, [storage/actor_dossier.rs](../../../crates/argos-osint-core/src/storage/actor_dossier.rs) for bounded dossier snapshots, and [intel_topology.rs](../../../crates/argos-osint-core/src/intel_topology.rs) for topology entry projection. Read [source lifecycle](../../diagrams/brain-source-lifecycle.html) and [topology](../concepts/topology-mapper.md) before changing eligibility or associations.
 
-Actor sourcing and catalog ingestion are defined by the [seeded catalog](actor-catalog.md), implemented in [actor_catalog.rs](../../../crates/argos-osint-core/src/actor_catalog.rs) and [storage/actor_catalog.rs](../../../crates/argos-osint-core/src/storage/actor_catalog.rs).
+Actor sourcing and catalog ingestion are defined by the [seeded catalog](actor-catalog.md), implemented in [actor_catalog.rs](../../../crates/argos-osint-core/src/actor_catalog.rs) and [storage/actor_catalog.rs](../../../crates/argos-osint-core/src/storage/actor_catalog.rs). Workstation registration, pairing, uploads, setup jobs and Embedded Inbox QA storage live in [storage/connect_registry.rs](../../../crates/argos-osint-core/src/storage/connect_registry.rs), [storage/native_pairing.rs](../../../crates/argos-osint-core/src/storage/native_pairing.rs), [storage/upload_ticket.rs](../../../crates/argos-osint-core/src/storage/upload_ticket.rs), [storage/setup_jobs.rs](../../../crates/argos-osint-core/src/storage/setup_jobs.rs) and [storage/inbox_qa.rs](../../../crates/argos-osint-core/src/storage/inbox_qa.rs).
 
 ## Providers and tool adapters
 

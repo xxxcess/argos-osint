@@ -8,26 +8,9 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 
 <!-- END:nextjs-agent-rules -->
 
-Follow the shared [agent workflow](../../docs/wiki/code/agent-workflow.md) for execution and evidence. Reuse authorized scoped checks, preserve the active host's roles, and suggest evidence-backed reversible process improvements within assigned ownership.
+Follow the [agent workflow](../../docs/wiki/code/agent-workflow.md) ([scope and finish line](../../docs/wiki/code/agent-workflow.md#scope-and-finish-line)), [shared UI rules](../../docs/wiki/code/react-ui.md) ([Fleetworks look and feel](../../docs/wiki/code/react-ui.md#fleetworks-look-and-feel)), [Glass Canvas theme](../../docs/design/matte-canvas/theme.md), and [interaction-state contract](../../docs/design/matte-canvas/interaction-state.md). Preserve the generated Next block above.
 
-During Nightly GSD, run affected Web checks, tests, builds and visual capture generation in [GitHub Actions](../../.agents/skills/gsd/SKILL.md#github-ci-first).
-
-Keep work bounded by the shared [scope and finish line](../../docs/wiki/code/agent-workflow.md#scope-and-finish-line).
-
-Use the approved [Glass Canvas theme](../../docs/design/matte-canvas/theme.md) and [interaction-state contract](../../docs/design/matte-canvas/interaction-state.md) for shared paint and generic loading/continuous-scroll targets. Preserve existing web composition, typography, routes and topology/list behavior; do not graft native setup or service workflows onto Intel. Design targets and mockups are not claims about current runtime behavior. Connect v2 uses an opaque workstation ID; optional IP metadata never defines identity. Reject old workspace contexts/cookies/query narrowing and retain authoritative session/revision/epoch fences.
-
-For React UI changes, load `argos-react-ui` and, for components/state/performance, `argos-react-patterns`. Follow [shared UI rules](../../docs/wiki/code/react-ui.md) and the [Fleetworks look and feel](../../docs/wiki/code/react-ui.md#fleetworks-look-and-feel). Design components creatively inside the Fleetworks theme. Preserve the generated Next guidance above.
-
-Keep the React Native Web alias/shared transpilation and React Compiler enabled in Next. `pnpm lint` enforces Hooks/compiler diagnostics with zero warnings; fix violations without disabling rules or adding blanket compiler opt-outs.
-
-Launch Next with this app directory as its working directory; an app path argument alone does not fix Babel preset resolution from the repo root. Compiler/launcher changes require export and development browser checks.
-
-Use [CI workflow contracts](../../docs/wiki/code/ci.md) and `.github/workflows/intel-web.yml` for frontend verification; async UI changes must cover pending, refresh, empty/zero, failure and cursor-page behavior.
-
-For web UI changes, dispatch [UI visual review](../../.github/workflows/ui-visual-review.yml) for the open PR's exact head with `scope=web` and the affected `web_surface`. Inspect the generated Playwright images, retain the artifact, attach selected images inline to the PR and record a durable visual reference in the affected docs or exact-head release. [Dispatch recipe](../../docs/wiki/code/native-verification.md#dispatchable-ui-visual-review). The workflow accepts dispatch only after it exists on the default branch; use existing web CI artifacts and manual PR attachments until then.
-
-Follow [build cache hygiene](../../docs/wiki/code/contributing.md#build-cache-hygiene): check free space before/after builds, remove only verified obsolete inactive artifacts, and preserve the active Next output/cache, running dev server and retained Rust build.
-
-## Rust mutation execution restriction
-
-Until further notice, agents must not run Rust mutation tests or mutation baselines locally, including `cargo mutants` and cargo-mutants runner invocations. Use the GitHub Actions `mutation.yml` workflow for execution and inspect its hosted results. Local mutation execution is deliberately skipped, not passed; ordinary targeted checks and the embedded gate remain required.
+- **Scope & skills:** Load `argos-react-ui` for UI work and `argos-react-patterns` for components/state/perf. Preserve web routes, typography, composition, and topology/list behavior (never graft native setup/service workflows onto Intel; mockups are not runtime proof). Connect v2 uses an opaque workstation ID (optional IP metadata never defines identity); reject legacy workspace contexts/cookies/query narrowing and keep authoritative session/revision/epoch fences.
+- **Next & Compiler:** Keep React Native Web aliasing/transpilation and React Compiler enabled. `pnpm lint` enforces zero-warning Hooks/Compiler diagnostics (fix rather than suppress or opt out). Always launch Next with `apps/web-desktop` as CWD for Babel preset resolution; compiler/launcher changes require both export and dev browser checks.
+- **Verification & visuals:** In Nightly GSD, run Web checks, builds, and captures in [GitHub Actions](../../.agents/skills/gsd/SKILL.md#github-ci-first) per [CI contracts](../../docs/wiki/code/ci.md) and `.github/workflows/intel-web.yml`; cover pending, refresh, empty/zero, error, and cursor-page states. For UI deltas, dispatch [UI visual review](../../.github/workflows/ui-visual-review.yml) ([recipe](../../docs/wiki/code/native-verification.md#dispatchable-ui-visual-review)) at exact PR head with `scope=web` and affected `web_surface` (or use existing CI artifacts until the workflow lands on the default branch); inspect Playwright images, retain the artifact, attach selected images inline, and record durable refs.
+- **Hygiene & restrictions:** Follow [build cache hygiene](../../docs/wiki/code/contributing.md#build-cache-hygiene) while preserving active Next output/cache, running dev server, and retained Rust cache. Do not run Rust mutation tests (`cargo mutants`) locally; use hosted `mutation.yml` and report local mutation as skipped.

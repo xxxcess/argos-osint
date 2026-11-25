@@ -13,10 +13,10 @@ Normal startup opens settings without creating a `default` child. The manager ve
 | Location | Owns |
 | --- | --- |
 | `.native-pairing.json` | Installation/origin/deployment/credential references, selected origin and exact pending/issuance recovery; no polling/access secrets |
-| macOS Keychain | Installation- and origin-bound polling/access secrets through the blocking `KeychainStore` adapter; denied access never falls back |
+| macOS Keychain / Linux D-Bus Secret Service | Installation- and origin-bound polling/access secrets through the blocking `KeychainStore` / Secret Service adapter; denied or unavailable access never falls back silently to files (Linux offers explicit in-memory `session_only` mode when Secret Service is unavailable or locked) |
 | Retained file catalog | Explicit operator/headless credential references; no automatic adoption, migration or deletion |
 
-[Pairing](native-connections.md#pairing-and-keychain-agreed-target) records exact intent before HTTP and issuance before Keychain promotion. Restart/retry recovers only that reference. An approved credential becomes connected only after authenticated compatibility checks and successful storage. Server revocation is independent of local cancellation/deletion.
+[Pairing](native-connections.md#pairing-and-keychain-agreed-target) records exact intent before HTTP and issuance before Keychain/Secret Service promotion. Restart/retry recovers only that reference. An approved credential becomes connected only after authenticated compatibility checks and successful storage. Server revocation is independent of local cancellation/deletion.
 
 Explicit `--api-origin` + `--api-token-file` retains file-based launch mode. Optional `--provision-gateway-credential` saves its binding and exits without GUI/network/service startup; normal GUI pairing does not require it.
 
@@ -24,7 +24,7 @@ Explicit `--api-origin` + `--api-token-file` retains file-based launch mode. Opt
 
 New registrations, request contexts and activity queries contain workstation identity without workspace IDs, names or markers. Backend models, keys, actor corpus and search remain shared within authorized deployment scope. Membership is resolved before counts, pagination, details, logs, results, streams and mutations. Unknown/system jobs are never assigned to a workstation as a fallback.
 
-Schema 10 adds pairing records without replacing installation/scope identity or accepted origins. The versioned registry migration preserves workstation IDs and `(scope_id, installation_hash)`, retains old registration mappings and immutable origins for historical readers, fences incompatible admission and requires a fresh browser Connect. Accepted causal children retain the correct workstation lifecycle fence. Legacy child registrations cannot admit new work.
+Schema 12 covers pairing and revocation records (v10), dataset upload tickets (v11), and Embedded Inbox QA state (v12) without replacing installation/scope identity or accepted origins. The versioned registry migration preserves workstation IDs and `(scope_id, installation_hash)`, retains old registration mappings and immutable origins for historical readers, fences incompatible admission and requires a fresh browser Connect. Accepted causal children retain the correct workstation lifecycle fence. Legacy child registrations cannot admit new work.
 
 [![Backend resources and workstation origin](../../diagrams/workspace-scope.svg)](../../diagrams/workspace-scope.html)
 
@@ -38,4 +38,4 @@ Existing default/named child folders, markers, pending operation journals and un
 
 ## Verification
 
-Manager fixtures cover settings-only initialization, installation identity, injected Keychain access/promotion/recovery, credential-origin/file binding and retained catalogs. Registry/API tests cover forward migration, IP-independent identity, session invalidation and historical request recovery. Actual Rune fixtures exercise the same production views/handlers. See the [acceptance tracker](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md) for executed results; unit fixtures do not establish installed-app or both-architecture approval.
+Manager fixtures cover settings-only initialization, installation identity, injected Keychain / Linux Secret Service and session-only access/promotion/recovery, credential-origin/file binding and retained catalogs. Registry/API tests cover forward migration, IP-independent identity, session invalidation and historical request recovery. Actual Rune fixtures exercise the same production views/handlers. See the [acceptance tracker](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md) for executed results; unit fixtures do not establish installed-app or both-architecture approval.

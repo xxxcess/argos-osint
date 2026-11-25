@@ -1,0 +1,166 @@
+name: "Nightly Performance & Security"
+
+on:
+  pull_request:
+    branches: [nightly]
+    types: [opened, synchronize, reopened]
+  workflow_call:
+    inputs:
+      head:
+        type: string
+        required: true
+      base:
+        type: string
+        required: true
+      pr:
+        type: string
+        default: ''
+    outputs:
+      audit_result:
+        value: ${{ jobs.results.outputs.audit_result }}
+      findings_count:
+        value: ${{ jobs.results.outputs.findings_count }}
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Open PR number targeting nightly
+        type: string
+        required: true
+      head:
+        description: Exact 40-character PR head SHA
+        type: string
+        required: true
+      post_comment:
+        description: Post or update the consolidated gbot review comment on the open same-repo PR
+        type: boolean
+        default: false
+
+# Read-only by default. Only the explicit same-repo dispatch comment job receives pull-requests: write.
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: nightly-perf-security-${{ github.event.pull_request.number || inputs.pr || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Static Performance, Security & Scalability audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      head: ${{ steps.resolve.outputs.head }}
+      base: ${{ steps.resolve.outputs.base }}
+      pr: ${{ steps.resolve.outputs.pr }}
+      findings_count: ${{ steps.audit.outputs.findings_count }}
+      high_findings: ${{ steps.audit.outputs.high_findings }}
+      status: ${{ steps.audit.outputs.status }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.head || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          lfs: false
+      - name: Resolve exact review revision and base
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr || '' }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha || inputs.head || github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha || inputs.base || '' }}
+          POST_COMMENT: ${{ inputs.post_comment == true }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            extra=()
+            if [[ "$POST_COMMENT" == true ]]; then extra+=(--require-same-repo); fi
+            python3 .github/scripts/nightly_perf_security.py validate \
+              --repo "$REVIEW_REPO" --pr "$PR_NUMBER" --head "$PR_HEAD" "${extra[@]}"
+          else
+            printf 'pr=%s\nhead=%s\nbase=%s\n' "$PR_NUMBER" "$PR_HEAD" "$PR_BASE" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run static Performance, Security & Scalability audit
+        id: audit
+        env:
+          REVIEW_HEAD: ${{ steps.resolve.outputs.head }}
+          REVIEW_BASE: ${{ steps.resolve.outputs.base }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$REVIEW_HEAD"
+          if ! git cat-file -e "${REVIEW_BASE}^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "$REVIEW_BASE"
+          fi
+          python3 .github/scripts/nightly_perf_security.py audit \
+            --base "$REVIEW_BASE" --head "$REVIEW_HEAD" --run-url "$RUN_URL" \
+            --json-output "$RUNNER_TEMP/perf-security/audit.json" \
+            --markdown-output "$RUNNER_TEMP/perf-security/review.md"
+          cat "$RUNNER_TEMP/perf-security/review.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain Performance & Security audit artifact
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Fleetworks-Nightly-Perf-Security-Audit-${{ steps.resolve.outputs.head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/perf-security/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  comment:
+    name: Post consolidated gbot PR review comment
+    needs: audit
+    if: github.event_name == 'workflow_dispatch' && inputs.post_comment == true && needs.audit.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: nightly
+          persist-credentials: false
+          lfs: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: Fleetworks-Nightly-Perf-Security-Audit-${{ needs.audit.outputs.head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/perf-security-download
+          digest-mismatch: error
+      - name: Upsert exact-head review comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_REPO: ${{ github.repository }}
+          REVIEW_PR: ${{ needs.audit.outputs.pr }}
+          REVIEW_HEAD: ${{ needs.audit.outputs.head }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/nightly_perf_security.py comment \
+            --repo "$REVIEW_REPO" --pr "$REVIEW_PR" --head "$REVIEW_HEAD" \
+            --body-file "$RUNNER_TEMP/perf-security-download/review.md"
+
+  results:
+    name: Collect Performance & Security review results
+    needs: [audit, comment]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      audit_result: ${{ steps.results.outputs.audit_result }}
+      findings_count: ${{ steps.results.outputs.findings_count }}
+    steps:
+      - name: Record review outcome
+        id: results
+        env:
+          AUDIT_RESULT: ${{ needs.audit.result }}
+          FINDINGS_COUNT: ${{ needs.audit.outputs.findings_count }}
+        shell: bash
+        run: |
+          printf 'audit_result=%s\nfindings_count=%s\n' "$AUDIT_RESULT" "${FINDINGS_COUNT:-0}" >> "$GITHUB_OUTPUT"

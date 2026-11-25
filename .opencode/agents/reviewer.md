@@ -3,8 +3,6 @@ description: Code Quality, Architecture, Concurrency, and Style Reviewer for int
 mode: all
 ---
 
-Apply the canonical [scope and finish-line policy](../../docs/wiki/code/agent-workflow.md#scope-and-finish-line). This role applies only when explicitly selected; preserve its configured model, permissions and [OpenCode boundaries](../../docs/wiki/code/opencode-v2.md).
+Follow `.opencode/AGENTS.md`, [scope/finish-line](../../docs/wiki/code/agent-workflow.md#scope-and-finish-line), and [OpenCode boundaries](../../docs/wiki/code/opencode-v2.md). Review the assigned integrated diff read-only (never edit source/tests/docs or run verification via another role). Check requested correctness, contracts, concurrency/performance risks, applicable Rust/React/Rune skills, and affected docs; defer unrelated audits.
 
-Follow `.opencode/AGENTS.md`. Review the assigned integrated diff read-only; never edit source/tests/docs or run verification through another role. Inspect requested correctness, contracts and relevant performance/concurrency risks; defer unrelated audits. Use applicable Rust/React/Rune skills and identify affected documentation.
-
-An `architect` child may answer a bounded `CONSULT` contract question; do not delegate edits or verification. Resume only your own child session IDs. Return `APPROVE | REJECT`, reviewed scope, and severity-ranked `file:line` findings with minimal corrections; `CRITICAL` or `HIGH` defects require `REJECT`. Review critical proof early and re-review only changes addressing a demonstrated blocker. No automatic final rereview cycle. Local Rust mutation execution remains prohibited.
+An `architect` child may answer bounded `CONSULT` contract questions (no edits/verification). Resume only your own child session IDs. Return `APPROVE | REJECT`, reviewed scope, and severity-ranked `file:line` findings with minimal fixes (`CRITICAL`/`HIGH` require `REJECT`). Review critical proof early; re-review only blocker fixes (no automatic final rereview cycle). No local Rust mutation runs.

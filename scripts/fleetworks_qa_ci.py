@@ -258,16 +258,16 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
             chunks.append(text)
         raise ValueError("generator did not complete its bounded draft")
 
-    def complete_turn(event, *, prose_required):
+    def complete_turn(event):
         reply = event.get("reply")
         usage = event.get("context", {})
         pack.check(event.get("kind") == "complete" and event.get("outcome") == "answered"
-                   and (valid_reply(reply) or (reply is None and not prose_required)),
+                   and valid_reply(reply),
                    "generator did not complete the bounded turn")
         pack.check(usage.get("window_tokens") == window and usage.get("model_windows") == 1
                    and type(usage.get("peak_input_tokens")) is int and 0 < usage["peak_input_tokens"] <= window,
                    "generator did not report its bounded input window")
-        return usage, reply is not None
+        return usage, reply
 
     try:
         ready = {"reply": "ready_with_streaming", "protocol": 1,
@@ -292,27 +292,35 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
         pack.check(first_delta is not None and greeting_draft.strip(),
                    "generator did not stream any conversational text before completion")
         pack.check(not has_prompt_marker(greeting_draft), "generator streamed a conversational prompt marker")
-        greeting_context, _ = complete_turn(greeting_terminal, prose_required=True)
+        greeting_context, _ = complete_turn(greeting_terminal)
         greeted = time.monotonic()
         sample_rss()
 
-        fact = {"source_id": "readiness", "text": "Actor search is ready."}
+        facts = [
+            {"source_id": "actor-search", "text": "Actor search is ready."},
+            {"source_id": "gateway", "text": "Gateway reported “ready” for local requests."},
+        ]
         operational = {
             "turn_id": "pack-operational-probe", "snapshot_id": "pack-operational-probe",
-            "question": "What is the state of actor search?", "passages": [fact],
+            "question": "How are actor search and the gateway doing?", "passages": facts,
             "dialogue": {"kind": "operational", "history": []},
         }
         operational_started = time.monotonic()
         deadline = operational_started + 25
         send({"command": "ask", "request": operational})
-        finding, finding_sequence, operational_draft, _ = read_drafts(operational)
-        pack.check(not operational_draft or operational_draft.strip() == fact["text"],
-                   "operational turn streamed text outside its approved observation")
-        pack.check(finding == {"kind": "finding", "turn_id": operational["turn_id"], "sequence": finding_sequence,
-                               "start": 0, "end": len(fact["text"]), **fact},
-                   "operational turn did not cite the exact frozen fact")
-        terminal = receive_event(operational, finding_sequence + 1)
-        operational_context, composed = complete_turn(terminal, prose_required=False)
+        event, first_finding, operational_draft, _ = read_drafts(operational)
+        for sequence, fact in enumerate(facts, first_finding):
+            pack.check(event == {"kind": "finding", "turn_id": operational["turn_id"], "sequence": sequence,
+                                 "start": 0, "end": len(fact["text"]), **fact},
+                       "operational turn did not cite an exact frozen fact in order")
+            event = receive_event(operational, sequence + 1)
+        operational_context, operational_reply = complete_turn(event)
+        body = " ".join(fact["text"] for fact in facts)
+        pack.check(operational_reply in (body, f"Here is the current status. {body}",
+                                         f"Here are the current checks. {body}"),
+                   "operational reply did not preserve all approved facts")
+        pack.check(operational_draft == operational_reply,
+                   "operational turn did not stream its verified reply before completion")
         operational_finished = time.monotonic()
         sample_rss()
 
@@ -322,10 +330,10 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
                 "first_delta_ms": round((first_delta - greeting_started) * 1000, 1),
                 "first_reply_ms": round((greeted - greeting_started) * 1000, 1),
                 "dialogue_delta_events": greeting_sequence - 1,
-                "operational_delta_events": finding_sequence - 1,
+                "operational_delta_events": first_finding - 1,
                 "operational_reply_ms": round((operational_finished - operational_started) * 1000, 1),
                 "dialogue_context": greeting_context, "operational_context": operational_context,
-                "operational_composed": composed, "peak_sampled_rss_bytes": peak_rss,
+                "operational_composed": bool(operational_reply), "peak_sampled_rss_bytes": peak_rss,
                 "rss_samples": rss_samples}
     except Exception:
         error_log.seek(0)

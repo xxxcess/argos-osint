@@ -256,10 +256,14 @@ def benchmark(args):
         memory_limit = None if args.base_model_assets is not None else 1536
         with qa.embedded_qa_session(binary, state, qa_memory_mib=memory_limit) as (session, registration, request):
             context = qa.authorize(registration)
+            defaults = request("settings")
+            qa.require(defaults["generator"]["preference"] == "automatic"
+                       and defaults["decision"]["preference"] == "rules_only",
+                       "Fresh settings must default to Automatic and Rules only")
             oracle = observe_oracle(session, registration)
             started = time.monotonic()
-            request("settings", {"context": context, "expected_revision": request("settings")["revision"],
-                                 "enabled": True, "generator_preference": "automatic", "decision_preference": "rules_only"})
+            request("settings", {"context": context, "expected_revision": defaults["revision"],
+                                 "enabled": True})
             settings = qa.until(lambda: request("settings"), lambda value: value["phase"] in {"ready", "unavailable"},
                                 "Automatic did not settle its generator selection", timeout=110)
             generator = settings["generator"]
@@ -292,6 +296,7 @@ def benchmark(args):
             rss = qa.embedded.read_process_rss_bytes(workers[0]) if len(workers) == 1 else None
 
     generated = [row for row in rows if row["route"] == "generated_reply"]
+    verified = [row for row in generated if row["checks_passed"] and not row["style_issues"]]
     expected_generation = [row for row in rows if row["expected_route"] == "generated_reply"]
     companion_path = binary.relative_to(args.app.resolve()).as_posix()
     return {"app_revision": manifest["revision"], "app_dirty": manifest["dirty"], "target": target,
@@ -305,7 +310,9 @@ def benchmark(args):
                 "expected_route_passed": sum(row["route_passed"] for row in rows),
                 "expected_generated": len(expected_generation),
                 "worker_admitted_for_generation": sum(row["admitted_to_worker"] for row in expected_generation),
-                "verified_generated": sum(row["route_passed"] for row in expected_generation),
+                "verified_generated": sum(row["expected_route"] == "generated_reply" for row in verified),
+                "verified_operational_model_replies": sum(row["subject"] != "greeting" for row in verified),
+                "verified_conversational_model_replies": sum(row["subject"] == "greeting" for row in verified),
                 "generated_checks_passed": sum(row["checks_passed"] for row in generated),
                 "generated_without_style_issues": sum(not row["style_issues"] for row in generated),
                 "median_generated_ms": statistics.median(row["terminal_ms"] for row in generated) if generated else None,

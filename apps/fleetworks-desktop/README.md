@@ -27,6 +27,8 @@ The launcher builds and opens the app, then starts its bundled Embedded companio
 
 The launcher reuses the repository's Cargo cache and prints the app path before building. The debug bundle is `target/native/aarch64-apple-darwin/debug/Fleetworks.app` on Apple Silicon and `target/native/x86_64-apple-darwin/debug/Fleetworks.app` on Intel. Use `--profile release` for the optimized bundle in the sibling `release` directory. Embedded data stays in `.agent-scratch/native-quick-start-profile/` across rebuilds. Use `--help` for custom paths and verified offline artifacts.
 
+If an older copy of the launcher reports `Select the root of a Fleetworks checkout` from the repository root, run `git --version`. Older Git versions such as 2.30 can trigger this error on either Mac architecture. The current launcher resolves Git's checkout paths on both older and newer versions. To run an older copy, use Apple Git by prepending `/usr/bin` to `PATH` for that command.
+
 ### Build and backend options
 
 Distributed setup uses [operator pairing and the system keyring](../../docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target). Embedded setup uses **Start Embedded Backend** and a private companion state directory. See the [backend type and parity contract](../../docs/wiki/code/native-connections.md#backend-types-and-parity).

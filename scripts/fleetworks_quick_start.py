@@ -22,10 +22,10 @@ SCRIPT_CHECKOUT = Path(__file__).resolve().parents[1]
 
 def git_path(directory, option):
     value = subprocess.check_output(
-        ["git", "-C", str(directory), "rev-parse", "--path-format=absolute", option],
+        ["git", "-C", str(directory), "rev-parse", option],
         text=True, timeout=15,
     ).strip()
-    return Path(value).resolve()
+    return (directory / value).resolve()
 
 
 def source_checkouts():

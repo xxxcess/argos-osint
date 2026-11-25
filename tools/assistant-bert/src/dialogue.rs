@@ -23,6 +23,7 @@ use tch::Kind;
 use tch::Tensor;
 
 use super::protocol::valid_dialogue_reply;
+use super::protocol::verified_operational_passages;
 use super::protocol::QaDialogueExchange;
 use super::protocol::QaDialogueKind;
 use super::protocol::QaModelTarget;
@@ -246,7 +247,16 @@ fn operational_options(passages: &[QaPassage]) -> Vec<OperationalOption> {
             }
             reply.push_str(text);
         }
-        if valid_dialogue_reply(&reply) && !options.iter().any(|option| option.reply == reply) {
+        // Common explanations can match another passage. Only offer choices
+        // the same verifier will publish with their intended citations.
+        let citations_match =
+            verified_operational_passages(passages, &reply).is_some_and(|sources| {
+                sources
+                    .iter()
+                    .copied()
+                    .eq(indices.iter().map(|&index| &passages[index]))
+            });
+        if citations_match && !options.iter().any(|option| option.reply == reply) {
             options.push(OperationalOption {
                 introduction,
                 indices: indices.to_vec(),
@@ -654,6 +664,25 @@ mod tests {
             assert!(option.indices.len() <= QA_MAX_FINDINGS);
             assert!(valid_dialogue_reply(&option.reply));
         }
+    }
+
+    #[test]
+    fn operational_choices_exclude_ambiguous_repeated_explanations() {
+        let passages = [
+            QaPassage::new("catalog".into(), "Actor catalog is not ready.".into()),
+            QaPassage::new("search".into(), "Actor search is ready.".into()),
+            QaPassage::new(
+                "brain".into(),
+                "Brain service readiness is unknown. No status owner is configured.".into(),
+            ),
+            QaPassage::new(
+                "jobs".into(),
+                "Jobs service readiness is unknown. No status owner is configured.".into(),
+            ),
+        ];
+        let options = operational_options(&passages);
+        assert!(options.iter().any(|option| option.indices == [0, 1, 2]));
+        assert!(options.iter().all(|option| option.indices != [0, 1, 3]));
     }
 
     #[test]

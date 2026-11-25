@@ -304,6 +304,14 @@ pub fn verified_operational_sources<'a>(
     request: &'a QaWorkerRequest,
     reply: &str,
 ) -> Option<Vec<&'a QaPassage>> {
+    verified_operational_passages(&request.passages, reply)
+}
+
+/// Resolve the citations that a reply would use against these frozen passages.
+pub fn verified_operational_passages<'a>(
+    passages: &'a [QaPassage],
+    reply: &str,
+) -> Option<Vec<&'a QaPassage>> {
     if !valid_dialogue_reply(reply) {
         return None;
     }
@@ -320,7 +328,7 @@ pub fn verified_operational_sources<'a>(
             continue;
         }
         first = false;
-        let passage = request.passages.iter().find(|passage| {
+        let passage = passages.iter().find(|passage| {
             passage
                 .text
                 .split(". ")

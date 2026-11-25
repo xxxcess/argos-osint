@@ -1567,7 +1567,7 @@ fn answer_state(turn: &QaTurn) -> (chat_ui::TurnState, &'static str) {
 }
 
 fn answer_sources(turn_id: &str, citations: &[chat_ui::Citation], expanded: bool, kit: &Kit) -> El {
-    let turn_id = turn_id.to_owned();
+    let active_turn_id = turn_id.to_owned();
     let trigger = rune_kit::Button::new(format!("Sources ({})", citations.len()))
         .variant(rune_kit::ButtonVariant::Ghost)
         .icon(if expanded {
@@ -1581,7 +1581,7 @@ fn answer_sources(turn_id: &str, citations: &[chat_ui::Citation], expanded: bool
                 && qa
                     .latest
                     .as_ref()
-                    .is_some_and(|turn| turn.turn_id == turn_id)
+                    .is_some_and(|turn| turn.turn_id == active_turn_id)
             {
                 qa.sources_open = !qa.sources_open;
                 if !state.inbox.at_bottom {
@@ -1598,7 +1598,7 @@ fn answer_sources(turn_id: &str, citations: &[chat_ui::Citation], expanded: bool
         .gap(4.0)
         .child(rune::row().child(trigger))
         .children(expanded.then(|| {
-            chat_ui::citation_rows(citations, kit)
+            chat_ui::citation_rows(turn_id, citations, kit)
                 .key(SOURCES_CONTENT)
                 .role("region")
                 .label("Source citations")
@@ -1674,11 +1674,12 @@ fn context_dial(usage: Option<QaContextUsage>, kit: &Kit) -> El {
 
 pub(crate) fn greeting(state: &State, kit: &Kit) -> Option<El> {
     state.can_send_inbox_qa().then(|| {
-        chat_ui::greeting(
-            GREETING,
-            "Hi! Ask me about workstation readiness, memory usage, or running jobs.",
-            kit,
-        )
+        let text = if state.permission(Permission::ReadWorkstationActivity) {
+            "Hi! Ask me about workstation readiness, memory usage, or running jobs."
+        } else {
+            "Hi! Ask me about workstation readiness or memory usage."
+        };
+        chat_ui::greeting(GREETING, text, kit)
     })
 }
 
@@ -2007,6 +2008,7 @@ mod tests {
     use super::*;
 
     const FINDING: &str = "Actor search is ready.";
+    const FIXTURE_CITATION: &str = "chat-citation-fixture-turn-0";
 
     fn turn(state: QaTurnState, cursor: u64) -> QaTurn {
         let mut turn = QaTurn::queued(
@@ -2049,7 +2051,11 @@ mod tests {
             reduced_motion: true,
             ..Default::default()
         });
-        state.seed_inbox_qa_drawer_fixture();
+        if latest.is_none() {
+            state.seed_inbox_qa_overflow_fixture();
+        } else {
+            state.seed_inbox_qa_drawer_fixture();
+        }
         state.seed_inbox_qa_fixture(QaSettings::new(true, QaPhase::Ready, 1, 1, true), latest);
         let mut runtime = Runtime::new(
             state,
@@ -2076,13 +2082,14 @@ mod tests {
     }
 
     #[test]
-    fn empty_inbox_shows_a_static_assistant_greeting() {
+    fn empty_transcript_keeps_the_assistant_greeting_visible_with_notification_history() {
         for size in [(640.0, 480.0), (1280.0, 800.0)] {
             let mut runtime = qa_drawer(size, None);
             let tree = runtime.accessibility_json();
             assert_eq!(accessibility_nodes_with_key(&tree, GREETING), 1);
             let rendered = tree.to_string();
             assert!(rendered.contains("Assistant message"));
+            assert!(!rendered.contains(r#""name":"Assistant""#));
             assert!(rendered.contains("workstation readiness, memory usage, or running jobs"));
             assert!(runtime.find(COMPOSER).is_some());
             assert!(runtime.find(SOURCES_TOGGLE).is_none());
@@ -2093,6 +2100,22 @@ mod tests {
             let (scroll, _) = runtime.presented(crate::inbox::SCROLL).unwrap();
             assert!(greeting[1] >= scroll[1] - 0.5);
             assert!(greeting[1] + greeting[3] <= scroll[1] + scroll[3] + 0.5);
+            if size.1 == 480.0 {
+                let (first_card, _) = runtime.presented("inbox-group-connection-toggle").unwrap();
+                assert!(first_card[1] < scroll[1]);
+            }
+
+            runtime.update(|state, _| {
+                let capabilities = state.connection.capabilities.as_mut().unwrap();
+                capabilities.features.push(QA_TRIAGE_FEATURE.into());
+                capabilities
+                    .permissions
+                    .retain(|permission| *permission != Permission::ReadWorkstationActivity);
+            });
+            runtime.frame(0.625);
+            let limited_prompt = runtime.accessibility_json().to_string();
+            assert!(limited_prompt.contains("workstation readiness or memory usage"));
+            assert!(!limited_prompt.contains("or running jobs"));
 
             runtime.update(|state, _| state.inbox_qa.request_resume());
             runtime.frame(0.75);
@@ -2628,7 +2651,7 @@ mod tests {
         assert!(!rendered.contains("How can I help?"));
         assert!(!rendered.contains("Select a job to ask about its status"));
         assert!(runtime.find(SOURCES_TOGGLE).is_some());
-        assert!(runtime.find("chat-citation-0").is_none());
+        assert!(runtime.find(FIXTURE_CITATION).is_none());
         assert!(rendered.contains("448 of 512 tokens, 88% peak usage"));
         assert!(runtime.elements().iter().any(|element| {
             !element.exiting && element.text.as_deref() == Some("448/512 tokens")
@@ -2689,7 +2712,7 @@ mod tests {
                 state.inbox_qa.adopt(Some(turn(QaTurnState::Running, 2)));
             });
             runtime.frame(1.0);
-            assert!(runtime.find("chat-citation-0").is_none());
+            assert!(runtime.find(FIXTURE_CITATION).is_none());
             let elements = runtime.elements();
             let toggle = elements
                 .iter()
@@ -2712,7 +2735,7 @@ mod tests {
             assert!(toggle.focused);
             let citation = elements
                 .iter()
-                .find(|el| el.key.as_deref() == Some("chat-citation-0"))
+                .find(|el| el.key.as_deref() == Some(FIXTURE_CITATION))
                 .expect("expanded citation");
             assert_eq!(
                 citation.text.as_deref(),
@@ -2726,7 +2749,7 @@ mod tests {
             });
             runtime.frame(1.75);
             assert!(runtime.find("inbox-qa-stop").is_none());
-            assert!(runtime.find("chat-citation-0").is_some());
+            assert!(runtime.find(FIXTURE_CITATION).is_some());
             let tree = runtime.accessibility_json();
             assert_eq!(accessibility_nodes_with_key(&tree, REPLY), 1);
             let rendered = tree.to_string();
@@ -2736,9 +2759,9 @@ mod tests {
             assert_eq!(runtime.state.inbox.unread(), unread);
 
             press_disclosure(&mut runtime, SOURCES_TOGGLE, 2.0);
-            assert!(runtime.find("chat-citation-0").is_none());
+            assert!(runtime.find(FIXTURE_CITATION).is_none());
             press_disclosure(&mut runtime, SOURCES_TOGGLE, 2.5);
-            assert!(runtime.find("chat-citation-0").is_some());
+            assert!(runtime.find(FIXTURE_CITATION).is_some());
             runtime.update(|state, _| {
                 let mut next = turn(QaTurnState::Answered, 2);
                 next.turn_id = "fixture-next-turn".into();
@@ -2747,14 +2770,18 @@ mod tests {
             });
             runtime.frame(3.0);
             assert!(runtime.find(SOURCES_TOGGLE).is_some());
-            assert!(runtime.find("chat-citation-0").is_none());
+            let next_citation = "chat-citation-fixture-next-turn-0";
+            assert!(runtime.find(next_citation).is_none());
+            press_disclosure(&mut runtime, SOURCES_TOGGLE, 3.1);
+            assert!(runtime.find(next_citation).is_some());
+            assert!(runtime.find(FIXTURE_CITATION).is_none());
 
             runtime.update(|state, _| {
                 state
                     .inbox_qa
-                    .apply_settings(QaSettings::new(false, QaPhase::Off, 2, 2, false), 3.25);
+                    .apply_settings(QaSettings::new(false, QaPhase::Off, 2, 2, false), 3.5);
             });
-            runtime.frame(3.25);
+            runtime.frame(3.5);
             assert!(runtime.find(COMPOSER).is_none());
             assert!(runtime.find(REPLY).is_none());
             assert!(runtime

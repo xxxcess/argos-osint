@@ -627,6 +627,34 @@ impl State {
         }
     }
 
+    /// Open a synthetic Inbox whose notification history overflows at minimum window size.
+    #[doc(hidden)]
+    pub fn seed_inbox_qa_overflow_fixture(&mut self) {
+        if !self.fixture {
+            return;
+        }
+        self.seed_inbox_qa_drawer_fixture();
+        let checks = [
+            ReadinessCheckId::Gateway,
+            ReadinessCheckId::Datastore,
+            ReadinessCheckId::Jobs,
+            ReadinessCheckId::Brain,
+            ReadinessCheckId::ActorCatalog,
+            ReadinessCheckId::ActorSearch,
+        ];
+        for check in checks {
+            let name = readiness_name(check);
+            self.inbox.push(
+                Topic::Readiness(check),
+                name.clone(),
+                format!("{name} is ready"),
+                format!("{name} completed its readiness check."),
+                self.clock,
+                StatusTone::Ok,
+            );
+        }
+    }
+
     /// Populate the production Inbox with synthetic topics for native visual review.
     pub fn seed_inbox_drawer_fixture(&mut self) {
         if self.fixture {
@@ -939,9 +967,8 @@ fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
         }
         rows = rows.child(group_view(&group, state, kit, preferences));
     }
-    let exchange = crate::inbox_qa::exchange(state, kit, preferences);
-    let stick_bottom = exchange.is_some();
-    let chat = exchange.or_else(|| crate::inbox_qa::greeting(state, kit));
+    let chat = crate::inbox_qa::exchange(state, kit, preferences)
+        .or_else(|| crate::inbox_qa::greeting(state, kit));
     let show_chat = chat.is_some();
     let list = rune::col()
         .key("inbox-content")
@@ -1002,7 +1029,9 @@ fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
                 .w_full()
                 .grow(1.0)
                 .min_h(0.0)
-                .scroll(rune::ScrollSpec { stick_bottom })
+                .scroll(rune::ScrollSpec {
+                    stick_bottom: show_chat,
+                })
                 .scroll_anchor()
                 .on_at_bottom(|state: &mut State, at_bottom| state.inbox.at_bottom = at_bottom)
                 .child(list),

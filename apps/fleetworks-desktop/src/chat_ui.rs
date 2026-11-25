@@ -112,12 +112,12 @@ fn chip(label: String, tone: StatusTone, kit: &Kit) -> El {
         .child(rune::text(label).font(kit.ty.small).color(tone.fg()).wrap())
 }
 
-pub(crate) fn citation_rows(list: &[Citation], kit: &Kit) -> El {
+pub(crate) fn citation_rows(message_id: &str, list: &[Citation], kit: &Kit) -> El {
     let mut column = rune::col().w_full().gap(3.0);
     for (index, citation) in list.iter().enumerate() {
         column = column.child(
             rune::text(format!("{}: {}", citation.kind, citation.label))
-                .key(format!("chat-citation-{index}"))
+                .key(format!("chat-citation-{message_id}-{index}"))
                 .font(kit.ty.small)
                 .color(theme::hex(theme::TEXT_SECONDARY))
                 .wrap_anywhere(),
@@ -138,7 +138,7 @@ pub(crate) fn bubble(message: &ChatMessage, kit: &Kit) -> El {
                     .font(kit.ty.small_medium)
                     .color(theme::hex(theme::TEXT_MUTED)),
             )
-            .child(citation_rows(&message.citations, kit))
+            .child(citation_rows(&message.id, &message.citations, kit))
     });
     bubble_with_sources(message, sources, kit)
 }
@@ -179,7 +179,8 @@ fn message_bubble(
     let mut body = rune::col().w_full().gap(6.0).child(
         rune::text(role.label())
             .font(kit.ty.small_medium)
-            .color(theme::hex(theme::TEXT_MUTED)),
+            .color(theme::hex(theme::TEXT_MUTED))
+            .a11y_hidden(),
     );
     if !text.is_empty() {
         body = body.child(

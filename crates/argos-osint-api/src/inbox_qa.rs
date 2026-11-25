@@ -45,6 +45,10 @@ use crate::{ApiError, ApiState};
 
 pub(crate) const FEATURE: &str = "inbox-qa-v2";
 
+const MAX_ADMISSION_FRESHNESS_RETRIES: usize = 4;
+const ADMISSION_FRESHNESS_BACKOFF: Duration = Duration::from_millis(50);
+const MAX_SUMMARY_PASSAGES: usize = 6;
+
 /// Cancellation remains observable to subscribers that join after it was raised.
 #[derive(Clone)]
 pub struct CancellationToken(watch::Sender<bool>);
@@ -754,8 +758,8 @@ pub(crate) async fn submit_request(
     )?;
     request.validate().map_err(|_| crate::bad())?;
     context.revalidate(&state.repo).await?;
-    let intent = question::classify(&request.question);
-    require_evidence_permission(context, intent, request.source.as_ref())?;
+    let classified = question::classify(&request.question);
+    require_evidence_permission(context, classified.intent, request.source.as_ref())?;
     if let Some(turn) = store::replay(&state.repo, &actor, &request)
         .await
         .map_err(storage_error)?
@@ -772,18 +776,23 @@ pub(crate) async fn submit_request(
         ));
     }
     let deadline = Instant::now() + Duration::from_secs(4);
-    let follow_up = if intent == Question::FollowUp {
+    let follow_up = if classified.intent == Question::FollowUp {
         resolve_follow_up(state, &actor, &request, deadline).await?
     } else {
         None
     };
-    let evidence_request = follow_up.as_ref().map_or(&request, |turn| &turn.request);
-    require_evidence_permission(
-        context,
-        question::classify(&evidence_request.question),
-        evidence_request.source.as_ref(),
-    )?;
+    let (evidence_request, classified) = if let Some(follow_up) = &follow_up {
+        require_evidence_permission(
+            context,
+            follow_up.classified.intent,
+            follow_up.request.source.as_ref(),
+        )?;
+        (&follow_up.request, follow_up.classified)
+    } else {
+        (&request, classified)
+    };
     let runtime = SnapshotRuntime {
+        classified,
         generation: setting.generation,
         history_generation: setting.history_generation,
         availability,
@@ -792,6 +801,7 @@ pub(crate) async fn submit_request(
             .as_ref()
             .and_then(|turn| turn.observation.as_ref()),
     };
+    let mut freshness_retries = 0;
     loop {
         let snapshot = snapshot(
             state,
@@ -820,7 +830,13 @@ pub(crate) async fn submit_request(
                 return Ok(turn);
             }
             Err(TxError::Abort(reason))
-                if reason == "inbox_qa:freshness" && Instant::now() < deadline => {}
+                if reason == "inbox_qa:freshness"
+                    && freshness_retries < MAX_ADMISSION_FRESHNESS_RETRIES
+                    && Instant::now() + ADMISSION_FRESHNESS_BACKOFF < deadline =>
+            {
+                freshness_retries += 1;
+                tokio::time::sleep(ADMISSION_FRESHNESS_BACKOFF).await;
+            }
             Err(error) => return Err(storage_error(error)),
         }
     }
@@ -892,6 +908,7 @@ async fn resolve_follow_up(
     if resolved.source.is_some() {
         resolved.question = "What happened?".into();
         return Ok(Some(ResolvedFollowUp {
+            classified: question::classify(&resolved.question),
             request: resolved,
             observation: None,
         }));
@@ -904,7 +921,8 @@ async fn resolve_follow_up(
     let Some(previous) = previous else {
         return Ok(None);
     };
-    let supported = match question::classify(&previous.question) {
+    let classified = question::classify(&previous.question);
+    let supported = match classified.intent {
         Question::ContextStatus(_) | Question::ContextLogs(_) | Question::ExplainSelected => {
             previous.subject.is_some()
         }
@@ -924,12 +942,14 @@ async fn resolve_follow_up(
     resolved.question = previous.question;
     resolved.source = previous.subject;
     Ok(Some(ResolvedFollowUp {
+        classified,
         request: resolved,
         observation: previous.observation,
     }))
 }
 
 struct ResolvedFollowUp {
+    classified: question::Classified,
     request: QaTurnRequest,
     observation: Option<store::Observation>,
 }
@@ -940,6 +960,7 @@ struct Snapshot {
 }
 
 struct SnapshotRuntime<'a> {
+    classified: question::Classified,
     generation: i64,
     history_generation: i64,
     availability: &'a QaRuntimeAvailability,
@@ -948,21 +969,17 @@ struct SnapshotRuntime<'a> {
 }
 
 fn dialogue_kind(
-    intent: Question,
-    question: &str,
+    classified: question::Classified,
     has_evidence: bool,
     is_follow_up: bool,
     may_read_backend: bool,
 ) -> Option<QaDialogueKind> {
-    match intent {
+    match classified.intent {
         Question::Greeting if may_read_backend => Some(QaDialogueKind::Greeting),
         Question::Acknowledgement if may_read_backend => Some(QaDialogueKind::Acknowledgement),
         Question::Help if may_read_backend => Some(QaDialogueKind::Help),
         Question::Recall if may_read_backend => Some(QaDialogueKind::Recall),
-        _ if may_read_backend
-            && has_evidence
-            && (is_follow_up || !intent.is_exact_fact(question)) =>
-        {
+        _ if may_read_backend && has_evidence && (is_follow_up || !classified.exact_fact) => {
             Some(QaDialogueKind::Operational)
         }
         _ => None,
@@ -991,7 +1008,7 @@ async fn snapshot(
     // Leave headroom for decoding within the five-second evidence budget.
     let health_boundary = terminal_boundary.max(now - 1_000);
     let boundary = terminal_boundary.max(now - 1);
-    let intent = question::classify(&request.question);
+    let intent = runtime.classified.intent;
     let source = request.source.as_ref();
     let mut selected_activity = None;
     if let Some(source) = source {
@@ -1331,7 +1348,7 @@ async fn snapshot(
                     })
                     .collect::<Vec<_>>();
                 facts.sort_by_key(|fact| readiness::priority(fact));
-                for fact in facts {
+                for fact in facts.into_iter().take(MAX_SUMMARY_PASSAGES) {
                     let reference =
                         ChatSourceReference::new(ChatSourceKind::Readiness, fact.id.clone())
                             .map_err(|_| crate::bad())?;
@@ -1384,8 +1401,7 @@ async fn snapshot(
     let turn_id = store::accepted_turn_id(actor, request, runtime.history_generation)
         .map_err(storage_error)?;
     let dialogue = dialogue_kind(
-        intent,
-        &request.question,
+        runtime.classified,
         !passages.is_empty(),
         runtime.is_follow_up,
         context.permits(Permission::ReadBackend),
@@ -1456,6 +1472,7 @@ pub(crate) async fn events_request(
     let long_poll = if query.wait_seconds == 0 {
         None
     } else {
+        context.revalidate(&state.repo).await?;
         let permit = target.subscribers.try_acquire().map_err(|_| {
             ApiError(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -1524,18 +1541,19 @@ mod tests {
     fn routes_only_exact_facts_directly_when_evidence_is_available() {
         for prompt in [
             "What is the current CPU utilization?",
+            "  What  is the current CPU utilization ? ",
             "How many jobs are running?",
             "How many jobs failed in the past 24 hours?",
             "Does the catalog need seeding?",
         ] {
-            let intent = question::classify(prompt);
-            assert_ne!(intent, Question::Unsupported, "{prompt}");
+            let classified = question::classify(prompt);
+            assert_ne!(classified.intent, Question::Unsupported, "{prompt}");
             assert!(
-                dialogue_kind(intent, prompt, true, false, true).is_none(),
+                dialogue_kind(classified, true, false, true).is_none(),
                 "{prompt} is an exact fact"
             );
             assert!(matches!(
-                dialogue_kind(intent, prompt, true, true, true),
+                dialogue_kind(classified, true, true, true),
                 Some(QaDialogueKind::Operational)
             ));
         }
@@ -1548,26 +1566,25 @@ mod tests {
             "Are any jobs running?",
             "What does this mean?",
         ] {
-            let intent = question::classify(prompt);
-            assert_ne!(intent, Question::Unsupported, "{prompt}");
+            let classified = question::classify(prompt);
+            assert_ne!(classified.intent, Question::Unsupported, "{prompt}");
             assert!(
                 matches!(
-                    dialogue_kind(intent, prompt, true, false, true),
+                    dialogue_kind(classified, true, false, true),
                     Some(QaDialogueKind::Operational)
                 ),
                 "{prompt} should use the generator with approved evidence"
             );
-            assert!(dialogue_kind(intent, prompt, false, false, true).is_none());
+            assert!(dialogue_kind(classified, false, false, true).is_none());
         }
 
         let activity = "Are any jobs running?";
-        assert!(
-            dialogue_kind(question::classify(activity), activity, true, false, false).is_none()
-        );
+        assert!(dialogue_kind(question::classify(activity), true, false, false).is_none());
 
         let unsupported = "Can you give me the big picture on this workstation and reboot it?";
-        assert_eq!(question::classify(unsupported), Question::Unsupported);
-        assert!(dialogue_kind(Question::Unsupported, unsupported, false, false, true).is_none());
+        let classified = question::classify(unsupported);
+        assert_eq!(classified.intent, Question::Unsupported);
+        assert!(dialogue_kind(classified, false, false, true).is_none());
     }
 
     #[test]

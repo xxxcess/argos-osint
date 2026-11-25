@@ -805,6 +805,16 @@ mod render_tests {
                         label: "Job abc".into(),
                     }],
                 },
+                ChatMessage {
+                    id: "3".into(),
+                    role: Role::Assistant,
+                    state: TurnState::Final,
+                    text: "The preceding job finished.".into(),
+                    citations: vec![Citation {
+                        kind: "Job",
+                        label: "Job xyz".into(),
+                    }],
+                },
             ];
         });
         rt.frame(2.0 / 60.0);
@@ -813,7 +823,8 @@ mod render_tests {
         assert!(rt.find("chat-message-2").is_some());
         assert!(rt.find("chat-state-2").is_some());
         assert!(rt.find("chat-state-1").is_none());
-        assert!(rt.find("chat-citation-0").is_some());
+        assert!(rt.find("chat-citation-2-0").is_some());
+        assert!(rt.find("chat-citation-3-0").is_some());
         rt.update(|state, _| {
             state.assistant.sync_scope(1);
             state.assistant.sync_scope(2);

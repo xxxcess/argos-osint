@@ -25,20 +25,19 @@ pub(super) enum Question {
 
 impl Question {
     /// Keep canonical, single-fact requests on the direct path.
-    pub(super) fn is_exact_fact(self, question: &str) -> bool {
-        let question = question.trim().trim_end_matches(['?', '.', '!']);
+    fn is_exact_fact(self, question: &str) -> bool {
         let canonical = match self {
-            Self::Metric(Metric::Cpu) => "What is the current CPU utilization",
-            Self::Metric(Metric::Memory) => "What is the current memory usage",
-            Self::Metric(Metric::Disk) => "What is the current disk usage",
-            Self::Metric(Metric::QueuedJobs) => "How many jobs are queued",
-            Self::Metric(Metric::RunningJobs) => "How many jobs are running",
-            Self::Metric(Metric::RetryingJobs) => "How many jobs are retrying",
-            Self::Metric(Metric::FailedJobs) => "How many jobs failed in the past 24 hours",
-            Self::Readiness(ReadinessCheckId::ActorCatalog) => "Does the catalog need seeding",
+            Self::Metric(Metric::Cpu) => "what is the current cpu utilization",
+            Self::Metric(Metric::Memory) => "what is the current memory usage",
+            Self::Metric(Metric::Disk) => "what is the current disk usage",
+            Self::Metric(Metric::QueuedJobs) => "how many jobs are queued",
+            Self::Metric(Metric::RunningJobs) => "how many jobs are running",
+            Self::Metric(Metric::RetryingJobs) => "how many jobs are retrying",
+            Self::Metric(Metric::FailedJobs) => "how many jobs failed in the past 24 hours",
+            Self::Readiness(ReadinessCheckId::ActorCatalog) => "does the catalog need seeding",
             _ => return false,
         };
-        question.eq_ignore_ascii_case(canonical)
+        question == canonical
     }
 
     pub(super) fn wants_measurement(self, metric: Metric) -> bool {
@@ -85,21 +84,36 @@ const GREETINGS: &[&str] = &[
     "hey",
 ];
 
+#[derive(Clone, Copy)]
+pub(super) struct Classified {
+    pub(super) intent: Question,
+    pub(super) exact_fact: bool,
+}
+
 /// Match the whole question so additional subjects or qualifiers cannot silently change its scope.
-pub(super) fn classify(question: &str) -> Question {
-    let intent = classify_simple(question);
-    if intent != Question::Unsupported {
-        return intent;
-    }
-    let normalized = question.to_ascii_lowercase();
-    if let Some((first, second)) = normalized.split_once(" and ") {
-        let first = classify_simple(first.trim_end_matches([',', ' ']));
-        let second = classify_simple(second);
-        if first != second && is_operational(first) && is_operational(second) {
-            return Question::ChooseSubject;
+pub(super) fn classify(question: &str) -> Classified {
+    let normalized = question
+        .to_ascii_lowercase()
+        .replace(['_', '-'], " ")
+        .replace('’', "'")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let normalized = trim_sentence_end(&normalized);
+    let mut intent = classify_simple(normalized);
+    if intent == Question::Unsupported {
+        if let Some((first, second)) = normalized.split_once(" and ") {
+            let first = classify_simple(trim_sentence_end(first.trim_end_matches([',', ' '])));
+            let second = classify_simple(second);
+            if first != second && is_operational(first) && is_operational(second) {
+                intent = Question::ChooseSubject;
+            }
         }
     }
-    Question::Unsupported
+    Classified {
+        intent,
+        exact_fact: intent.is_exact_fact(normalized),
+    }
 }
 
 fn is_operational(intent: Question) -> bool {
@@ -120,14 +134,6 @@ fn is_operational(intent: Question) -> bool {
 }
 
 fn classify_simple(question: &str) -> Question {
-    let normalized = question
-        .to_ascii_lowercase()
-        .replace(['_', '-'], " ")
-        .replace('’', "'")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let question = trim_sentence_end(&normalized);
     if GREETINGS.contains(&question) {
         return Question::Greeting;
     }
@@ -769,12 +775,15 @@ fn strip_any_suffix<'a>(value: &'a str, patterns: &[&str]) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::classify;
     use super::Metric;
     use super::Question;
     use super::StatusChecks;
     use fleetworks_contracts::chat::ChatSourceKind;
     use fleetworks_contracts::readiness::ReadinessCheckId;
+
+    fn classify(prompt: &str) -> Question {
+        super::classify(prompt).intent
+    }
 
     #[test]
     fn recognizes_standalone_greetings() {

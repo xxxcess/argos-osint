@@ -646,7 +646,7 @@ mod native {
 
     fn inbox_qa_ready(state: &mut State) {
         registered(state);
-        state.seed_inbox_qa_drawer_fixture();
+        state.seed_inbox_qa_overflow_fixture();
         triage_connection(state, QaPhase::Ready);
     }
 

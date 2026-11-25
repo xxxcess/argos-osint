@@ -8,13 +8,13 @@ Follow these routes from setup to implementation.
 
 ## What this repository is
 
-Fleetworks collects public-source intelligence and prepares cited Focus Briefs. The native macOS app and Intel Web connect to an independently deployed authenticated Linux backend with SurrealDB, private services and workers.
+Fleetworks collects public-source intelligence and prepares cited Focus Briefs. The native macOS and Linux x86_64 Rune app starts an Embedded companion (explicit **Start Embedded Backend** over an unnamed Unix socket) or connects to an independently deployed authenticated Distributed Linux gateway with SurrealDB, private services and workers; Intel Web provides the browser desktop.
 
 Start with the [README](../../README.md), [concepts](concepts/index.md), and [glossary](concepts/glossary.md). Follow the [code map](code/index.md) and [diagrams](../diagrams.md) for implementation.
 
 ## Run the client and backend
 
-Install the pinned Rust 1.95.0 toolchain and Xcode tools for native app packaging. Docker and Compose v2.20+ operate the separate backend. Start at the [quick start](../../README.md#quick-start), then follow [native connections](code/native-connections.md) and [direct deployment](../../deploy/README.md). The app never launches services.
+Install the pinned Rust 1.95.0 toolchain and host build prerequisites (Xcode Command Line Tools on macOS, or Linux desktop dependencies on x86_64) for native app packaging. Docker and Compose v2.20+ operate the separate Distributed backend. Start at the [quick start](../../README.md#quick-start), then follow [native connections](code/native-connections.md) and [direct deployment](../../deploy/README.md). The app never launches Distributed services or Intel Web; Embedded starts only when explicitly requested.
 
 Use the same deployment env file, Compose files and project for startup, status, logs and stop. Keep backend data separate from the protected native container. Retired terminal instructions are preserved only as [historical evidence](../archive/cli-retirement.md).
 
@@ -54,7 +54,7 @@ Start with the [web contract](code/intel-web.md), then the [UI rules](code/react
 
 ## Native client and historical terminals
 
-The Rune app supplies Atlas, Brain, Tools, Models, Profile, Workstation, Workspaces and scoped Jobs & Logs. Intel Web supplies topology and its list twin. Venture, the six terminal clients and the older Ratatui executable are retired. [Native verification](code/native-verification.md) · [Historical disposition](../archive/cli-retirement.md)
+The macOS and Linux x86_64 Rune app has six sidebar destinations (**Actor Maintenance**, **News Cycles**, **Brain Search**, **Tool Box**, **Model Assignments**, **Jobs & Logs**) plus **Workstation Status**, **Settings** (five tabs: General, Connection, Assistant, Appearance, Models), **Inbox** (notifications and Embedded QA), and **Setup Gateway**. Intel Web supplies topology and its list twin. Venture, the six terminal clients and the older Ratatui executable are retired. [Native verification](code/native-verification.md) · [Historical disposition](../archive/cli-retirement.md)
 
 ## Where the code lives
 
@@ -62,17 +62,21 @@ Use the [repository map](../index.md#directory-map) for the directory index.
 
 | Path | Role |
 | --- | --- |
-| [apps/fleetworks-desktop](../../apps/fleetworks-desktop) | Native Rune macOS control hub |
+| [apps/fleetworks-desktop](../../apps/fleetworks-desktop) | Native Rune macOS and Linux x86_64 control hub |
 | [crates/fleetworks-contracts](../../crates/fleetworks-contracts) | Client-safe contracts and origin-pinned SDK |
+| [crates/fleetworks-workstation](../../crates/fleetworks-workstation) | Protected workstation settings, installation identity, and keyring/session storage |
 | [apps/web-desktop](../../apps/web-desktop) | Intel web server and relay |
 | [packages](../../packages) | Shared React Native UI, Intel screens, and API client |
 | [crates/argos-osint-core](../../crates/argos-osint-core) | Domain workflows and storage |
 | [crates/argos-osint-api](../../crates/argos-osint-api) | Versioned HTTP contracts |
-| [services/api-host](../../services/api-host) | Authenticated host and private roles |
+| [services/api-host](../../services/api-host) | Authenticated host and private roles (including Embedded `local-ipc`) |
+| [services/search-index](../../services/search-index) | Private Tantivy actor search index service |
 | [crates/fleetworks-jobs](../../crates/fleetworks-jobs) | SQLite operational storage and embedded RocksDB queue |
+| [crates/fleetworks-broker](../../crates/fleetworks-broker) | Standalone RabbitMQ (`lapin`) transport crate |
 | [deploy](../../deploy) | Compose files, images, and smoke scripts |
 | [scripts](../../scripts) | Build, storage, release, and CI planning tools |
-| [tools/atlas-bert](../../tools/atlas-bert) | Standalone Rust-BERT worker |
+| [tools/atlas-bert](../../tools/atlas-bert) | Standalone Atlas Rust-BERT classifier worker |
+| [tools/assistant-bert](../../tools/assistant-bert) | Standalone Embedded Inbox QA Rust-BERT worker |
 | [.github/workflows](../../.github/workflows) | Hosted checks and releases |
 
 The [core map](code/core.md) is the module index inside the domain crate.

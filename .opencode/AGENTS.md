@@ -1,32 +1,29 @@
 # Fleetworks OpenCode quick guide
 
-Follow root [AGENTS.md](../AGENTS.md) and the [canonical agent workflow](../docs/wiki/code/agent-workflow.md). User instructions take precedence. These role, model and edit boundaries apply to the selected OpenCode team profile. Other hosts use their own roles and tools.
+Follow root [AGENTS.md](../AGENTS.md) and the [canonical agent workflow](../docs/wiki/code/agent-workflow.md). User instructions take precedence. These boundaries apply only to the selected OpenCode team profile.
 
 ## Agent operation chain
 
-Choose the smallest team. A clear request or existing contract permits work. Ask only about material unknowns and reuse existing authorization. Use a direct specialist for a cohesive task, an architect for unresolved contracts, or an orchestrator for independent work.
+Pick the smallest team: direct specialist for cohesive work, `architect` for unresolved contracts, `orchestrator` for independent parallel areas. Ask only for material unknowns; reuse existing authorization.
 
 | Role | Ownership |
 | --- | --- |
-| Coordinator | User intake and specialist dispatch. Owns `.planning/` intake. No source edits. |
-| Orchestrator | Writes shared plans only. Owns disjoint units and acceptance. Delegates implementation, documentation, verification, review and audit. |
-| Architect | Direct investigation and consultation. No source edits or children. |
-| Rust and React coders | Implement owned code and fixtures. No children. Return review, docs and verification needs. |
-| Tester | Owns authorized checks and the integration build cache. |
-| Reviewer and auditor | Review and integrity. Audit has a binary veto. |
-| Scribe | Maintains affected docs, tags and diagram pairs before final verification. |
-| Utility | Quick non-code edits. No source, test or CI edits and no children. |
+| `coordinator` | User intake, `.planning/` intake, specialist dispatch. No source edits. |
+| `orchestrator` | Shared `.planning/` only; owns disjoint units and delegates code, docs, test, review, audit. |
+| `architect` | Direct investigation/consultation. No source edits or children. |
+| `rust-coder`, `react-coder` | Owned code/fixtures. No children. Return review, docs, and verification needs. |
+| `tester` | Authorized checks and integration build cache. |
+| `reviewer`, `auditor` | Diff review (`APPROVE`/`REJECT`) and forensic integrity (`CLEAN`/`INTEGRITY_VIOLATION` veto). |
+| `scribe` | Affected docs, tags, and diagram pairs before final verification. |
+| `utility` | Quick non-code edits. No source/test/CI edits or children. |
 
-The parent owns shared plans, assigns disjoint paths and appoints one build owner. Shell access follows the same edit boundaries. Pass acceptance, non-goals and verification with each handoff. Follow the [role catalog and continuation rules](../docs/wiki/code/opencode-v2.md) for child sessions, permissions and models. On provider exhaustion preserve completed work and escalate to the coordinator. Model substitution requires user direction.
+Parents own shared plans, disjoint paths, and one build owner; shell access respects the same edit boundaries. Pass acceptance, non-goals, and verification with each handoff. Follow the [role catalog](../docs/wiki/code/opencode-v2.md) for sessions, permissions, and models. On provider exhaustion, preserve completed work and escalate to `coordinator`; never silently substitute models.
 
-**Final code gate** requires `reviewer: APPROVE`, `tester: PASS` and `auditor: CLEAN`. Review risks early, reuse unaffected evidence and freeze before final checks. Reopen only for demonstrated blockers to agreed acceptance. On wrap-up, stop new work and report gaps.
+**Final code gate:** `reviewer: APPROVE`, `tester: PASS`, `auditor: CLEAN`. Review risks early, reuse unaffected evidence, freeze before final checks, and reopen only for demonstrated acceptance blockers. On wrap-up, stop new work and report gaps.
 
 ## Quick reference
 
-- **Visual authority:** use the [approved Glass Canvas guide](../docs/design/matte-canvas/README.md), current native control allowlist and shared React guidance (deep-space `#060709` backdrop, layered smoked/frosted glass across primary surfaces and overlays with static liquid-metal rim highlights, crescent-moon textures on committing/brand surfaces, opaque reduced-transparency fallbacks, no pager chrome or resting animation wake loops).
-
-
-- **Build and CI:** For Nightly GSD, run supported checks, tests, builds and captures in [GitHub Actions](../.agents/skills/gsd/SKILL.md#github-ci-first). Follow [contributor commands](../docs/wiki/code/contributing.md) and [cache hygiene](../docs/wiki/code/contributing.md#build-cache-hygiene). Use affected [Fleetworks scopes](../docs/wiki/code/ci.md#fleetworksyml--scoped-branch-checks) and the embedded gate for affected compatibility paths. Local Rust uses the host and embedded storage. Dispatch `embedded.yml` for hosted platform compatibility and `mutation.yml` for mutation evidence; do not run mutation locally.
-- **Testing and design:** Load [repository testing guidelines](skills/argos-testing/SKILL.md). Rune app work uses [fleetworks-rune-verify](skills/fleetworks-rune-verify/SKILL.md) and [native verification](../docs/wiki/code/native-verification.md). The terminal executables and TUI workflow are retired; historical records are not current verification instructions. Preserve Rust conventions, React Compiler/Hooks, shared primitives and web `ForceCanvas` with its list twin. Inspect actual affected figures and fixtures; native views do not own backend lifecycle or topology.
-- **Plan and handoff:** Use the [named planning format](../docs/wiki/code/planning-artifacts.md#working-format). Record checks and Next Step. Scratch and worktrees belong in `.agent-scratch/`. Commit only with authorization and exact staging.
-- **Navigate and maintain:** Start at the [wiki](../docs/index.md) and [tags](../docs/wiki/tags.md). Use [wiki maintenance](../docs/wiki/maintenance.md) for affected routes, contracts and figure pairs.
+- **Visual authority:** [Glass Canvas guide](../docs/design/matte-canvas/README.md), native control allowlist, and shared React guidance (opaque fallbacks, no pager chrome or resting animation wake loops).
+- **Build & CI:** Nightly GSD runs supported checks/builds/captures in [GitHub Actions](../.agents/skills/gsd/SKILL.md#github-ci-first). Follow [contributing](../docs/wiki/code/contributing.md), [cache hygiene](../docs/wiki/code/contributing.md#build-cache-hygiene), and affected [Fleetworks scopes](../docs/wiki/code/ci.md#fleetworksyml--scoped-branch-checks). Local Rust uses host-native embedded storage; dispatch `embedded.yml` and `mutation.yml` in CI (no local mutation runs).
+- **Testing & UI:** Load [argos-testing](skills/argos-testing/SKILL.md). Native Rune uses [fleetworks-rune-verify](skills/fleetworks-rune-verify/SKILL.md) and [native verification](../docs/wiki/code/native-verification.md); terminal TUI is retired. Preserve Rust style, React Compiler/Hooks, shared primitives, and `ForceCanvas` + list twin. Inspect affected figures/fixtures; native views own neither backend lifecycle nor topology.
+- **Plan & wiki:** Use the [named plan format](../docs/wiki/code/planning-artifacts.md#working-format) (checks + Next Step), keep scratch/worktrees in `.agent-scratch/`, and commit only with authorization and exact staging. Navigate via [wiki](../docs/index.md), [tags](../docs/wiki/tags.md), and [maintenance](../docs/wiki/maintenance.md).

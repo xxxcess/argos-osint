@@ -262,7 +262,11 @@ def verification_passes(rollup: list[dict] | None) -> dict:
 
 def verification_tracks(rollup: list[dict] | None) -> dict:
     tracks = {}
-    for track, name in (("core", "GSD Nightly: Core"), ("ui", "GSD Nightly: UI")):
+    for track, name in (
+        ("core", "GSD Nightly: Core"),
+        ("ui", "GSD Nightly: UI"),
+        ("perf_security", "Nightly Performance & Security"),
+    ):
         selected = []
         for check in rollup or []:
             label = check.get("name") or check.get("context") or ""
@@ -304,14 +308,18 @@ def load_state(path: Path, hours: float, reset: bool) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Poll open PRs targeting nightly for GSD")
     parser.add_argument("--repo", required=True, help="owner/repo")
-    parser.add_argument("--track", choices=("core", "ui"), default="core")
+    parser.add_argument("--track", choices=("core", "ui", "perf-security"), default="core")
     parser.add_argument("--state", type=Path, help="Override the track’s local state file")
     parser.add_argument("--hours", type=float, default=1.0, help="Window duration in hours")
     parser.add_argument("--reset", action="store_true", help="Reset state timer")
     args = parser.parse_args()
     if args.state is None:
-        filename = "gsd-state.json" if args.track == "core" else "gsd-ui-state.json"
-        args.state = Path(".agent-scratch") / filename
+        filenames = {
+            "core": "gsd-state.json",
+            "ui": "gsd-ui-state.json",
+            "perf-security": "gsd-perf-security-state.json",
+        }
+        args.state = Path(".agent-scratch") / filenames[args.track]
 
     fields = (
         "number,title,headRefName,headRefOid,baseRefName,"

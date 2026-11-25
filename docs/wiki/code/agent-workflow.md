@@ -2,60 +2,49 @@
 
 [Code route](index.md) · [Contributor commands](contributing.md) · [Testing](../../../.opencode/skills/argos-testing/SKILL.md)
 
-Canonical execution policy for repository agents. Host instructions and user authorization take precedence. Role-specific workflows apply only when selected.
+Canonical execution policy for repository agents. Host instructions and user authorization take precedence; role-specific workflows apply only when selected.
 
 ## Scope and finish line
 
-- Pin the requested outcome, non-goals, acceptance and verification scope before substantial work. Use an existing plan; do not create ceremony for a small edit.
-- Complete the smallest useful implementation. Optional refactors, adjacent bugs, extra benchmarks and documentation sweeps are follow-ups unless required for the requested acceptance. Finding an issue does not authorize expanding the task.
-- Review risky contracts and exercise one realistic end-to-end case early. Finish the scoped review and edits before expensive final checks; freeze that revision.
-- After freeze, reopen only for a demonstrated failure that blocks the agreed acceptance. Record the failure, make the smallest repair and rerun affected checks. Defer independent findings. Do not start another general audit or review cycle because the work is nearly finished.
-- Plan one final verification pass. Repeat a broad gate only when changed inputs or a diagnosed failure require it; identify why affected checks are insufficient. A required failure stays failed, never becomes a pass through a retry limit or omission.
-- Keep documentation, plans, provenance and cleanup proportional to the change. They support delivery; they are not independent improvement projects.
-- When the user asks to stop or wrap up, start no new edits, audits or checks. Stop only task-owned work when appropriate, preserve evidence, and hand off exact completed, failed and unverified items. Do not make a “last fix” after that request.
+- Pin outcome, non-goals, acceptance, and verification scope before substantial work (reuse existing plans; no ceremony for small edits).
+- Deliver the smallest useful implementation. Defer optional refactors, adjacent bugs, extra benchmarks, and broad doc sweeps unless required for acceptance.
+- Review risky contracts and run one realistic end-to-end check early. Finish scoped review and edits before expensive final checks, then freeze that revision.
+- After freeze, reopen only for a demonstrated failure blocking agreed acceptance: record it, apply the smallest repair, and rerun affected checks. Do not start another general audit because work is nearly done.
+- Plan one final verification pass; repeat a broad gate only when changed inputs or a diagnosed failure require it. A required failure never becomes a pass via retry cap or omission.
+- Keep docs, plans, provenance, and cleanup proportional to the change.
+- On user stop/wrap-up, start no new edits, audits, or checks ("no last fix"): stop only task-owned work, preserve evidence, and hand off exact completed, failed, and unverified items.
 
 ## Establish the critical path
 
-Confirm the intended PR base branch with the user before starting changes. Carry that branch into the named plan and use it as the PR base; a branch stated by the user in the current session is already confirmed.
-
-During Nightly GSD, select GitHub Actions for affected checks, tests, builds and captures whenever available. Use exact-head hosted artifacts for review. The [GSD verification policy](../../../.agents/skills/gsd/SKILL.md#github-ci-first) defines when local execution is needed.
-
-Read the active plan, dirty-tree baseline and relevant contracts. Reuse existing authorization. Identify dependencies, the earliest decisive check and the remaining required work. Build realistic isolated fixtures through public services; never forge authority or relax guards to make tests pass. Smoke a costly fixture before repetitions.
+- Confirm the intended PR base branch before edits (an explicit branch in the session counts) and record it in the named plan.
+- In Nightly GSD, use GitHub Actions first for affected checks, tests, builds, and captures, reviewing exact-head hosted artifacts ([GSD verification policy](../../../.agents/skills/gsd/SKILL.md#github-ci-first)).
+- Read the active plan, dirty-tree baseline, and relevant contracts; reuse existing authorization. Build realistic isolated fixtures via public services (never forge authority or relax guards) and smoke costly fixtures before repeating them.
 
 ## Coordinate work that can actually run in parallel
 
-Use available subagents early for useful independent implementation, review or documentation. Assign concrete outcomes, disjoint writable paths, shared interfaces and a return point. One owner integrates changes and owns the shared Cargo cache. Delegation creates no new approval gate.
+Use subagents early for useful independent implementation, review, or docs—assign concrete outcomes, disjoint writable paths, shared interfaces, and a return point. One owner integrates changes and owns the shared Cargo cache; delegation adds no approval gate.
 
-Wake completed workers explicitly, integrate results promptly, and reuse their valid evidence. Do not create workers, layers or duplicated reviews merely to keep agents busy. Finish edits before compilation; never edit a compiling unit or launch competing builds. Preserve user services and frontend locks.
+Wake idle workers explicitly, integrate promptly, and reuse valid evidence. Never spawn redundant layers, edit a compiling unit, launch competing builds, or disturb user services/frontend locks.
 
 ## Keep one reusable build graph
 
-Before compiling, inspect the existing cache and select the matching shared debug graph. Record host, storage mode, features, target/profile, exact activating package/target set and concurrency. Prefer scoped debug checks/tests for iteration; matching a gate may require its full workspace graph even for one test filter. Make a new smaller graph deliberate rather than guessing flags repeatedly. Follow the [canonical graph choices](contributing.md#verification-ownership-and-host-resources) and [build recipes](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration). Zero-match companion targets are not test passes.
+Before compiling, inspect the existing cache and reuse the matching shared debug graph (record host, storage mode, features, target/profile, activating package/target set, and concurrency). Prefer scoped debug checks during iteration; make graph changes deliberate ([canonical graphs](contributing.md#verification-ownership-and-host-resources), [build recipes](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration)). Zero-match companion targets are not passes.
 
-Choose build/test concurrency from memory and observed pressure; two build jobs are a starting point on this 16 GiB host. Serialize shared-state or timing-sensitive fixtures. For slow active builds, inspect CPU time, memory and host throttling once before changing course; do not repeatedly poll diagnostics or restart useful compilation. Follow [cache hygiene](contributing.md#build-cache-hygiene); preserve `target/debug` and the reusable agent cache.
+Size concurrency to host memory (~2 build jobs starting point on 16 GiB) and serialize shared-state/timing fixtures. For slow active builds, inspect CPU/memory/throttling once before changing course—do not poll or restart useful compilation. Follow [cache hygiene](contributing.md#build-cache-hygiene); protect `target/debug` and the reusable agent cache.
 
 ## Diagnose before repeating
 
-Start with the [formatting gate](contributing.md#build-and-test). Preserve the original error and bounded relevant state, diagnose it, then rerun the repaired contract. Reuse checks whose relevant inputs did not change. An unchanged failure needs new evidence or an honest blocker, not identical retries or an unrelated repair campaign. Stop irrecoverably failed task-owned checks when useful; never stop unrelated processes.
-
-Terminal checks must reconstruct current cells/state, not concatenate ANSI history. Use deliberate input and wait for its transition; repeated keys can cross child-process boundaries.
+Start with the [formatting gate](contributing.md#build-and-test). Preserve the original error and bounded state, diagnose it, and rerun only the repaired contract. Reuse unaffected checks; an unchanged failure needs new evidence or an honest blocker, not identical retries. Stop irrecoverably failed task-owned checks when useful—never unrelated processes.
 
 ## Separate evidence by what it proves
 
-Record actual commands, exits, executed/skipped counts and limitations. Queued, interrupted, skipped or unreached phases, zero matches and generated-but-uninspected screenshots are not passes. Keep implementation and verification status separate; link final outcomes to the task's acceptance record.
-
-Bind performance evidence to the relevant corpus/model, workload, binary and environment. Do not repeat measurements or hash large unrelated artifacts merely because prose or another independent file changed. Capture affected UI states early; reuse inspected evidence only when relevant inputs match.
-
-Select Fleetworks checks with the [shared scope planner](ci.md#fleetworksyml--scoped-branch-checks). Run affected local checks in the integration checkout and record selected hosted results separately. Use an isolated pinned domain server or embedded queue fixture for an authorized targeted network contract. Pull requests into `dev`, `nightly` and `main` run selected checks on creation and pushed updates. Linux embedded compatibility is selected for affected storage; direct dispatch retains the four-platform diagnostic. Trusted integration pushes publish only verified, commit-versioned [channel artifacts](versioning.md#release-automation). Dispatch mutation separately; do not run it locally.
-
-For an interactive native review, a passing hosted app build for the user's local Mac platform is enough to start the review phase before broader Linux/storage gates finish. The integration owner records the exact app revision and uses the matching hosted artifact for local review. Rebuild only when necessary for an authorized check that the hosted artifact cannot support. Keep unfinished or failed hosted checks visible in the plan and PR; this early handoff is not a claim that all implementation gates passed.
-
-For native or web UI deltas, dispatch [UI visual review](native-verification.md#dispatchable-ui-visual-review) at the frozen PR head with only affected scenes/surfaces. Inspect PNG/tree or Playwright captures, attach selected images inline to the open PR comment, and keep the full artifact. Record durable image references in affected design docs or use an existing exact-head release. Generated-but-uninspected images remain pending visual evidence. A newly introduced dispatch workflow is available only after it reaches the default branch; until then, use the existing native/web CI captures and attach selected images manually.
-
-For changes to embedded or compatibility behavior, run the applicable [native embedded gate](contributing.md#full-local-embedded-gate--github-ci-monitoring) after the focused check passes. Leave storage-mode variables unset so its required storage phase runs once. Inspect companion target contracts because some native tests also execute in the workspace phase.
+- Record commands, exits, executed/skipped counts, and limitations. Queued, interrupted, skipped, unreached, zero-match, or generated-but-uninspected outputs are not passes. Keep implementation and verification status distinct.
+- Bind performance evidence to corpus/model, workload, binary, and environment; do not re-measure or hash unrelated artifacts after prose/independent edits.
+- Select Fleetworks checks via the [shared scope planner](ci.md#fleetworksyml--scoped-branch-checks). PRs to `dev`, `nightly`, and `main` run selected checks; Linux embedded compatibility runs for affected storage (direct dispatch keeps the 4-platform diagnostic). Trusted pushes publish commit-versioned [channel artifacts](versioning.md#release-automation). Dispatch mutation in CI only—never locally.
+- For interactive native review, a passing hosted Mac app build at exact head is enough to start review before broader Linux/storage gates finish (rebuild locally only if the hosted artifact cannot support an authorized check); keep unfinished/failing gates visible.
+- For UI deltas, dispatch [UI visual review](native-verification.md#dispatchable-ui-visual-review) at frozen PR head for affected scenes/surfaces (or use existing CI captures until the workflow lands on the default branch): inspect captures, attach selected images inline, retain the full artifact, and record durable doc/release refs.
+- For embedded/compatibility changes, run the [native embedded gate](contributing.md#full-local-embedded-gate--github-ci-monitoring) after focused checks pass, with storage-mode vars unset so the required storage phase executes once.
 
 ## Communicate and improve the workflow
 
-Report the completed outcome, current blocker and next decisive check. Base estimates on observed complete command times and remaining stages; do not repeatedly promise “almost done.” If work overruns, explain the cause and reduce optional work instead of moving the finish line.
-
-Keep guidance concise: one canonical rule, links from other entrypoints, and only role-specific differences. Apply small reversible workflow fixes within existing scope; defer broader improvements. Final handoffs state what changed, what was verified and what remains.
+Report completed outcomes, current blockers, and the next decisive check; base estimates on observed timings and cut optional work rather than moving the finish line. Keep guidance concise (one canonical rule, links elsewhere, role deltas only), apply reversible fixes within scope, and deliver honest final handoffs.

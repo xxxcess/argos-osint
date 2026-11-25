@@ -3,123 +3,32 @@ name: argos-rust-style
 description: Apply Google's Rust Style Guide when writing, reviewing, or refactoring any Rust in this repo. Use for API design, naming, imports, error handling, documentation, and implementation patterns.
 ---
 
-Use the canonical [agent workflow](../../../docs/wiki/code/agent-workflow.md) with the active host's roles and existing authorization. OpenCode-only restrictions apply when that profile is explicitly selected.
-
 # Rust style — Google Rust Style Guide
 
-Load this for every Rust edit or review under `crates/`. Follow the public [Rust Style Guide](https://doc.rust-lang.org/nightly/style-guide/) and [API Guidelines](https://rust-lang.github.io/api-guidelines/) unless this skill conflicts. `cargo fmt` handles formatting.
+Follow the [agent workflow](../../../docs/wiki/code/agent-workflow.md), [Rust Style Guide](https://doc.rust-lang.org/nightly/style-guide/), and [API Guidelines](https://rust-lang.github.io/api-guidelines/) for every Rust edit/review under `crates/`. `cargo fmt` handles formatting.
 
 ## Argos overrides
 
-These win when the guide below disagrees:
+- **Async & stack:** Tokio async is required ([async/process safety](../../../docs/wiki/code/conventions.md#async-runtime-and-process-safety) overrides Chromium's `async`/`await` ban). Follow its allocation-boundary rule for large task-local callbacks and verify stack-overflow fixes on the normal public stack—never by enlarging test stacks.
+- **Workspace & crates:** Keep the existing workspace layout (do not flatten crates, ban module subdirectories, or adopt `rust_static_library`). Library crates (`argos-osint-core`, `argos-osint-api`) follow binding API rules; application crates (`fleetworks-desktop`, `fleetworks-search-index`, `argos-api-host`) treat them as recommendations favoring simplicity.
+- **Environment:** Fuchsia sync primitives do not apply; tests stay offline; no unstable features. Never run Rust mutation tests (`cargo mutants`) locally—use hosted `mutation.yml` and report local mutation as skipped.
 
-- Tokio async is required. [Async runtime and process safety](../../../docs/wiki/code/conventions.md#async-runtime-and-process-safety) overrides the Chromium ban on `async`/`await`.
-- Follow that guide's allocation-boundary rule for large task-local callbacks. Verify a stack-overflow repair through the actual public path on the normal stack; do not hide it with larger test stacks.
-- Keep the existing workspace. Do not flatten crates, ban module subdirectories, or adopt Chromium `rust_static_library` layout.
-- `argos-osint-core` and `argos-osint-api` are library code. `fleetworks-desktop`, `fleetworks-search-index` and `argos-api-host` are application code.
-- Fuchsia sync primitives do not apply.
-- Tests stay offline. Do not add unstable features.
+## Core & organization
 
-## Core principles
+- Prioritize readability, maintainability, ecosystem alignment, and rules that pull their weight.
+- Name leaf files after their primary item (`mod foo;` → `foo.rs`); non-leaf modules hold `mod`/re-exports plus small core code, `mod test`, or existing `#[cxx::bridge]`.
+- **Imports:** No globs except `use super::*` inline, `use enum::*` in enum methods, and `pub use sub::*` from non-leaf modules. One module per `use` (no `::` inside `{}`). Scope trait imports locally when used only in one function. Qualify free functions (`mem::transmute`) unless unambiguous/small first-party; import types unqualified (`Regex`) unless ambiguous/macro/generated.
 
-- Prioritize readability and maintainability over writeability.
-- Favor automation and consistency for large-scale changes.
-- Align with the wider Rust ecosystem.
-- Rules must pull their weight.
-- Library code follows the binding API rules. Application code treats them as recommendations and favors simplicity.
+## APIs, types, traits, and naming
 
-## Code organization
+- **Signatures:** Accept `&T`, `&[T]`, `&str`, `Option<&T>` over `&Box<T>`/`&Vec<T>`/`&String`/`&Option<T>`. Libraries prefer `impl Iterator`/`impl IntoIterator` and `impl Into<T>`; apps prefer `Vec<T>`/`&[T]` and concrete types. Prefer `enum` over unclear `bool` (document bools). Use `Option` for obvious absence, `Result` for recoverable errors with context, and documented `panic!` only for violated invariants.
+- **Types:** Prefer newtypes for distinct semantics and named fields over tuples (except newtypes and tiny locals).
+- **Traits:** Add impls proactively in libraries, as needed in apps. Prefer `#[derive]`, standard traits (`FromStr`) over custom-only methods, generics over `dyn Trait` in libraries (unless code size matters), and inherent impls unless polymorphism/extension (`Ext` suffix, owned with the type) is needed. Public-field types mirror subfield traits; errors `Copy` when possible; `Clone` unless owning external resources; `Default` on options structs or real defaults; `PartialEq`/`PartialOrd` unless `Eq`/`Ord` hold; map keys need `Hash + Eq` (and `Ord` if total). Pair key `From` impls with explicit constructors (`new`, `from_foo`, `try_new`).
+- **Naming:** Follow std conventions (`as_`/`to_`/`into_`, `foo()`, `foo_mut()`, `take_foo()`, `set_foo()`, `with_foo()`/`with_mut_foo()`, `replace_foo()`, `new`/`new_with_foo`/`try_new`/`from_foo`). Use descriptive lifetimes (except `'_`, highly generic code, or ≤2 local relations), short indicative generics (`T`/`U` or trait initial), and no obscure abbreviations (common `IpAddr` is fine).
+- **Docs & attributes:** Document public APIs (with examples for crates), panic conditions, and `unsafe` invariants with capitalized, punctuated prose; comments explain *why*. Require a compelling reason (plus benchmarks for perf) before `unsafe`. Pair related APIs (`len`/`is_empty`). Never call external `#[doc(hidden)]` items or pre-`main` `ctor`s. Use `const` only if meant to stay const; operator overloads only for math/logic; `#[non_exhaustive]` on cross-crate public enums/structs (skip when functional update is needed internally); `#[must_use]` on pure functions, error types, lazy values, and critical returns.
 
-- Name source files and leaf modules after the primary item (`mod foo;` → `foo.rs`).
-- Non-leaf modules hold `mod` declarations and re-exports, plus small core code, `mod test`, or `#[cxx::bridge]` when those already exist.
-- No glob imports except `use super::*` inline, `use enum::*` for enum methods, and `pub use submodule::*` from a non-leaf module.
-- Each `use` imports from one module. No `::` inside `{}`.
-- Prefer locally scoped trait imports, inside the function unless the trait is used throughout the module.
-- Qualify top-level function calls with the module name (`mem::transmute`). Exceptions: disambiguated names, small first-party modules, and collision-prone modules.
-- Import type names and use them unqualified (`use regex::Regex;` then `Regex`). Exceptions: ambiguities, large groups, macros, and generated code.
+## Concurrency, macros, and implementation
 
-## Function inputs and outputs
-
-- Accept flexible references for immutable data: `&T` not `&Box<T>`, `&[T]` not `&Vec<T>`, `&str` not `&String`, `Option<&T>` not `&Option<T>`.
-- Library: prefer `impl Iterator` returns and `impl IntoIterator` params. Application: prefer `Vec<T>` / `&[T]` when ownership or random access is needed.
-- Consider `impl Into<T>` for library flexibility. Avoid it in application code.
-- Prefer `enum` over `bool` when the purpose is not obvious. Document bools.
-- `Option` for an obvious missing value. `Result` for a recoverable error that needs context. `panic!` for a violated invariant; document it.
-
-## Types
-
-- Prefer newtypes over aliases when the difference is semantic, needs its own API, or should stay distinct.
-- Prefer named fields over tuples and non-newtype tuple structs. Exceptions: newtypes and very local values.
-
-## Traits
-
-- Add impls proactively in libraries and as needed in applications.
-- Implement standard traits instead of custom methods (`FromStr` rather than only a custom `from_str`). A custom method may remain for discoverability.
-- Prefer `#[derive]` over manual impls.
-- Library functions prefer generics (`T: Trait` / `impl Trait`) over `dyn Trait`, except where code size matters.
-- Define a trait for generics, `impl`/`dyn Trait`, or an extension. Otherwise use an inherent impl.
-- Extension traits use an `Ext` suffix and are owned by the team that owns the original type.
-- Public fields: implement the traits of the subfields. Errors: `Copy` when possible. `Clone` unless the type owns an external resource. `Default` when there is a `new()` or a real default. Prefer `PartialEq`/`PartialOrd` unless `Eq`/`Ord` requirements hold. Map keys need `Hash` + `Eq`, and `Ord` when a total order exists.
-- Pair important `From` impls with an explicit constructor (`new`, `from_foo`, `try_new`).
-- Options structs (all-public fields) implement `Default`.
-
-## Concurrency
-
-Never observe or continue through a poisoned mutex. Argos uses Tokio; do not replace it with `std` threads or remove `async`.
-
-## Macros
-
-Prefer, in order: ordinary Rust, `macro_rules!`, other codegen, then `proc_macro`. Weigh tooling and large-scale-change cost.
-
-## Naming
-
-- Methods follow std style. Use `as_` / `to_` / `into_` with the matching `self`. Getters: `foo()` (`&T`, or `T` if `Copy`), `foo_mut()`, `take_foo()`, `set_foo()`, `with_foo()` / `with_mut_foo()`, `replace_foo()`.
-- Lifetimes are descriptive. Exceptions: highly generic code, `'_`, and up to two single-character local relations.
-- Generics are short and indicative (`T` / `U` when unbound; a letter from the main trait otherwise).
-- Initialization: `new()` / `new_with_foo()` / `try_new()`; `from_foo()` alongside `From`.
-- Avoid abbreviations unknown outside the project. Common public abbreviations such as `IpAddr` may stay.
-
-## Documentation
-
-- Document public APIs. Include examples for crate usage.
-- Document panic cases for malformed input and state unsafe invariants.
-- Use capitalization and punctuation.
-- Comments add insight the code does not already provide.
-
-## Other features
-
-- Unsafe needs a reason a safe equivalent will not do. Benchmark it when the reason is performance.
-- Implement expected API sets together (`len` with `is_empty`).
-- Do not call `#[doc(hidden)]` items you do not own.
-- `const` only when the item is expected to stay const.
-- Operator overloads only for mathematical or logical meaning.
-- Public enums and public-field structs used across crate boundaries are `#[non_exhaustive]` unless a change is impossible or a large-scale change is already committed. Skip `non_exhaustive` when functional record update is required and the struct is not a cross-team contract.
-- `#[must_use]` on pure functions and on error or critical returns whose type is not already marked. Also on error types and lazy computations.
-- No code before `main()` (`ctor` and similar).
-
-## Implementation
-
-- Leave enough explicit types for a reader who knows the codebase. Prefer the annotation on the variable over turbofish.
-- Prefer pattern matching over check-then-unwrap. Prefer `expect` over `unwrap` when stating an invariant.
-- On `#[non_exhaustive]` enums, list variants or use `if let` / `let else`.
-- `assert!` messages say why, or log the values, especially for API misuse.
-- Prefer a direct `for` loop when an iterator chain is hard to read. Do not put a chain in the `for` header, and avoid `for_each` unless it is clearer.
-- Do not call `panic::catch_unwind`.
-- Prefer `format!` / `write!` for concatenation and substitution.
-
-## Review checklist
-
-| Area | Check |
-| --- | --- |
-| Imports | No globs; one module per `use`; qualify functions; unqualified types |
-| Errors | `Option` / `Result` / panic used for the right case; panics documented |
-| Types | Newtypes where the meaning differs; named fields |
-| Traits | Derive when possible; extension suffix `Ext`; `Default` on options structs |
-| Naming | Descriptive lifetimes; no obscure abbreviations |
-| Public APIs | Docs, `non_exhaustive` where needed, `must_use` |
-| Impl | Pattern match over unwrap; context on asserts |
-| Argos | Async and process rules kept; crate layout unchanged |
-
-## Rust mutation execution restriction
-
-Until further notice, agents must not run Rust mutation tests or mutation baselines locally, including `cargo mutants` and cargo-mutants runner invocations. Use the GitHub Actions `mutation.yml` workflow for execution and inspect its hosted results. Local mutation execution is deliberately skipped, not passed; ordinary targeted checks and the embedded gate remain required.
+- Never continue through a poisoned mutex; keep Tokio async (no `std` thread replacements).
+- Macro preference order: ordinary Rust → `macro_rules!` → other codegen → `proc_macro`.
+- Annotate variables rather than turbofish; pattern-match over check-then-unwrap; prefer `expect` with invariant over `unwrap`; match `#[non_exhaustive]` with listed variants or `if let`/`let else`. Add context to `assert!`. Prefer direct `for` loops over unreadable iterator chains (no chains in `for` headers; avoid `for_each` unless clearer). Never call `panic::catch_unwind`. Prefer `format!`/`write!` for string assembly.

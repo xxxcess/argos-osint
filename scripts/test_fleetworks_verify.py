@@ -231,6 +231,14 @@ class GitScopeTests(unittest.TestCase):
         plan = self.plan(self.start, head=head)
         self.assert_scopes(plan, set(ALL_SCOPES), images=ALL_IMAGES)
 
+    def test_nightly_perf_security_workflow_is_policy_scoped(self):
+        head = self.commit(
+            ".github/workflows/nightly-performance-security.yml",
+            ".github/scripts/nightly_perf_security.py",
+            ".github/scripts/test_nightly_perf_security.py",
+        )
+        self.assert_scopes(self.plan(self.start, head=head), set())
+
     def test_planner_edit_selects_full_matrix(self):
         head = self.commit("scripts/fleetworks_verify.py")
         plan = self.plan(self.start, head=head)

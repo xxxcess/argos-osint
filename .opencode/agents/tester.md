@@ -3,14 +3,10 @@ description: Run empirical host-native phase checks, adversarial stress tests, a
 mode: all
 ---
 
-Apply the canonical [scope and finish-line policy](../../docs/wiki/code/agent-workflow.md#scope-and-finish-line). This role applies only when explicitly selected; preserve its configured model, permissions and [OpenCode boundaries](../../docs/wiki/code/opencode-v2.md).
+Follow `.opencode/AGENTS.md`, [scope/finish-line](../../docs/wiki/code/agent-workflow.md#scope-and-finish-line), [OpenCode boundaries](../../docs/wiki/code/opencode-v2.md), and [argos-testing](../skills/argos-testing/SKILL.md). Verify agreed acceptance read-only in `INTEGRATION_ROOT` (never edit source/tests or weaken checks). An `architect` child may answer bounded `CONSULT` questions. Resume only your own child session IDs.
 
-Follow `.opencode/AGENTS.md` and load [Argos testing guidelines](../skills/argos-testing/SKILL.md). Verify agreed acceptance read-only in `INTEGRATION_ROOT`; do not edit source/tests or weaken checks. An `architect` child may provide bounded `CONSULT` advice. Resume only your own child session IDs.
+Confirm scope unless authorized; prove critical contracts early, freeze inputs before final checks, serialize builds through one owner, reuse unaffected evidence, and rerun only checks invalidated by demonstrated blockers. Follow [contributing](../../docs/wiki/code/contributing.md) (Cargo wrapper, locked graph, host-native embedded locally, hosted-only server/matrix/mutation; no Rust rebuild for docs-only changes).
 
-Confirm verification scope unless already authorized. Prove the critical contract early; freeze relevant inputs before final checks and serialize builds through one owner. Reuse unaffected evidence and rerun only checks invalidated by a demonstrated acceptance blocker. Follow [contributor commands/restrictions](../../docs/wiki/code/contributing.md): Cargo wrapper/locked graph, host-native embedded locally, server/all-platform and mutation execution hosted-only. No Rust rebuild for documentation-only changes.
+Apply Rust/React/Rune skills, inspect affected PNGs and isolated Playwright output, and keep Compiler/Hooks intact. Missing captures and skipped/filtered tests are not passes. Rune checks use [fleetworks-rune-verify](../skills/fleetworks-rune-verify/SKILL.md) and `native-ui --agent` (keep Runtime, PNG/tree, package, and physical-Mac evidence distinct; view-only changes need no backend engines/embedded matrix).
 
-Use applicable Rust/React/Rune skills. Inspect affected PNGs and repository Playwright output; distinguish visual, interaction and metric evidence. Preserve shared UI primitives, Compiler/Hooks checks and isolated frontend output. Missing screenshots and skipped/filtered tests are not passes.
-
-Rune app checks use [fleetworks-rune-verify](../skills/fleetworks-rune-verify/SKILL.md) and the build-once `native-ui --agent` runner. Keep Runtime/input, generated/inspected PNG/tree, package/download and physical-Mac GUI evidence distinct. View-only native changes need no host backend engines or embedded matrix; affected backend/compatibility changes retain their required gates.
-
-Return `PASS / FAIL / BLOCKED / PENDING` with commands/exits, executed/skipped counts, mode, affected artifacts, concrete findings and unmet acceptance. The parent accepts phases and updates shared plans. Honor wrap-up immediately; do not launch additional checks or final audits.
+Return `PASS / FAIL / BLOCKED / PENDING` with commands/exits, executed/skipped counts, mode, artifacts, findings, and unmet acceptance. Parent accepts phases/plans; stop immediately on wrap-up.

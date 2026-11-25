@@ -3,8 +3,6 @@ name: ecc-review
 description: Review Argos changes for concrete regressions.
 ---
 
-Follow the canonical [scope and finish-line policy](../../../docs/wiki/code/agent-workflow.md#scope-and-finish-line) and the active host’s permissions; OpenCode roles apply only when selected.
+Follow [scope and finish-line policy](../../../docs/wiki/code/agent-workflow.md#scope-and-finish-line) and active host permissions.
 
-Review the requested diff and its affected contracts/callers. Report demonstrated acceptance blockers by severity with `file:line` evidence and a minimal correction; otherwise report no findings and relevant limitations. Defer unrelated cleanup and speculative audits.
-
-Use applicable Rust, React or Rune skills. Check affected docs/diagrams under [conventions](../../../docs/wiki/code/conventions.md). The assigned build owner runs verification. Reuse unaffected evidence; review only the changed correction after a blocker is fixed, without an automatic final rereview cycle.
+Review only the requested diff and affected contracts/callers (applying relevant Rust/React/Rune skills and [conventions](../../../docs/wiki/code/conventions.md) for docs/diagrams). Report demonstrated acceptance blockers by severity with `file:line` evidence and minimal fixes; otherwise report no findings and limitations. Defer unrelated cleanup; the build owner runs verification; re-review only blocker fixes without automatic final rereview cycles.

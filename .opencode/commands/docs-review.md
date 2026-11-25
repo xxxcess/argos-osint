@@ -3,6 +3,4 @@ description: Review code changes and update affected wiki documentation
 agent: scribe
 ---
 
-Follow the canonical [scope and finish-line policy](../../docs/wiki/code/agent-workflow.md#scope-and-finish-line) and this command’s configured role/permissions.
-
-Review $ARGUMENTS within the assigned revision/task-owned scope using `docs/wiki/maintenance.md#refresh-wiki`. Update affected canonical docs/diagrams; report actual checks or a scoped no-op. Return source/instruction needs to the parent.
+Follow [scope/finish-line](../../docs/wiki/code/agent-workflow.md#scope-and-finish-line) and role permissions. Review $ARGUMENTS within the assigned scope via `docs/wiki/maintenance.md#refresh-wiki`, update affected canonical docs/diagrams, and report actual checks or a scoped no-op (return source/instruction needs to the parent).

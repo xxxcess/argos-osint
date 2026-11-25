@@ -1,79 +1,62 @@
 # Agent Testing Guidelines — Argos OSINT
 
-Applies to test design, changes, review and execution. Follow root `AGENTS.md`, [contributor workflow](../../../docs/wiki/code/contributing.md), relevant [conventions](../../../docs/wiki/code/conventions.md), and the canonical [scope and finish-line policy](../../../docs/wiki/code/agent-workflow.md#scope-and-finish-line). OpenCode role boundaries apply only when that profile is selected.
+Follow root `AGENTS.md`, [contributing](../../../docs/wiki/code/contributing.md), [conventions](../../../docs/wiki/code/conventions.md), and [scope and finish-line policy](../../../docs/wiki/code/agent-workflow.md#scope-and-finish-line). OpenCode boundaries apply only when selected.
 
 ## Authorization and scope
 
-- For Nightly GSD, use [GitHub Actions first](../../../.agents/skills/gsd/SKILL.md#github-ci-first) for affected checks, tests, builds and captures. Use exact-head artifacts for native review when available. Local commands below apply only to necessary evidence CI cannot supply within the user's authorized scope.
-- Confirm the verification scope before execution unless this session already explicitly authorizes it. Offer scoped static and feature-functionality checks followed by native review, or all applicable checks through resolution of implementation failures. Confirm whether feature tests run locally or in GitHub CI. Authorization persists for affected retries; do not ask repeatedly. When CI is selected, push a task branch and inspect checks for the exact revision. If a matching local-platform native app artifact passes and the user is in the review loop, run local native review at that point while other hosted gates continue; compile locally only for that review. In the first path, prove the affected feature behavior with targeted checks, then report remaining Docker, embedded, installed-app or platform gates as pending.
-- Tie each test to requested acceptance or a concrete regression. Prove the critical contract early, freeze final-check inputs, and run agreed required gates. After freeze, fix only demonstrated acceptance blockers and rerun affected evidence; do not start unrelated audits or repeat unchanged broad checks. Honor wrap-up immediately.
-- Reuse existing harnesses/dependencies and the current toolchain. Do not add frameworks, feature flags or infrastructure without an in-scope need. Inspect manifests and actual flags rather than copying stale commands.
+- **CI first (Nightly GSD):** Run affected checks, tests, builds, and captures in [GitHub Actions](../../../.agents/skills/gsd/SKILL.md#github-ci-first) and use exact-head artifacts for native review; run locally only for required local hardware/state under user authorization.
+- **Confirm scope once:** Unless already authorized, offer (a) scoped static/feature checks + native review (reporting remaining Docker/embedded/platform gates as pending), or (b) all applicable gates through resolution; confirm local vs. CI. Authorization persists across affected retries. On CI selection, push the task branch and track exact-head checks; if a matching local-platform native artifact passes during interactive review, review it while broader gates continue (compile locally only if needed for that review).
+- **Scope discipline:** Tie every test to acceptance or a concrete regression. Prove the critical contract early, freeze final inputs, and after freeze fix only demonstrated acceptance blockers with affected reruns. Reuse existing harnesses/dependencies/flags—inspect manifests instead of copying stale commands.
 
 ## Test contracts
 
-- Assert observable behavior through the smallest useful level: pure unit logic, public integration/persistence contracts, or critical end-to-end journeys. Avoid redundant layers, implementation-mirroring assertions and incidental SQL/log/count checks.
-- Cover relevant boundaries, invalid/empty/Unicode input, partial failures, retries, ordering, cancellation, leases and recovery. Add a regression that would fail if the demonstrated bug returned. Coverage is diagnostic, not a numerical target.
-- Never weaken/delete/ignore assertions, loosen tolerances, suppress warnings or auto-update snapshots just to obtain green results. Diagnose the original failure; environmental blockers and intentional skips remain explicit.
-- Keep fixtures small, deterministic, isolated and offline. Each test owns its temporary directories, DB namespace/database, ports, state and mocks. Bind services to loopback; control clocks/IDs/providers instead of relying on sleeps, current dates, locale, DNS or external availability.
-- Never use the real Argos home, user data, credentials, production/shared databases, live OSINT providers, paid APIs, real people/breach data or external infrastructure. Use synthetic targets and fake secrets; test redaction and untrusted content as data.
-- Keep golden updates deliberate and versioned. Prefer focused assertions over huge snapshots. Cleanup errors must remain visible without hiding the original failure.
+- Assert observable behavior at the smallest useful level (unit, public integration/persistence, critical E2E); avoid implementation-mirroring assertions or incidental SQL/log/count checks.
+- Cover boundaries, invalid/empty/Unicode inputs, partial failures, retries, ordering, cancellation, leases, and recovery; add a failing-before-fix regression. Coverage is diagnostic, not a numeric target.
+- Never weaken/delete/ignore assertions, loosen tolerances, suppress warnings, or auto-update snapshots to get green; keep blockers and intentional skips explicit.
+- Keep fixtures small, deterministic, isolated, and offline: own temp dirs, DB namespaces, loopback ports, controlled clocks/IDs/mocks (no sleeps, real Argos home, user/real people data, live providers, or external services). Test redaction and untrusted content as data. Keep golden updates deliberate and cleanup errors visible.
 
 ### 3.1 Native fixture prerequisites and diagnostic output
 
-Use real local admission/publication, seeded catalog identities, current metadata, validated retained bodies and complete native NLP receipts where required. Tags, forged completion markers or hand-written checksums cannot grant current authority; adversarial forged rows are valid only to prove exclusion.
+Use real local admission/publication, seeded catalog identities, current metadata, validated retained bodies, and complete native NLP receipts where required. Tags, forged completion markers, or hand-written checksums never grant current authority (forged rows are valid only to prove exclusion).
 
-Exercise opt-in fixtures before using them as evidence. Preserve meaningful assertions during fixture corrections. Diagnostics stay bounded and omit secrets/article/body prose; retain original publisher/transaction failures. Fix stack allocation boundaries and verify the public path on its normal stack rather than enlarging test stacks.
+Exercise opt-in fixtures before citing them as evidence and preserve meaningful assertions during fixture fixes. Keep diagnostics bounded and free of secrets/article prose while retaining original publisher/transaction errors. Fix stack-allocation boundaries and verify on the normal public stack—never enlarge test stacks.
 
-## Rust and storage
+## Rust, storage, and backend
 
-- Unit tests live beside meaningful logic; public/cross-module integration tests live under `crates/<crate>/tests/`. Reuse `tests/support` rather than creating an accidentally discovered empty test crate. Backend and administrative process tests prove supported command contracts; executable examples follow public APIs.
-- Test state machines and persistence: idempotence, owner/epoch fencing, timeout/backoff, cancellation, rollback/partial commits, restart/reopen and stale-generation exclusion. Use explicit barriers/channels or supported controlled time, never sleeps to hide races.
-- Jobs SQLite/RocksDB tests use temporary local directories and the Jobs HTTP fixtures; never share their files between process owners. Test crash/reopen, idempotent outbox handoff, visibility expiry and stale delivery epochs. See [planned persistence scopes](../../../docs/wiki/code/jobs-persistence.md).
-- For domain contracts, use current SurrealDB schemas, `storage::repo::Repository` and the existing isolated harness. Assert schema/bootstrap/version guards and records through public contracts; raw query tests are appropriate when query semantics are the contract. Disk reopen tests must use persisted storage.
-- Keep provider/model calls injectable and mocked at the boundary. Cover quotas, budgets, fallback and malformed/error responses when those contracts change. Do not mock away the integration being proved.
-- Use table-driven finite cases; add property-based tooling only when existing dependencies and the affected input space justify it. Include useful assertion diagnostics and reproduction data.
-- Load `argos-rust-style` for Rust edits/review. No local Rust mutation tests or baselines (`cargo mutants` included); use hosted `mutation.yml` and report local mutation execution as deliberately skipped.
+- Unit tests sit beside logic; cross-module tests live in `crates/<crate>/tests/` (reuse `tests/support` to avoid empty test crates). Load `argos-rust-style` for Rust edits/reviews.
+- Test state machines and persistence: idempotence, owner/epoch fencing, timeout/backoff, cancellation, rollback, restart/reopen, and stale-generation exclusion via barriers/channels/controlled time (no sleeps).
+- Jobs SQLite/RocksDB tests use private temp dirs and Jobs HTTP fixtures (crash/reopen, idempotent outbox, visibility expiry, stale delivery epochs; [jobs persistence](../../../docs/wiki/code/jobs-persistence.md)).
+- SurrealDB contracts use current schemas, `storage::repo::Repository`, and the isolated harness (disk reopen tests must persist to disk). Mock providers/models at injectable boundaries without mocking away the tested integration. Use table-driven cases; add property testing only when existing deps and input space justify it.
+- Linux backend/search changes require real isolated domain/outbox/index/gateway/dossier and restart/lease/pressure checks. Native PNGs, optional Natural training, or doc-only Rust-BERT compilation do not prove Linux model inference; both Linux and physical Mac architectures remain explicit platform evidence.
+- **No local Rust mutation runs** (`cargo mutants`): use hosted `mutation.yml` and report local mutation as deliberately skipped.
 
-## React and browser
+## React, browser, and Rune UI
 
-- Discover the existing package manager, lockfile, scripts and CI; do not scaffold or migrate a test stack. Keep type/lint/build/behavior evidence distinct and preserve React Compiler/Hooks checks.
-- Test user-visible loading/success/empty/error/retry, validation, accessible roles/names, focus/keyboard and relevant responsive states. Test hooks through consumers and asynchronous API/cache behavior through realistic boundary fixtures. Reset caches, timers, handlers and storage between tests.
-- Cover cancellation, pagination and stale-response races where relevant. Use accessible locators and Playwright auto-waiting; isolate accounts/backend data and preserve the real app path while stubbing external providers.
-- Browser verification uses the repository Playwright runner. Set `ARGOS_WEB_TEST_DEV=1`; Next output/locks belong under `.agent-scratch/next-web-tests`. Never stop the user's frontend or remove its lock. Retain bounded traces/screenshots/errors for failed affected cases.
-- Load applicable React and Rune skills. Use actual production view/state/input fixtures and inspected PNG/tree evidence. Generated images alone are not visual evidence; snapshots alone do not prove interactions. Missing visual evidence remains pending.
-- For native/web UI changes in a PR, dispatch the [visual review workflow](../../../docs/wiki/code/native-verification.md#dispatchable-ui-visual-review) at the exact frozen head with affected scenes/surfaces. Inspect the generated captures, attach selected images inline to the PR and keep their artifact plus durable docs or exact-head release reference. Report dispatch unavailable before default-branch installation or failed capture/comment upload as pending, never as visual approval.
-
-## Rune client and Linux backend
-
-- Rune changes follow [fleetworks-rune-verify](../fleetworks-rune-verify/SKILL.md) and [native verification](../../../docs/wiki/code/native-verification.md). Test actual `State`/handlers with Rune Runtime, then select real-view PNG/tree/script captures through `fleetworks_verify.py native-ui --agent`. Use the shared debug graph, actual scene inventory and synthetic effects. Preserve two-node/child/deployment privacy, stale-reply, credential and protected-path cases when affected.
-- Native UI, transport, package validation, inspected captures and matching-hardware GUI/input/accessibility are separate evidence. Native view-only work needs neither terminal captures nor a backend engine installation. Embedded-storage changes still require their applicable gate below.
-- Linux backend/search changes require real isolated domain/outbox/index/gateway/dossier and restart/lease/pressure checks when affected. Native PNGs, optional Natural training and doc-only Rust-BERT compilation cannot establish real Linux model inference. Both Linux architectures and both physical Mac architectures remain explicit platform evidence.
+- **React/Playwright:** Reuse existing package manager/scripts/CI; keep type/lint/build/behavior evidence distinct with React Compiler/Hooks enabled. Test loading/success/empty/error/retry, validation, a11y roles/names, focus/keyboard, responsive viewports, cancellation, pagination, and stale-response races; reset caches/timers/storage between tests. Use repo Playwright with `ARGOS_WEB_TEST_DEV=1` (Next output/locks in `.agent-scratch/next-web-tests`; never touch the user's frontend).
+- **Rune native:** Follow [fleetworks-rune-verify](../fleetworks-rune-verify/SKILL.md) and [native verification](../../../docs/wiki/code/native-verification.md). Test production `State`/handlers via Rune Runtime, then capture real-view PNG/tree/scripts via `fleetworks_verify.py native-ui --agent` on the shared debug graph with synthetic effects. Keep native UI, transport, packaging, inspected captures, and matching-hardware GUI evidence distinct; view-only changes need neither terminal captures nor backend engines.
+- **PR visual review:** Dispatch [UI visual review](../../../docs/wiki/code/native-verification.md#dispatchable-ui-visual-review) at frozen PR head for affected scenes/surfaces, inspect captures, attach selected images inline, and retain artifacts + durable refs (generated-only or unavailable dispatch stays pending).
 
 ## Execution restrictions
 
-Use the designated combined integration tree and one build owner. Worktrees are edit/format-only. Follow the [stable graph/resource policy](../../../docs/wiki/code/agent-workflow.md#keep-one-reusable-build-graph) and [cache hygiene](../../../docs/wiki/code/contributing.md#build-cache-hygiene); never bypass locks or clean active/user/global caches.
+Work in the combined integration tree with one build owner (worktrees are edit/format-only) per [build graph policy](../../../docs/wiki/code/agent-workflow.md#keep-one-reusable-build-graph) and [cache hygiene](../../../docs/wiki/code/contributing.md#build-cache-hygiene). All agent Rust commands use `python3 scripts/agent_cargo.py … --locked` (`cargo fmt` excepted). Targeted storage tests need `ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1`.
 
-All agent Rust build/check/clippy/test commands use `python3 scripts/agent_cargo.py … --locked`; `cargo fmt` is the direct exception. Preserve the chosen feature graph, including activating fixture targets. Target storage tests explicitly require `ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1`; inspect each harness for skips.
-
-For the required full native embedded gate, leave parent storage-mode variables unset:
+Required full native embedded gate (parent storage vars unset):
 
 ```sh
 env -u ARGOS_SURREAL_MODE -u ARGOS_SURREAL_BIN -u ARGOS_SURREAL_REQUIRED \
   bash scripts/local_matrix.sh --storage embedded
 ```
 
-Keep `ARGOS_EMBED` unset unless its opt-in tests are explicitly authorized. Local agents run host-native embedded storage only; server/all-platform CI matrices remain hosted. Monitor available hosted results for other modes. A plain workspace storage skip does not replace the dedicated required embedded phase.
-
-Documentation/config-only changes use their relevant authorized static/policy checks, not a Rust rebuild. Frontend checks use existing package scripts and locked dependencies. Required gates are not waived by retry caps, but unchanged failures do not justify repeating broad runs; return the demonstrated blocker and affected next check.
+Keep `ARGOS_EMBED` unset unless explicitly authorized. Local runs are host-native embedded only (server/all-platform matrices stay in CI); a plain workspace skip never substitutes for the dedicated embedded phase. Docs/config-only work uses static/policy checks, not a Rust rebuild.
 
 ## Evidence and independent verification
 
-Record command, exit, relevant mode/environment, executed/pass/fail/skip counts, tested input scope and affected artifact paths. Capture hashes only when performance/release provenance needs immutable identity; do not repeatedly hash unrelated files. Inspect intended execution: zero-match filters, ignored tests, early-return harnesses and missing services are not passes.
+Record command, exit code, mode/env, executed/pass/fail/skip counts, tested scope, and artifact paths (hash only when perf/release provenance requires it). Zero-match filters, ignored tests, early-return harnesses, and missing services are not passes.
 
 - **PASS:** all intended checks executed and passed.
-- **FAIL:** intended assertions/build checks failed.
-- **BLOCKED:** a required dependency/tool/service prevented execution.
-- **SKIPPED:** intentionally not executed under a documented condition; never PASS.
+- **FAIL:** intended build/assertion failed.
+- **BLOCKED:** required tool/dependency/service prevented execution.
+- **SKIPPED:** intentionally skipped under a documented condition (never PASS).
 - **PENDING:** required evidence not yet attempted or deferred to CI/user.
 
-The OpenCode tester is an independent verifier, not a fixer: do not edit source/tests to make checks pass. Report the minimal reproducer, concrete `file:line` findings, actual evidence and unmet acceptance to the caller; the caller owns phase acceptance/plans. Distinguish local/hosted and visual/interaction/performance evidence. Do not begin an automatic final rereview or new acceptance search after agreed checks pass.
+The OpenCode `tester` is a read-only verifier (never edits code/tests to pass): return minimal reproducer, `file:line` findings, actual evidence, and unmet acceptance to the caller; do not start automatic rereviews after agreed checks pass.

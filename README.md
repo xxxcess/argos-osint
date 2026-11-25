@@ -10,7 +10,7 @@ Fleetworks collects public-source intelligence, connects evidence to actors and 
 
 ## Approved visual direction
 
-The [matte canvas design reference](docs/design/matte-canvas/README.md) defines the approved native/shared-web target, exact reproduction recipes, symbol-only branding, continuous-scroll and stable-loading behavior. It includes four reviewed concept mockups and the [Quiet Orbit motion contract](docs/design/matte-canvas/motion.md).
+The [Glass Canvas design reference](docs/design/matte-canvas/README.md) defines the approved native/shared-web target, exact reproduction recipes, symbol-only branding, continuous-scroll and stable-loading behavior. It includes four reviewed concept mockups and the [Quiet Orbit motion contract](docs/design/matte-canvas/motion.md).
 
 ## Quick start
 
@@ -57,13 +57,13 @@ Enter the selectable Connect ID from **Workstation Status** into Intel Web's exi
 
 Start Docker Desktop or your local Docker engine, then run these commands from the repository root. The backend includes the gateway, private services, workers, SurrealDB, Jobs storage and actor search.
 
-**Single-command build, redeploy, and native launch:** run `native_review.py up` from the repository root. On first run it auto-detects your host Docker platform, initializes `native-local` on port `18091`, and links a private `compose.env` at the repository root (when none exists); on every run it builds the backend service images, redeploys the Docker containers, and builds/opens the native app on supported macOS hosts (`x86_64-apple-darwin` or `aarch64-apple-darwin`):
+**Single-command build, redeploy, and native launch:** run `native_review.py up` from the repository root. On first run it auto-detects your host Docker platform, initializes `native-local` on port `18091`, and links a private `compose.env` at the repository root (when none exists); on every run it builds the backend service images, redeploys the Docker containers, and builds/opens the native app on supported **macOS and Linux x86_64** hosts (`x86_64-apple-darwin`, `aarch64-apple-darwin`, or `x86_64-unknown-linux-gnu`):
 
 ```sh
 python3 deploy/native_review.py up
 ```
 
-Pass `--name <name>` (defaults to `native-local`) or `--api-port <port>` (defaults to `18091`) on a fresh review, or add `--backend-only` to skip the native build/open (non-macOS hosts skip it automatically). `native_review.py up` checks the active local Docker context/architecture against `PLATFORM`, builds the `backend` Bake group (`runtime`, `surrealdb`, `search-index`), stops and recreates the Compose containers with `--force-recreate --detach --wait`, and—on supported macOS hosts—runs `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug --open`. Existing credentials, scope/epochs and data remain preserved across reruns.
+Pass `--name <name>` (defaults to `native-local`) or `--api-port <port>` (defaults to `18091`) on a fresh review, or add `--backend-only` to skip the native build/open (unsupported architectures such as Linux ARM64 skip it automatically). `native_review.py up` checks the active local Docker context/architecture against `PLATFORM`, builds the `backend` Bake group (`runtime`, `surrealdb`, `search-index`), stops and recreates the Compose containers with `--force-recreate --detach --wait`, and—on supported macOS and Linux x86_64 hosts—runs `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug --open`. Existing credentials, scope/epochs and data remain preserved across reruns.
 
 Edit `compose.env` at the repository root to update local Compose settings. It is private and ignored by Git. The deployment's generated env path points to this same file, so both locations use the same settings. Keep its generated access scope, epochs and storage path with the existing credentials and data.
 
@@ -89,11 +89,12 @@ Provision provider credentials, the Atlas worker, private NLP and a Rust-BERT mo
 
 | Area | What you can do |
 | --- | --- |
-| DB Setup | Confirm actor seeding and search-index build. Follow the job through reader-visible completion. |
+| Actor Maintenance | Confirm actor seeding and search-index build. Follow the job through reader-visible completion. |
 | News Cycles and Brain Search | Queue cycles, inspect workstation cycle history, discover actors and read dossiers. |
-| OSINT Tools and Model Assignments | Read service/provider cards, provision keys and edit supported model routing with confirmed revisions. |
+| Tool Box and Model Assignments | Read service/provider cards, provision keys and edit supported model routing with confirmed revisions. |
 | Workstation Status and Setup Gateway | Inspect identity, readiness and backend resources. Start Embedded or pair and reconnect to Distributed. |
 | Jobs & Logs | Read the bounded workstation queue and selected-job safe operational summaries. |
+| Inbox & Embedded Assistant | Inspect workstation notifications and run grounded FLAN-T5 Small/Base Q&A, Jobs/Inbox triage, Workstation Status handoff, and model configuration in **Settings → Assistant**. |
 | Intel Web | Browse the Bulletin, Focus Briefs, Related articles, actor dossiers and topology behind the Connect/session gate. |
 
 [![Fleetworks service boundaries](docs/diagrams/fleetworks.svg)](docs/diagrams/fleetworks.html)
@@ -119,12 +120,12 @@ Choose the shortest loop for the changed surface. The native app/fixture graph i
 | Change | Loop |
 | --- | --- |
 | Rune app, client contracts or workstation manager | Scoped host debug tests, selected same-view Runtime/PNG/tree fixtures, then `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug`. |
-| Service roles (`argos-api-host`) | `python3 deploy/native_review.py up` auto-initializes if missing, rebuilds the `backend` Bake images, recreates Docker containers, and builds/opens the native app on supported macOS (`--backend-only` skips native). BuildKit caches dependencies. |
+| Service roles (`argos-api-host`) | `python3 deploy/native_review.py up` auto-initializes if missing, rebuilds the `backend` Bake images, recreates Docker containers, and builds/opens the native app on supported macOS and Linux x86_64 hosts (`--backend-only` skips native). BuildKit caches dependencies. |
 | Web app and `packages/*/src` | Run the separately configured Next development server; use isolated repository Playwright output for browser checks. |
 | Dependencies, Dockerfile, Compose or private search | Build the affected image with `docker buildx bake -f deploy/docker-bake.hcl <target>`, then use its isolated deployment checks. |
 | Packaging or release | Push and read the hosted CI results for that revision. |
 
-PRs targeting `dev`, `nightly` or `main` automatically run affected Linux x86_64 native and AMD64 backend checks when opened or updated. After first-pass CI succeeds, dispatch the affected macOS and React Native Web builds and checks for the same commit. Track Linux visual review in parallel. [CI review passes](docs/wiki/code/ci.md#nightly-gsd-order) Trusted pushes publish selected verified unsigned Mac ZIPs and dual-architecture GHCR images: `nightly` → nightly, `dev`/`main` → stable. [Visual checks/publication flow](docs/diagrams/native-release.html) · [Artifact identities and limits](docs/wiki/code/build-artifacts.md#hosted-artifacts-and-publication)
+PRs targeting `dev`, `nightly` or `main` automatically run affected Linux x86_64 native and AMD64 backend checks when opened or updated. After first-pass CI succeeds, dispatch the affected macOS and React Native Web builds and checks for the same commit. Track Linux visual review in parallel, and review automated [Performance, Security & Scalability](docs/wiki/code/performance-security-scalability.md) deltas from the [`nightly performance security`](.github/workflows/nightly-performance-security.yml) workflow. [CI review passes](docs/wiki/code/ci.md#nightly-gsd-order) Trusted pushes publish selected verified unsigned Mac ZIPs, dual-architecture GHCR images, and (on `nightly`) the three smoke-verified `Fleetworks-Inbox-QA-Pack-<target>.tar.gz` + `.digests.json` pairs: `nightly` → nightly, `dev`/`main` → stable. [Visual checks/publication flow](docs/diagrams/native-release.html) · [Artifact identities and limits](docs/wiki/code/build-artifacts.md#hosted-artifacts-and-publication)
 
 Run host checks first, then the affected container loop, then hosted CI. [Full loop guide](docs/wiki/code/contributing.md#development-loops-local-cli-and-docker)
 

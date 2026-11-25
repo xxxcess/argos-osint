@@ -77,7 +77,12 @@ def torch_environment():
     return root, key, env
 
 
-def linux_libraries(binary, directory, env, *, torch_root=None):
+def linux_libraries(binary, directory, env, installed=False, *, torch_root=None):
+    if installed:
+        library_dirs = (directory.resolve(),)
+    else:
+        pack.check(torch_root is not None, "Copying Linux libraries requires the pinned Torch wheel")
+        library_dirs = (torch_root / "lib", torch_root.parent / "torch.libs")
     result = run("ldd", str(binary), env=env, capture=True, timeout=60)
     pack.check("not found" not in result, "Inbox QA worker library could not be resolved")
     paths = []
@@ -85,11 +90,8 @@ def linux_libraries(binary, directory, env, *, torch_root=None):
         if name in LINUX_SYSTEM:
             continue
         source = Path(source)
-        if torch_root is None:
-            pack.check(source.resolve().parent == directory.resolve(), "Inbox QA linked outside its pack")
-        else:
-            wheel_dirs = (torch_root / "lib", torch_root.parent / "torch.libs")
-            pack.check(source.resolve().parent in wheel_dirs, "Inbox QA linked a library outside the pinned wheel")
+        pack.check(source.resolve().parent in library_dirs, "Inbox QA linked a library outside its expected root")
+        if not installed:
             shutil.copyfile(source, directory / name)
         paths.append(directory / name)
     versions = run("readelf", "--version-info", str(binary), *map(str, paths), capture=True, timeout=60)
@@ -417,7 +419,7 @@ def build(target, directory, chat_model=pack.DEFAULT_CHAT_MODEL):
                                     manifest_sha256=digests["manifest_sha256"]))
     if target not in DARWIN_WHEELS:
         linux_libraries(installed / pack.WORKER, installed / "lib",
-                        {**env, loader_key: str(installed / "lib")})
+                        {**env, loader_key: str(installed / "lib")}, installed=True)
     digests["checkpoint_smoke"] = verify_inference(installed, loader_key, target, chat_model)
     (directory / "digests.json").write_text(json.dumps(digests, sort_keys=True) + "\n")
     print(json.dumps(digests, sort_keys=True))

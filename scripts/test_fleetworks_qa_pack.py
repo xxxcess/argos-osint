@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import fleetworks_qa_ci as ci
 import fleetworks_qa_pack as pack
 
 
@@ -18,6 +19,31 @@ ELF = b"\x7fELF\x02\x01" + bytes(12) + (62).to_bytes(2, "little")
 
 
 class PackTest(unittest.TestCase):
+    def test_linux_worker_libraries_verify_installed_paths_and_copy_only_from_the_wheel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            torch_root = root / "torch"
+            library = torch_root / "lib/libtorch_cpu.so"
+            library.parent.mkdir(parents=True)
+            library.write_bytes(ELF)
+            installed = root / "pack/lib"
+            installed.mkdir(parents=True)
+            worker = root / "worker"
+            env = {}
+
+            with patch.object(ci, "run", side_effect=[f"libtorch_cpu.so => {library} (0xf)", ""]):
+                copied, = ci.linux_libraries(worker, installed, env, torch_root=torch_root)
+            self.assertEqual(copied.read_bytes(), ELF)
+
+            with patch.object(ci, "run", side_effect=[f"libtorch_cpu.so => {copied} (0xf)", ""]):
+                self.assertEqual(ci.linux_libraries(worker, installed, env, installed=True), [copied])
+            with patch.object(ci, "run", return_value=f"libtorch_cpu.so => {library} (0xf)"):
+                with self.assertRaisesRegex(ValueError, "outside its expected root"):
+                    ci.linux_libraries(worker, installed, env, installed=True)
+            with patch.object(ci, "run", return_value=f"libtorch_cpu.so => {copied} (0xf)"):
+                with self.assertRaisesRegex(ValueError, "outside its expected root"):
+                    ci.linux_libraries(worker, installed, env, torch_root=torch_root)
+
     def test_pack_progress_is_private_and_clears_after_interrupted_download(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)

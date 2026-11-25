@@ -44,6 +44,7 @@ struct Inner {
     mode: Option<Mode>,
     publisher: std::sync::OnceLock<super::publisher::Publisher>,
     matcher: MatcherCache,
+    inbox_qa_writer: tokio::sync::Mutex<()>,
     scheduler_lease: tokio::sync::Mutex<Option<SchedulerLeaseRenewal>>,
     _hold: Option<Hold>,
 }
@@ -112,6 +113,7 @@ impl Repository {
                     ready: std::sync::atomic::AtomicBool::new(false),
                     rebuild: tokio::sync::Mutex::new(()),
                 },
+                inbox_qa_writer: tokio::sync::Mutex::new(()),
                 scheduler_lease: tokio::sync::Mutex::new(None),
                 _hold: hold,
             }),
@@ -121,6 +123,11 @@ impl Repository {
     /// The client, for the `storage::*` repository functions.
     pub fn db(&self) -> &Surreal<Any> {
         &self.inner.db
+    }
+
+    /// Queue Inbox writes across clones of this repository.
+    pub(super) async fn lock_inbox_qa_writer(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.inner.inbox_qa_writer.lock().await
     }
 
     /// Whether `owner` holds this repository's scheduler lease.

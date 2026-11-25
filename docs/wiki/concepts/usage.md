@@ -4,7 +4,7 @@
 
 [![Provision, connect and register a workstation](../../diagrams/native-connections.svg)](../../diagrams/native-connections.html)
 
-**Native setup:** Gateway URL → operator approval once → macOS Keychain → authenticated reconnect. Enter the independent gateway URL in Setup Gateway and share its request ID/code with the operator. The app saves approved access and registers this installation; no file management is needed. Explicit operator/headless clients retain token-file mode. [Pairing/recovery](../code/native-connections.md#pairing-and-keychain-agreed-target) · [Verification](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md)
+**Native setup:** Gateway URL → operator approval once → macOS Keychain → authenticated reconnect. Enter the independent gateway URL in Setup Gateway and share its request ID/code with the operator. The app saves approved access and registers this installation; no file management is needed. Explicit operator/headless clients retain token-file mode. [Pairing/recovery](../code/native-connections.md#pairing-and-keychain-agreed-target) · [Verification](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md)
 
 The opaque workstation Connect ID also selects the browser’s separately authorized session. IP is optional metadata. Native launch starts no services or child folders.
 

@@ -30,7 +30,7 @@ Start with the [workspace manifest](../../../Cargo.toml). The native macOS app c
 | Six-domain classifier | [Classifier](classifier.md) |
 | Model and provider scheduling | [Providers](../concepts/providers.md) |
 | Rust style | [Repository Rust style](../../../.opencode/skills/argos-rust-style/SKILL.md) · [Conventions](conventions.md#rust-style) |
-| Approved theme and live-state target | [Matte canvas reproduction](../../design/matte-canvas/README.md) · [Implementation handoff](../../../.planning/2026-11-16-matte-canvas/handoff.md) |
+| Approved theme and live-state target | [Matte canvas reproduction](../../design/matte-canvas/README.md) · [Implementation handoff](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-16-matte-canvas/handoff.md) |
 | React UI and fixture review | [Design rules](react-ui.md) · [Browser checks](react-ui-testing.md) |
 | Build tools, outputs and cache paths | [Visual artifact map](build-artifacts.md) |
 | Native Runtime captures and inspection | [Selected native UI verification](native-verification.md) |

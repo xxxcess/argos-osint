@@ -16,11 +16,11 @@ use argos_osint_core::storage::repo::Repository;
 use chrono::DateTime;
 use chrono::Utc;
 use fleetworks_contracts::chat::ChatSourceKind;
+use fleetworks_contracts::chat::QaGeneratorPreference;
+use fleetworks_contracts::chat::QaModelTarget;
 use fleetworks_contracts::chat::QA_MAX_FINDINGS;
 use fleetworks_contracts::chat::QA_MAX_WORDS;
-use fleetworks_contracts::chat::{
-    QaAvailabilityReason, QaFinding, QaModelTarget, QaStartupStage, QaTurnState,
-};
+use fleetworks_contracts::chat::{QaAvailabilityReason, QaFinding, QaStartupStage, QaTurnState};
 use fleetworks_contracts::qa_worker::{
     verified_operational_sources, QaContextUsage, QaDialogueKind, QaWorkerEvent, QaWorkerOutcome,
     QaWorkerSequence, QA_CONTEXT_WINDOW_TOKENS,
@@ -171,7 +171,7 @@ impl Executor {
                     Ok(Ok(store::ReplicaClaim::Warm)) => {
                         self.lease_held = true;
                         if self
-                            .warm(setting.generation, setting.model_target, stop)
+                            .warm(setting.generation, setting.generator_preference, stop)
                             .await
                         {
                             loaded = Some(setting.generation);
@@ -252,10 +252,20 @@ impl Executor {
         }
     }
 
-    async fn warm(&self, generation: i64, model: QaModelTarget, stop: &CancellationToken) -> bool {
+    async fn warm(
+        &self,
+        generation: i64,
+        preference: QaGeneratorPreference,
+        stop: &CancellationToken,
+    ) -> bool {
         if !self.renew_replica(generation, false, "warm_lease").await {
             return false;
         }
+        let selected_model = |model| {
+            if let Some(availability) = &self.availability {
+                availability.record_model(generation, model);
+            }
+        };
         let progress = |stage| {
             if let Some(availability) = &self.availability {
                 availability.record_stage(generation, stage);
@@ -263,7 +273,8 @@ impl Executor {
         };
         let warm = timeout(
             WARM_TIMEOUT,
-            self.model.warm_with_progress(model, &progress),
+            self.model
+                .warm_with_progress(preference, &selected_model, &progress),
         );
         tokio::pin!(warm);
         let mut next = Instant::now() + CHECK;
@@ -563,7 +574,15 @@ impl Executor {
         tokio::pin!(inference);
         let mut next_check = Instant::now() + CHECK;
         let deadline = Instant::now() + TURN_TIMEOUT;
-        let mut publication = Publication::default();
+        // Only this executor can replace the generator while it owns the delivery lease.
+        let model_target = match evidence.answer_mode {
+            AnswerMode::Model => self.model.active_model().await,
+            AnswerMode::Grounded => None,
+        };
+        let mut publication = Publication {
+            model_target,
+            ..Publication::default()
+        };
         let mut model_finished = false;
         let mut received_event = false;
         let result = loop {
@@ -807,6 +826,7 @@ fn readiness_fallback(evidence: &FrozenEvidence, now_ms: i64) -> Vec<QaFinding> 
 
 #[derive(Default)]
 struct Publication {
+    model_target: Option<QaModelTarget>,
     sequence: QaWorkerSequence,
     has_finding: bool,
     cited_sources: BTreeSet<String>,
@@ -927,7 +947,12 @@ impl Publication {
             _ => return Err(anyhow!("unsupported Inbox QA event")),
         };
         self.has_finding |= finding.is_some();
-        if !store::publish_with_model_result(repo, lease, state, finding, context, reply).await? {
+        let result = store::ModelResult {
+            context,
+            reply,
+            model_target: self.model_target,
+        };
+        if !store::publish_with_model_result(repo, lease, state, finding, result).await? {
             return Ok(RunResult::Fenced);
         }
         Ok(if state.is_terminal() {

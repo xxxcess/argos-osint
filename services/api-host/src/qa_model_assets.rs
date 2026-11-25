@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{ensure, Context, Result};
+use argos_osint_core::hardware;
 use fleetworks_contracts::qa_worker::{QaModelTarget, QA_MODEL_PINS};
 use reqwest::Client;
 use serde::Deserialize;
@@ -16,6 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::sync::Mutex;
 
 const BLOCK_BYTES: usize = 1024 * 1024;
+const WORKSPACE_DISK_RESERVE: u64 = 512 * 1024 * 1024;
 static PROVISIONING: Mutex<()> = Mutex::const_new(());
 
 #[derive(Deserialize)]
@@ -80,6 +82,15 @@ pub(crate) async fn provision(state_dir: &Path, target: QaModelTarget) -> Result
         if cached(&destination, asset).await? {
             continue;
         }
+        let disk_path = cache.clone();
+        let available =
+            tokio::task::spawn_blocking(move || hardware::filesystem_available_bytes(&disk_path))
+                .await?;
+        ensure!(
+            available
+                .is_some_and(|bytes| bytes.saturating_sub(WORKSPACE_DISK_RESERVE) >= asset.bytes),
+            "QA asset would exceed the available workspace storage budget"
+        );
         if client.is_none() {
             client = Some(download_client()?);
         }

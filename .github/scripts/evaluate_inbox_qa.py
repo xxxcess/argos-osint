@@ -17,13 +17,8 @@ import urllib.request
 
 
 SENTENCEPIECE = (791656, "d60acb128cf7b7f2536e8f38a5b18a05535c9e14c7a355904270e15b0945ea86")
-GPT2_TOKENIZER = {
-    "merges.txt": (456318, "1ce1664773c50f3e0cc8842619a93edc4624525b728b188a9e0be33b7726adc5"),
-    "vocab.json": (1042301, "196139668be63f3b5d6574427317ae82f612a97c5d1cdaf36ed2256dbf636783"),
-}
 CANDIDATES = {
     "flan-t5-small": (
-        "t5",
         "google/flan-t5-small",
         "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
         {
@@ -38,7 +33,6 @@ CANDIDATES = {
         },
     ),
     "flan-t5-base": (
-        "t5",
         "google/flan-t5-base",
         "7bcac572ce56db69c1ea7c8af255c5d7c9672fc2",
         {
@@ -51,28 +45,6 @@ CANDIDATES = {
             "num_heads": 12, "vocab_size": 32128, "feed_forward_proj": "gated-gelu",
             "tie_word_embeddings": False,
         },
-    ),
-    "gpt2-small": (
-        "gpt2",
-        "openai-community/gpt2",
-        "607a30d783dfa663caf39e06633721c8d4cfcd7e",
-        {
-            "config.json": (665, "0daed7749b4f02b8f76240d5444551d7b08712dab4d0adb8239c56ba823bb7b4"),
-            "rust_model.ot": (702517648, "adf0adedbf4016b249550f866c66a3b3a3d09c8b3b3a1f6e5e9a265d94e0270e"),
-            **GPT2_TOKENIZER,
-        },
-        {"n_embd": 768, "n_head": 12, "n_layer": 12, "vocab_size": 50257},
-    ),
-    "gpt2-medium": (
-        "gpt2",
-        "openai-community/gpt2-medium",
-        "6dcaa7a952f72f9298047fd5137cd6e4f05f41da",
-        {
-            "config.json": (718, "ef1a44d889ad1a0acc7731c78134f1b87d2d222f110e97dd10fd4117331caf22"),
-            "rust_model.ot": (1725881760, "064e9fde8e3a539c41b186a6ca94e6fb7c6520f49f903fb236f6e89912fedd32"),
-            **GPT2_TOKENIZER,
-        },
-        {"n_embd": 1024, "n_head": 16, "n_layer": 24, "vocab_size": 50257},
     ),
 }
 
@@ -146,8 +118,6 @@ INSTRUCTIONS = {
 DEFAULT_EMBEDDED_CAPS_MIB = {
     "flan-t5-small": 1536,
     "flan-t5-base": 3584,
-    "gpt2-small": 2048,
-    "gpt2-medium": 4608,
 }
 NUMBER = re.compile(r"(?<![\w.])[-+]?\d+(?:[.,]\d+)*(?!\w)")
 
@@ -214,7 +184,7 @@ def fetch(source, revision, filename, expected_bytes, expected_digest, directory
 
 
 def evaluate(args, receipt, model):
-    family, source, revision, files, shape = CANDIDATES[args.candidate]
+    source, revision, files, shape = CANDIDATES[args.candidate]
     receipt["status"] = "asset_verification_failed"
     verified = []
     for filename, (size, digest) in files.items():
@@ -231,7 +201,7 @@ def evaluate(args, receipt, model):
     started = time.monotonic()
     try:
         completed = subprocess.run(
-            [args.worker, family, model], input=json.dumps(prompts), text=True,
+            [args.worker, "t5", model], input=json.dumps(prompts), text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=child_env, timeout=300, check=False,
         )
@@ -284,7 +254,7 @@ def main():
     if not re.fullmatch(r"[0-9a-f]{40}", args.head):
         parser.error("an exact source SHA is required")
 
-    _, source, revision, _, _ = CANDIDATES[args.candidate]
+    source, revision, _, _ = CANDIDATES[args.candidate]
     receipt = {
         "schema": 1,
         "source_sha": args.head,

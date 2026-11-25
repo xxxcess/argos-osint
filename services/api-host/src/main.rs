@@ -10,6 +10,8 @@ mod jobs_service;
 mod local_ipc;
 mod native_worker;
 mod nlp_service;
+#[cfg(feature = "embedded")]
+mod qa_decision;
 mod qa_model_assets;
 mod qa_worker;
 mod queue_client;

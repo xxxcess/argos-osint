@@ -21,7 +21,7 @@
   <figure tabindex="0" aria-label="Scrollable prompt flow diagram">
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 896" role="img" aria-labelledby="inbox-prompt-flow-title inbox-prompt-flow-desc">
   <title id="inbox-prompt-flow-title">Inbox prompt flow</title>
-  <desc id="inbox-prompt-flow-desc">Rune sends the registered Inbox question to the Embedded companion through its private Unix socket. Admission checks permissions and builds a fresh workstation snapshot and up to two prior exchanges. Explicit operational questions are answered directly from the snapshot. Broad or conversational turns use a durable queue and one sandboxed Rust-BERT generator with cached incremental decoding. Provisional chunks travel back by cursor. The coordinator checks operational facts and persists validated final text and timestamped citations. Inbox replaces its draft with the canonical reply and shows the model context dial.</desc>
+  <desc id="inbox-prompt-flow-desc">Rune sends a registered question or a Jobs or Inbox activity lookup through the Embedded companion’s private Unix socket. Admission checks permissions and builds a fresh workstation snapshot and up to two prior exchanges. Explicit operational questions are answered directly from the snapshot. Broad or conversational turns use a durable queue and one sandboxed Rust-BERT generator with cached incremental decoding. Provisional chunks travel back by cursor. The coordinator checks operational facts and persists validated final text and timestamped citations. Inbox replaces its draft with the canonical reply and shows the model context dial.</desc>
   <style>
     text{font-family:Geist,Arial,sans-serif;fill:#242424}
     .label{font-size:22px;font-weight:600}
@@ -51,8 +51,8 @@
 
   <g data-card="true">
     <rect x="360" y="24" width="400" height="64" rx="6" class="node"/>
-    <text x="380" y="52" class="label">Fleetworks Desktop Inbox</text>
-    <text x="380" y="76" class="note">Rune composer submits one registered turn</text>
+    <text x="380" y="52" class="label">Fleetworks Desktop Jobs and Inbox</text>
+    <text x="380" y="76" class="note">A composer turn or typed activity lookup</text>
   </g>
   <g data-card="true">
     <rect x="382" y="124" width="356" height="88" rx="6" class="node"/>
@@ -64,16 +64,16 @@
   <g data-card="true">
     <rect x="252" y="248" width="616" height="112" rx="6" class="focus"/>
     <text x="272" y="280" class="label">Embedded Assistant admission</text>
-    <text x="272" y="304" class="note">Check workstation registration, permissions and inference readiness</text>
-    <text x="272" y="326" class="note">Freeze fresh, scoped readiness checks, host metrics and Jobs counts</text>
-    <text x="272" y="348" class="note">Follow-ups reuse the topic and take new observations</text>
+    <text x="272" y="304" class="note">Check registration, source visibility and route requirements</text>
+    <text x="272" y="326" class="note">Freeze fresh, scoped observations relevant to the question</text>
+    <text x="272" y="348" class="note">Follow-ups resolve the subject and take fresh observations</text>
   </g>
 
   <g data-card="true">
     <rect x="80" y="384" width="448" height="88" rx="6" class="node"/>
     <text x="100" y="412" class="label">Immediate answer</text>
-    <text x="100" y="436" class="note">Failed or unresolved check counts and names</text>
-    <text x="100" y="460" class="note">Specific metrics, help and context requests</text>
+    <text x="100" y="436" class="note">Scoped counts and exact activity links</text>
+    <text x="100" y="460" class="note">Read-only lookup creates no turn or job</text>
   </g>
   <g data-card="true">
     <rect x="592" y="384" width="448" height="88" rx="6" class="node"/>
@@ -84,9 +84,9 @@
   <g data-card="true">
     <rect x="592" y="508" width="448" height="100" rx="6" class="isolated"/>
     <text x="612" y="536" class="label">Sandboxed Rust-BERT worker</text>
-    <text x="612" y="560" class="note">One selected FLAN-T5 or GPT-2 model</text>
+    <text x="612" y="560" class="note">FLAN-T5 Base or Small</text>
     <text x="612" y="580" class="note">Incremental decoding with cached attention</text>
-    <text x="612" y="600" class="note">512 or 896 input tokens, up to 128 output</text>
+    <text x="612" y="600" class="note">512 input tokens, up to 128 output</text>
   </g>
 
   <g data-card="true">
@@ -99,9 +99,9 @@
 
   <g data-card="true">
     <rect x="240" y="788" width="640" height="84" rx="6" class="node"/>
-    <text x="260" y="816" class="label">Inbox transcript</text>
+    <text x="260" y="816" class="label">Inbox transcript or inline card</text>
     <text x="260" y="840" class="note">Recover the canonical turn or resume from its event cursor</text>
-    <text x="260" y="864" class="note">Mini dial below the reply and collapsible Sources</text>
+    <text x="260" y="864" class="note">Citations and operator-activated navigation</text>
   </g>
 </svg>
   </figure>

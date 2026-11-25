@@ -41,30 +41,46 @@ Turn states are `queued`, `running`, `retrying`, `final` and `failed`. V1 is a s
 
 ## Inbox QA V2
 
-The [V2 wire contract](../../../crates/fleetworks-contracts/src/chat/qa.rs) is available through the Embedded companion's inherited Unix socket. Distributed retains Inbox notifications. In Embedded, Workstation Settings shows the Assistant model selector while Backend inference is on. The Inbox prompts the operator to enable inference when it is off. It opens the composer once the selected model is ready.
+The [V2 wire contract](../../../crates/fleetworks-contracts/src/chat/qa.rs) is available through the Embedded companion's inherited Unix socket. Distributed retains Inbox notifications. In Embedded, Workstation Settings shows Generator and Decision preferences, effective engines, provisioning, and context usage for a registered Embedded connection while Backend inference is on. Workstation Status provides an Assistant shortcut and keeps deterministic diagnostics accessible independently. The Inbox prompts the operator to enable inference when it is off. On a companion advertising `inbox-qa-triage-v1`, the composer can answer supported direct questions while model inference is starting or unavailable.
 
 ### Prompt flow
 
 [![Native Inbox prompt flow from the composer to the Embedded companion and back](../../diagrams/inbox-prompt-flow.svg)](../../diagrams/inbox-prompt-flow.html)
 
 1. The Rune composer sends the question, a request ID, the registered request context, and an optional source reference. The backend uses the registration to authorize the request. It rejects caller-supplied evidence and conversation history. [Native Inbox](../../../apps/fleetworks-desktop/src/inbox_qa.rs) · [Embedded transport](native-connections.md#backend-types-and-parity)
-2. Admission collects readiness, recent host measurements, and allowed workstation Jobs counts. It builds the model's snapshot from its own authorized readings and includes up to two completed exchanges from the same credential, registration, access epoch, and generation. A follow-up such as “And now?” reuses the supported topic and collects fresh readings. Request-ID replays return the original turn. [Admission and evidence](../../../crates/argos-osint-api/src/inbox_qa.rs) · [Turn store](../../../crates/argos-osint-core/src/storage/inbox_qa.rs)
-3. Straightforward readiness, metric and job-count questions return typed timestamped facts directly. Broad summaries and conversational turns can queue one job for the supervised Rust-BERT worker. The worker processes only the selected model, checks for cancellation between decoding steps, and reuses the attention cache. [Intent routing](../../../crates/argos-osint-api/src/inbox_qa/question.rs) · [Executor](../../../services/api-host/src/inbox_qa_service.rs) · [Decoder](../../../tools/assistant-bert/src/dialogue.rs)
+2. Admission selects the readiness, host metrics, Jobs counts and selected activity needed for the question. It builds the model's snapshot from its own authorized readings and includes up to two completed exchanges from the same credential, registration, access epoch, and generation. A follow-up such as “What about now?” reuses the authorized subject and supported intent when they are available, then collects fresh readings. A new explicit selection takes precedence. When the retained subject has a comparable earlier observation, the reply pairs the current reading with a separate timestamped citation for the previous one. Request-ID replays preserve the original turn and its authorization boundary. [Admission and evidence](../../../crates/argos-osint-api/src/inbox_qa.rs) · [Turn store](../../../crates/argos-osint-core/src/storage/inbox_qa.rs)
+3. Straightforward readiness, metric and job-count questions return typed timestamped facts directly, including the terminal time window on failed-job counts. Broad summaries and conversational turns can queue one job for the supervised Rust-BERT worker. The worker processes only the selected model, checks for cancellation between decoding steps, and reuses the attention cache. [Intent routing](../../../crates/argos-osint-api/src/inbox_qa/question.rs) · [Executor](../../../services/api-host/src/inbox_qa_service.rs) · [Decoder](../../../tools/assistant-bert/src/dialogue.rs)
 4. Batched text updates arrive as provisional events. For an operational draft the worker and backend accept complete authorized facts. Terminal answers cite exact passages from the snapshot, with their original observation times. When a generated operational reply fails verification, the backend can answer with the current recorded facts. The terminal turn clears the provisional text, seals the canonical reply, and moves the observation boundary forward for the next turn. [Validation](../../../crates/fleetworks-contracts/src/qa_worker.rs) · [Event store](../../../crates/argos-osint-core/src/storage/inbox_qa.rs)
 5. The transcript reconciles the latest turn and event pages by cursor. The compact dial reports the peak input count and percentage of the selected model's input window. **Sources** starts collapsed and shows each citation's observation time when expanded. Stop seals the turn with any already published citations. [Native transcript](../../../apps/fleetworks-desktop/src/inbox_qa.rs)
 
+### Jobs and Inbox triage
+
+Use **Find related activity** on a selected private job or expanded readiness notice. The companion resolves a typed job or readiness reference in the current registration. An explicit stage/check relation can open the associated diagnostic. A historical readiness notice links to **Current status**. A current check alone provides no evidence of the earlier cause. Missing relations, ambiguous choices and unavailable inference have distinct outcomes.
+
+The inline lookup returns one compact result and creates no Assistant exchange or job. **Explain in Assistant** fills the composer with the selected subject for the operator to submit. Both flows use scoped activity and fresh readiness. Navigation is a typed native action that runs after operator input and uses the ordinary destination authorization.
+
 ### Models and lifecycle
 
-| Model | Input tokens | Output tokens |
-| --- | ---: | ---: |
-| FLAN-T5 Small (default) | 512 | 128 |
-| FLAN-T5 Base | 512 | 128 |
-| GPT-2 Small | 896 | 128 |
-| GPT-2 Medium | 896 | 128 |
+| Model | FP32 weights | Input tokens | Output tokens |
+| --- | ---: | ---: | ---: |
+| FLAN-T5 Base (preferred) | ~990 MB | 512 | 128 |
+| FLAN-T5 Small (fallback) | ~308 MB | 512 | 128 |
 
-The model selector commits through the existing revisioned settings operation. The selection persists in Embedded state. Switching or turning inference off fences the active generation and reaps its worker. The supervisor starts the replacement only after that reclaim. A verified runtime pack provides the model executable and its libraries. The companion can reuse a verified optional model pack or fetch its pinned checkpoint files into the private asset cache. The worker starts with only the selected checkpoint and runs without network access. [Pack provisioning and resource limits](../../../deploy/inbox-qa.md)
+**Generator** defaults to **Automatic**. It selects Base when fresh memory headroom allows it and can fall back to Small when Base assets are unavailable. Explicit **FLAN-T5 Small** always requests Small. Explicit **FLAN-T5 Base** stays selected if memory or verified assets are unavailable. The panel keeps the saved choice visible and reports the effective model once a verified worker is ready. Both choices use the same resource admission and sandbox checks. The warm worker stays idle between turns, runs without network access, and uses one beam. [Pack provisioning and resource limits](../../../deploy/inbox-qa.md)
+
+Each control sends a revisioned patch for its own role. Only companions advertising `inbox-qa-model-settings-v1` receive the preference fields. Legacy enablement requests leave both preferences intact, and older companions retain their read-only model display. A generator change fences active output and retains completed exchanges. Usage is attributed to the worker model and generator generation that produced it. Changing Decision leaves the generator generation and its warm worker in place. Turning Backend inference off reaps workers and retains preferences for the next enable.
+
+Within the Embedded companion, settings changes, worker publications, and health updates queue before opening their write transactions. This prevents background writes from repeatedly invalidating a settings transaction. The database still enforces the authorization and generation fences and clears retained exchanges atomically when inference is turned off.
 
 Each exact host fact preserves its decimal value, unit, subject and observation time. Jobs evidence comes from the authorized workstation scope. Resolved, failed, unknown and retired checks remain distinct, and passed checks can cite the authenticated registration. Direct responses report zero model input tokens. Older workers can omit usage or report their legacy limit. Model-generated text stays read-only. The zero-shot classifier has its own model and execution path.
+
+### Decision model qualification
+
+**Decision** offers **Rules only** (default), **Julia-1 Q8** (168 MB), and **vLLM d3-edge Q8** (806 MB). The latter two save a preference immediately. Until the exact checkpoint and runtime qualify on the companion’s native target, **In use** stays **Rules only** and the panel reports **Awaiting qualification on this platform**. Unqualified choices trigger no model download or worker launch. Exact facts and explicit links use the same deterministic path with any preference.
+
+The [hosted scoring workflow](../../../.github/workflows/fleetworks-decision-qualification.yml) accepts an exact PR SHA through `Fleetworks` dispatch with `decision_qualification=linux` or `macos`. It verifies pinned Julia-1 and vLLM d3-edge assets, calibrates on a separate incident group, and records held-out precision, coverage, out-of-scope choices and warm eight-candidate p95. Its receipts describe isolated scoring. Julia uses the publisher’s October 19 Q8 snapshot because the later snapshot has a tokenizer metadata incompatibility with the pinned shared runtime. [Julia GGUF loading issue](https://github.com/ggml-org/llama.cpp/issues/32882)
+
+Release qualification requires combined answer and navigation checks, resource measurements with FLAN and indexing active, and separate evidence for each native target. No candidate currently has a release record. A qualified decision request uses a complete bounded set of authorized job observations, reserves workstation memory and starts one verified CPU scorer on a private Unix socket. Only a validated menu choice may become a link, and the companion rechecks permission and the active decision revision before it returns. The scorer is reaped after the request. The Linux launcher confines its files and Unix listener with Landlock and seccomp. macOS activation also requires a verified native sandbox.
 
 ### Operations
 
@@ -72,10 +88,11 @@ Each exact host fact preserves its decimal value, unit, subject and observation 
 | --- | --- |
 | `qa_settings` | Registered Native backend read |
 | `qa_settings_update` | Registered Native `manage_inbox_qa`, current setting revision |
-| `qa_turn_submit` | Registered Native interactive submit and backend read |
+| `qa_turn_submit` | Registered Native interactive submit and the evidence source’s read grant |
+| `qa_related_activity` | Registered Native backend read for readiness or workstation activity read for a job |
 | `qa_latest`, `qa_events` | Registered Native workstation activity read |
 | `qa_cancel` | Registered Native interactive submit |
 
-Settings can include the current provision, verification, model load, or activation stage. An unavailable reason is a fixed code such as `pack_missing`, `pack_invalid`, `sandbox_unsupported`, or `worker_start_failed`. The notification feed remains available during setup and inference changes.
+Settings can include the current provision, verification, model load, or activation stage. An unavailable reason is a fixed code such as `pack_missing`, `pack_invalid`, `sandbox_unsupported`, `worker_start_failed`, `insufficient_resources`, or `model_provision_failed`. The notification feed remains available during setup and inference changes.
 
 A turn's `provisional_reply` carries its bounded accumulated draft for cursor-gap recovery. A `provisional_delta` is ordered with the other events and has no citations. The canonical terminal turn and its verified findings replace the draft. Terminal transitions clear provisional text, including previously retained draft event text. A recovered turn with a partly published reply is sealed before it can append a second draft. Each active registration can submit one turn at a time. Per-placement worker and lease limits keep the pending work bounded. [V2 wire contract](../../../crates/fleetworks-contracts/src/chat/qa.rs)

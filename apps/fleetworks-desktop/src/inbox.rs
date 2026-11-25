@@ -7,6 +7,9 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
 
+use fleetworks_contracts::chat::ChatSourceKind;
+use fleetworks_contracts::chat::ChatSourceReference;
+use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
 use rune::Cx;
 use rune::El;
@@ -45,7 +48,7 @@ const BELL: Icon = Icon {
 enum Topic {
     Connection,
     Job(String),
-    Readiness(String),
+    Readiness(ReadinessCheckId),
 }
 
 impl Topic {
@@ -53,7 +56,7 @@ impl Topic {
         match self {
             Self::Connection => "inbox-group-connection".into(),
             Self::Job(id) => format!("inbox-group-job-{id}"),
-            Self::Readiness(check) => format!("inbox-group-readiness-{check}"),
+            Self::Readiness(check) => format!("inbox-group-readiness-{}", readiness_name(*check)),
         }
     }
 
@@ -98,6 +101,7 @@ pub(crate) struct Item {
     pub at: f64,
     pub read: bool,
     tone: StatusTone,
+    private_job: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -117,8 +121,9 @@ pub(crate) struct Observation {
     pub link: Link,
     /// (job id, title, state) for the registered workstation's visible jobs.
     pub jobs: Vec<(String, String, String)>,
-    /// (check name, state) from the latest readiness read.
-    pub checks: Vec<(String, ReadinessState)>,
+    pub private_jobs: BTreeSet<String>,
+    /// (check identity, state) from the latest readiness read.
+    pub checks: Vec<(ReadinessCheckId, ReadinessState)>,
     pub tracked_actor_reindex: bool,
 }
 
@@ -141,16 +146,21 @@ pub struct Inbox {
     link: Link,
     known_jobs: BTreeMap<String, String>,
     known_job_order: VecDeque<String>,
-    checks: Vec<(String, ReadinessState)>,
+    checks: Vec<(ReadinessCheckId, ReadinessState)>,
     seen_job_events: VecDeque<String>,
     pub(crate) open: bool,
     pub(crate) at_bottom: bool,
+    focus_return: Option<&'static str>,
     query: TextEdit,
     expanded: BTreeSet<Topic>,
     selected: Option<u64>,
 }
 
 impl Inbox {
+    pub(crate) fn selected_notice_id(&self) -> Option<u64> {
+        self.selected
+    }
+
     #[cfg(test)]
     pub(crate) fn items(&self) -> impl Iterator<Item = &Item> {
         self.items.iter().rev()
@@ -254,6 +264,7 @@ impl Inbox {
         self.open = false;
         self.query = TextEdit::new("");
         self.selected = None;
+        self.focus_return = None;
     }
 
     fn mark_group_read(&mut self, topic: &Topic) {
@@ -308,6 +319,7 @@ impl Inbox {
         title: &str,
         state: String,
         transition_id: Option<&str>,
+        private: bool,
     ) -> bool {
         let was_active = self
             .known_jobs
@@ -341,6 +353,9 @@ impl Inbox {
                     now,
                     tone,
                 );
+                if let Some(item) = self.items.back_mut() {
+                    item.private_job = private;
+                }
                 changed = true;
             }
         }
@@ -367,6 +382,7 @@ impl Inbox {
                 &update.title,
                 update.state,
                 update.transition_id.as_deref(),
+                false,
             ) {
                 changed = true;
             }
@@ -393,6 +409,7 @@ impl Inbox {
             at,
             read: false,
             tone,
+            private_job: false,
         });
         while self.items.len() > MAX_ITEMS {
             if let Some(dropped) = self.items.pop_front() {
@@ -455,30 +472,33 @@ impl Inbox {
         }
 
         for (id, title, state) in observation.jobs {
-            if self.observe_job_update(now, id, &title, state, None) {
+            let private = observation.private_jobs.contains(&id);
+            if self.observe_job_update(now, id, &title, state, None, private) {
                 changed = true;
             }
         }
 
-        for (name, state) in &observation.checks {
-            let Some((_, previous)) = self.checks.iter().find(|(known, _)| known == name) else {
+        for (id, state) in &observation.checks {
+            let Some((_, previous)) = self.checks.iter().find(|(known, _)| known == id) else {
                 continue;
             };
             if previous == state {
                 continue;
             }
-            let actor_running = name == "Actor search" && *state == ReadinessState::Running;
+            let actor_running =
+                *id == ReadinessCheckId::ActorSearch && *state == ReadinessState::Running;
             if actor_running && observation.tracked_actor_reindex {
                 continue;
             }
             if actor_running || is_notable(*previous) || is_notable(*state) {
+                let name = readiness_name(*id);
                 let title = if actor_running {
                     crate::readiness_cards::ACTOR_INDEX_CATCH_UP.to_owned()
                 } else {
                     format!("{name} is {}", readiness_word(*state))
                 };
                 self.push(
-                    Topic::Readiness(name.clone()),
+                    Topic::Readiness(*id),
                     name.clone(),
                     title,
                     format!(
@@ -537,6 +557,10 @@ fn readiness_word(state: ReadinessState) -> &'static str {
 }
 
 /// Split a camel-case id such as `ActorSearch` into `Actor search`.
+fn readiness_name(id: ReadinessCheckId) -> String {
+    humanize(&format!("{id:?}"))
+}
+
 fn humanize(id: &str) -> String {
     let mut out = String::new();
     for (index, ch) in id.chars().enumerate() {
@@ -562,13 +586,29 @@ pub(crate) fn age_label(now: f64, at: f64) -> String {
 
 impl State {
     pub(crate) fn open_inbox(&mut self) {
+        self.open_inbox_from("inbox-toggle");
+    }
+
+    pub(crate) fn open_inbox_from(&mut self, trigger: &'static str) {
         self.inbox.open = true;
+        self.inbox.focus_return = Some(trigger);
         self.inbox_qa.request_resume();
     }
 
+    fn inbox_focus_return(&self) -> &'static str {
+        self.inbox
+            .focus_return
+            .filter(|&trigger| {
+                trigger != crate::views::WORKSTATION_ASSISTANT || self.inbox_qa_visible()
+            })
+            .unwrap_or("inbox-toggle")
+    }
+
     pub(crate) fn close_inbox(&mut self, tx: &mut Tx) {
+        let trigger = self.inbox_focus_return();
         self.inbox.close();
-        tx.focus("inbox-toggle", tx.focus_visible());
+        self.poll_activity_triage();
+        tx.focus(trigger, tx.focus_visible());
     }
 
     /// Populate the Inbox with a compact synthetic notification and room for a QA exchange.
@@ -604,6 +644,50 @@ impl State {
     }
 
     /// Fold what this app currently shows into the Inbox. Cheap, bounded, and read-only.
+    /// Open one synthetic retained notice in the production drawer.
+    #[doc(hidden)]
+    pub fn fixture_show_triage_notice(&mut self) {
+        if !self.fixture {
+            return;
+        }
+        let topic = Topic::Readiness(ReadinessCheckId::ActorSearch);
+        self.inbox.push(
+            topic.clone(),
+            "Actor search".into(),
+            "Actor search was unavailable".into(),
+            "An earlier actor search check reported a failure.".into(),
+            self.clock,
+            StatusTone::Err,
+        );
+        self.inbox.expanded.insert(topic);
+        self.inbox.select(self.inbox.next_id);
+        self.inbox.open = true;
+    }
+
+    pub(crate) fn open_readiness_notice(&mut self, id: ReadinessCheckId, tx: &mut Tx) {
+        self.navigate(crate::app::Page::Workstation);
+        if let crate::app::Load::Ready(readiness) = &self.readiness {
+            if readiness.checks.iter().any(|check| check.id == id) {
+                self.reveal_readiness_check(id, tx);
+            }
+        }
+    }
+
+    pub(crate) fn selected_notice_source(&self, notice_id: u64) -> Option<ChatSourceReference> {
+        if !self.inbox.open || self.inbox.selected != Some(notice_id) {
+            return None;
+        }
+        let item = self.inbox.items.iter().find(|item| item.id == notice_id)?;
+        let (kind, id) = match &item.topic {
+            Topic::Readiness(id) => (ChatSourceKind::Readiness, id.as_str().to_owned()),
+            Topic::Job(id) if item.private_job && !self.triage_job_is_shared(id) => {
+                (ChatSourceKind::Job, id.clone())
+            }
+            _ => return None,
+        };
+        ChatSourceReference::new(kind, id).ok()
+    }
+
     pub(crate) fn observe_inbox(&mut self) -> bool {
         use crate::app::Load;
         use crate::connection::ConnectionStatus;
@@ -617,16 +701,28 @@ impl State {
             ConnectionStatus::Disconnected => Link::Unknown,
         };
         let mut jobs = Vec::new();
+        let mut private_jobs = BTreeSet::new();
         if self.registration.context.is_some() {
             let mut seen_ids = BTreeSet::new();
             if let Some(page) = &self.scoped_jobs.page {
                 for row in page.rows.iter().take(MAX_TRACKED_JOBS) {
                     if seen_ids.insert(row.id.clone()) {
                         jobs.push((row.id.clone(), row.title.clone(), row.state.clone()));
+                        if row.private_details_available && !row.status_only {
+                            private_jobs.insert(row.id.clone());
+                        }
                     }
                 }
             }
             if let Load::Ready(detail) = &self.backend.detail {
+                if detail.private_details_available
+                    && detail.job.private_details_available
+                    && !detail.job.status_only
+                {
+                    private_jobs.insert(detail.job.id.clone());
+                } else {
+                    private_jobs.remove(&detail.job.id);
+                }
                 if jobs.len() < MAX_TRACKED_JOBS && seen_ids.insert(detail.job.id.clone()) {
                     jobs.push((
                         detail.job.id.clone(),
@@ -640,7 +736,7 @@ impl State {
             Load::Ready(readiness) => readiness
                 .checks
                 .iter()
-                .map(|check| (humanize(&format!("{:?}", check.id)), check.state))
+                .map(|check| (check.id, check.state))
                 .collect(),
             _ => Vec::new(),
         };
@@ -653,6 +749,7 @@ impl State {
                 scope: self.origin_revision,
                 link,
                 jobs,
+                private_jobs,
                 checks,
                 tracked_actor_reindex,
             },
@@ -756,7 +853,7 @@ pub(crate) fn drawer(
             .h_full()
             .role("dialog")
             .label("Inbox")
-            .focus_return("inbox-toggle")
+            .focus_return(state.inbox_focus_return())
             .modal_tx(false, State::close_inbox)
             .child(scrim)
             .child(
@@ -802,6 +899,7 @@ fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
         .label("Filter notifications")
         .placeholder("Search Inbox")
         .on_edit(|state: &mut State| &mut state.inbox.query)
+        .on_change(|state: &mut State, _| state.cancel_activity_triage())
         .build(kit)
         .key("inbox-filter")
         .w_full();
@@ -943,6 +1041,7 @@ fn group_view(group: &Group<'_>, state: &State, kit: &Kit, preferences: ViewPref
         .hover(theme::hex(theme::SURFACE_ELEVATED))
         .on_press_tx(move |state: &mut State, tx| {
             state.inbox.toggle_group(&topic);
+            state.poll_activity_triage();
             tx.keep_on_screen(group_toggle_key.clone());
         })
         .child(status_dot(latest.tone))
@@ -1104,6 +1203,7 @@ fn row(item: &Item, state: &State, kit: &Kit, preferences: ViewPreferences) -> E
                 .hover(theme::hex(theme::SURFACE_ELEVATED))
                 .on_press_tx(move |state: &mut State, tx| {
                     state.inbox.select(id);
+                    state.poll_activity_triage();
                     tx.keep_on_screen(toggle_key.clone());
                 })
                 .child(
@@ -1158,20 +1258,7 @@ fn row(item: &Item, state: &State, kit: &Kit, preferences: ViewPreferences) -> E
                             state.setup_gateway = false;
                             state.open_job(id);
                         }
-                        Topic::Readiness(name) => {
-                            state.navigate(crate::app::Page::Workstation);
-                            let check = match &state.readiness {
-                                crate::app::Load::Ready(readiness) => readiness
-                                    .checks
-                                    .iter()
-                                    .find(|check| humanize(&format!("{:?}", check.id)) == *name)
-                                    .map(|check| check.id),
-                                _ => None,
-                            };
-                            if let Some(id) = check {
-                                state.reveal_readiness_check(id, tx);
-                            }
-                        }
+                        Topic::Readiness(id) => state.open_readiness_notice(*id, tx),
                         Topic::Connection => {}
                     }
                 })
@@ -1191,14 +1278,20 @@ fn row(item: &Item, state: &State, kit: &Kit, preferences: ViewPreferences) -> E
                     .color(theme::hex(theme::TEXT_SECONDARY))
                     .wrap(),
             )
-            .children(action),
+            .children(action)
+            .children(crate::activity_triage::actions(
+                state,
+                crate::activity_triage::Anchor::Notice(id),
+                kit,
+                preferences,
+            )),
     );
     enter_from_below(entry.child(content), preferences)
 }
 
 fn seed_drawer(inbox: &mut Inbox, now: f64) {
     let connection = Topic::Connection;
-    let readiness = Topic::Readiness("Actor search".into());
+    let readiness = Topic::Readiness(ReadinessCheckId::ActorSearch);
     let job = Topic::Job("fixture-index-job".into());
     let job_title = "Scheduled maintenance for the synthetic regional actor catalogue";
     inbox.push(
@@ -1260,7 +1353,7 @@ mod tests {
         let mut inbox = Inbox::default();
         let mut first = obs(1, Link::Connected);
         first.jobs = vec![job("a", "completed")];
-        first.checks = vec![("Jobs".into(), ReadinessState::NotReady)];
+        first.checks = vec![(ReadinessCheckId::Jobs, ReadinessState::NotReady)];
         assert!(!inbox.observe(1.0, first));
         assert_eq!(inbox.unread(), 0);
     }
@@ -1302,10 +1395,10 @@ mod tests {
     fn connection_and_readiness_changes_use_fixed_text_only() {
         let mut inbox = Inbox::default();
         let mut base = obs(1, Link::Connecting);
-        base.checks = vec![("Actor search".into(), ReadinessState::Ready)];
+        base.checks = vec![(ReadinessCheckId::ActorSearch, ReadinessState::Ready)];
         inbox.observe(1.0, base);
         let mut next = obs(1, Link::Connected);
-        next.checks = vec![("Actor search".into(), ReadinessState::Degraded)];
+        next.checks = vec![(ReadinessCheckId::ActorSearch, ReadinessState::Degraded)];
         assert!(inbox.observe(2.0, next));
         let titles: Vec<_> = inbox.items().map(|item| item.title.clone()).collect();
         assert_eq!(titles, ["Actor search is degraded", "Connected"]);
@@ -1320,10 +1413,10 @@ mod tests {
     fn running_and_unknown_readiness_flaps_stay_quiet() {
         let mut inbox = Inbox::default();
         let mut base = obs(1, Link::Connected);
-        base.checks = vec![("Jobs".into(), ReadinessState::Unknown)];
+        base.checks = vec![(ReadinessCheckId::Jobs, ReadinessState::Unknown)];
         inbox.observe(1.0, base);
         let mut next = obs(1, Link::Connected);
-        next.checks = vec![("Jobs".into(), ReadinessState::Running)];
+        next.checks = vec![(ReadinessCheckId::Jobs, ReadinessState::Running)];
         assert!(!inbox.observe(2.0, next));
     }
 
@@ -1367,7 +1460,7 @@ mod tests {
     fn groups_use_oldest_unread_then_insertion_order_with_chronological_rows() {
         let mut inbox = Inbox::default();
         seed_drawer(&mut inbox, 900.0);
-        let actor = Topic::Readiness("Actor search".into());
+        let actor = Topic::Readiness(ReadinessCheckId::ActorSearch);
         let job = Topic::Job("fixture-index-job".into());
 
         let groups = inbox.groups();
@@ -1411,7 +1504,7 @@ mod tests {
         for tracked in [false, true] {
             let mut inbox = Inbox::default();
             let mut base = obs(1, Link::Connected);
-            base.checks = vec![("Actor search".into(), ReadinessState::Unknown)];
+            base.checks = vec![(ReadinessCheckId::ActorSearch, ReadinessState::Unknown)];
             inbox.observe(0.0, base.clone());
 
             base.tracked_actor_reindex = tracked;
@@ -1421,7 +1514,7 @@ mod tests {
                 assert_eq!(inbox.unread(), 0);
             } else {
                 let item = inbox.items().next().expect("actor readiness item");
-                assert_eq!(item.topic, Topic::Readiness("Actor search".into()));
+                assert_eq!(item.topic, Topic::Readiness(ReadinessCheckId::ActorSearch));
                 assert_eq!(item.topic.action(), Some("View status"));
                 assert_eq!(item.title, crate::readiness_cards::ACTOR_INDEX_CATCH_UP);
             }

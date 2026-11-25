@@ -4,13 +4,20 @@
 use std::time::Duration;
 
 use fleetworks_contracts::chat::ChatSourceKind;
+use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::chat::QaAvailabilityReason;
 use fleetworks_contracts::chat::QaCancelRequest;
 use fleetworks_contracts::chat::QaConversationReply;
+use fleetworks_contracts::chat::QaDecisionAvailabilityReason;
+use fleetworks_contracts::chat::QaDecisionPreference;
+use fleetworks_contracts::chat::QaDecisionSettings;
 use fleetworks_contracts::chat::QaEventPage;
 use fleetworks_contracts::chat::QaEventQuery;
+use fleetworks_contracts::chat::QaGeneratorPreference;
+use fleetworks_contracts::chat::QaGeneratorSettings;
 use fleetworks_contracts::chat::QaModelTarget;
 use fleetworks_contracts::chat::QaPhase;
+use fleetworks_contracts::chat::QaRelatedActivity;
 use fleetworks_contracts::chat::QaSettings;
 use fleetworks_contracts::chat::QaSettingsUpdate;
 use fleetworks_contracts::chat::QaStartupStage;
@@ -20,6 +27,8 @@ use fleetworks_contracts::chat::QaTurnRequest;
 use fleetworks_contracts::chat::QaTurnState;
 use fleetworks_contracts::chat::MAX_EVENT_WAIT_SECS;
 use fleetworks_contracts::chat::MAX_INPUT_BYTES;
+use fleetworks_contracts::chat::QA_MODEL_SETTINGS_FEATURE;
+use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
 use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::context::RegisteredContext;
@@ -35,10 +44,10 @@ use rune::TextEdit;
 use rune::Tx;
 use rune_kit::Kit;
 use rune_kit::ProgressCircle;
-use rune_kit::RadioGroup;
 use rune_kit::RadioItem;
 
 use crate::accessibility::ViewPreferences;
+use crate::activity_triage::Anchor;
 use crate::assistant;
 use crate::chat_ui;
 use crate::connection::GatewayEffects;
@@ -48,6 +57,7 @@ use crate::material::{self, GlassSurface, MetalFinish};
 use crate::theme;
 use crate::theme::StatusTone;
 use crate::ui_components::ActionButton;
+use crate::workstation_settings::SettingsSection;
 use crate::State;
 
 const SETTINGS_REFRESH: f64 = 5.0;
@@ -147,10 +157,25 @@ struct Ticket {
     request_revision: u64,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SettingsChange {
-    Inference(bool),
-    Model(QaModelTarget),
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ModelRole {
+    Generator,
+    Decision,
+}
+
+#[derive(Clone, Copy)]
+enum ModelPreference {
+    Generator(QaGeneratorPreference),
+    Decision(QaDecisionPreference),
+}
+
+impl ModelPreference {
+    fn role(self) -> ModelRole {
+        match self {
+            Self::Generator(_) => ModelRole::Generator,
+            Self::Decision(_) => ModelRole::Decision,
+        }
+    }
 }
 
 pub(crate) struct InboxQa {
@@ -159,13 +184,18 @@ pub(crate) struct InboxQa {
     latest: Option<QaTurn>,
     pending: Option<Pending>,
     draft: TextEdit,
-    source: Option<assistant::Context>,
+    source: Option<ChatSourceReference>,
     status: Option<&'static str>,
     settings_loaded: bool,
     details_open: bool,
     sources_open: bool,
     startup_seen: bool,
-    settings_change: Option<SettingsChange>,
+    pending_inference: Option<bool>,
+    pending_model: Option<ModelRole>,
+    model_save_error: Option<(ModelRole, &'static str)>,
+    settings_refresh_required: bool,
+    #[cfg(test)]
+    captured_update: Option<QaSettingsUpdate>,
     request: Option<InFlight>,
     request_revision: u64,
     resume: bool,
@@ -188,7 +218,12 @@ impl Default for InboxQa {
             details_open: false,
             sources_open: false,
             startup_seen: false,
-            settings_change: None,
+            pending_inference: None,
+            pending_model: None,
+            model_save_error: None,
+            settings_refresh_required: false,
+            #[cfg(test)]
+            captured_update: None,
             request: None,
             request_revision: 0,
             resume: true,
@@ -234,7 +269,9 @@ impl InboxQa {
     }
 
     fn settings_change_pending(&self) -> bool {
-        self.settings_change.is_some()
+        self.pending_inference.is_some()
+            || self.pending_model.is_some()
+            || self.settings_refresh_required
             || self
                 .request
                 .as_ref()
@@ -259,16 +296,28 @@ impl InboxQa {
             .settings
             .as_ref()
             .is_some_and(|old| settings.generation != old.generation);
-        if !settings.enabled || generation_changed {
+        let model_settings = settings.generator.is_some() && settings.decision.is_some();
+        if !settings.enabled || (generation_changed && !model_settings) {
             self.retire();
             self.resume = true;
+        } else if generation_changed {
+            // Completed exchanges remain usable across roles. Recover the canonical state of
+            // any previously active exchange instead of showing its stale draft.
+            self.pending = None;
+            if self.active().is_some() {
+                self.latest = None;
+                self.sources_open = false;
+            }
+            self.request_resume();
         }
         if self.settings.and_then(|old| old.availability_reason) != settings.availability_reason {
             self.details_open = false;
         }
         self.settings = Some(settings);
         self.settings_loaded = true;
-        self.settings_change = None;
+        self.pending_inference = None;
+        self.pending_model = None;
+        self.settings_refresh_required = false;
         let tracking_startup =
             settings.startup_stage.is_some() || settings.phase == QaPhase::Starting;
         self.next_settings_at = now
@@ -378,6 +427,34 @@ impl State {
                 })
     }
 
+    pub(crate) fn supports_workstation_triage(&self) -> bool {
+        self.supports_inbox_qa()
+            && self
+                .connection
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| {
+                    capabilities
+                        .features
+                        .iter()
+                        .any(|feature| feature == QA_TRIAGE_FEATURE)
+                })
+    }
+
+    fn supports_model_settings(&self) -> bool {
+        self.supports_inbox_qa()
+            && self
+                .connection
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| {
+                    capabilities
+                        .features
+                        .iter()
+                        .any(|feature| feature == QA_MODEL_SETTINGS_FEATURE)
+                })
+    }
+
     fn inbox_qa_settings(&self) -> Option<&QaSettings> {
         (self.supports_inbox_qa()
             && self.inbox_qa.settings_loaded
@@ -399,27 +476,91 @@ impl State {
     }
 
     pub(crate) fn assistant_settings_visible(&self) -> bool {
-        self.inbox_qa.settings_change != Some(SettingsChange::Inference(false))
+        self.inbox_qa.pending_inference != Some(false)
             && self
                 .inbox_qa_settings()
                 .is_some_and(|settings| settings.enabled && settings.phase != QaPhase::Stopping)
     }
 
-    fn inbox_qa_visible(&self) -> bool {
-        self.permission(Permission::ReadWorkstationActivity) && self.assistant_settings_visible()
+    pub(crate) fn triage_generation(&self) -> Option<u64> {
+        if !self.supports_workstation_triage() || !self.assistant_settings_visible() {
+            return None;
+        }
+        self.inbox_qa_settings().map(|settings| settings.generation)
+    }
+
+    pub(crate) fn inbox_qa_visible(&self) -> bool {
+        self.assistant_settings_visible()
+            && (self.supports_workstation_triage()
+                || self.permission(Permission::ReadWorkstationActivity))
+    }
+
+    pub(crate) fn can_prefill_inbox_question(&self) -> bool {
+        self.supports_workstation_triage()
+            && self.inbox_qa_visible()
+            && self.permission(Permission::SubmitInteractive)
+            && self.inbox_qa.pending.is_none()
+            && self.inbox_qa.active().is_none()
+    }
+
+    pub(crate) fn prefill_inbox_question(
+        &mut self,
+        source: &ChatSourceReference,
+        anchor: Anchor,
+        tx: &mut Tx,
+    ) {
+        if !self.can_prefill_inbox_question() {
+            return;
+        }
+        let prompt = match source.kind {
+            ChatSourceKind::Job => "What happened with this job?",
+            ChatSourceKind::Readiness => "What happened with this readiness check?",
+            _ => return,
+        };
+        if !self.inbox.open && !self.has_active_confirmation() {
+            debug_assert_eq!(anchor, Anchor::Job);
+            self.open_inbox_from("triage-explain");
+        }
+        if !self.inbox.open {
+            return;
+        }
+        if self.inbox_qa.draft.text.trim().is_empty() {
+            self.inbox_qa.draft = TextEdit::new(prompt);
+        }
+        self.inbox_qa.source = Some(source.clone());
+        tx.focus(COMPOSER, true);
+    }
+
+    pub(crate) fn canonical_related_activity(&self) -> Option<&QaRelatedActivity> {
+        if !self.supports_workstation_triage() || !self.inbox_qa_visible() {
+            return None;
+        }
+        let qa = &self.inbox_qa;
+        if qa.pending.is_some() {
+            return None;
+        }
+        qa.latest
+            .as_ref()
+            .filter(|turn| {
+                matches!(
+                    turn.state,
+                    QaTurnState::Answered | QaTurnState::InsufficientContext
+                )
+            })
+            .and_then(|turn| turn.related_activity.as_ref())
     }
 
     fn can_send_inbox_qa(&self) -> bool {
         self.inbox_qa_visible()
             && self.permission(Permission::SubmitInteractive)
-            && self
-                .inbox_qa_settings()
-                .is_some_and(|settings| settings.phase == QaPhase::Ready)
+            && self.inbox_qa_settings().is_some_and(|settings| {
+                settings.phase == QaPhase::Ready || self.supports_workstation_triage()
+            })
             && !self.inbox_qa.resume
             && self.inbox_qa.pending.is_none()
             && self.inbox_qa.active().is_none()
             && !self.inbox_qa.mutation_in_flight()
-            && self.inbox_qa.settings_change.is_none()
+            && !self.inbox_qa.settings_change_pending()
     }
 
     fn sync_inbox_qa_binding(&mut self) -> bool {
@@ -459,7 +600,7 @@ impl State {
         }
         let qa = &self.inbox_qa;
         let watch_settings = !qa.settings_loaded
-            || qa.settings_change.is_some()
+            || qa.settings_change_pending()
             || self.inbox.open
             || self.settings_open
             || self.startup.data_setup_active()
@@ -471,8 +612,14 @@ impl State {
         if watch_settings {
             tx.wake_after(Duration::from_secs_f64(qa.next_settings_at - now));
         }
+        let restore_usage = self.settings_open
+            && self.settings_section == SettingsSection::Assistant
+            && qa.resume
+            && qa
+                .settings
+                .is_some_and(|settings| settings.phase == QaPhase::Ready);
         if !self.inbox_qa_visible()
-            || (!self.inbox.open && qa.active().is_none() && qa.pending.is_none())
+            || (!self.inbox.open && !restore_usage && qa.active().is_none() && qa.pending.is_none())
         {
             return changed;
         }
@@ -547,17 +694,42 @@ impl State {
             Reply::Update(Ok(settings)) => {
                 qa.apply_settings(settings, now);
                 qa.status = None;
+                qa.model_save_error = None;
             }
-            Reply::Settings(Err(error)) | Reply::Update(Err(error)) => {
-                if admission_rejected(error) {
-                    qa.settings_change = None;
-                }
+            Reply::Settings(Err(error)) => {
                 qa.status = Some(status_message(error));
                 if denied(error) {
                     qa.retire();
                     qa.settings_loaded = false;
                 }
                 qa.next_settings_at = qa.retry_after(now);
+            }
+            Reply::Update(Err(error)) => {
+                let conflict = matches!(error, ClientError::Status(409));
+                let refresh_required = conflict || !admission_rejected(error);
+                let message = if conflict {
+                    "Settings changed. Review the current preference and choose again."
+                } else {
+                    status_message(error)
+                };
+                if let Some(role) = qa.pending_model.take() {
+                    qa.model_save_error = Some((role, message));
+                } else {
+                    qa.status = Some(message);
+                }
+                if admission_rejected(error) {
+                    qa.pending_inference = None;
+                }
+                qa.settings_refresh_required = refresh_required;
+                if denied(error) {
+                    qa.retire();
+                    qa.settings_loaded = false;
+                }
+                qa.next_settings_at = if refresh_required {
+                    now
+                } else {
+                    qa.retry_after(now)
+                };
             }
             Reply::Submit(Ok(turn)) => {
                 if qa.accept_pending(&turn) {
@@ -640,11 +812,10 @@ impl State {
     }
 
     fn set_inbox_inference(&mut self, enabled: bool) {
-        self.update_inbox_settings(SettingsChange::Inference(enabled));
-    }
-
-    fn update_inbox_settings(&mut self, change: SettingsChange) {
-        if !self.can_manage_inbox_qa() || self.inbox_qa.settings_change_pending() {
+        if !self.can_manage_inbox_qa()
+            || self.inbox_qa.settings_change_pending()
+            || self.inbox_qa.mutation_in_flight()
+        {
             return;
         }
         let (Some(context), Some(settings)) =
@@ -652,24 +823,62 @@ impl State {
         else {
             return;
         };
-        if settings.phase == QaPhase::Stopping {
+        if settings.phase == QaPhase::Stopping || enabled == settings.enabled {
             return;
         }
-        let context = MutationContext::new(context);
-        let update = match change {
-            SettingsChange::Inference(enabled) if enabled != settings.enabled => {
-                QaSettingsUpdate::new(context, settings.revision, enabled)
-            }
-            SettingsChange::Model(target)
-                if settings.enabled && target != settings.model_target =>
+        let update =
+            QaSettingsUpdate::new(MutationContext::new(context), settings.revision, enabled);
+        if self.dispatch_inbox_qa(Request::Update(update)) {
+            self.inbox_qa.pending_inference = Some(enabled);
+            self.inbox_qa.status = None;
+        }
+    }
+
+    fn set_model_preference(&mut self, preference: ModelPreference) {
+        if !self.supports_model_settings()
+            || !self.assistant_settings_visible()
+            || !self.can_manage_inbox_qa()
+            || self.inbox_qa.settings_change_pending()
+            || self.inbox_qa.mutation_in_flight()
+        {
+            return;
+        }
+        let (Some(context), Some(settings)) =
+            (&self.registration.context, self.inbox_qa_settings())
+        else {
+            return;
+        };
+        let update =
+            QaSettingsUpdate::preferences(MutationContext::new(context), settings.revision);
+        let update = match preference {
+            ModelPreference::Generator(preference)
+                if settings
+                    .generator
+                    .is_some_and(|role| role.preference != preference) =>
             {
-                QaSettingsUpdate::new(context, settings.revision, true).with_model_target(target)
+                update.with_generator_preference(preference)
+            }
+            ModelPreference::Decision(preference)
+                if settings
+                    .decision
+                    .is_some_and(|role| role.preference != preference) =>
+            {
+                update.with_decision_preference(preference)
             }
             _ => return,
         };
+        let role = preference.role();
+        #[cfg(test)]
+        if self.fixture {
+            self.inbox_qa.request_revision = self.inbox_qa.request_revision.wrapping_add(1);
+            self.inbox_qa.captured_update = Some(update);
+            self.inbox_qa.pending_model = Some(role);
+            self.inbox_qa.model_save_error = None;
+            return;
+        }
         if self.dispatch_inbox_qa(Request::Update(update)) {
-            self.inbox_qa.settings_change = Some(change);
-            self.inbox_qa.status = None;
+            self.inbox_qa.pending_model = Some(role);
+            self.inbox_qa.model_save_error = None;
         }
     }
 
@@ -692,11 +901,7 @@ impl State {
             self.inbox_qa.status = Some("Could not prepare the question. Try again.");
             return;
         };
-        let source = self
-            .inbox_qa
-            .source
-            .as_ref()
-            .and_then(assistant::source_for);
+        let source = self.inbox_qa.source.clone();
         let Ok(request) = QaTurnRequest::new(
             request_id,
             MutationContext::new(context),
@@ -752,28 +957,23 @@ impl GatewayEffects {
 }
 
 fn phase_label(state: &State) -> (&'static str, StatusTone) {
-    match state.inbox_qa.settings_change {
-        Some(SettingsChange::Inference(false)) => return ("Stopping", StatusTone::Warn),
-        Some(SettingsChange::Inference(true)) => return ("Starting", StatusTone::Info),
-        Some(SettingsChange::Model(_)) => return ("Switching model", StatusTone::Info),
+    match state.inbox_qa.pending_inference {
+        Some(false) => return ("Stopping", StatusTone::Warn),
+        Some(true) => return ("Starting", StatusTone::Info),
         None => {}
     }
     if let Some(label) = startup_label(state) {
         return (label, StatusTone::Info);
     }
-    match state.inbox_qa_settings().map(|settings| settings.phase) {
-        Some(QaPhase::Off) => ("Off", StatusTone::Neutral),
-        Some(QaPhase::Starting) => ("Starting", StatusTone::Info),
-        Some(QaPhase::Ready) => ("Ready", StatusTone::Ok),
-        Some(QaPhase::Stopping) => ("Stopping", StatusTone::Warn),
-        Some(QaPhase::Unavailable) => ("Unavailable", StatusTone::Warn),
-        _ if state.supports_inbox_qa() => ("Checking", StatusTone::Info),
-        _ => ("Unavailable", StatusTone::Neutral),
+    match state.inbox_qa_settings() {
+        Some(settings) => model_phase(settings.phase),
+        None if state.supports_inbox_qa() => ("Checking", StatusTone::Info),
+        None => ("Unavailable", StatusTone::Neutral),
     }
 }
 
 fn startup_label(state: &State) -> Option<&'static str> {
-    if state.inbox_qa.settings_change.is_some() {
+    if state.inbox_qa.pending_inference.is_some() {
         return None;
     }
     let settings = state.inbox_qa_settings()?;
@@ -804,7 +1004,7 @@ struct EmbeddedProblem {
 
 fn embedded_problem(state: &State) -> Option<EmbeddedProblem> {
     if !state.is_local_backend()
-        || state.inbox_qa.settings_change.is_some()
+        || state.inbox_qa.pending_inference.is_some()
         || startup_label(state).is_some()
     {
         return None;
@@ -813,7 +1013,11 @@ fn embedded_problem(state: &State) -> Option<EmbeddedProblem> {
     if !settings.enabled || settings.phase != QaPhase::Unavailable {
         return None;
     }
-    let problem = match settings.availability_reason? {
+    problem_for_reason(settings.availability_reason?)
+}
+
+fn problem_for_reason(reason: QaAvailabilityReason) -> Option<EmbeddedProblem> {
+    let problem = match reason {
         QaAvailabilityReason::PackMissing => EmbeddedProblem {
             status: "Embedded QA pack is missing",
             details: "Install the optional Inbox QA pack for this Fleetworks release and platform.",
@@ -825,6 +1029,14 @@ fn embedded_problem(state: &State) -> Option<EmbeddedProblem> {
         QaAvailabilityReason::SandboxUnsupported => EmbeddedProblem {
             status: "Embedded inference isn’t supported on this host",
             details: "Embedded inference on Linux requires Landlock ABI 3 or newer.",
+        },
+        QaAvailabilityReason::InsufficientResources => EmbeddedProblem {
+            status: "Not enough resources for Assistant",
+            details: "Free memory or disk space on this workstation, then turn inference off and back on.",
+        },
+        QaAvailabilityReason::ModelProvisionFailed => EmbeddedProblem {
+            status: "Assistant model provisioning failed",
+            details: "Check network access and free disk space, then turn inference off and back on.",
         },
         QaAvailabilityReason::WorkerStartFailed => EmbeddedProblem {
             status: "Embedded inference worker could not start",
@@ -925,46 +1137,366 @@ fn model_footprint(target: QaModelTarget) -> String {
     }
 }
 
+const GENERATOR_CHOICES: [(QaGeneratorPreference, &str); 3] = [
+    (
+        QaGeneratorPreference::Automatic,
+        "assistant-generator-automatic",
+    ),
+    (
+        QaGeneratorPreference::FlanT5Small,
+        "assistant-generator-small",
+    ),
+    (
+        QaGeneratorPreference::FlanT5Base,
+        "assistant-generator-base",
+    ),
+];
+
+const DECISION_CHOICES: [(QaDecisionPreference, &str); 3] = [
+    (QaDecisionPreference::RulesOnly, "assistant-decision-rules"),
+    (QaDecisionPreference::Julia1Q8, "assistant-decision-julia"),
+    (
+        QaDecisionPreference::VllmD3EdgeQ8,
+        "assistant-decision-edge",
+    ),
+];
+
+fn generator_target(preference: QaGeneratorPreference) -> Option<QaModelTarget> {
+    match preference {
+        QaGeneratorPreference::FlanT5Small => Some(QaModelTarget::FlanT5Small),
+        QaGeneratorPreference::FlanT5Base => Some(QaModelTarget::FlanT5Base),
+        _ => None,
+    }
+}
+
+fn generator_label(preference: QaGeneratorPreference) -> &'static str {
+    generator_target(preference).map_or("Automatic", QaModelTarget::label)
+}
+
+fn decision_label(preference: QaDecisionPreference) -> &'static str {
+    match preference {
+        QaDecisionPreference::RulesOnly => "Rules only",
+        QaDecisionPreference::Julia1Q8 => "Julia-1 Q8",
+        QaDecisionPreference::VllmD3EdgeQ8 => "vLLM d3-edge Q8",
+        _ => "Unknown",
+    }
+}
+
+fn decision_reason(reason: QaDecisionAvailabilityReason) -> &'static str {
+    match reason {
+        QaDecisionAvailabilityReason::AwaitingQualification => {
+            "Awaiting qualification on this platform"
+        }
+        QaDecisionAvailabilityReason::InsufficientResources => {
+            "Not enough resources for the preferred decision model"
+        }
+        QaDecisionAvailabilityReason::PackMissing => "Decision model pack is unavailable",
+        QaDecisionAvailabilityReason::WorkerStartFailed => "Decision model could not start",
+        _ => "Decision model unavailable",
+    }
+}
+
+fn model_phase(phase: QaPhase) -> (&'static str, StatusTone) {
+    match phase {
+        QaPhase::Off => ("Off", StatusTone::Neutral),
+        QaPhase::Starting => ("Starting", StatusTone::Info),
+        QaPhase::Ready => ("Ready", StatusTone::Ok),
+        QaPhase::Stopping => ("Stopping", StatusTone::Warn),
+        _ => ("Unavailable", StatusTone::Warn),
+    }
+}
+
+fn model_preference_status(state: &State, role: ModelRole, kit: &Kit) -> Option<El> {
+    let qa = &state.inbox_qa;
+    let (message, tone) = if qa.pending_model == Some(role) {
+        ("Saving preference…", StatusTone::Info)
+    } else {
+        (
+            qa.model_save_error
+                .filter(|(saved_role, _)| *saved_role == role)?
+                .1,
+            StatusTone::Warn,
+        )
+    };
+    Some(
+        hint(message, kit)
+            .color(tone.fg())
+            .key("assistant-preference-save")
+            .role("status")
+            .live_region(LiveRegion::Polite),
+    )
+}
+
+fn role_summary(preferred: &str, effective: &str, reason: Option<&str>, kit: &Kit) -> El {
+    rune::col()
+        .w_full()
+        .gap(4.0)
+        .role("status")
+        .live_region(LiveRegion::Polite)
+        .child(hint(&format!("Preferred · {preferred}"), kit))
+        .child(hint(&format!("In use · {effective}"), kit))
+        .children(reason.map(|reason| hint(reason, kit)))
+}
+
+fn model_selector(
+    label: &str,
+    key: &str,
+    disabled: bool,
+    options: impl Iterator<Item = El>,
+    kit: &Kit,
+) -> El {
+    rune::col()
+        .key(key.to_owned())
+        .role("radiogroup")
+        .label(label.to_owned())
+        .focus_group()
+        .disabled(disabled)
+        .gap(8.0)
+        .child(
+            rune::text(label)
+                .font(kit.ty.small.lh(11.0))
+                .color(kit.c.text_faint)
+                .a11y_hidden(),
+        )
+        .child(rune::col().key("items").gap(12.0).children(options))
+}
+
+fn generator_settings_content(
+    state: &State,
+    settings: &QaSettings,
+    generator: QaGeneratorSettings,
+    kit: &Kit,
+) -> El {
+    let disabled = !state.can_manage_inbox_qa();
+    let options = GENERATOR_CHOICES
+        .into_iter()
+        .enumerate()
+        .map(|(index, (preference, key))| {
+            let label = generator_label(preference);
+            let label = generator_target(preference).map_or_else(
+                || label.into(),
+                |target| {
+                    format!(
+                        "{label} · {:.0} MB",
+                        target.weight_bytes() as f64 / 1_000_000.0
+                    )
+                },
+            );
+            RadioItem::new(label, preference == generator.preference)
+                .disabled(disabled)
+                .on_select(move |state: &mut State| {
+                    state.set_model_preference(ModelPreference::Generator(preference));
+                })
+                .build(kit)
+                .key(key)
+                .position_in_set(index + 1, GENERATOR_CHOICES.len())
+        });
+    let phase = if generator.phase == QaPhase::Ready && generator.effective.is_none() {
+        QaPhase::Unavailable
+    } else {
+        generator.phase
+    };
+    let (label, tone) = startup_label(state)
+        .filter(|_| phase != QaPhase::Ready)
+        .map_or_else(|| model_phase(phase), |label| (label, StatusTone::Info));
+    let reason = generator
+        .reason
+        .and_then(problem_for_reason)
+        .map(|problem| problem.status)
+        .or_else(|| {
+            (generator.preference == QaGeneratorPreference::Automatic
+                && generator.effective.is_some())
+            .then_some("Selected for available workstation resources")
+        });
+    let usage = state
+        .inbox_qa
+        .latest
+        .as_ref()
+        .filter(|turn| {
+            state.inbox_qa_visible()
+                && generator.effective.is_some()
+                && turn.model_target == generator.effective
+                && turn.model_generation == Some(settings.generation)
+        })
+        .and_then(|turn| turn.context);
+    rune::col()
+        .key("assistant-generator-section")
+        .w_full()
+        .min_w(0.0)
+        .gap(8.0)
+        .child(model_selector(
+            "Generator",
+            "assistant-generator-preference",
+            disabled,
+            options,
+            kit,
+        ))
+        .child(role_summary(
+            generator_label(generator.preference),
+            generator.effective.map_or("None", QaModelTarget::label),
+            reason,
+            kit,
+        ))
+        .child(
+            crate::ui_components::status_pill(label, None, tone, kit)
+                .key("assistant-model-status")
+                .live_region(LiveRegion::Polite),
+        )
+        .child(assistant_context_usage(
+            QaModelTarget::default().input_tokens(),
+            usage,
+            kit,
+        ))
+        .children(model_preference_status(state, ModelRole::Generator, kit))
+}
+
+fn decision_settings_content(state: &State, decision: QaDecisionSettings, kit: &Kit) -> El {
+    let disabled = !state.can_manage_inbox_qa();
+    let options = DECISION_CHOICES
+        .into_iter()
+        .enumerate()
+        .map(|(index, (preference, key))| {
+            let label = match preference {
+                QaDecisionPreference::Julia1Q8 => "Julia-1 Q8 · 168 MB",
+                QaDecisionPreference::VllmD3EdgeQ8 => "vLLM d3-edge Q8 · 806 MB",
+                _ => decision_label(preference),
+            };
+            RadioItem::new(label, preference == decision.preference)
+                .disabled(disabled)
+                .on_select(move |state: &mut State| {
+                    state.set_model_preference(ModelPreference::Decision(preference));
+                })
+                .build(kit)
+                .key(key)
+                .position_in_set(index + 1, DECISION_CHOICES.len())
+        });
+    let phase = match (decision.effective, decision.phase) {
+        (QaDecisionPreference::RulesOnly, QaPhase::Off | QaPhase::Ready | QaPhase::Unavailable) => {
+            None
+        }
+        (_, phase) => Some(model_phase(phase)),
+    };
+    rune::col()
+        .key("assistant-decision-section")
+        .w_full()
+        .min_w(0.0)
+        .gap(8.0)
+        .child(model_selector(
+            "Decision",
+            "assistant-decision-preference",
+            disabled,
+            options,
+            kit,
+        ))
+        .child(role_summary(
+            decision_label(decision.preference),
+            decision_label(decision.effective),
+            decision.reason.map(decision_reason),
+            kit,
+        ))
+        .children(phase.map(|(label, tone)| {
+            crate::ui_components::status_pill(label, None, tone, kit)
+                .key("assistant-decision-status")
+                .live_region(LiveRegion::Polite)
+        }))
+        .children(model_preference_status(state, ModelRole::Decision, kit))
+}
+
+fn assistant_context_usage(capacity: u16, usage: Option<QaContextUsage>, kit: &Kit) -> El {
+    rune::col()
+        .gap(4.0)
+        .child(hint("Context window", kit))
+        .child(
+            match usage.filter(|usage| usage.window_tokens == capacity) {
+                Some(usage) => context_dial(Some(usage), kit).key("assistant-context-usage"),
+                None => rune::text(format!("{capacity} tokens · No measured usage"))
+                    .font(kit.ty.small_medium)
+                    .color(kit.c.std_text)
+                    .w_full()
+                    .wrap(),
+            },
+        )
+}
+
 pub(crate) fn assistant_settings_content(state: &State, kit: &Kit) -> El {
     let Some(settings) = state.inbox_qa_settings() else {
         return rune::el();
     };
-    let selected = match state.inbox_qa.settings_change {
-        Some(SettingsChange::Model(target)) => target,
-        _ => settings.model_target,
-    };
-    let mut options = RadioGroup::new().label("Model Target").disabled(
-        !state.can_manage_inbox_qa()
-            || state.inbox_qa.settings_change_pending()
-            || settings.phase == QaPhase::Stopping,
-    );
-    for target in QaModelTarget::ALL {
-        options = options.item(
-            RadioItem::new(target.label(), target == selected)
-                .description(model_footprint(target))
-                .on_select(move |state: &mut State| {
-                    state.update_inbox_settings(SettingsChange::Model(target));
-                }),
-        );
+    if state.supports_model_settings() {
+        if let (Some(generator), Some(decision)) = (settings.generator, settings.decision) {
+            return rune::col()
+                .w_full()
+                .min_w(0.0)
+                .padding(12.0)
+                .gap(12.0)
+                .children((!state.can_manage_inbox_qa()).then(|| {
+                    hint(
+                        "Only a workstation manager can change model preferences.",
+                        kit,
+                    )
+                }))
+                .child(generator_settings_content(state, settings, generator, kit))
+                .child(rune::rule(1.0, theme::hex(theme::BORDER_SUBTLE)).a11y_hidden())
+                .child(decision_settings_content(state, decision, kit));
+        }
     }
+    let target = settings.model_target;
     let (phase, tone) = phase_label(state);
     let status = crate::ui_components::status_pill(phase, None, tone, kit)
         .key("assistant-model-status")
         .live_region(LiveRegion::Polite);
+    let model_label = if settings.phase == QaPhase::Ready {
+        "Active model"
+    } else {
+        "Selected model"
+    };
+    let usage = state
+        .inbox_qa
+        .latest
+        .as_ref()
+        .filter(|_| state.inbox_qa_visible())
+        .and_then(|turn| turn.context);
+    let context = assistant_context_usage(target.input_tokens(), usage, kit);
+    let problem = embedded_problem(state);
+    let diagnostic = problem
+        .as_ref()
+        .map(|problem| problem.details)
+        .or(state.inbox_qa.status)
+        .or_else(|| (phase == "Unavailable").then_some(UNAVAILABLE_NUDGE));
+    let model_selected =
+        settings.availability_reason != Some(QaAvailabilityReason::InsufficientResources);
     rune::col()
         .w_full()
         .min_w(0.0)
         .padding(12.0)
         .gap(12.0)
-        .child(rune::row().child(status))
-        .children(embedded_problem(state).map(|problem| hint(problem.details, kit)))
-        .children(
-            state
-                .inbox_qa
-                .status
-                .map(|status| hint(status, kit).role("status")),
+        .child(
+            rune::row()
+                .w_full()
+                .min_w(0.0)
+                .flex_wrap()
+                .gap(8.0)
+                .center_y()
+                .children(model_selected.then(|| {
+                    rune::col()
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .gap(4.0)
+                        .child(hint(model_label, kit))
+                        .child(
+                            rune::text(target.label())
+                                .key("assistant-active-model")
+                                .font(kit.ty.body_medium)
+                                .color(kit.c.std_text)
+                                .wrap(),
+                        )
+                }))
+                .child(status),
         )
-        .child(options.build(kit).key("assistant-model-target"))
+        .children(model_selected.then(|| hint(&model_footprint(target), kit)))
+        .children(model_selected.then_some(context))
+        .children(problem.map(|problem| hint(problem.status, kit)))
+        .children(diagnostic.map(|message| hint(message, kit).role("status")))
 }
 
 pub(crate) fn setup_choice(state: &State) -> bool {
@@ -1014,6 +1546,9 @@ fn answer_state(turn: &QaTurn) -> (chat_ui::TurnState, &'static str) {
         Some(QaConversationReply::ContextNeeded) => context_needed,
         Some(QaConversationReply::FollowUpNeedsTopic) => {
             "What would you like me to check again? Try “What’s the current memory usage?” or select the job you mean."
+        }
+        Some(QaConversationReply::ChooseSubject) => {
+            "Which should I check first? Select a job or ask about one subject."
         }
         Some(QaConversationReply::RecallNeedsHistory) => "Ask me a question first, then I can recap our recent exchange.",
         _ => match turn.notice {
@@ -1233,7 +1768,10 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
                 .key("inbox-qa-live-answer")
                 .live_region(live_region),
         )
-        .child(context_dial(usage, kit));
+        .child(context_dial(usage, kit))
+        .children(state.canonical_related_activity().map(|related| {
+            crate::activity_triage::result_view(state, related, None, kit, preferences)
+        }));
     // Admission and streaming keep the same request key as the queued draft.
     let turn = crate::inbox::enter_from_below(
         rune::col()
@@ -1258,29 +1796,33 @@ pub(crate) fn footer(state: &State, kit: &Kit, preferences: ViewPreferences) -> 
 }
 
 fn footer_content(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
-    let progress = match state.inbox_qa.settings_change {
-        Some(SettingsChange::Model(_)) => Some("Switching model"),
-        Some(SettingsChange::Inference(true)) => Some("Starting backend inference"),
-        _ => startup_label(state),
+    let progress = if state.inbox_qa.pending_inference == Some(true) {
+        Some("Starting backend inference")
+    } else {
+        startup_label(state)
     };
-    if let Some(label) = progress {
-        return footer_layer(
-            hint(label, kit)
-                .key("inbox-qa-startup-status")
-                .role("status")
-                .live_region(LiveRegion::Polite),
-            preferences,
-        );
-    }
-    if let Some(problem) = embedded_problem(state) {
-        return footer_layer(problem_content(state, problem, kit), preferences);
+    let problem = embedded_problem(state);
+    let triage = state.supports_workstation_triage() && state.inbox_qa_visible();
+    if !triage {
+        if let Some(label) = progress {
+            return footer_layer(
+                hint(label, kit)
+                    .key("inbox-qa-startup-status")
+                    .role("status")
+                    .live_region(LiveRegion::Polite),
+                preferences,
+            );
+        }
+        if let Some(problem) = problem {
+            return footer_layer(problem_content(state, problem, kit), preferences);
+        }
     }
     if !state.inbox_qa_visible() {
         return nudge(state, kit, preferences);
     }
     let qa = &state.inbox_qa;
     let phase = state.inbox_qa_settings().map(|settings| settings.phase);
-    if phase != Some(QaPhase::Ready) {
+    if phase != Some(QaPhase::Ready) && !triage {
         let label = if matches!(phase, Some(QaPhase::Off | QaPhase::Starting)) {
             "Preparing backend inference…"
         } else {
@@ -1318,24 +1860,25 @@ fn footer_content(state: &State, kit: &Kit, preferences: ViewPreferences) -> El 
     let mut row = rune::row().w_full().flex_wrap().center_y().gap(7.0);
     if let Some(source) = &qa.source {
         row = row.child(
-            ActionButton::new(format!("Remove {} source", source.kind.to_lowercase()))
-                .key("inbox-qa-clear-source")
-                .finish(MetalFinish::Gunmetal)
-                .disabled(qa.pending.is_some())
-                .on_press(|state: &mut State| state.inbox_qa.source = None)
-                .build(kit, preferences, None),
+            ActionButton::new(format!(
+                "Remove {} source",
+                citation_kind(source.kind).to_lowercase()
+            ))
+            .key("inbox-qa-clear-source")
+            .finish(MetalFinish::Gunmetal)
+            .disabled(qa.pending.is_some())
+            .on_press(|state: &mut State| state.inbox_qa.source = None)
+            .build(kit, preferences, None),
         );
     } else {
         let current = assistant::current_context(state);
-        if assistant::source_for(&current).is_some() {
+        if let Some(source) = assistant::source_for(&current) {
             row = row.child(
                 ActionButton::new(format!("Include {}", current.kind.to_lowercase()))
                     .key("inbox-qa-pin-source")
                     .finish(MetalFinish::Gunmetal)
                     .disabled(qa.pending.is_some())
-                    .on_press(move |state: &mut State| {
-                        state.inbox_qa.source = Some(current.clone())
-                    })
+                    .on_press(move |state: &mut State| state.inbox_qa.source = Some(source.clone()))
                     .build(kit, preferences, None),
             );
         }
@@ -1361,6 +1904,20 @@ fn footer_content(state: &State, kit: &Kit, preferences: ViewPreferences) -> El 
         );
     }
     let mut content = rune::col().w_full().gap(7.0);
+    if phase != Some(QaPhase::Ready) {
+        let reason = progress
+            .or_else(|| problem.map(|problem| problem.status))
+            .unwrap_or("Language model unavailable");
+        content = content.child(
+            hint(
+                &format!("{reason}. Direct facts and verified links are available."),
+                kit,
+            )
+            .key("inbox-qa-limited")
+            .role("status")
+            .live_region(LiveRegion::Polite),
+        );
+    }
     if let Some(status) = qa.status {
         content = content.child(hint(status, kit).role("status"));
     }
@@ -1372,7 +1929,7 @@ fn nudge(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
         "Reconnect the selected backend to check inference."
     } else if !state.supports_inbox_qa() {
         "Backend inference is unavailable for this selection."
-    } else if state.inbox_qa.settings_change == Some(SettingsChange::Inference(false))
+    } else if state.inbox_qa.pending_inference == Some(false)
         || state
             .inbox_qa_settings()
             .is_some_and(|settings| settings.phase == QaPhase::Stopping)
@@ -1526,28 +2083,37 @@ mod tests {
         let mut runtime = active_drawer((1280.0, 800.0));
         runtime.update(|state, _| {
             state.inbox.close();
+            let mut answered = turn(QaTurnState::Answered, 3);
+            answered.context = Some(QaContextUsage::new(512, 128, 1));
+            state.inbox_qa.adopt(Some(answered));
             state.fixture_show_assistant_settings();
         });
         runtime.frame(1.0);
         assert!(runtime.find("settings-category-assistant").is_some());
         let tree = runtime.accessibility_json().to_string();
-        for model in QaModelTarget::ALL {
-            assert!(tree.contains(model.label()));
-            assert!(tree.contains(&model_footprint(model)));
-        }
-        assert!(tree.contains("Model Target"));
+        let model = QaModelTarget::default();
+        assert!(tree.contains(model.label()));
+        assert!(tree.contains(&model_footprint(model)));
+        assert!(tree.contains("Active model"));
+        assert!(tree.contains("128 of 512 tokens, 25% peak usage"));
+        assert!(runtime.find("assistant-context-usage").is_some());
+        assert!(!tree.contains("Model Target"));
+        assert!(runtime.find("assistant-generator-preference").is_none());
+        assert!(runtime.find("assistant-decision-preference").is_none());
         assert!(runtime.find("assistant-model-status").is_some());
 
         runtime.update(|state, _| {
             let mut next = QaSettings::new(true, QaPhase::Starting, 2, 2, true);
-            next.model_target = QaModelTarget::Gpt2Small;
+            next.model_target = QaModelTarget::FlanT5Base;
             next.startup_stage = Some(QaStartupStage::DownloadingPack);
             state.inbox_qa.apply_settings(next, 1.5);
         });
         runtime.frame(1.5);
         let tree = runtime.accessibility_json().to_string();
         assert!(tree.contains("Downloading QA pack"));
-        assert!(runtime.find("assistant-model-target").is_some());
+        assert!(tree.contains(QaModelTarget::FlanT5Base.label()));
+        assert!(tree.contains("Selected model"));
+        assert!(tree.contains("512 tokens · No measured usage"));
 
         runtime.update(|state, _| {
             state.settings_open = false;
@@ -1566,7 +2132,7 @@ mod tests {
         });
         runtime.frame(2.5);
         assert!(runtime.find("settings-category-assistant").is_none());
-        assert!(runtime.find("assistant-model-target").is_none());
+        assert!(runtime.find("assistant-active-model").is_none());
 
         runtime.update(|state, _| {
             state.backend_kind = BackendKind::Remote;
@@ -1581,6 +2147,342 @@ mod tests {
         assert!(runtime.find("inbox-group-connection-toggle").is_some());
         assert!(runtime.find("inbox-qa-footer").is_none());
         assert!(runtime.find("inbox-qa-exchange").is_none());
+    }
+
+    fn model_settings(
+        generator: QaGeneratorPreference,
+        decision: QaDecisionPreference,
+        revision: u64,
+        generation: u64,
+    ) -> QaSettings {
+        let mut settings = QaSettings::new(true, QaPhase::Ready, revision, generation, true);
+        settings.model_target = generator_target(generator).unwrap_or(QaModelTarget::FlanT5Small);
+        settings.generator = Some(QaGeneratorSettings::new(
+            generator,
+            Some(settings.model_target),
+            QaPhase::Ready,
+            None,
+        ));
+        settings.decision = Some(QaDecisionSettings::new(
+            decision,
+            QaDecisionPreference::RulesOnly,
+            QaPhase::Off,
+            (decision != QaDecisionPreference::RulesOnly)
+                .then_some(QaDecisionAvailabilityReason::AwaitingQualification),
+        ));
+        settings
+    }
+
+    fn model_settings_runtime() -> Runtime<State> {
+        let mut runtime = active_drawer((640.0, 480.0));
+        runtime.update(|state, _| {
+            state.inbox.close();
+            let capabilities = state
+                .connection
+                .capabilities
+                .as_mut()
+                .expect("capabilities");
+            capabilities.features.push(QA_MODEL_SETTINGS_FEATURE.into());
+            let settings = model_settings(
+                QaGeneratorPreference::Automatic,
+                QaDecisionPreference::RulesOnly,
+                10,
+                7,
+            );
+            let mut answered = turn(QaTurnState::Answered, 3);
+            answered.context = Some(QaContextUsage::new(512, 128, 1));
+            answered.model_target = Some(settings.model_target);
+            answered.model_generation = Some(settings.generation);
+            state.seed_inbox_qa_fixture(settings, Some(answered));
+            state.fixture = false;
+            assert!(state.sync_inbox_qa_binding());
+            state.fixture = true;
+            state.fixture_show_assistant_settings();
+        });
+        runtime.frame(1.0);
+        runtime.frame(1.25);
+        runtime
+    }
+
+    fn choose_model_setting(runtime: &mut Runtime<State>, label: &str, now: f64) -> String {
+        let option = runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.role == "radio" && element.label.as_deref() == Some(label))
+            .unwrap_or_else(|| panic!("missing model setting {label}"));
+        let path = option.path;
+        let key = option.key.expect("model setting key");
+        runtime.update(move |_, tx| {
+            tx.scroll_into_view(key.clone());
+            tx.focus(key, true);
+        });
+        runtime.frame(now);
+        let control = runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.path == path)
+            .unwrap_or_else(|| panic!("missing model setting {label} after scrolling"));
+        assert!(
+            control.focused && control.focus_visible,
+            "model choice {label} must have keyboard focus"
+        );
+        // Rune subtracts the clipped edges to report width and height.
+        assert!(
+            control
+                .visible
+                .into_iter()
+                .zip(control.rect)
+                .all(|(visible, actual)| (visible - actual).abs() < 0.001),
+            "model choice {label} must be fully visible: {:?} of {:?}",
+            control.visible,
+            control.rect
+        );
+        runtime.key(KeyEvent {
+            key: Key::Text(" ".into()),
+            mods: Mods::default(),
+        });
+        runtime.frame(now + 0.1);
+        path
+    }
+
+    fn model_settings_reply(runtime: &mut Runtime<State>, reply: Reply) {
+        runtime.update(move |state, tx| {
+            let ticket = Ticket {
+                epoch: state.connection.epoch,
+                origin_revision: state.origin_revision,
+                request_revision: state.inbox_qa.request_revision,
+            };
+            state.receive_inbox_qa(ticket, reply, tx);
+        });
+    }
+
+    #[test]
+    fn assistant_preferences_save_independently_and_keep_focus_at_minimum_width() {
+        let mut runtime = model_settings_runtime();
+        let choices: Vec<_> = runtime
+            .elements()
+            .into_iter()
+            .filter(|element| element.role == "radio")
+            .filter_map(|element| element.label)
+            .collect();
+        assert_eq!(
+            choices,
+            [
+                "Automatic",
+                "FLAN-T5 Small · 308 MB",
+                "FLAN-T5 Base · 990 MB",
+                "Rules only",
+                "Julia-1 Q8 · 168 MB",
+                "vLLM d3-edge Q8 · 806 MB",
+            ]
+        );
+        assert!(runtime.find("assistant-context-usage").is_some());
+
+        let generator = choose_model_setting(&mut runtime, "FLAN-T5 Base · 990 MB", 1.5);
+        let update = runtime
+            .state
+            .inbox_qa
+            .captured_update
+            .as_ref()
+            .expect("generator update");
+        assert_eq!(update.expected_revision, 10);
+        assert_eq!(update.enabled, None);
+        assert_eq!(
+            update.generator_preference,
+            Some(QaGeneratorPreference::FlanT5Base)
+        );
+        assert_eq!(update.decision_preference, None);
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("Saving preference"));
+
+        model_settings_reply(
+            &mut runtime,
+            Reply::Update(Ok(model_settings(
+                QaGeneratorPreference::FlanT5Base,
+                QaDecisionPreference::RulesOnly,
+                11,
+                8,
+            ))),
+        );
+        runtime.frame(1.8);
+        assert!(runtime
+            .elements()
+            .into_iter()
+            .any(|element| { element.path == generator && element.focused }));
+        assert!(runtime.find("assistant-context-usage").is_none());
+        assert!(runtime
+            .state
+            .inbox_qa
+            .latest
+            .as_ref()
+            .is_some_and(|turn| { turn.state == QaTurnState::Answered && turn.context.is_some() }));
+
+        runtime.update(|state, _| {
+            let mut answered = turn(QaTurnState::Answered, 4);
+            answered.context = Some(QaContextUsage::new(512, 128, 1));
+            answered.model_target = Some(QaModelTarget::FlanT5Base);
+            answered.model_generation = Some(8);
+            state.inbox_qa.adopt(Some(answered));
+        });
+        runtime.frame(1.9);
+        assert!(runtime.find("assistant-context-usage").is_some());
+
+        let decision = choose_model_setting(&mut runtime, "Julia-1 Q8 · 168 MB", 2.0);
+        let update = runtime
+            .state
+            .inbox_qa
+            .captured_update
+            .as_ref()
+            .expect("decision update");
+        assert_eq!(update.expected_revision, 11);
+        assert_eq!(update.enabled, None);
+        assert_eq!(update.generator_preference, None);
+        assert_eq!(
+            update.decision_preference,
+            Some(QaDecisionPreference::Julia1Q8)
+        );
+
+        model_settings_reply(
+            &mut runtime,
+            Reply::Update(Ok(model_settings(
+                QaGeneratorPreference::FlanT5Base,
+                QaDecisionPreference::Julia1Q8,
+                12,
+                9,
+            ))),
+        );
+        runtime.frame(2.3);
+        assert!(runtime
+            .elements()
+            .into_iter()
+            .any(|element| { element.path == decision && element.focused }));
+        assert!(runtime.find("assistant-context-usage").is_none());
+        let tree = runtime.accessibility_json().to_string();
+        assert!(tree.contains("Preferred · Julia-1 Q8"));
+        assert!(tree.contains("In use · Rules only"));
+        assert!(tree.contains("Awaiting qualification on this platform"));
+
+        runtime.update(|state, _| {
+            state
+                .inbox_qa
+                .settings
+                .as_mut()
+                .expect("settings")
+                .can_manage = false;
+        });
+        runtime.frame(2.5);
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("Only a workstation manager can change model preferences."));
+        assert!(runtime
+            .elements()
+            .into_iter()
+            .any(|element| { element.path == decision && !element.focusable }));
+    }
+
+    #[test]
+    fn assistant_preference_conflict_refreshes_and_old_backend_replies_are_fenced() {
+        let mut runtime = model_settings_runtime();
+        choose_model_setting(&mut runtime, "FLAN-T5 Small · 308 MB", 1.5);
+        model_settings_reply(&mut runtime, Reply::Update(Err(ClientError::Status(409))));
+        runtime.frame(1.8);
+        assert!(runtime.state.inbox_qa.settings_refresh_required);
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("Settings changed. Review the current preference"));
+        choose_model_setting(&mut runtime, "FLAN-T5 Base · 990 MB", 2.0);
+        let update = runtime
+            .state
+            .inbox_qa
+            .captured_update
+            .as_ref()
+            .expect("original update");
+        assert_eq!(
+            update.generator_preference,
+            Some(QaGeneratorPreference::FlanT5Small)
+        );
+        model_settings_reply(
+            &mut runtime,
+            Reply::Settings(Ok(model_settings(
+                QaGeneratorPreference::Automatic,
+                QaDecisionPreference::RulesOnly,
+                14,
+                7,
+            ))),
+        );
+        runtime.frame(2.3);
+        assert!(!runtime.state.inbox_qa.settings_refresh_required);
+        choose_model_setting(&mut runtime, "vLLM d3-edge Q8 · 806 MB", 2.5);
+        let update = runtime
+            .state
+            .inbox_qa
+            .captured_update
+            .as_ref()
+            .expect("current update");
+        assert_eq!(update.expected_revision, 14);
+        assert_eq!(
+            update.decision_preference,
+            Some(QaDecisionPreference::VllmD3EdgeQ8)
+        );
+        runtime.update(|state, tx| {
+            let old_ticket = Ticket {
+                epoch: state.connection.epoch,
+                origin_revision: state.origin_revision,
+                request_revision: state.inbox_qa.request_revision,
+            };
+            state.backend_kind = BackendKind::Remote;
+            state.inbox_qa.detach();
+            state.receive_inbox_qa(
+                old_ticket,
+                Reply::Update(Ok(model_settings(
+                    QaGeneratorPreference::Automatic,
+                    QaDecisionPreference::VllmD3EdgeQ8,
+                    15,
+                    8,
+                ))),
+                tx,
+            );
+        });
+        runtime.frame(2.8);
+        assert!(runtime.find("settings-category-assistant").is_none());
+        assert_eq!(runtime.state.inbox_qa.settings.unwrap().revision, 14);
+    }
+
+    #[test]
+    fn workstation_assistant_shortcut_returns_focus_and_preserves_checks_when_off() {
+        const SHORTCUT: &str = crate::views::WORKSTATION_ASSISTANT;
+        let mut runtime = active_drawer((640.0, 480.0));
+        runtime.update(|state, _| state.inbox.close());
+        runtime.frame(1.0);
+
+        press_disclosure(&mut runtime, SHORTCUT, 1.5);
+        assert!(runtime.find("inbox-layer").is_some());
+        assert!(runtime.find("inbox-filter").is_some());
+        runtime.key(KeyEvent {
+            key: Key::Escape,
+            mods: Mods::default(),
+        });
+        runtime.frame(2.0);
+        assert!(runtime.find("inbox-layer").is_none());
+        assert!(runtime
+            .elements()
+            .iter()
+            .any(|element| element.key.as_deref() == Some(SHORTCUT) && element.focused));
+
+        runtime.update(|state, _| {
+            state
+                .inbox_qa
+                .apply_settings(QaSettings::new(false, QaPhase::Off, 2, 2, true), 2.5);
+        });
+        runtime.frame(2.5);
+        assert!(runtime.find(SHORTCUT).is_none());
+        assert!(runtime.find("workstation-health").is_some());
+        assert!(runtime.find("status-checks-toggle/trigger").is_some());
+        assert!(runtime.find("workstation-diagnostics/trigger").is_some());
     }
 
     #[test]
@@ -1677,7 +2579,7 @@ mod tests {
             direct.turn_id = "fixture-direct".into();
             direct.request_id = "fixture-direct-request".into();
             direct.context = Some(QaContextUsage::new(
-                QaModelTarget::Gpt2Medium.input_tokens(),
+                QaModelTarget::FlanT5Base.input_tokens(),
                 0,
                 0,
             ));
@@ -1685,7 +2587,7 @@ mod tests {
         });
         runtime.frame(1.5);
         let rendered = runtime.accessibility_json().to_string();
-        assert!(rendered.contains("0 of 896 tokens, 0%, model bypassed"));
+        assert!(rendered.contains("0 of 512 tokens, 0%, model bypassed"));
         assert!(!rendered.contains("448 of 512 tokens"));
 
         runtime.update(|state, _| {
@@ -1829,6 +2731,11 @@ mod tests {
                 QaTurnNotice::OutOfScope,
                 Some(QaConversationReply::FollowUpNeedsTopic),
                 "What’s the current memory usage?",
+            ),
+            (
+                QaTurnNotice::OutOfScope,
+                Some(QaConversationReply::ChooseSubject),
+                "Which should I check first?",
             ),
             (
                 QaTurnNotice::ObservationUnavailable,
@@ -1986,6 +2893,16 @@ mod tests {
                 QaAvailabilityReason::WorkerStartFailed,
                 "Embedded inference worker could not start",
                 "Check the Embedded companion logs",
+            ),
+            (
+                QaAvailabilityReason::InsufficientResources,
+                "Not enough resources for Assistant",
+                "Free memory or disk space",
+            ),
+            (
+                QaAvailabilityReason::ModelProvisionFailed,
+                "Assistant model provisioning failed",
+                "Check network access and free disk space",
             ),
         ];
         for size in [(640.0, 480.0), (1280.0, 800.0)] {

@@ -4,11 +4,44 @@
 
 The Rune/rune-kit macOS and Linux x86_64 API client supports **Embedded** and **Distributed** backends. Embedded uses a bundled companion started explicitly by the user over a private Unix socket. Distributed connects to an operator-managed gateway. Backend engines run outside the desktop process. Its six sidebar destinations are Actor Maintenance, News Cycles, Brain Search, Tool Box, Model Assignments and Jobs & Logs. The brand avatar opens Workstation Status. It groups actor search and workstation activity under **Services**, followed by **Status checks** and **Diagnostics**. **Settings → Connection** walks through setup and selects the backend type after launch. **Settings → General** shows the app name and version. Distributed setup uses a gateway URL, operator approval and macOS Keychain or Linux D-Bus Secret Service, with explicit Linux session-only mode also available.
 
-[Design and control allowlist](../../docs/wiki/code/native-design-system.md) · [Connection contracts](../../docs/wiki/code/native-connections.md) · [Protected identity](../../docs/wiki/code/native-workspaces.md) · [Implementation/verification status](../../.planning/2026-11-12-native-pairing-implementation/acceptance.md)
+[Design and control allowlist](../../docs/wiki/code/native-design-system.md) · [Connection contracts](../../docs/wiki/code/native-connections.md) · [Protected identity](../../docs/wiki/code/native-workspaces.md) · [Implementation/verification status](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md)
 
 [![Six destinations and selected content](../../docs/diagrams/native-workstation-layout.svg)](../../docs/diagrams/native-workstation-layout.html)
 
 ## Build and provision
+
+### macOS quick start
+
+You’ll need the pinned Rust **1.95.0** toolchain, Python 3, Xcode Command Line Tools, and the bundled actor catalog checked out through Git LFS. Quit Fleetworks before rebuilding an open app.
+
+**RustRover.** Open the repository root, choose **Build and open Fleetworks (Embedded)** from the run configuration menu, and click **Run**. [Shared run configuration](../../.idea/runConfigurations/Build_and_open_Fleetworks_Embedded.xml)
+
+**Terminal.** Run the same command from the repository root.
+
+```sh
+PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=1 \
+  python3 -B scripts/fleetworks_quick_start.py --profile debug --start-embedded
+```
+
+The launcher builds and opens the app, then starts its bundled Embedded companion. Automatic startup uses macOS Accessibility. If macOS asks for permission, allow RustRover or Terminal under **System Settings → Privacy & Security → Accessibility**. To start the companion by hand, omit `--start-embedded`, then click **Start Embedded Backend** in Fleetworks.
+
+The launcher reuses the repository's Cargo cache and prints the app path before building. The debug bundle is `target/native/aarch64-apple-darwin/debug/Fleetworks.app` on Apple Silicon and `target/native/x86_64-apple-darwin/debug/Fleetworks.app` on Intel. Use `--profile release` for the optimized bundle in the sibling `release` directory. Embedded data stays in `.agent-scratch/native-quick-start-profile/` across rebuilds. Use `--help` for custom paths and verified offline artifacts.
+
+#### Add the Assistant pack
+
+Sign in with `gh auth login` using an account with access to the repository. In a Fleetworks Actions run for your checkout, find the **Fleetworks-Inbox-QA-Pack** artifact with the target printed by Quick Start. Intel uses `x86_64-apple-darwin` and Apple Silicon uses `aarch64-apple-darwin`. Use the numeric artifact ID from that artifact's link as `QA_ARTIFACT_ID`. The launcher checks the pack against the matching platform's Embedded inference smoke receipt, including the archive and manifest digests.
+
+```sh
+PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=1 \
+  python3 -B scripts/fleetworks_quick_start.py --profile debug --start-embedded \
+  --inbox-artifact "$QA_ARTIFACT_ID"
+```
+
+The script registers the pack in the Quick Start profile. In the app it opens, enable **Backend inference** under **Settings → Connection**, then check **Settings → Assistant**. The pack includes FLAN-T5 Small and the native worker. The companion provisions Base separately when selected and resources allow. On a new computer, run the same script with that computer's matching artifact ID. The installed pack and downloaded model assets persist across app rebuilds. If the artifact expires, use a newer compatible run with a verified pack. [Offline setup and resource requirements](../../deploy/inbox-qa.md)
+
+If an older copy of the launcher reports `Select the root of a Fleetworks checkout` from the repository root, run `git --version`. Older Git versions such as 2.30 can trigger this error on either Mac architecture. The current launcher resolves Git's checkout paths on both older and newer versions. To run an older copy, use Apple Git by prepending `/usr/bin` to `PATH` for that command.
+
+### Build and backend options
 
 Distributed setup uses [operator pairing and the system keyring](../../docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target). Embedded setup uses **Start Embedded Backend** and a private companion state directory. See the [backend type and parity contract](../../docs/wiki/code/native-connections.md#backend-types-and-parity).
 

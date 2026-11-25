@@ -248,7 +248,7 @@ class LocalIpcSession:
     """Managed child `argos-api-host --role local-ipc` process speaking binary IPC frames."""
 
     def __init__(self, binary, state_dir, *, client_name="fleetworks-local-smoke", client_version="0.2.1",
-                 log_filter=None):
+                 log_filter=None, qa_memory_mib=None):
         self.binary = Path(binary)
         self.state_dir = Path(state_dir)
         self.client_name = client_name
@@ -260,6 +260,8 @@ class LocalIpcSession:
         environment = clean_child_environment()
         if log_filter is not None:
             environment["RUST_LOG"] = log_filter
+        if qa_memory_mib is not None:
+            environment["FLEETWORKS_QA_MEMORY_MIB"] = str(qa_memory_mib)
         self.proc, self.socket = spawn_ipc_child(
             [str(self.binary), "--role", "local-ipc", "--state-dir", str(self.state_dir)],
             stderr=subprocess.PIPE,

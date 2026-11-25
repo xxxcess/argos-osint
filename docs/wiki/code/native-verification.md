@@ -130,7 +130,7 @@ packaged app launch debugging, `fleetworks_candidate.py` `build-native` / `packa
 initializing stderr tracing, non-secret startup preflight, and early non-zero crash
 capture before handoff. Actual helper tests/rendering must be executed by the integration owner and recorded in
 the active acceptance tracker (for the cutover baseline, see
-[cutover acceptance](../../../.planning/2026-11-11-rune-macos-cutover/acceptance.md)).
+[cutover acceptance](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-11-rune-macos-cutover/acceptance.md)).
 
 ## Matte Canvas target review
 
@@ -138,7 +138,7 @@ The approved [Matte Canvas theme](../../design/matte-canvas/theme.md),
 [interaction/state contract](../../design/matte-canvas/interaction-state.md) and
 [motion guide](../../design/matte-canvas/motion.md) define a **target**, not a
 recorded native implementation or verification result. The
-[implementation handoff](../../../.planning/2026-11-16-matte-canvas/handoff.md)
+[implementation handoff](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-16-matte-canvas/handoff.md)
 maps the affected production symbols. Existing verification commands and
 historical evidence above remain applicable and unchanged. Run product checks
 only within the task's authorized verification scope.

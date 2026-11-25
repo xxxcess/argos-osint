@@ -3,6 +3,16 @@
 #[path = "qa_sandbox.rs"]
 mod sandbox;
 
+#[cfg(feature = "embedded")]
+pub(crate) fn decision_command(
+    runtime_dir: &Path,
+    model: &Path,
+    worker: &Path,
+    socket_dir: &Path,
+) -> Result<Command> {
+    sandbox::decision_command(runtime_dir, model, worker, socket_dir)
+}
+
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
@@ -17,6 +27,7 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -26,7 +37,9 @@ use anyhow::Result;
 use argos_osint_api::inbox_qa::CancellationToken;
 use argos_osint_api::inbox_qa::QaInference;
 use argos_osint_api::inbox_qa::QaInferenceFuture;
+use argos_osint_core::hardware;
 use fleetworks_contracts::chat::QaAvailabilityReason;
+use fleetworks_contracts::chat::QaGeneratorPreference;
 use fleetworks_contracts::chat::QaModelTarget;
 use fleetworks_contracts::chat::QaStartupStage;
 use fleetworks_contracts::qa_worker::qa_frame_len;
@@ -71,6 +84,45 @@ const TURN_LIMIT: Duration = Duration::from_secs(25);
 const PING_LIMIT: Duration = Duration::from_secs(2);
 const UNLOAD_LIMIT: Duration = Duration::from_secs(3);
 const MIB: u64 = 1024 * 1024;
+pub(crate) const WORKSTATION_RESERVE: u64 = 1024 * MIB;
+const SMALL_RESIDENT_LIMIT: u64 = 1536 * MIB;
+const BASE_RESIDENT_LIMIT: u64 = 3584 * MIB;
+
+fn configured_u16(name: &str) -> Option<u16> {
+    env::var(name).ok()?.parse().ok()
+}
+
+fn select_target(
+    preference: QaGeneratorPreference,
+    available_memory: u64,
+    operator_limit: u64,
+) -> Option<QaModelTarget> {
+    let limit = available_memory
+        .saturating_sub(WORKSTATION_RESERVE)
+        .min(operator_limit);
+    match preference {
+        QaGeneratorPreference::Automatic | QaGeneratorPreference::FlanT5Base
+            if limit >= BASE_RESIDENT_LIMIT =>
+        {
+            Some(QaModelTarget::FlanT5Base)
+        }
+        QaGeneratorPreference::Automatic | QaGeneratorPreference::FlanT5Small
+            if limit >= SMALL_RESIDENT_LIMIT =>
+        {
+            Some(QaModelTarget::FlanT5Small)
+        }
+        _ => None,
+    }
+}
+
+async fn select_workstation_model(preference: QaGeneratorPreference) -> Result<QaModelTarget> {
+    let available = tokio::task::spawn_blocking(hardware::available_memory_bytes).await?;
+    let operator_limit = configured_u16("FLEETWORKS_QA_MEMORY_MIB")
+        .filter(|n| (512..=6144).contains(n))
+        .map_or(u64::MAX, |limit| u64::from(limit) * MIB);
+    select_target(preference, available, operator_limit)
+        .ok_or_else(|| WarmFailure(QaAvailabilityReason::InsufficientResources).into())
+}
 
 struct WorkerLimits {
     threads: u16,
@@ -79,27 +131,14 @@ struct WorkerLimits {
 
 impl WorkerLimits {
     fn for_target(target: QaModelTarget) -> Self {
-        let default_mib = match target {
-            QaModelTarget::FlanT5Small => 1536,
-            QaModelTarget::FlanT5Base => 3584,
-            QaModelTarget::Gpt2Small => 2048,
-            QaModelTarget::Gpt2Medium => 4608,
-            _ => 1536,
-        };
-        let configured = |name: &str| {
-            env::var(name)
-                .ok()
-                .and_then(|value| value.parse::<u16>().ok())
-        };
         Self {
-            threads: configured("FLEETWORKS_QA_CPU_THREADS")
+            threads: configured_u16("FLEETWORKS_QA_CPU_THREADS")
                 .filter(|n| (1..=4).contains(n))
                 .unwrap_or(1),
-            resident_bytes: u64::from(
-                configured("FLEETWORKS_QA_MEMORY_MIB")
-                    .filter(|n| (512..=6144).contains(n))
-                    .unwrap_or(default_mib),
-            ) * MIB,
+            resident_bytes: match target {
+                QaModelTarget::FlanT5Base => BASE_RESIDENT_LIMIT,
+                _ => SMALL_RESIDENT_LIMIT,
+            },
         }
     }
 }
@@ -122,10 +161,7 @@ pub(crate) fn availability_reason(error: &anyhow::Error) -> QaAvailabilityReason
 }
 
 fn pack_pointer_error(error: anyhow::Error) -> anyhow::Error {
-    let reason = if error
-        .downcast_ref::<io::Error>()
-        .is_some_and(|error| error.kind() == io::ErrorKind::NotFound)
-    {
+    let reason = if pointer_missing(&error) {
         QaAvailabilityReason::PackMissing
     } else {
         QaAvailabilityReason::PackInvalid
@@ -195,6 +231,7 @@ struct Manifest {
 /// Owns the only isolated model child for this Embedded companion.
 pub(crate) struct QaWorkerSupervisor {
     state_dir: PathBuf,
+    model_admission: Arc<Mutex<()>>,
     session: Mutex<Option<WorkerSession>>,
     stopping: watch::Sender<()>,
 }
@@ -203,14 +240,22 @@ impl QaWorkerSupervisor {
     pub(crate) fn embedded_for_state(state_dir: PathBuf) -> Self {
         Self {
             state_dir,
+            model_admission: Arc::new(Mutex::new(())),
             session: Mutex::new(None),
             stopping: watch::channel(()).0,
         }
     }
 
+    pub(crate) fn with_model_admission(mut self, admission: Arc<Mutex<()>>) -> Self {
+        self.model_admission = admission;
+        self
+    }
+
     async fn connect(
         &self,
-        target: QaModelTarget,
+        mut target: QaModelTarget,
+        preference: QaGeneratorPreference,
+        selected_model: &(dyn Fn(QaModelTarget) + Sync),
         progress: &(dyn Fn(QaStartupStage) + Sync),
     ) -> Result<WorkerSession> {
         let state_dir = self.state_dir.clone();
@@ -229,31 +274,42 @@ impl QaWorkerSupervisor {
             sandbox::protect_state(&state_dir, &pack).map_err(|error| {
                 warm_error("sandbox_state_boundary", error.context(invalid_pack()))
             })?;
-            Ok::<_, anyhow::Error>((pack, packed_target == Some(target)))
+            Ok::<_, anyhow::Error>((pack, packed_target))
         });
         if pointer_observed.await.is_ok() {
             progress(QaStartupStage::VerifyingPack);
         }
         let verified = timeout(WARM_LIMIT, verification).await;
         stage.finish();
-        let (pack, selected) = verified?.map_err(|_| {
+        let (pack, packed_target) = verified?.map_err(|_| {
             warm_error(
                 "pack_verification",
                 anyhow!("QA pack verification did not finish"),
             )
         })??;
-        let model = if selected {
+        let model = if packed_target == Some(target) {
             pack.join("model")
         } else {
             progress(QaStartupStage::DownloadingPack);
-            crate::qa_model_assets::provision(&self.state_dir, target)
-                .await
-                .map_err(|error| {
-                    warm_error(
+            match crate::qa_model_assets::provision(&self.state_dir, target).await {
+                Ok(model) => model,
+                Err(error)
+                    if preference == QaGeneratorPreference::Automatic
+                        && target == QaModelTarget::FlanT5Base
+                        && packed_target == Some(QaModelTarget::FlanT5Small) =>
+                {
+                    let _ = warm_error("base_model_provision", error);
+                    target = QaModelTarget::FlanT5Small;
+                    selected_model(target);
+                    pack.join("model")
+                }
+                Err(error) => {
+                    return Err(warm_error(
                         "model_provision",
-                        error.context(WarmFailure(QaAvailabilityReason::PackInvalid)),
-                    )
-                })?
+                        error.context(WarmFailure(QaAvailabilityReason::ModelProvisionFailed)),
+                    ));
+                }
+            }
         };
         let model = tokio::fs::canonicalize(model).await?;
         sandbox::protect_state(&self.state_dir, &model)?;
@@ -264,15 +320,17 @@ impl QaWorkerSupervisor {
     async fn connect_ready(
         &self,
         target: QaModelTarget,
+        preference: QaGeneratorPreference,
         stopped: &mut watch::Receiver<()>,
         cancel: &CancellationToken,
+        selected_model: &(dyn Fn(QaModelTarget) + Sync),
         progress: &(dyn Fn(QaStartupStage) + Sync),
     ) -> Result<WorkerSession> {
         let mut session = tokio::select! {
             biased;
             _ = stopped.changed() => return Err(anyhow!("QA worker is stopping")),
             _ = cancel.cancelled() => return Err(anyhow!("QA request was canceled")),
-            result = self.connect(target, progress) => result?,
+            result = self.connect(target, preference, selected_model, progress) => result?,
         };
         let child_pid = session.child_id();
         let mut stage = WarmStage::new("worker_ready_frame");
@@ -310,20 +368,39 @@ impl QaWorkerSupervisor {
 
     pub(crate) async fn warm_with_progress(
         &self,
-        target: QaModelTarget,
+        preference: QaGeneratorPreference,
+        selected_model: &(dyn Fn(QaModelTarget) + Sync),
         progress: &(dyn Fn(QaStartupStage) + Sync),
     ) -> Result<()> {
         let mut stopped = self.stopping.subscribe();
+        let _admission = self.model_admission.lock().await;
         let mut slot = self.session.lock().await;
         if let Some(old) = slot.take() {
             old.stop().await?;
         }
+        let target = select_workstation_model(preference).await?;
+        selected_model(target);
         let cancel = CancellationToken::new();
         *slot = Some(
-            self.connect_ready(target, &mut stopped, &cancel, progress)
-                .await?,
+            self.connect_ready(
+                target,
+                preference,
+                &mut stopped,
+                &cancel,
+                selected_model,
+                progress,
+            )
+            .await?,
         );
         Ok(())
+    }
+
+    pub(crate) async fn active_model(&self) -> Option<QaModelTarget> {
+        self.session
+            .lock()
+            .await
+            .as_ref()
+            .map(|session| session.model_target)
     }
 
     pub(crate) async fn check_ready(&self) -> Result<()> {
@@ -614,7 +691,7 @@ impl WorkerSession {
     }
 }
 
-async fn guard_resident(pid: Option<u32>, resident_limit: u64) -> anyhow::Error {
+pub(crate) async fn guard_resident(pid: Option<u32>, resident_limit: u64) -> anyhow::Error {
     let Some(pid) = pid else {
         return future::pending().await;
     };
@@ -667,7 +744,7 @@ async fn resident_bytes(pid: u32) -> Option<u64> {
     Some(unsafe { info.assume_init() }.pti_resident_size)
 }
 
-fn limit_embedded_worker(command: &mut Command) {
+pub(crate) fn limit_embedded_worker(command: &mut Command) {
     // SAFETY: setpriority applies only to the forked worker before exec.
     unsafe {
         command.pre_exec(|| {
@@ -725,35 +802,40 @@ fn protect_private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn pointer_missing(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<io::Error>()
+        .is_some_and(|error| error.kind() == io::ErrorKind::NotFound)
+}
+
 fn worker_pack_pointer(state_dir: &Path, target: QaModelTarget) -> Result<PackPointer> {
     if let Some(pointer) = override_pack()? {
         return Ok(pointer);
     }
-    protect_private_directory(state_dir)?;
-    let targets = state_dir.join("qa-model-packs");
-    match protect_private_directory(&targets) {
-        Ok(()) => {
-            let path = targets.join(format!("{}.json", target.slug()));
-            match read_pointer(&path) {
-                Err(error)
-                    if error
-                        .downcast_ref::<io::Error>()
-                        .is_some_and(|error| error.kind() == io::ErrorKind::NotFound) => {}
-                other => return other,
-            }
-        }
-        Err(error)
-            if error
-                .downcast_ref::<io::Error>()
-                .is_some_and(|error| error.kind() == io::ErrorKind::NotFound) => {}
-        Err(error) => return Err(error),
-    }
-    load_installed_pointer(state_dir)
+    load_installed_pointer(state_dir, target)
 }
 
-fn load_installed_pointer(state_dir: &Path) -> Result<PackPointer> {
+fn load_installed_pointer(state_dir: &Path, target: QaModelTarget) -> Result<PackPointer> {
     protect_private_directory(state_dir)?;
-    read_pointer(&state_dir.join("qa-pack.json"))
+    let targets = state_dir.join("qa-model-packs");
+    let named = match protect_private_directory(&targets) {
+        Ok(()) => true,
+        Err(error) if pointer_missing(&error) => false,
+        Err(error) => return Err(error),
+    };
+    if named {
+        match read_pointer(&targets.join(format!("{}.json", target.slug()))) {
+            Err(error) if pointer_missing(&error) => {}
+            other => return other,
+        }
+    }
+    match read_pointer(&state_dir.join("qa-pack.json")) {
+        Err(error) if pointer_missing(&error) && named && target == QaModelTarget::FlanT5Base => {
+            // A named Small pack also contains the shared verified generator runtime.
+            read_pointer(&targets.join("flan-t5-small.json"))
+        }
+        other => other,
+    }
 }
 
 fn read_pointer(path: &Path) -> Result<PackPointer> {
@@ -990,6 +1072,97 @@ fn host_target() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selects_largest_model_with_memory_left_for_the_workstation() {
+        use super::{
+            select_target, BASE_RESIDENT_LIMIT, SMALL_RESIDENT_LIMIT, WORKSTATION_RESERVE,
+        };
+        use fleetworks_contracts::chat::QaModelTarget;
+
+        let base_available = BASE_RESIDENT_LIMIT + WORKSTATION_RESERVE;
+        let small_available = SMALL_RESIDENT_LIMIT + WORKSTATION_RESERVE;
+        assert_eq!(
+            select_target(QaGeneratorPreference::Automatic, base_available, u64::MAX),
+            Some(QaModelTarget::FlanT5Base)
+        );
+        assert_eq!(
+            select_target(
+                QaGeneratorPreference::Automatic,
+                base_available - 1,
+                u64::MAX
+            ),
+            Some(QaModelTarget::FlanT5Small)
+        );
+        assert_eq!(
+            select_target(
+                QaGeneratorPreference::Automatic,
+                base_available,
+                SMALL_RESIDENT_LIMIT
+            ),
+            Some(QaModelTarget::FlanT5Small)
+        );
+        assert_eq!(
+            select_target(QaGeneratorPreference::Automatic, small_available, u64::MAX),
+            Some(QaModelTarget::FlanT5Small)
+        );
+        assert_eq!(
+            select_target(
+                QaGeneratorPreference::Automatic,
+                small_available - 1,
+                u64::MAX
+            ),
+            None
+        );
+        assert_eq!(
+            select_target(
+                QaGeneratorPreference::Automatic,
+                base_available,
+                SMALL_RESIDENT_LIMIT - 1
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_model_preferences_require_their_own_memory_budget() {
+        let base_available = BASE_RESIDENT_LIMIT + WORKSTATION_RESERVE;
+        let small_available = SMALL_RESIDENT_LIMIT + WORKSTATION_RESERVE;
+        assert_eq!(
+            select_target(QaGeneratorPreference::FlanT5Small, base_available, u64::MAX),
+            Some(QaModelTarget::FlanT5Small),
+            "Explicit Small must remain Small on a Base-capable host"
+        );
+        assert_eq!(
+            select_target(QaGeneratorPreference::FlanT5Base, base_available, u64::MAX),
+            Some(QaModelTarget::FlanT5Base)
+        );
+        assert_eq!(
+            select_target(
+                QaGeneratorPreference::FlanT5Base,
+                base_available,
+                SMALL_RESIDENT_LIMIT
+            ),
+            None,
+            "An operator cap must not silently substitute Small for explicit Base"
+        );
+        assert_eq!(
+            select_target(
+                QaGeneratorPreference::FlanT5Base,
+                base_available - 1,
+                u64::MAX
+            ),
+            None
+        );
+        assert_eq!(
+            select_target(
+                QaGeneratorPreference::FlanT5Small,
+                small_available - 1,
+                u64::MAX
+            ),
+            None
+        );
+    }
+
     use std::os::unix::fs::PermissionsExt;
 
     use fleetworks_contracts::qa_worker::{
@@ -1019,7 +1192,9 @@ mod tests {
     fn classifies_missing_and_invalid_local_pack_and_startup_failure() {
         let state = tempfile::tempdir().unwrap();
         fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let reason = || match load_installed_pointer(state.path()).map_err(pack_pointer_error) {
+        let reason = || match load_installed_pointer(state.path(), QaModelTarget::FlanT5Small)
+            .map_err(pack_pointer_error)
+        {
             Ok(_) => panic!("fixture must not load a pack"),
             Err(error) => availability_reason(&error),
         };
@@ -1032,6 +1207,49 @@ mod tests {
             availability_reason(&anyhow!("private synthetic worker failure")),
             QaAvailabilityReason::WorkerStartFailed
         );
+    }
+
+    #[test]
+    fn base_admission_finds_named_small_runtime_only_when_preferred_pointers_are_missing() {
+        let state = tempfile::tempdir().unwrap();
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let targets = state.path().join("qa-model-packs");
+        fs::create_dir(&targets).unwrap();
+        fs::set_permissions(&targets, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = select_target(
+            QaGeneratorPreference::Automatic,
+            BASE_RESIDENT_LIMIT + WORKSTATION_RESERVE,
+            u64::MAX,
+        )
+        .unwrap();
+        assert_eq!(target, QaModelTarget::FlanT5Base);
+        assert!(!state.path().join("qa-model-assets").exists());
+
+        let small = targets.join("flan-t5-small.json");
+        let base = targets.join("flan-t5-base.json");
+        let generic = state.path().join("qa-pack.json");
+        let write = |path: &Path, root: &str| {
+            let pointer = serde_json::json!({
+                "root": root,
+                "manifest_sha256": "a".repeat(64)
+            });
+            fs::write(path, pointer.to_string()).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        let found = || load_installed_pointer(state.path(), target).map(|pointer| pointer.root);
+        write(&small, "/named-small");
+        assert_eq!(found().unwrap(), Path::new("/named-small"));
+
+        write(&generic, "/default-pack");
+        assert_eq!(found().unwrap(), Path::new("/default-pack"));
+        write(&base, "/named-base");
+        assert_eq!(found().unwrap(), Path::new("/named-base"));
+
+        fs::write(&base, b"malformed pointer").unwrap();
+        assert!(!pointer_missing(&found().unwrap_err()));
+        fs::remove_file(&base).unwrap();
+        fs::write(&generic, b"malformed pointer").unwrap();
+        assert!(!pointer_missing(&found().unwrap_err()));
     }
 
     #[tokio::test]

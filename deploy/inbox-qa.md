@@ -1,6 +1,11 @@
 # Set up Embedded Inbox Assistant
 
-Inbox Assistant starts Off. In an Embedded workstation, turn on **Backend inference** and use the **Assistant** section in Workstation Settings to choose a model. Settings show the model’s weight download size, provisioning progress, and readiness. The Inbox composer becomes available when the selected model is ready.
+Inbox Assistant starts Off. In an Embedded workstation, turn on **Backend inference**. The **Assistant** tab in Workstation Settings shows the saved preferences, effective engines, startup progress and current generator context usage. Open Assistant from Workstation Status or use the Inbox composer. Direct questions and explicit links are available while the generator prepares.
+
+- **Generator** offers **Automatic**, **FLAN-T5 Small** (~308 MB) and **FLAN-T5 Base** (~990 MB). Automatic uses fresh headroom and verified assets to choose a worker. Explicit Small always requests Small. If explicit Base cannot fit or provision, it stays selected and the panel displays the cause.
+- **Decision** offers **Rules only**, **Julia-1 Q8** (168 MB) and **vLLM d3-edge Q8** (806 MB). The companion saves either model preference with **Rules only** effective until that exact model and runtime qualify on the current native target. Saving an unqualified choice triggers no downloads. A Decision save keeps the current generator warm.
+
+Workstation Status keeps its deterministic warnings and diagnostic checks available during startup and when inference is off.
 
 ## Verified offline packs
 
@@ -15,12 +20,14 @@ python3 scripts/fleetworks_qa_pack.py install \
 
 Use the Embedded companion’s state directory for the selected installation. The pack parent and the private state directory must belong to the current user. To replace a pack, turn the Assistant Off, import into a new version directory, then enable it.
 
-The default pack carries the verified worker, its runtime libraries and FLAN-T5 Small. Install it once on a fresh workstation. Selecting FLAN-T5 Base, GPT-2 Small, or GPT-2 Medium provisions the chosen model’s pinned assets in the workstation profile. The companion loads one model at a time. The [news classifier](../docs/wiki/code/classifier.md) uses its own model and configuration.
+The default pack carries the verified worker, its runtime libraries and FLAN-T5 Small. Install it once on a fresh workstation. With Automatic selected, the companion prefers FLAN-T5 Base when measured memory headroom allows it. It reuses a verified cached Base checkpoint or provisions its pinned files in the private profile. When Base assets cannot be provisioned, the verified Small checkpoint in the offline pack is available as a fallback. The companion loads one model at a time. The [news classifier](../docs/wiki/code/classifier.md) uses its own model and configuration.
 
 ## Host requirements
 
-The worker requires Linux Landlock ABI 3 or newer, or macOS Seatbelt. The companion starts it with read access to the verified pack, selected model assets, and system loader. Workstation Settings and Inbox show whether the pack is missing or invalid, the sandbox is unavailable, or the worker cannot start.
+The worker requires Linux Landlock ABI 3 or newer, or macOS Seatbelt. The companion starts it with read access to the verified pack, selected model assets, and system loader. Workstation Settings and Inbox show whether the pack is missing or invalid, the sandbox is unavailable, or the worker has insufficient resources or cannot start.
 
-The companion accepts `FLEETWORKS_QA_CPU_THREADS` from 1 to 4 and `FLEETWORKS_QA_MEMORY_MIB` from 512 to 6144. It uses one CPU thread by default and applies a resident-memory limit of 1,536 MiB for FLAN-T5 Small, 3,584 MiB for FLAN-T5 Base, 2,048 MiB for GPT-2 Small, and 4,608 MiB for GPT-2 Medium. The offline package smoke verifies the default pack with networking disabled.
+At startup, the companion reserves 1 GiB of available memory for the workstation and its other workloads. The worker’s resident-memory limits are 3,584 MiB for Base and 1,536 MiB for Small. If available memory cannot accommodate Small and the reserve, Settings reports insufficient resources. Model asset downloads also leave a 512 MiB reserve on the private profile filesystem. The fixture and operator ceiling `FLEETWORKS_QA_MEMORY_MIB` accepts 512 to 6144 MiB. The worker runs at reduced priority with one CPU thread by default. `FLEETWORKS_QA_CPU_THREADS` accepts 1 to 4.
+
+The offline package smoke uses a 1,536 MiB ceiling and verifies Small without network access. The Linux pack job exercises Base separately. Turning inference off cancels active work, unloads workers, and leaves the preferences and Inbox notifications available.
 
 [Assistant contract](../docs/wiki/code/assistant-chat-contract.md) · [Hosted verification](../docs/wiki/code/ci.md)

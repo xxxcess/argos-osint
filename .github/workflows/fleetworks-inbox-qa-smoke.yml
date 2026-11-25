@@ -151,18 +151,14 @@ jobs:
           # On macOS the production QA worker applies its own fail-closed
           # sandbox-exec profile; nesting profiles can deny child startup.
           offline=(env)
-          model_switch=()
           if [[ "$QA_TARGET" == x86_64-unknown-linux-gnu ]]; then
             app="$extracted/Fleetworks-linux-x86_64"
-            assets="$RUNNER_TEMP/inbox-qa-gpt2-small"
-            python3 -B scripts/fleetworks_qa_ci.py prepare-assets --chat-model gpt2-small --output "$assets"
-            model_switch=(--gpt2-small-assets "$assets")
             offline=(sudo -- unshare --net --setgid "$(id -g)" --setuid "$(id -u)" -- /usr/bin/env)
           fi
           "${offline[@]}" HOME="$RUNNER_TEMP/inbox-qa-empty-home" PYTHONDONTWRITEBYTECODE=1 \
             python3 -B scripts/fleetworks_qa_smoke.py embedded --app "$app" \
             --archive "$pack/Fleetworks-Inbox-QA-Pack-$QA_TARGET.tar.gz" --digests "$pack/digests.json" \
-            --gated-worker "$gate" "${model_switch[@]}" | tee "$evidence/embedded-$QA_TARGET.json"
+            --gated-worker "$gate" | tee "$evidence/embedded-$QA_TARGET.json"
           python3 -B .github/scripts/inbox_qa_smoke_receipt.py \
             --evidence "$evidence/embedded-$QA_TARGET.json" --target "$QA_TARGET" --head "$FLEETWORKS_HEAD"
           cp "$pack/digests.json" "$evidence/pack-digests-$QA_TARGET.json"
@@ -188,7 +184,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            at-spi2-core python3-pyatspi libglib2.0-bin dbus-daemon xvfb xauth scrot xdotool \
+            at-spi2-core python3-pyatspi libglib2.0-bin dbus-daemon xvfb xauth scrot xdotool xclip \
             libvulkan1 mesa-vulkan-drivers libxkbcommon-x11-0
           pack="$RUNNER_TEMP/inbox-qa-pack"
           gate="$RUNNER_TEMP/inbox-qa-stream-gate/qa_stream_gate"

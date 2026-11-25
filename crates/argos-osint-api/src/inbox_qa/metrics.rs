@@ -13,6 +13,7 @@ use fleetworks_contracts::context::Permission;
 use tokio::time::Instant;
 
 use super::question::Metric;
+use super::question::Question;
 use crate::activity;
 use crate::host_metrics;
 use crate::host_metrics::SharedSampler;
@@ -34,6 +35,7 @@ pub(super) async fn collect_snapshot(
     state: &ApiState,
     context: &ResolvedRequest,
     sampler: Option<&SharedSampler>,
+    intent: Question,
     boundary: i64,
     deadline: Instant,
 ) -> Vec<(Metric, Fact)> {
@@ -43,21 +45,42 @@ pub(super) async fn collect_snapshot(
     let (mut facts, jobs) = tokio::join!(
         async {
             if let Some(sampler) = sampler.filter(|_| context.permits(Permission::ReadBackend)) {
-                observe_host(sampler, boundary, deadline).await
+                observe_host(sampler, intent, boundary, deadline).await
             } else {
                 Vec::new()
             }
         },
-        tokio::time::timeout_at(deadline, observe_jobs(state, context, boundary)),
+        async {
+            if [
+                Metric::QueuedJobs,
+                Metric::RunningJobs,
+                Metric::RetryingJobs,
+                Metric::FailedJobs,
+            ]
+            .into_iter()
+            .any(|metric| intent.wants_measurement(metric))
+            {
+                tokio::time::timeout_at(deadline, observe_jobs(state, context, intent, boundary))
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        },
     );
-    facts.extend(jobs.ok().flatten().unwrap_or_default());
+    facts.extend(jobs);
     let now = Utc::now();
-    facts.retain(|(_, fact)| fresh(fact.observed_at, boundary, now));
+    facts.retain(|(metric, fact)| {
+        intent.wants_measurement(*metric) && fresh(fact.observed_at, boundary, now)
+    });
     facts
 }
 
 async fn observe_host(
     sampler: &SharedSampler,
+    intent: Question,
     boundary: i64,
     deadline: Instant,
 ) -> Vec<(Metric, Fact)> {
@@ -66,13 +89,22 @@ async fn observe_host(
         (Metric::Memory, None),
         (Metric::Disk, None),
     ];
+    let requested_is_complete = |observations: &[(Metric, Option<Fact>)]| {
+        observations
+            .iter()
+            .all(|(metric, fact)| !intent.wants_measurement(*metric) || fact.is_some())
+    };
+    if requested_is_complete(&observations) {
+        return Vec::new();
+    }
     for can_retry in [true, true, false] {
         if Instant::now() >= deadline {
             break;
         }
-        let needs_disk = observations
-            .iter()
-            .any(|(metric, fact)| *metric == Metric::Disk && fact.is_none());
+        let needs_disk = intent.wants_measurement(Metric::Disk)
+            && observations
+                .iter()
+                .any(|(metric, fact)| *metric == Metric::Disk && fact.is_none());
         let disk_required_after =
             needs_disk.then(|| boundary.max(Utc::now().timestamp_millis() - MAX_EVIDENCE_AGE_MS));
         let sample =
@@ -81,7 +113,7 @@ async fn observe_host(
         let next_sample_at = if let Some(sample) = sample {
             let now = Utc::now();
             for (metric, fact) in &mut observations {
-                if fact.is_none() {
+                if intent.wants_measurement(*metric) && fact.is_none() {
                     *fact = host_fact(&sample, *metric, boundary, now);
                 }
             }
@@ -90,10 +122,7 @@ async fn observe_host(
         } else {
             retry_floor
         };
-        if !can_retry
-            || observations.iter().all(|(_, fact)| fact.is_some())
-            || next_sample_at >= deadline
-        {
+        if !can_retry || requested_is_complete(&observations) || next_sample_at >= deadline {
             break;
         }
         tokio::time::sleep_until(next_sample_at).await;
@@ -133,6 +162,7 @@ fn host_fact(
 async fn observe_jobs(
     state: &ApiState,
     context: &ResolvedRequest,
+    intent: Question,
     boundary: i64,
 ) -> Option<Vec<(Metric, Fact)>> {
     // The same registered cohort and top-level buckets used by Workstation
@@ -146,6 +176,30 @@ async fn observe_jobs(
     let observed_at = Utc::now();
     if observed_at.timestamp_millis() <= boundary {
         return None;
+    }
+    if intent.wants_measurement(Metric::FailedJobs) {
+        let count = jobs_view::activity_failed_jobs(
+            state.repo.db(),
+            context.scope_id(),
+            &scope,
+            observed_at,
+        )
+        .await
+        .ok()
+        .and_then(|count| u64::try_from(count).ok())?;
+        let noun = if count == 1 { "job" } else { "jobs" };
+        let label = "Failed workstation jobs in the last 24 hours";
+        return Some(vec![(
+            Metric::FailedJobs,
+            Fact {
+                kind: ChatSourceKind::JobCount,
+                id: "failed_last_24_hours",
+                label,
+                text: format!("{count} {noun} failed on this workstation in the last 24 hours."),
+                observed_at,
+                measurement: QaMeasurement::new(count, QaMeasurementUnit::Jobs, label.to_owned()),
+            },
+        )]);
     }
     let counts = jobs_view::activity_job_counts(state.repo.db(), context.scope_id(), &scope)
         .await
@@ -283,7 +337,7 @@ mod tests {
 
     #[cfg(feature = "embedded")]
     #[tokio::test]
-    async fn running_jobs_count_respects_each_registered_workstation() {
+    async fn job_counts_respect_registered_workstations_and_failure_window() {
         use std::sync::Arc;
 
         use argos_osint_core::storage::bootstrap;
@@ -427,6 +481,7 @@ mod tests {
                 &state,
                 request,
                 None,
+                Question::JobsSummary,
                 0,
                 Instant::now() + Duration::from_secs(4),
             )
@@ -468,5 +523,48 @@ mod tests {
             );
             assert_eq!(fact.text, text);
         }
+
+        db.query("UPDATE $job SET state='failed', finished_at=<datetime>$at RETURN NONE")
+            .bind(("job", RecordId::new("job", "metric-fixture-job")))
+            .bind(("at", now.to_rfc3339()))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        for (request, count, noun) in [(first, 1, "job"), (second, 0, "jobs")] {
+            let facts = collect_snapshot(
+                &state,
+                request,
+                None,
+                Question::Metric(Metric::FailedJobs),
+                0,
+                Instant::now() + Duration::from_secs(4),
+            )
+            .await;
+            assert_eq!(facts.len(), 1);
+            assert_eq!(facts[0].0, Metric::FailedJobs);
+            let fact = &facts[0].1;
+            assert_eq!(fact.measurement.value, count);
+            assert_eq!(
+                fact.text,
+                format!("{count} {noun} failed on this workstation in the last 24 hours.")
+            );
+            assert!(fact.observed_at >= now);
+        }
+
+        db.query("UPDATE $job SET finished_at=<datetime>$at RETURN NONE")
+            .bind(("job", RecordId::new("job", "metric-fixture-job")))
+            .bind(("at", (now - chrono::Duration::hours(25)).to_rfc3339()))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let scope = activity::scope_for_request(&state.repo, first, None)
+            .await
+            .unwrap();
+        let count = jobs_view::activity_failed_jobs(db, first.scope_id(), &scope, now)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }

@@ -642,6 +642,37 @@ pub async fn activity_job_counts(
     Ok(counts)
 }
 
+/// Count failed top-level workstation jobs which finished in the 24 hours ending at `at`.
+pub async fn activity_failed_jobs(
+    db: &Surreal<Any>,
+    authority_scope: &str,
+    scope: &ActivityScope,
+    at: DateTime<Utc>,
+) -> Result<i64> {
+    validate_activity_scope(authority_scope, scope)?;
+    require_activity_schema(db).await?;
+    #[derive(SurrealValue)]
+    struct Count {
+        n: i64,
+    }
+    let query = format!(
+        "SELECT count() AS n FROM job WHERE parent = NONE AND kind != 'service' AND state = 'failed' AND {ELIGIBLE} AND ({}) AND finished_at >= <datetime>$since AND finished_at <= <datetime>$at GROUP ALL;",
+        activity_membership()
+    );
+    let rows: Vec<Count> = db
+        .query(query)
+        .bind(("activity_scope", authority_scope.to_owned()))
+        .bind(("activity_deployment", scope.deployment_id.clone()))
+        .bind(("activity_node", scope.workstation_id.clone()))
+        .bind(("cutoff", cutoff(at)))
+        .bind(("since", ts(at - Duration::hours(24))))
+        .bind(("at", ts(at)))
+        .await?
+        .check()?
+        .take(0)?;
+    Ok(rows.first().map_or(0, |row| row.n))
+}
+
 /// Bounded app facets from the authorized workstation cohort only.
 pub async fn activity_job_apps(
     db: &Surreal<Any>,

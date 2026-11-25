@@ -14,9 +14,22 @@ The [matte canvas design reference](docs/design/matte-canvas/README.md) defines 
 
 ## Quick start
 
-### Native app
+### macOS with Embedded
 
-Install the pinned Rust **1.95.0** toolchain and the [host build prerequisites](apps/fleetworks-desktop/README.md#build-and-provision). Build a debug app for the physical macOS or Linux x86_64 host from the repository root:
+From the repository root, run the **Build and open Fleetworks** script:
+
+```sh
+PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=1 \
+  python3 -B scripts/fleetworks_quick_start.py --profile debug --start-embedded
+```
+
+The script builds and opens the complete app for your Mac and starts Embedded in the Quick Start profile. In RustRover, **Build and open Fleetworks (Embedded)** runs the same script. Quit Fleetworks normally before rebuilding its bundle.
+
+**Enable Assistant on a new Mac.** Sign in with `gh auth login`, then add `--inbox-artifact "$QA_ARTIFACT_ID"` to the command above. Set `QA_ARTIFACT_ID` to the numeric Actions artifact ID for the **Fleetworks-Inbox-QA-Pack** from a compatible checkout's verified Embedded smoke run. Choose `x86_64-apple-darwin` on Intel or `aarch64-apple-darwin` on Apple Silicon. After installation, enable **Backend inference** in **Settings → Connection**. [Prerequisites, bundle paths, and QA pack setup](apps/fleetworks-desktop/README.md#macos-quick-start)
+
+### Linux and manual native builds
+
+Install the pinned Rust **1.95.0** toolchain and the [host build prerequisites](apps/fleetworks-desktop/README.md#build-and-provision). Run this from the repository root on macOS or Linux x86_64.
 
 ```sh
 python3 scripts/fleetworks_candidate.py build-native --target host --profile debug
@@ -28,7 +41,7 @@ The helper prints the app and manifest paths. Add `--open` to launch it. The sta
 
 **Embedded:** Choose **Embedded** and click **Start Embedded Backend** to start the bundled companion.
 
-**Distributed:** Enter the gateway URL and obtain operator approval. macOS Keychain or Linux Secret Service retains the scoped credential for reconnect, with explicit Linux session-only mode also available. [Pairing and recovery](docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target) · [Verification status](.planning/2026-11-12-native-pairing-implementation/acceptance.md)
+**Distributed:** Enter the gateway URL and obtain operator approval. macOS Keychain or Linux Secret Service retains the scoped credential for reconnect, with explicit Linux session-only mode also available. [Pairing and recovery](docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target) · [Verification status](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md)
 
 1. Start the backend with the [Docker Compose quick start below](#backend-for-the-native-app). Backend deployment requires Docker and Docker Compose **v2.20 or newer**.
 2. Open **Setup Gateway**, select **Distributed**, enter the gateway URL and choose **Connect**. Give its pairing request ID and approval code to the gateway operator for [approval](docs/wiki/code/native-connections.md#operator-approval-and-revocation).

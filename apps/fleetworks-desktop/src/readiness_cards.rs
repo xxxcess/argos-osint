@@ -40,6 +40,53 @@ impl State {
     }
 }
 
+pub(crate) fn workstation_health(state: &State) -> (&'static str, StatusTone) {
+    if state.local_backend.pressure_paused.is_some() && state.is_local_backend() {
+        return ("Resource pressure", StatusTone::Warn);
+    }
+    if state.registration.context.is_none() {
+        return ("Registration required", StatusTone::Warn);
+    }
+    match &state.readiness {
+        Load::Idle => ("Health unchecked", StatusTone::Neutral),
+        Load::Pending | Load::Loading => ("Checking health", StatusTone::Info),
+        Load::Failed(_) => ("Health checks unavailable", StatusTone::Warn),
+        Load::Ready(readiness) => {
+            let checks = readiness.checks.iter().filter(|check| {
+                check.id != ReadinessCheckId::ClassifierTraining
+                    && check.state != ReadinessState::NotApplicable
+            });
+            let mut observed = false;
+            let mut unresolved = false;
+            let mut attention = false;
+            for check in checks {
+                observed = true;
+                if !state.readiness_check_fresh(check) {
+                    unresolved = true;
+                    continue;
+                }
+                let status = CheckStatus::of(check, true);
+                if status == CheckStatus::Failed {
+                    return ("Service failure", StatusTone::Err);
+                }
+                attention |= status.is_blocker();
+                unresolved |= status != CheckStatus::Ready;
+            }
+            if attention {
+                ("Needs attention", StatusTone::Warn)
+            } else if state.readiness_error.is_some() {
+                ("Health checks unsynced", StatusTone::Warn)
+            } else if !observed {
+                ("Health unchecked", StatusTone::Neutral)
+            } else if unresolved {
+                ("Checks unresolved", StatusTone::Neutral)
+            } else {
+                ("Workstation ready", StatusTone::Ok)
+            }
+        }
+    }
+}
+
 pub(crate) fn workstation_section(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
     let open = state.workstation_status_checks_open;
     let connected = state.connected();

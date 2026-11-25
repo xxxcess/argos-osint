@@ -1,0 +1,51 @@
+{
+  "runtime": {
+    "tag": "b12681",
+    "revision": "d141011c25781519123be51019441cd710260cb2",
+    "archives": {
+      "x86_64-unknown-linux-gnu": {
+        "file": "llama-b12681-bin-ubuntu-x64.tar.gz",
+        "bytes": 23377794,
+        "sha256": "61f04060b691efc99708ff9ca59564a24de3073543f35b1c084e1b8cb73e6da0"
+      },
+      "x86_64-apple-darwin": {
+        "file": "llama-b12681-bin-macos-x64.tar.gz",
+        "bytes": 12540864,
+        "sha256": "1e1afbe507aaaf080ba97a1afe2913657fc0e84510b49a3d764cc33326d4bdcb"
+      },
+      "aarch64-apple-darwin": {
+        "file": "llama-b12681-bin-macos-arm64.tar.gz",
+        "bytes": 16820137,
+        "sha256": "7d1e633ba29c9c2171149ef5b8e9d0e4c13d3599388d7883169369c18f2e9c23"
+      }
+    }
+  },
+  "models": {
+    "julia-1": {
+      "repository": "ggml-org/Julia-1-GGUF",
+      "revision": "1e6b48a6983d7467f8eedc2cb0d21267b5fc052d",
+      "file": "Julia-1-Q8_0.gguf",
+      "bytes": 168166496,
+      "sha256": "1ea6a7e87156eeeda88cb7a36a61265b37ba7b993897b7289b99aea5b5e47069",
+      "license": "Apache-2.0"
+    },
+    "liquid-d1-omni-600m": {
+      "repository": "LiquidAI/d1-omni-600M-GGUF",
+      "revision": "8eb2d2a1c5404bba8a34a88bd8e159c242197d51",
+      "file": "d1-omni-600M-Q8_0.gguf",
+      "bytes": 407207584,
+      "sha256": "cd94463f4cac9c700ec6750df8df005bb6846de410e159d1f5e985e1171693d3",
+      "license": "LFM Open License v1.0",
+      "license_bytes": 10572,
+      "license_sha256": "9953509cbd8c1c6ce7b06ddf74fcc204a892692316201dd8f7400a84790d4120"
+    },
+    "vllm-d3-edge": {
+      "repository": "ggml-org/vllm-d3-edge-GGUF",
+      "revision": "e59a4bd76e00c243e08f01182f55fd1893142d95",
+      "file": "vllm-d3-edge-Q8_0.gguf",
+      "bytes": 806232480,
+      "sha256": "bdffd3a44a2535d8672d3ca7cf110c61bf1fe95788a3d249f18b3310cc0f85cd",
+      "license": "Apache-2.0"
+    }
+  }
+}

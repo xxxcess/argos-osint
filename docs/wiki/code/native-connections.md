@@ -1,6 +1,6 @@
 # Native connections and registered context
 
-[Client](../../../apps/fleetworks-desktop/README.md) · [Protected identity](native-workspaces.md) · [Control/design guide](native-design-system.md) · [Verification](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md)
+[Client](../../../apps/fleetworks-desktop/README.md) · [Protected identity](native-workspaces.md) · [Control/design guide](native-design-system.md) · [Verification](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md)
 
 [![Native pairing and authenticated reconnect](../../diagrams/native-connections.svg)](../../diagrams/native-connections.html)
 
@@ -45,6 +45,8 @@ The toolbar **Inbox** bell shows the unread count and opens a full-height drawer
 
 Filter this workstation’s observed notifications by text. Groups collect related job, service, or connection changes and show time headings. Unread groups lead, ordered by their oldest unread item. Expand a group to read items in chronological order. Opening the drawer leaves items unread. An unread dot disappears after you close an opened item. Use the check icon on a group header to mark that group read. **Open job** goes to a tracked job and **View status** opens the matching readiness details on Workstation Status. Background actor indexing is a readiness update and leaves the Jobs & Logs count unchanged. A hairline divides notifications from the Inbox transcript. New notifications and submitted turns enter with a short upward slide. Reduced Motion shows them directly.
 
+When Backend inference is on, an Embedded companion with the triage capability also offers **Find related activity** for eligible Jobs and Inbox items. Observed notices retain the typed readiness check identity. **Current status** resolves the check again at lookup time. A result opens a job or check on operator click and normal registered visibility still applies. **Explain in Assistant** fills a question and source in the existing composer. [Assistant triage](assistant-chat-contract.md#jobs-and-inbox-triage)
+
 The app keeps at most 50 items and clears them when the connection authority changes. Notifications cover visible job completion, readiness transitions, and connection success or failure. Item text uses fixed wording and bounded titles without exposing error text, URLs, or credentials.
 
 The contextual **Assistant** dock is built and tested but **disabled** (`Assistant::enabled` is false). It needs the typed chat capability, which the backend does not advertise yet, so sending would stay gated even if shown. While it is disabled the original context rail stays in place. When enabled it docks at 380 pt if the center view keeps at least 640 pt, stays hidden otherwise, and floats over the right edge only when the operator asks. Enter sends, Shift+Enter adds a line, and an input method that is composing keeps Enter. The draft stays with its pinned context, and a new connection authority clears both.
@@ -57,7 +59,7 @@ Cmd/Ctrl+K opens a fixed list of navigation actions for pages, Connection settin
 
 ## Pairing and Keychain
 
-**Distributed flow:** Gateway URL → operator approval once → macOS Keychain or Linux D-Bus Secret Service (or explicit Linux session-only mode) → authenticated reconnect. [Verification status](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md) records actual checks; injected secret-store tests do not establish live Keychain/Secret Service or installed-app passes.
+**Distributed flow:** Gateway URL → operator approval once → macOS Keychain or Linux D-Bus Secret Service (or explicit Linux session-only mode) → authenticated reconnect. [Verification status](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md) records actual checks; injected secret-store tests do not establish live Keychain/Secret Service or installed-app passes.
 
 | Step | Behavior |
 | --- | --- |
@@ -169,4 +171,4 @@ Cycles use bounded workstation summaries and revision/idempotency-bound associat
 
 [Contracts/SDK](../../../crates/fleetworks-contracts/src/) · [Native effects](../../../apps/fleetworks-desktop/src/) · [Protected settings](../../../crates/fleetworks-workstation/src/native/) · [Registry](../../../crates/argos-osint-core/src/storage/connect_registry.rs) · [Job context](../../../crates/argos-osint-core/src/storage/job_context.rs) · [Gateway boundary](../../../crates/argos-osint-api/src/context_boundary.rs)
 
-The [acceptance tracker](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md) separates implementation, actual focused/gate results, inspected Runtime evidence, hosted platforms and installed-app checks. A source audit or generated image is not runtime approval.
+The [acceptance tracker](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md) separates implementation, actual focused/gate results, inspected Runtime evidence, hosted platforms and installed-app checks. A source audit or generated image is not runtime approval.

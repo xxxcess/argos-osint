@@ -10,7 +10,7 @@ The existing NativeWorker owns durable ingestion and explicit rebuild Jobs. Sour
 transactions record projection intent, the gateway filters current canonical
 eligibility, and deployment assets provide a separate private image and volume.
 Executed evidence and remaining cutover gates are tracked in the
-[cutover acceptance tracker](../../.planning/2026-11-11-rune-macos-cutover/acceptance.md).
+[cutover acceptance tracker](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-11-rune-macos-cutover/acceptance.md).
 Host fixtures do not establish Linux deployment performance or both architectures.
 
 ## Dependency and persistence contract

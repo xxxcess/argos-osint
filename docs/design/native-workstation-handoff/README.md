@@ -2,7 +2,7 @@
 
 ## Start here
 
-This package preserves the earlier native-app redesign and its historical structural mockups. Start new visual work at the approved [matte canvas reference](../matte-canvas/README.md) and [current implementation handoff](../../../.planning/2026-11-16-matte-canvas/handoff.md).
+This package preserves the earlier native-app redesign and its historical structural mockups. Start new visual work at the approved [matte canvas reference](../matte-canvas/README.md) and [current implementation handoff](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-16-matte-canvas/handoff.md).
 
 1. Read [the implementation handoff](argos_workstation_identity_implementation_spec.md) for execution order, verified edit locations, workstation identity migration, credential provisioning, API work and acceptance.
 2. Read [the design-system guide](argos_native_design_system_guide.md) for the native control allowlist, screen composition, matte material recipes, brand palette and interaction states.

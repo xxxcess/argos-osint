@@ -6,20 +6,27 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shlex
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 
 from fleetworks_local_backend_smoke import check_zero_bound_sockets, resolve_companion_binary
 from fleetworks_qa_pack import install_gated_fixture
+from fleetworks_qa_smoke import FIXTURE_MODEL_MEMORY_MIB
 
 SUMMARY_QUESTION = "What is the current workstation readiness?"
 MEMORY_QUESTION = "What's our RAM consumption right now?"
 SOURCES_TOGGLE = "inbox-qa-sources-toggle"
 SOURCES_CONTENT = "inbox-qa-sources"
+DRAWER = "inbox-layer"
+COMPOSER = "inbox-qa-composer"
+COMPOSER_LABEL = "Question for the Inbox assistant"
+WORKSTATION_ASSISTANT = "workstation-open-assistant"
 TERMINAL = {"answered", "insufficient_context", "failed", "canceled"}
 BUNDLED_ACTOR_ROWS = 94_987
 
@@ -74,7 +81,9 @@ def companion_proxy(home, app):
     proxy = home / "argos-api-host"
     journal = home / "qa-ipc-journal.jsonl"
     observer = Path(__file__).resolve().with_name("fleetworks_qa_ipc_observer.py")
-    command = ["/usr/bin/python3", "-B", str(observer), str(resolve_companion_binary(app=app)), str(journal)]
+    # The real launcher strips ambient settings before starting the fixture proxy.
+    command = ["/usr/bin/env", f"FLEETWORKS_QA_MEMORY_MIB={FIXTURE_MODEL_MEMORY_MIB}",
+               "/usr/bin/python3", "-B", str(observer), str(resolve_companion_binary(app=app)), str(journal)]
     proxy.write_text("#!/bin/sh\nexec " + shlex.join(command) + ' "$@"\n')
     proxy.chmod(0o700)
     return proxy, journal
@@ -92,6 +101,69 @@ def screen_bounds(node, atspi):
     if width <= 0 or height <= 0 or x < 0 or y < 0:
         return None
     return x, y, width, height
+
+
+def app_roots(app, registry):
+    return (node for node in registry.getDesktop(0) if node is not None and node.get_process_id() == app.pid)
+
+
+def query_text(node):
+    try:
+        return node.queryText()
+    except NotImplementedError:
+        # AccessKit exports the AT-SPI Text interface only when text runs exist.
+        return None
+
+
+def read_x11_clipboard():
+    try:
+        result = subprocess.run(["xclip", "-selection", "clipboard", "-out"], stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, check=False, timeout=1)
+        return result.stdout if result.returncode == 0 else None
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def retain_focus_diagnostics(app, registry, atspi, output, error):
+    from gi.repository import GLib
+
+    evidence = {"failure": str(error)[:240], "app_pid": app.pid, "nodes": []}
+    try:
+        focus = subprocess.check_output(["xdotool", "getwindowfocus"], text=True, timeout=3).strip()
+        evidence["x11_focused_window"] = focus if focus.isdecimal() else None
+    except (OSError, subprocess.SubprocessError):
+        evidence["x11_focused_window"] = None
+
+    states = {"focused": atspi.STATE_FOCUSED, "focusable": atspi.STATE_FOCUSABLE,
+              "editable": atspi.STATE_EDITABLE, "enabled": atspi.STATE_ENABLED,
+              "showing": atspi.STATE_SHOWING}
+    try:
+        pending = [(node, 0) for node in app_roots(app, registry)]
+        for _ in range(96):
+            if not pending:
+                break
+            node, depth = pending.pop()
+            try:
+                state = node.getState()
+                if state.contains(atspi.STATE_DEFUNCT):
+                    continue
+                pending.extend((child, depth + 1) for child in reversed(list(node)) if child is not None)
+                flags = {name: state.contains(value) for name, value in states.items()}
+                row = {"depth": depth, "id": (node.get_accessible_id() or "")[:96], "role": node.getRoleName(),
+                       "name": (node.name or "")[:120], "states": flags, "bounds": screen_bounds(node, atspi)}
+                if flags["editable"] and (flags["focused"] or row["name"] == COMPOSER_LABEL):
+                    edit = query_text(node)
+                    row["text_interface"] = edit is not None
+                    if edit is not None:
+                        row["text_characters"] = edit.characterCount
+                        row["text"] = edit.getText(0, min(row["text_characters"], 256))
+                evidence["nodes"].append(row)
+            except (GLib.Error, NotImplementedError):
+                continue
+        evidence["truncated"] = bool(pending)
+    except GLib.Error:
+        evidence["tree_unavailable"] = True
+    (output / "failed-accessibility.json").write_text(json.dumps(evidence, indent=2) + "\n")
 
 
 def release_gate(companion, worker):
@@ -154,9 +226,7 @@ def settled_turn(pages, first, expected_state):
 def test_window(app, registry, atspi, home, worker, pointer, digests, journal, output):
     def find(key, *, button=False, label=None):
         # Match the process we launched, even if another application is registered.
-        for window in registry.getDesktop(0):
-            if window is None or window.get_process_id() != app.pid:
-                continue
+        for window in app_roots(app, registry):
             for node in descendants(window):
                 if (key is not None and node.get_accessible_id() != key
                         or label is not None and node.name != label):
@@ -169,7 +239,7 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
                 return node
         return None
 
-    def button(key, label=None):
+    def button(key, label=None, *, timeout=90):
         def activate():
             node = find(key, label=label, button=True)
             if node is None:
@@ -178,7 +248,7 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
                 raise RuntimeError(f"Fleetworks could not activate {key}")
             return True
 
-        wait_for(activate, app, key)
+        wait_for(activate, app, key, timeout=timeout)
 
     def sources_ready(expanded):
         toggle = find(SOURCES_TOGGLE, button=True)
@@ -220,24 +290,75 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
     button("inbox-qa-toggle", "Turn On")
     button("startup-inbox-qa-continue")
     button("startup-data-continue", "Open Workstation")
+
+    def shown_drawer():
+        drawer = find(DRAWER)
+        if screen_bounds(drawer, atspi) is not None and screen_bounds(find("inbox-close"), atspi) is not None:
+            return drawer
+        return None
+
+    def shown_composer():
+        if shown_drawer() is None:
+            return None
+        wrapper = find(COMPOSER)
+        if wrapper is None:
+            return None
+        # Rune Kit gives the outer styled TextArea the application key. Focus
+        # and text belong to its named editable child, not the containing box.
+        fields = [
+            node for node in descendants(wrapper)
+            if node.name == COMPOSER_LABEL
+            and node.getState().contains(atspi.STATE_EDITABLE)
+            and screen_bounds(node, atspi) is not None
+        ]
+        require(len(fields) <= 1, "Inbox exposed more than one editable question field")
+        return fields[0] if fields else None
+
     button("inbox-toggle")
+    wait_for(shown_composer, app, "Inbox drawer and editable composer opened from toolbar", timeout=4)
+    button("inbox-close", timeout=4)
+    wait_for(lambda: True if shown_drawer() is None else None, app, "Inbox drawer closed", timeout=4)
+    button(WORKSTATION_ASSISTANT, "Open Assistant", timeout=4)
+    wait_for(shown_drawer, app, "Inbox drawer opened from Workstation Status", timeout=4)
 
     def submit(question, *, timeout=20):
-        x, y, width, height = wait_for(
-            lambda: screen_bounds(find("inbox-qa-composer"), atspi), app, "available QA composer", timeout=timeout,
-        )
         # A bare Xvfb display has no window manager to grant keyboard focus.
         windows = subprocess.check_output(
             ["xdotool", "search", "--onlyvisible", "--name", "^Fleetworks$"], text=True, timeout=5,
         ).split()
         require(len(windows) == 1, "expected one visible Fleetworks window on the fixture display")
-        subprocess.run(
-            ["xdotool", "windowfocus", "--sync", windows[0],
-             "mousemove", str(x + width // 2), str(y + height // 2), "click", "1"],
-            check=True, timeout=5,
-        )
+        subprocess.run(["xdotool", "windowfocus", "--sync", windows[0]], check=True, timeout=5)
+
+        def focus_composer():
+            field = shown_composer()
+            if field is None:
+                return None
+            if field.getState().contains(atspi.STATE_FOCUSED):
+                return field
+            require(field.queryComponent().grabFocus(), "Fleetworks composer rejected accessible focus")
+            return None
+
+        wait_for(focus_composer, app, "focused editable QA composer", timeout=timeout)
         subprocess.run(["xdotool", "type", "--clearmodifiers", question], check=True, timeout=5)
-        wait_for(lambda: find("inbox-qa-send", button=True), app, "enabled QA Send")
+
+        def focused_with_send():
+            field = shown_composer()
+            if field is not None and field.getState().contains(atspi.STATE_FOCUSED):
+                return find("inbox-qa-send", button=True)
+            return None
+
+        wait_for(focused_with_send, app, "open Inbox with focused editable composer and enabled Send", timeout=8)
+        # Prove this copy came from the current editor even when the preceding turn
+        # used the same question. The display and its clipboard belong to this fixture.
+        sentinel = ("qa-copy-" + secrets.token_hex(8)).encode()
+        subprocess.run(["xclip", "-selection", "clipboard", "-in"], input=sentinel,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=3)
+        wait_for(lambda: True if read_x11_clipboard() == sentinel else None, app,
+                 "unique X11 clipboard sentinel", timeout=3)
+        subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+a", "ctrl+c"], check=True, timeout=5)
+        expected = question.encode()
+        wait_for(lambda: focused_with_send() if read_x11_clipboard() == expected else None, app,
+                 "exact question copied from the focused QA composer", timeout=5)
         submitted_at = time.monotonic()
         # Submit via the already-focused composer, using the same keyboard path as an operator.
         subprocess.run(["xdotool", "key", "--clearmodifiers", "Return"], check=True, timeout=5)
@@ -381,6 +502,9 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         "runtime": receipts[0]["transport"], "transport_attestation": receipts[0],
         "target": digests["target"], "source_sha": digests["source_sha"],
         "graphical": "x11", "first_citation_while_running": True,
+        "assistant_open_paths": ["inbox_toolbar", "workstation_status"],
+        "focused_editable_and_exact_typed_text": True,
+        "typed_question_verification": "x11_clipboard",
         "sources_default_collapsed": True, "sources_retained_after_completion": True,
         "sources_retained_after_cancel": True,
         "stop_enabled_before_release": True, "same_turn": True,
@@ -433,7 +557,11 @@ def main():
                                "--local-backend-bin", str(proxy)], env=environment) as app:
             try:
                 test_window(app, pyatspi.Registry, pyatspi, home, worker, pointer, digests, journal, output)
-            except Exception:
+            except Exception as error:
+                try:
+                    retain_focus_diagnostics(app, pyatspi.Registry, pyatspi, output, error)
+                except Exception as diagnostics:
+                    print(f"Could not retain AT-SPI diagnostics: {type(diagnostics).__name__}", file=sys.stderr)
                 if app.poll() is None:
                     try:
                         subprocess.run(["scrot", "--overwrite", str(output / "failed-stage.png")], timeout=3)

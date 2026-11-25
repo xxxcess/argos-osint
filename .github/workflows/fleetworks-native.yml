@@ -150,6 +150,7 @@ jobs:
             --scene workstation-settings-assistant --scene workstation-settings-assistant-provisioning \
             --scene workstation-status-checks-mixed --scene workstation-status-checks-mixed-matte \
             --scene inbox-drawer --scene inbox-drawer-matte \
+            --scene jobs-related-activity --scene inbox-related-activity-limited \
             --size 1440x860 --size 640x480 --scale 1 \
             --script registration-ready=apps/fleetworks-desktop/tests/fixtures/scripts/workstation-settings-open.json \
             --script-expect-key registration-ready=workstation-settings-body

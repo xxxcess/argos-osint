@@ -20,9 +20,9 @@ Understand the product, then follow its implementation. This is the maintained e
 | [docs/wiki/](wiki/index.md) | Two routes, searchable tags and wiki maintenance |
 | [docs/diagrams/](diagrams.md) | Diagram catalog; HTML pages and matching SVG figures |
 | [Core crate](../crates/argos-osint-core) | Domain pipelines and storage; [module map](wiki/code/core.md) |
-| [Native app](../apps/fleetworks-desktop) | [Visual control guide](wiki/code/native-design-system.md) · [Pairing setup](diagrams/native-connections.html) · [Keychain/recovery](wiki/code/native-connections.md#pairing-and-keychain-agreed-target) · [Verification](../.planning/2026-11-12-native-pairing-implementation/acceptance.md) · [Identity](wiki/code/native-workspaces.md) |
-| [Approved matte canvas theme](design/matte-canvas/README.md) | Exact rendering recipes, four concept screens, logo/splash, continuous scrolling and stable live state; [execution handoff](../.planning/2026-11-16-matte-canvas/handoff.md) |
-| [Native workstation redesign](design/native-workstation-handoff/README.md) | Supplied references, [design system](wiki/code/native-design-system.md) and [execution tracking](../.planning/2026-11-12-native-workstation-redesign/handoff.md); verification status is tracked separately |
+| [Native app](../apps/fleetworks-desktop) | [Visual control guide](wiki/code/native-design-system.md) · [Pairing setup](diagrams/native-connections.html) · [Keychain/recovery](wiki/code/native-connections.md#pairing-and-keychain-agreed-target) · [Verification](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md) · [Identity](wiki/code/native-workspaces.md) |
+| [Approved matte canvas theme](design/matte-canvas/README.md) | Exact rendering recipes, four concept screens, logo/splash, continuous scrolling and stable live state; [execution handoff](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-16-matte-canvas/handoff.md) |
+| [Native workstation redesign](design/native-workstation-handoff/README.md) | Supplied references, [design system](wiki/code/native-design-system.md) and [execution tracking](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-workstation-redesign/handoff.md); verification status is tracked separately |
 | [Distributed Docker backend](../deploy/README.md) | Independent Linux services, purpose credentials and persistent backend data; [retired terminal disposition](archive/cli-retirement.md) |
 | [Actor search](wiki/code/actor-search.md) | Private Tantivy projection, canonical discovery, visible acknowledgements and verification boundaries |
 | [Jobs persistence](wiki/code/jobs-persistence.md) | Planned SQLite state, embedded RocksDB delivery, migration scopes and acceptance |
@@ -34,7 +34,7 @@ Understand the product, then follow its implementation. This is the maintained e
 | [.opencode/](../.opencode) | Role/command/skill configuration; [guide](wiki/code/opencode-v2.md) |
 | [.agents/skills/](../.agents/skills) | Repository skills for other agent hosts; [gsd nightly workflow](../.agents/skills/gsd/SKILL.md#nightly-workflow-canonical) (scoped Linux x86_64 native and backend first pass, then other affected targets once first-pass CI succeeds) |
 | [.github/workflows/](../.github/workflows) | First-pass Linux review, second-pass platform checks and release automation. [CI guide](wiki/code/ci.md) |
-| [.planning/](../.planning) | Named task work; [format and retention](wiki/code/planning-artifacts.md) |
+| `.planning/` | Named task work; [format and retention](wiki/code/planning-artifacts.md) |
 
 Search by [tag](wiki/tags.md) when a concern crosses directories. Follow source links, search symbols/callers in the relevant directories, and verify against tests. Navigation requires no generated code graph.
 

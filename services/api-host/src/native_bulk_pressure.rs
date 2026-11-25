@@ -1,8 +1,6 @@
 //! Worker-local memory/disk gate for bulk setup only. Included as a child of
 //! setup_jobs after its compiling checkpoint; Tools never calls this gate.
 
-#[cfg(unix)]
-use std::ffi::CString;
 use std::fs::File;
 use std::io::Read;
 use std::io::Seek;
@@ -443,7 +441,7 @@ fn measure(workspace: &Path, reclaim_from: Option<u64>) -> Measurement {
     };
     Measurement {
         resident_bytes: resident,
-        workspace_free_bytes: free_bytes(workspace),
+        workspace_free_bytes: argos_osint_core::hardware::filesystem_available_bytes(workspace),
     }
 }
 
@@ -498,30 +496,6 @@ fn resident_bytes() -> Option<u64> {
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     None
-}
-
-fn free_bytes(workspace: &Path) -> Option<u64> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        let path = CString::new(workspace.as_os_str().as_bytes()).ok()?;
-        let mut output = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-        // SAFETY: path is NUL terminated and output is valid syscall storage.
-        if unsafe { libc::statvfs(path.as_ptr(), output.as_mut_ptr()) } != 0 {
-            return None;
-        }
-        // SAFETY: successful statvfs initialized the complete output.
-        let output = unsafe { output.assume_init() };
-        // Field widths vary across Unix; retain the u64 overflow boundary.
-        let available = u128::from(output.f_bavail);
-        let fragment_size = u128::from(output.f_frsize);
-        u64::try_from(available * fragment_size).ok()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = workspace;
-        None
-    }
 }
 
 #[cfg(test)]

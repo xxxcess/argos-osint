@@ -225,6 +225,8 @@ jobs:
             --scene pairing-keychain-denied \
             --scene assistant-open \
             --scene inbox-drawer \
+            --scene jobs-related-activity \
+            --scene inbox-related-activity-limited \
             --scene command-panel \
             --scene catalog \
             --scene workstation-status-checks-mixed-matte \

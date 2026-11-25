@@ -1,12 +1,18 @@
 //! Transactional Inbox state. Model processes never receive this repository.
 
+use std::future::Future;
+
 use chrono::Utc;
+use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::chat::QaConversationReply;
+use fleetworks_contracts::chat::QaDecisionPreference;
 use fleetworks_contracts::chat::QaEvent;
 use fleetworks_contracts::chat::QaFinding;
+use fleetworks_contracts::chat::QaGeneratorPreference;
 use fleetworks_contracts::chat::QaMeasurement;
 use fleetworks_contracts::chat::QaModelTarget;
+use fleetworks_contracts::chat::QaRelatedActivity;
 use fleetworks_contracts::chat::QaTurn;
 use fleetworks_contracts::chat::QaTurnNotice;
 use fleetworks_contracts::chat::QaTurnRequest;
@@ -36,8 +42,10 @@ use super::connect_registry;
 use super::connect_registry::RegistryAuthority;
 use super::job_dispatch;
 use super::jobs;
+use super::jobs_view;
 use super::repo::Repository;
 use super::tx::run_tx;
+use super::tx::Committed;
 use super::tx::RetryPolicy;
 use super::tx::Tx;
 use super::tx::TxError;
@@ -61,6 +69,10 @@ DEFINE FIELD IF NOT EXISTS epoch ON inbox_qa_settings TYPE string;
 DEFINE FIELD IF NOT EXISTS admission ON inbox_qa_settings TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS changed_at ON inbox_qa_settings TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS model_target ON inbox_qa_settings TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS generator_preference ON inbox_qa_settings TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS decision_preference ON inbox_qa_settings TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS history_generation ON inbox_qa_settings TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS decision_generation ON inbox_qa_settings TYPE option<int>;
 DEFINE TABLE IF NOT EXISTS inbox_qa_replica SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS generation ON inbox_qa_replica TYPE int;
 DEFINE FIELD IF NOT EXISTS owner ON inbox_qa_replica TYPE string DEFAULT '';
@@ -215,6 +227,27 @@ impl Source {
     }
 }
 
+/// An independently verified observation, retained for a later explicit recheck.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct Observation {
+    pub source: ChatSourceReference,
+    pub observed_at: String,
+    pub value: ObservationValue,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub enum ObservationValue {
+    State(String),
+    Measurement(QaMeasurement),
+}
+
+/// Trusted request metadata that is independent of any model reply.
+pub struct AdmissionMetadata {
+    pub subject: Option<ChatSourceReference>,
+    pub observation: Option<Observation>,
+    pub related_activity: Option<QaRelatedActivity>,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 struct Exchange {
     actor: Actor,
@@ -224,6 +257,53 @@ struct Exchange {
     evidence: Option<FrozenEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resolved_question: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolved_source: Option<ChatSourceReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observation: Option<Observation>,
+    /// Older rows used the history generation for both the worker and transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generator_generation: Option<i64>,
+}
+
+impl Exchange {
+    fn subject(&self) -> Option<&ChatSourceReference> {
+        self.resolved_source.as_ref().or(self.source.as_ref())
+    }
+}
+
+fn private_subject(source: &ChatSourceReference) -> bool {
+    matches!(source.kind, ChatSourceKind::Job | ChatSourceKind::Cycle)
+}
+
+async fn subject_visible_in(
+    tx: &Tx,
+    actor: &Actor,
+    source: Option<&ChatSourceReference>,
+) -> Result<bool, TxError> {
+    let Some(source) = source.filter(|source| private_subject(source)) else {
+        return Ok(true);
+    };
+    let query = format!(
+        "SELECT VALUE true FROM ONLY $job WHERE kind != 'service' AND {} AND ({}) AND ({})",
+        jobs_view::ELIGIBLE,
+        jobs_view::activity_membership(),
+        jobs_view::activity_private()
+    );
+    let mut result = jobs::run(
+        tx,
+        tx.query(query)
+            .bind(("job", jobs::rid("job", &source.id)))
+            .bind(("activity_scope", actor.scope.clone()))
+            .bind(("activity_deployment", actor.context.deployment_id.clone()))
+            .bind(("activity_node", actor.context.workstation_id.clone()))
+            .bind((
+                "cutoff",
+                jobs::ts(Utc::now() - chrono::Duration::hours(jobs::EXECUTION_WINDOW_HOURS)),
+            )),
+    )
+    .await?;
+    Ok(jobs::take::<Option<bool>>(&mut result, 0)? == Some(true))
 }
 
 #[derive(Clone, Debug, Default, SurrealValue)]
@@ -233,7 +313,10 @@ struct SettingsRow {
     generation: i64,
     epoch: String,
     changed_at: i64,
-    model_target: Option<String>,
+    generator_preference: Option<String>,
+    decision_preference: Option<String>,
+    history_generation: Option<i64>,
+    decision_generation: Option<i64>,
 }
 
 #[derive(SurrealValue)]
@@ -249,25 +332,42 @@ struct ExchangeRow {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Setting {
     pub enabled: bool,
+    /// Enablement and generator worker generation.
     pub generation: i64,
+    /// Enablement and decision worker generation.
+    pub decision_generation: i64,
+    /// Enablement generation used to retain transcripts across model changes.
+    pub history_generation: i64,
     pub revision: i64,
     pub changed_at_ms: i64,
-    pub model_target: QaModelTarget,
+    pub generator_preference: QaGeneratorPreference,
+    pub decision_preference: QaDecisionPreference,
 }
 
 impl SettingsRow {
-    fn state(&self, epoch: &str) -> Setting {
-        Setting {
+    fn state(&self, epoch: &str) -> Result<Setting, TxError> {
+        let generator_preference = match self.generator_preference.as_deref() {
+            None | Some("automatic") => QaGeneratorPreference::Automatic,
+            Some("flan_t5_small") => QaGeneratorPreference::FlanT5Small,
+            Some("flan_t5_base") => QaGeneratorPreference::FlanT5Base,
+            Some(_) => return Err(abort("invalid_store")),
+        };
+        let decision_preference = match self.decision_preference.as_deref() {
+            None | Some("rules_only") => QaDecisionPreference::RulesOnly,
+            Some("julia1_q8") => QaDecisionPreference::Julia1Q8,
+            Some("vllm_d3_edge_q8") => QaDecisionPreference::VllmD3EdgeQ8,
+            Some(_) => return Err(abort("invalid_store")),
+        };
+        Ok(Setting {
             enabled: self.enabled && self.epoch == epoch,
             generation: self.generation,
+            decision_generation: self.decision_generation.unwrap_or(self.generation),
+            history_generation: self.history_generation.unwrap_or(self.generation),
             revision: self.revision,
             changed_at_ms: self.changed_at,
-            model_target: self
-                .model_target
-                .as_deref()
-                .and_then(QaModelTarget::from_slug)
-                .unwrap_or_default(),
-        }
+            generator_preference,
+            decision_preference,
+        })
     }
 }
 
@@ -286,7 +386,14 @@ fn decode(payload: &str) -> Result<Exchange, TxError> {
 async fn settings_row(tx: &Tx) -> Result<SettingsRow, TxError> {
     let mut result = jobs::run(
         tx,
-        tx.query("SELECT enabled,revision,generation,epoch,changed_at,model_target FROM ONLY inbox_qa_settings:current"),
+        tx.query(
+            "SELECT enabled,revision,generation,epoch,changed_at,
+                    (generator_preference ?? 'automatic') AS generator_preference,
+                    (decision_preference ?? 'rules_only') AS decision_preference,
+                    (history_generation ?? generation) AS history_generation,
+                    (decision_generation ?? generation) AS decision_generation
+             FROM ONLY inbox_qa_settings:current",
+        ),
     )
     .await?;
     Ok(jobs::take::<Option<SettingsRow>>(&mut result, 0)?.unwrap_or_default())
@@ -295,7 +402,7 @@ async fn settings_row(tx: &Tx) -> Result<SettingsRow, TxError> {
 async fn settings_in(tx: &Tx) -> Result<Setting, TxError> {
     let row = settings_row(tx).await?;
     let deployment = connect_registry::deployment_state_in(tx).await?;
-    let mut observed = row.state(&deployment.configuration_epoch);
+    let mut observed = row.state(&deployment.configuration_epoch)?;
     observed.enabled &= deployment.admission_open;
     Ok(observed)
 }
@@ -323,6 +430,20 @@ pub async fn setting(repo: &Repository) -> Result<Setting, TxError> {
     })
     .await?
     .value)
+}
+
+// The companion shares its repository between IPC, the executor and the
+// health sampler. Queue their writes before opening a database snapshot so
+// background work cannot repeatedly invalidate a settings transaction.
+// Transcript reads with registration validation also write the registry guard.
+// The database still fences independently connected writers.
+async fn write<T, F, Fut>(repo: &Repository, body: F) -> Result<Committed<T>, TxError>
+where
+    F: FnMut(Tx) -> Fut,
+    Fut: Future<Output = Result<T, TxError>>,
+{
+    let _writer = repo.lock_inbox_qa_writer().await;
+    run_tx(repo.db(), RetryPolicy::default(), body).await
 }
 
 #[derive(SurrealValue)]
@@ -367,42 +488,139 @@ pub async fn event_changes(
     }))
 }
 
-/// Serialize settings updates with native registration rebind and reset.
+/// Toggle backend inference while preserving both saved preferences.
 pub async fn set(
     repo: &Repository,
     actor: &Actor,
     expected_revision: i64,
     enabled: bool,
-    model_target: Option<QaModelTarget>,
 ) -> Result<Setting, TxError> {
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+    update(
+        repo,
+        actor,
+        expected_revision,
+        SettingUpdate {
+            enabled: Some(enabled),
+            ..SettingUpdate::default()
+        },
+    )
+    .await
+}
+
+/// Fields provided by an authorized, revisioned settings update.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SettingUpdate {
+    pub enabled: Option<bool>,
+    pub generator_preference: Option<QaGeneratorPreference>,
+    pub decision_preference: Option<QaDecisionPreference>,
+}
+
+/// Serialize settings updates with native registration rebind and reset.
+pub async fn update(
+    repo: &Repository,
+    actor: &Actor,
+    expected_revision: i64,
+    update: SettingUpdate,
+) -> Result<Setting, TxError> {
+    Ok(write(repo, |tx| async move {
         actor.validate_in(&tx).await?;
         let row = settings_row(&tx).await?;
         if row.revision != expected_revision {
             return Err(abort("revision"));
         }
         let deployment = connect_registry::deployment_state_in(&tx).await?;
-        let current = row.state(&deployment.configuration_epoch);
-        let model_target = model_target.unwrap_or(current.model_target);
-        if current.enabled == enabled && current.model_target == model_target {
+        let current = row.state(&deployment.configuration_epoch)?;
+        let enabled = update.enabled.unwrap_or(current.enabled);
+        let generator_preference = update.generator_preference.unwrap_or(current.generator_preference);
+        let decision_preference = update.decision_preference.unwrap_or(current.decision_preference);
+        let enablement_changed = enabled != current.enabled;
+        let generator_changed = generator_preference != current.generator_preference;
+        let decision_changed = decision_preference != current.decision_preference;
+        if !enablement_changed && !generator_changed && !decision_changed {
             return Ok(current);
         }
-        let revision = row.revision.checked_add(1).ok_or_else(|| abort("revision"))?;
-        let generation = row.generation.checked_add(1).ok_or_else(|| abort("revision"))?;
-        let changed_at_ms = now_ms();
+        let advance = |value: i64, changed| {
+            if changed {
+                value.checked_add(1).ok_or_else(|| abort("revision"))
+            } else {
+                Ok(value)
+            }
+        };
+        let generator_replaced = enablement_changed || generator_changed;
+        let next = Setting {
+            enabled,
+            generator_preference,
+            decision_preference,
+            revision: advance(current.revision, true)?,
+            generation: advance(current.generation, generator_replaced)?,
+            decision_generation: advance(current.decision_generation, enablement_changed || decision_changed)?,
+            history_generation: advance(current.history_generation, enablement_changed)?,
+            changed_at_ms: if generator_replaced { now_ms() } else { current.changed_at_ms },
+        };
+        let generator_preference = match next.generator_preference {
+            QaGeneratorPreference::Automatic => "automatic",
+            QaGeneratorPreference::FlanT5Small => "flan_t5_small",
+            QaGeneratorPreference::FlanT5Base => "flan_t5_base",
+            _ => return Err(abort("invalid_store")),
+        };
+        let decision_preference = match next.decision_preference {
+            QaDecisionPreference::RulesOnly => "rules_only",
+            QaDecisionPreference::Julia1Q8 => "julia1_q8",
+            QaDecisionPreference::VllmD3EdgeQ8 => "vllm_d3_edge_q8",
+            _ => return Err(abort("invalid_store")),
+        };
         jobs::run(&tx, tx.query(
-            "UPSERT inbox_qa_settings:current SET enabled=$enabled, revision=$revision, generation=$generation, epoch=$epoch, changed_at=$at, model_target=$model RETURN NONE;",
-        ).bind(("enabled", enabled)).bind(("revision", revision)).bind(("generation", generation))
-          .bind(("epoch", deployment.configuration_epoch)).bind(("at", changed_at_ms)).bind(("model", model_target.slug()))).await?;
-        // A disabled generation cannot retain private prompts or open Jobs leases.
-        let mut reply = jobs::run(&tx, tx.query(
-            "SELECT VALUE record::id(id) FROM inbox_qa_exchange LIMIT $limit;",
-        ).bind(("limit", MAX_RETAINED))).await?;
-        retire_in(&tx, jobs::take::<Vec<String>>(&mut reply, 0)?).await?;
-        jobs::run(&tx, tx.query("DELETE inbox_qa_latest RETURN NONE; DELETE inbox_qa_exchange RETURN NONE; DELETE inbox_qa_health:current RETURN NONE;")).await?;
+            "UPSERT inbox_qa_settings:current SET enabled=$enabled, revision=$revision, generation=$generation,
+                    decision_generation=$decision_generation, history_generation=$history_generation,
+                    generator_preference=$generator_preference, decision_preference=$decision_preference,
+                    epoch=$epoch, changed_at=$at RETURN NONE;",
+        ).bind(("enabled", next.enabled)).bind(("revision", next.revision)).bind(("generation", next.generation))
+          .bind(("decision_generation", next.decision_generation)).bind(("history_generation", next.history_generation))
+          .bind(("generator_preference", generator_preference)).bind(("decision_preference", decision_preference))
+          .bind(("epoch", deployment.configuration_epoch)).bind(("at", next.changed_at_ms))).await?;
+        if enablement_changed {
+            // Master Off retires private transcripts and open Jobs leases.
+            let mut reply = jobs::run(&tx, tx.query(
+                "SELECT VALUE record::id(id) FROM inbox_qa_exchange LIMIT $limit;",
+            ).bind(("limit", MAX_RETAINED))).await?;
+            retire_in(&tx, jobs::take::<Vec<String>>(&mut reply, 0)?).await?;
+            jobs::run(&tx, tx.query("DELETE inbox_qa_latest RETURN NONE; DELETE inbox_qa_exchange RETURN NONE; DELETE inbox_qa_health:current RETURN NONE;")).await?;
+        } else if generator_changed {
+            seal_replaced_generator_in(&tx).await?;
+        }
         bump_event_revision(&tx).await?;
-        Ok(Setting { enabled, revision, generation, changed_at_ms, model_target })
+        Ok(next)
     }).await?.value)
+}
+
+async fn seal_replaced_generator_in(tx: &Tx) -> Result<(), TxError> {
+    let mut response = jobs::run(
+        tx,
+        tx.query(
+            "SELECT VALUE record::id(id) FROM inbox_qa_exchange WHERE active=true LIMIT $limit",
+        )
+        .bind(("limit", MAX_ACTIVE)),
+    )
+    .await?;
+    let active = jobs::take::<Vec<String>>(&mut response, 0)?;
+    for id in &active {
+        if let Some(row) = exchange_in(tx, id).await? {
+            let mut exchange = decode(&row.payload)?;
+            exchange.turn.findings.clear();
+            exchange.turn.related_activity = None;
+            exchange.events.clear();
+            append_in(
+                tx,
+                &row.owner,
+                row.generation,
+                &mut exchange,
+                QaTurnState::Canceled,
+                None,
+            )
+            .await?;
+        }
+    }
+    retire_in(tx, active).await
 }
 
 #[derive(SurrealValue)]
@@ -437,7 +655,7 @@ pub async fn claim_replica(
     owner: &str,
     generation: i64,
 ) -> Result<ReplicaClaim, TxError> {
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+    Ok(write(repo, |tx| async move {
         let state = settings_in(&tx).await?;
         if state.generation != generation {
             return Ok(ReplicaClaim::Wait);
@@ -468,7 +686,7 @@ pub async fn beat(
     generation: i64,
     ready: bool,
 ) -> Result<bool, TxError> {
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+    Ok(write(repo, |tx| async move {
         let state = settings_in(&tx).await?;
         if !state.enabled || state.generation != generation {
             return Ok(false);
@@ -502,6 +720,7 @@ pub async fn forget_replica(
     placement: &str,
     owner: &str,
 ) -> Result<(), TxError> {
+    let _writer = repo.lock_inbox_qa_writer().await;
     repo.db()
         .query("DELETE $worker WHERE owner=$owner RETURN NONE")
         .bind(("worker", jobs::rid("inbox_qa_replica", placement)))
@@ -540,9 +759,13 @@ fn turn_id(key: &str, request: &str, generation: i64) -> String {
 pub fn accepted_turn_id(
     actor: &Actor,
     request: &QaTurnRequest,
-    generation: i64,
+    history_generation: i64,
 ) -> Result<String, TxError> {
-    Ok(turn_id(&actor.key()?, &request.request_id, generation))
+    Ok(turn_id(
+        &actor.key()?,
+        &request.request_id,
+        history_generation,
+    ))
 }
 
 async fn exchange_in(tx: &Tx, turn_id: &str) -> Result<Option<ExchangeRow>, TxError> {
@@ -566,7 +789,7 @@ pub async fn replay(
     request: &QaTurnRequest,
 ) -> Result<Option<QaTurn>, TxError> {
     let key = actor.key()?;
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
+    Ok(write(repo, |tx| {
         let key = &key;
         async move {
             actor.validate_in(&tx).await?;
@@ -574,12 +797,12 @@ pub async fn replay(
             if !state.enabled {
                 return Err(abort("off"));
             }
-            let id = turn_id(key, &request.request_id, state.generation);
+            let id = turn_id(key, &request.request_id, state.history_generation);
             let Some(row) = exchange_in(&tx, &id).await? else {
                 return Ok(None);
             };
             if row.owner != *key
-                || row.generation != state.generation
+                || row.generation != state.history_generation
                 || (row.completed_at > 0 && row.completed_at + EXCHANGE_TTL_MS <= now_ms())
             {
                 return Ok(None);
@@ -587,6 +810,9 @@ pub async fn replay(
             let exchange = decode(&row.payload)?;
             if !matching_request(&exchange, request) {
                 return Err(abort("id_conflict"));
+            }
+            if !subject_visible_in(&tx, actor, exchange.subject()).await? {
+                return Err(abort("missing"));
             }
             Ok(Some(exchange.turn))
         }
@@ -602,7 +828,7 @@ pub async fn freshness_boundary(repo: &Repository, actor: &Actor) -> Result<i64,
         let key = &key;
         async move {
             let state = settings_in(&tx).await?;
-            boundary_in(&tx, key, state.generation).await
+            boundary_in(&tx, key, state.history_generation).await
         }
     })
     .await?
@@ -649,6 +875,35 @@ fn grounded_findings(evidence: &FrozenEvidence) -> Result<Vec<QaFinding>, TxErro
         .collect()
 }
 
+fn fallback_findings(evidence: &FrozenEvidence) -> Result<Vec<QaFinding>, TxError> {
+    evidence
+        .request
+        .validate()
+        .map_err(|_| abort("invalid_part"))?;
+    let passages = &evidence.request.passages;
+    if passages.len() != evidence.sources.len() {
+        return Err(abort("invalid_part"));
+    }
+    let mut remaining_words = QA_MAX_WORDS;
+    let mut findings = Vec::new();
+    for (passage, source) in passages.iter().zip(&evidence.sources) {
+        if passage.source_id != source.opaque_id {
+            return Err(abort("invalid_part"));
+        }
+        let Some(words) = remaining_words.checked_sub(passage.text.split_whitespace().count())
+        else {
+            continue;
+        };
+        let end = u32::try_from(passage.text.chars().count()).map_err(|_| abort("invalid_part"))?;
+        findings.push(source.finding(passage.text.clone(), 0, end));
+        remaining_words = words;
+        if findings.len() == QA_MAX_FINDINGS {
+            break;
+        }
+    }
+    Ok(findings)
+}
+
 fn dialogue_line(text: &str) -> &str {
     text[..text.floor_char_boundary(QA_MAX_DIALOGUE_MESSAGE_BYTES.min(text.len()))].trim()
 }
@@ -685,7 +940,16 @@ async fn recent_dialogue_in(
     let retained = recent_completed_in(tx, owner, generation, now, MAX_PER_REGISTRATION).await?;
     let mut history = Vec::with_capacity(QA_MAX_DIALOGUE_HISTORY);
     for row in retained {
-        let turn = decode(&row.payload)?.turn;
+        let exchange = decode(&row.payload)?;
+        // Keep private job and cycle observations outside the model history.
+        if exchange.subject().is_some_and(private_subject)
+            || exchange.turn.findings.iter().any(|finding| {
+                private_subject(&finding.source) || finding.source.kind == ChatSourceKind::JobCount
+            })
+        {
+            continue;
+        }
+        let turn = exchange.turn;
         let answer = if let Some(reply) = turn.reply {
             reply
         } else if turn.state == QaTurnState::Answered && !turn.findings.is_empty() {
@@ -726,31 +990,40 @@ pub async fn admit(
     actor: &Actor,
     request: &QaTurnRequest,
     evidence: FrozenEvidence,
+    metadata: AdmissionMetadata,
     expected_generation: i64,
 ) -> Result<QaTurn, TxError> {
     let key = actor.key()?;
-    let id = turn_id(&key, &request.request_id, expected_generation);
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
+    Ok(write(repo, |tx| {
         let key = &key;
-        let id = &id;
         let evidence = &evidence;
+        let metadata = &metadata;
         async move {
             actor.validate_in(&tx).await?;
             let state = settings_in(&tx).await?;
             if !state.enabled || state.generation != expected_generation {
                 return Err(abort("off"));
             }
+            let generation = state.history_generation;
+            let id = turn_id(key, &request.request_id, generation);
+            let id = id.as_str();
             if let Some(row) = exchange_in(&tx, id).await? {
-                if row.owner != *key || row.generation != state.generation {
+                if row.owner != *key || row.generation != generation {
                     return Err(abort("id_conflict"));
                 }
                 let exchange = decode(&row.payload)?;
                 if !matching_request(&exchange, request) {
                     return Err(abort("id_conflict"));
                 }
+                if !subject_visible_in(&tx, actor, exchange.subject()).await? {
+                    return Err(abort("missing"));
+                }
                 return Ok(exchange.turn);
             }
-            let boundary = boundary_in(&tx, key, state.generation).await?;
+            if !subject_visible_in(&tx, actor, metadata.subject.as_ref()).await? {
+                return Err(abort("missing"));
+            }
+            let boundary = boundary_in(&tx, key, generation).await?;
             let now = Utc::now();
             if evidence.sampled_at_ms <= boundary
                 || evidence.sampled_at_ms < now.timestamp_millis() - MAX_EVIDENCE_AGE_MS
@@ -770,48 +1043,54 @@ pub async fn admit(
               .bind(("workstation", actor.workstation())).bind(("active_cap", MAX_ACTIVE)).bind(("owner_cap", MAX_PER_REGISTRATION))
               .bind(("retained_cap", MAX_RETAINED))).await?;
             let ready = jobs::take::<Vec<bool>>(&mut reply, 1)?.len() as i64;
-            if ready == 0 {
-                return Err(abort("unavailable"));
-            }
+            let needs_model = matches!(evidence.answer_mode, AnswerMode::Model) && ready > 0;
             if !jobs::take::<Vec<bool>>(&mut reply, 2)?.is_empty() {
                 return Err(abort("active"));
             }
             let active = jobs::take::<Option<i64>>(&mut reply, 3)?.ok_or_else(|| abort("invalid_store"))?;
             let owner_retained = jobs::take::<Option<i64>>(&mut reply, 4)?.ok_or_else(|| abort("invalid_store"))?;
             let total_retained = jobs::take::<Option<i64>>(&mut reply, 5)?.ok_or_else(|| abort("invalid_store"))?;
-            if active >= MAX_ACTIVE.min(ready * 2)
+            if (needs_model && active >= MAX_ACTIVE.min(ready * 2))
                 || owner_retained >= MAX_PER_REGISTRATION
                 || total_retained >= MAX_RETAINED
             {
                 return Err(abort("busy"));
             }
             let mut frozen = evidence.clone();
-            if let Some(dialogue) = frozen.request.dialogue.as_mut() {
-                dialogue.history = recent_dialogue_in(&tx, key, state.generation, timestamp).await?;
+            if let Some(dialogue) = frozen.request.dialogue.as_mut().filter(|_| needs_model) {
+                dialogue.history = recent_dialogue_in(&tx, key, generation, timestamp).await?;
             }
             let mut exchange = Exchange {
                 actor: actor.clone(),
                 source: request.source.clone(),
-                turn: QaTurn::queued(id.clone(), request.request_id.clone(), request.question.clone()),
+                turn: QaTurn::queued(id.to_owned(), request.request_id.clone(), request.question.clone()),
                 events: Vec::new(),
                 evidence: Some(frozen),
                 resolved_question: (request.question != evidence.request.question)
                     .then(|| evidence.request.question.clone()),
+                resolved_source: metadata.subject.as_ref().filter(|source| Some(*source) != request.source.as_ref()).cloned(),
+                observation: metadata.observation.clone(),
+                generator_generation: Some(state.generation),
             };
+            exchange.turn.related_activity = metadata.related_activity.clone();
             let payload = serde_json::to_string(&exchange).map_err(|_| abort("invalid_store"))?;
             jobs::run(&tx, tx.query(
                 "CREATE $turn SET generation=$gen, owner=$owner, workstation=$workstation, active=true, accepted_at=$at, completed_at=0, payload=$payload RETURN NONE;
                  UPSERT $latest SET generation=$gen, turn=$turn, required_after=$boundary RETURN NONE;",
-            ).bind(("turn", jobs::rid("inbox_qa_exchange", id))).bind(("gen", state.generation))
+            ).bind(("turn", jobs::rid("inbox_qa_exchange", id))).bind(("gen", generation))
               .bind(("owner", key.clone())).bind(("workstation", actor.workstation())).bind(("at", timestamp)).bind(("payload", payload))
               .bind(("latest", jobs::rid("inbox_qa_latest", key))).bind(("boundary", boundary))).await?;
-            if matches!(evidence.answer_mode, AnswerMode::Grounded) {
+            if !needs_model {
                 // Exact facts need no worker lease. Publish the canonical turn and its
                 // events in the admission transaction so Off need not race settlement.
                 let findings = if (0..=MAX_EVIDENCE_AGE_MS)
                     .contains(&now_ms().saturating_sub(evidence.sampled_at_ms))
                 {
-                    grounded_findings(evidence)?
+                    if matches!(evidence.answer_mode, AnswerMode::Grounded) {
+                        grounded_findings(evidence)?
+                    } else {
+                        fallback_findings(evidence)?
+                    }
                 } else {
                     Vec::new()
                 };
@@ -821,12 +1100,12 @@ pub async fn admit(
                     QaTurnState::InsufficientContext
                 } else {
                     for finding in findings {
-                        append_in(&tx, key, state.generation, &mut exchange, QaTurnState::Running, Some(finding)).await?;
+                        append_in(&tx, key, generation, &mut exchange, QaTurnState::Running, Some(finding)).await?;
                     }
                     QaTurnState::Answered
                 };
-                exchange.turn.context = Some(QaContextUsage::new(state.model_target.input_tokens(), 0, 0));
-                append_in(&tx, key, state.generation, &mut exchange, terminal, None).await?;
+                exchange.turn.context = Some(QaContextUsage::new(QaModelTarget::default().input_tokens(), 0, 0));
+                append_in(&tx, key, generation, &mut exchange, terminal, None).await?;
                 return Ok(exchange.turn);
             }
             job_dispatch::submit_in(&tx, &jobs::NewJob {
@@ -859,13 +1138,20 @@ pub async fn latest(
         .map(|exchange| (exchange.turn, exchange.events)))
 }
 
+/// The latest answered intent and its typed subject after registration validation.
+pub struct AnsweredPrompt {
+    pub question: String,
+    pub subject: Option<ChatSourceReference>,
+    pub observation: Option<Observation>,
+}
+
 /// Use the most recent cited topic within the short conversation window.
 pub async fn last_answered_prompt(
     repo: &Repository,
     actor: &Actor,
-) -> Result<Option<String>, TxError> {
+) -> Result<Option<AnsweredPrompt>, TxError> {
     let key = actor.key()?;
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
+    Ok(write(repo, |tx| {
         let key = &key;
         async move {
             actor.validate_in(&tx).await?;
@@ -876,7 +1162,7 @@ pub async fn last_answered_prompt(
             for row in recent_completed_in(
                 &tx,
                 key,
-                setting.generation,
+                setting.history_generation,
                 now_ms(),
                 QA_MAX_DIALOGUE_HISTORY as i64,
             )
@@ -886,9 +1172,21 @@ pub async fn last_answered_prompt(
                 if exchange.turn.state == QaTurnState::Answered
                     && !exchange.turn.findings.is_empty()
                 {
-                    return Ok(Some(
-                        exchange.resolved_question.unwrap_or(exchange.turn.question),
-                    ));
+                    if !subject_visible_in(&tx, actor, exchange.subject()).await? {
+                        return Ok(None);
+                    }
+                    let subject = exchange.subject().cloned();
+                    let observation = exchange.observation.filter(|observation| {
+                        exchange.turn.findings.iter().any(|finding| {
+                            finding.source == observation.source
+                                && finding.observed_at == observation.observed_at
+                        })
+                    });
+                    return Ok(Some(AnsweredPrompt {
+                        subject,
+                        observation,
+                        question: exchange.resolved_question.unwrap_or(exchange.turn.question),
+                    }));
                 }
             }
             Ok(None)
@@ -900,7 +1198,7 @@ pub async fn last_answered_prompt(
 
 async fn latest_exchange(repo: &Repository, actor: &Actor) -> Result<Option<Exchange>, TxError> {
     let key = actor.key()?;
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
+    Ok(write(repo, |tx| {
         let key = &key;
         async move {
             actor.validate_in(&tx).await?;
@@ -908,13 +1206,17 @@ async fn latest_exchange(repo: &Repository, actor: &Actor) -> Result<Option<Exch
             if !state.enabled {
                 return Ok(None);
             }
-            let Some(turn_id) = current_turn_in(&tx, key, state.generation).await? else {
+            let Some(turn_id) = current_turn_in(&tx, key, state.history_generation).await? else {
                 return Ok(None);
             };
             let Some(row) = exchange_in(&tx, &turn_id).await? else {
                 return Ok(None);
             };
-            decode(&row.payload).map(Some)
+            let exchange = decode(&row.payload)?;
+            if !subject_visible_in(&tx, actor, exchange.subject()).await? {
+                return Ok(None);
+            }
+            Ok(Some(exchange))
         }
     })
     .await?
@@ -1005,12 +1307,12 @@ async fn append_event_in(
 /// Seal the caller's turn without erasing already delivered findings.
 pub async fn cancel(repo: &Repository, actor: &Actor, id: &str) -> Result<QaTurn, TxError> {
     let owner = actor.key()?;
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
+    Ok(write(repo, |tx| {
         let owner = &owner;
         async move {
             actor.validate_in(&tx).await?;
             let state = settings_in(&tx).await?;
-            if current_turn_in(&tx, owner, state.generation)
+            if current_turn_in(&tx, owner, state.history_generation)
                 .await?
                 .as_deref()
                 != Some(id)
@@ -1020,10 +1322,15 @@ pub async fn cancel(repo: &Repository, actor: &Actor, id: &str) -> Result<QaTurn
             let row = exchange_in(&tx, id)
                 .await?
                 .filter(|row| {
-                    state.enabled && row.generation == state.generation && row.owner == *owner
+                    state.enabled
+                        && row.generation == state.history_generation
+                        && row.owner == *owner
                 })
                 .ok_or_else(|| abort("missing"))?;
             let mut exchange = decode(&row.payload)?;
+            if !subject_visible_in(&tx, actor, exchange.subject()).await? {
+                return Err(abort("missing"));
+            }
             if row.active {
                 append_in(
                     &tx,
@@ -1051,7 +1358,7 @@ async fn live_exchange_in(
     let task = &lease.task;
     let Some(row) = exchange_in(tx, &task.job_id)
         .await?
-        .filter(|row| state.enabled && row.generation == state.generation && row.active)
+        .filter(|row| state.enabled && row.generation == state.history_generation && row.active)
     else {
         return Ok(None);
     };
@@ -1065,8 +1372,27 @@ async fn live_exchange_in(
     {
         return Ok(None);
     }
-    let exchange = decode(&row.payload)?;
+    let mut exchange = decode(&row.payload)?;
+    if exchange.generator_generation.unwrap_or(row.generation) != state.generation {
+        return Ok(None);
+    }
     exchange.actor.validate_in(tx).await?;
+    if !subject_visible_in(tx, &exchange.actor, exchange.subject()).await? {
+        exchange.turn.findings.clear();
+        exchange.turn.related_activity = None;
+        exchange.events.clear();
+        append_in(
+            tx,
+            &row.owner,
+            row.generation,
+            &mut exchange,
+            QaTurnState::Canceled,
+            None,
+        )
+        .await?;
+        retire_in(tx, vec![exchange.turn.turn_id.clone()]).await?;
+        return Ok(None);
+    }
     Ok(Some((row, exchange)))
 }
 
@@ -1075,7 +1401,7 @@ pub async fn start(
     repo: &Repository,
     lease: &job_dispatch::DeliveryLease,
 ) -> Result<Option<FrozenEvidence>, TxError> {
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+    Ok(write(repo, |tx| async move {
         let Some((row, mut exchange)) = live_exchange_in(&tx, lease).await? else {
             return Ok(None);
         };
@@ -1114,7 +1440,7 @@ pub async fn is_live(
     repo: &Repository,
     lease: &job_dispatch::DeliveryLease,
 ) -> Result<bool, TxError> {
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+    Ok(write(repo, |tx| async move {
         Ok(live_exchange_in(&tx, lease).await?.is_some())
     })
     .await?
@@ -1128,7 +1454,7 @@ pub async fn publish(
     state: QaTurnState,
     finding: Option<QaFinding>,
 ) -> Result<bool, TxError> {
-    publish_with_model_result(repo, lease, state, finding, None, None).await
+    publish_with_model_result(repo, lease, state, finding, ModelResult::default()).await
 }
 
 /// Publish a bounded draft under the same registration and lease fences as the answer.
@@ -1137,7 +1463,7 @@ pub async fn publish_draft(
     lease: &job_dispatch::DeliveryLease,
     text: String,
 ) -> Result<bool, TxError> {
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
+    Ok(write(repo, |tx| {
         let text = text.clone();
         async move {
             let Some((row, mut exchange)) = live_exchange_in(&tx, lease).await? else {
@@ -1188,18 +1514,29 @@ pub async fn publish_draft(
     .value)
 }
 
+/// Verified result of the actual worker handling a terminal turn.
+#[derive(Clone, Default)]
+pub struct ModelResult {
+    pub context: Option<QaContextUsage>,
+    pub reply: Option<String>,
+    pub model_target: Option<QaModelTarget>,
+}
+
 /// Commit model usage with the same terminal transition and execution lease as the answer.
 pub async fn publish_with_model_result(
     repo: &Repository,
     lease: &job_dispatch::DeliveryLease,
     state: QaTurnState,
     finding: Option<QaFinding>,
-    context: Option<QaContextUsage>,
-    reply: Option<String>,
+    result: ModelResult,
 ) -> Result<bool, TxError> {
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
+    Ok(write(repo, |tx| {
         let finding = finding.clone();
-        let reply = reply.clone();
+        let ModelResult {
+            context,
+            reply,
+            model_target,
+        } = result.clone();
         async move {
             let Some((row, mut exchange)) = live_exchange_in(&tx, lease).await? else {
                 return Ok(false);
@@ -1221,6 +1558,13 @@ pub async fn publish_with_model_result(
             if state.is_terminal() {
                 exchange.turn.context = context;
                 exchange.turn.reply = reply;
+                if let Some(target) =
+                    model_target.filter(|_| context.is_some_and(|usage| usage.model_windows > 0))
+                {
+                    exchange.turn.model_target = Some(target);
+                    exchange.turn.model_generation =
+                        u64::try_from(exchange.generator_generation.unwrap_or(row.generation)).ok();
+                }
                 if let Some(evidence) = dialogue_evidence.filter(|_| {
                     matches!(
                         state,
@@ -1300,7 +1644,7 @@ pub async fn claim_health(
     min_after: i64,
     for_admission: bool,
 ) -> Result<HealthClaim, TxError> {
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+    Ok(write(repo, |tx| async move {
         let setting = settings_in(&tx).await?;
         if !setting.enabled || setting.generation != generation {
             return Err(abort("off"));
@@ -1340,7 +1684,7 @@ pub async fn put_health(
     sample: &HealthSample,
 ) -> Result<bool, TxError> {
     let payload = serde_json::to_string(sample).map_err(|_| abort("invalid_store"))?;
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
+    Ok(write(repo, |tx| {
         let payload = &payload;
         async move {
             let setting = settings_in(&tx).await?;
@@ -1360,6 +1704,7 @@ pub async fn put_health(
 
 /// Release a failed/obsolete probe without canceling a successor's lease.
 pub async fn abandon_health(repo: &Repository, publisher: &str) -> Result<(), TxError> {
+    let _writer = repo.lock_inbox_qa_writer().await;
     repo.db()
         .query("UPDATE inbox_qa_health:current SET lease_until=0 WHERE publisher=$publisher AND lease_until>0 RETURN NONE")
         .bind(("publisher", publisher.to_owned()))
@@ -1393,7 +1738,7 @@ async fn retire_in(tx: &Tx, ids: Vec<String>) -> Result<(), TxError> {
 
 /// Retire expired private payloads and ensure an absent executor cannot leave an open turn.
 pub async fn cleanup(repo: &Repository) -> Result<(), TxError> {
-    run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+    write(repo, |tx| async move {
         let enabled = settings_in(&tx).await?.enabled;
         let mut expired = jobs::run(&tx, tx.query(
             "SELECT VALUE record::id(id) FROM inbox_qa_exchange

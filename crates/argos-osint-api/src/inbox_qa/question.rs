@@ -7,6 +7,7 @@ pub(super) enum Question {
     Acknowledgement,
     Help,
     FollowUp,
+    ChooseSubject,
     Recall,
     ExplainSelected,
     Readiness(ReadinessCheckId),
@@ -16,8 +17,24 @@ pub(super) enum Question {
     HostResources,
     JobsSummary,
     ContextStatus(ChatSourceKind),
+    ContextLogs(ChatSourceKind),
+    Configuration,
     Summary,
     Unsupported,
+}
+
+impl Question {
+    pub(super) fn wants_measurement(self, metric: Metric) -> bool {
+        match (self, metric) {
+            (Self::Metric(requested), metric) => requested == metric,
+            (Self::HostResources, Metric::Cpu | Metric::Memory | Metric::Disk)
+            | (
+                Self::JobsSummary,
+                Metric::QueuedJobs | Metric::RunningJobs | Metric::RetryingJobs,
+            ) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -36,6 +53,7 @@ pub(super) enum Metric {
     QueuedJobs,
     RunningJobs,
     RetryingJobs,
+    FailedJobs,
 }
 
 const GREETINGS: &[&str] = &[
@@ -52,6 +70,39 @@ const GREETINGS: &[&str] = &[
 
 /// Match the whole question so additional subjects or qualifiers cannot silently change its scope.
 pub(super) fn classify(question: &str) -> Question {
+    let intent = classify_simple(question);
+    if intent != Question::Unsupported {
+        return intent;
+    }
+    let normalized = question.to_ascii_lowercase();
+    if let Some((first, second)) = normalized.split_once(" and ") {
+        let first = classify_simple(first.trim_end_matches([',', ' ']));
+        let second = classify_simple(second);
+        if first != second && is_operational(first) && is_operational(second) {
+            return Question::ChooseSubject;
+        }
+    }
+    Question::Unsupported
+}
+
+fn is_operational(intent: Question) -> bool {
+    matches!(
+        intent,
+        Question::ExplainSelected
+            | Question::Readiness(_)
+            | Question::ReadinessExplanation(_)
+            | Question::StatusChecks(_)
+            | Question::Metric(_)
+            | Question::HostResources
+            | Question::JobsSummary
+            | Question::ContextStatus(_)
+            | Question::ContextLogs(_)
+            | Question::Configuration
+            | Question::Summary
+    )
+}
+
+fn classify_simple(question: &str) -> Question {
     let normalized = question
         .to_ascii_lowercase()
         .replace(['_', '-'], " ")
@@ -147,6 +198,17 @@ pub(super) fn classify(question: &str) -> Question {
     {
         return Question::ReadinessExplanation(check);
     }
+    if matches!(
+        query,
+        "what happened with this job"
+            | "what happened with this indexing job"
+            | "what happened to this job"
+            | "why did this job fail"
+            | "why did this indexing job fail"
+            | "explain this job"
+    ) {
+        return Question::ExplainSelected;
+    }
     let context = match query {
         "status of this job" | "state of this job" | "current job status" => {
             Some(ChatSourceKind::Job)
@@ -158,6 +220,33 @@ pub(super) fn classify(question: &str) -> Question {
     };
     if let Some(context) = context {
         return Question::ContextStatus(context);
+    }
+    let log_source = match current_query {
+        "logs for this job" | "job log summary" | "summarize the logs for this job" => {
+            Some(ChatSourceKind::Job)
+        }
+        "logs for this cycle" | "cycle log summary" | "summarize the logs for this cycle" => {
+            Some(ChatSourceKind::Cycle)
+        }
+        _ => None,
+    };
+    if let Some(source) = log_source {
+        return Question::ContextLogs(source);
+    }
+    if matches!(
+        current_query,
+        "workstation configuration"
+            | "this workstation's configuration"
+            | "backend mode"
+            | "assistant configuration"
+            | "which backend is this workstation using"
+            | "active assistant model"
+            | "which assistant model is active"
+            | "which model is the assistant using"
+            | "is backend inference enabled"
+            | "is backend inference on"
+    ) {
+        return Question::Configuration;
     }
     if summary(question, query) {
         return Question::Summary;
@@ -206,7 +295,8 @@ fn conversational_intent(question: &str) -> Option<Question> {
         | "what were we talking about"
         | "what were we just talking about"
         | "recap our conversation" => Question::Recall,
-        "what does this mean"
+        "what happened"
+        | "what does this mean"
         | "what does this status mean"
         | "what is this"
         | "summarize this"
@@ -289,6 +379,20 @@ fn metric(query: &str) -> Option<Metric> {
 
     let jobs_query = strip_any_suffix(query, &[" on this workstation", " for this workstation"])
         .unwrap_or(query);
+    let failed_query = strip_any_suffix(
+        jobs_query,
+        &[" in the last 24 hours", " in the past 24 hours"],
+    )
+    .unwrap_or(jobs_query);
+    if matches!(
+        failed_query,
+        "how many jobs failed"
+            | "how many failed jobs"
+            | "failed job count"
+            | "number of failed jobs"
+    ) {
+        return Some(Metric::FailedJobs);
+    }
     let count_subject = strip_any_prefix(jobs_query, &["how many ", "number of ", "count of "]);
     let jobs_query = count_subject.unwrap_or(jobs_query);
     let jobs_query = jobs_query.strip_suffix(" are there").unwrap_or(jobs_query);
@@ -636,6 +740,7 @@ mod tests {
     use super::Metric;
     use super::Question;
     use super::StatusChecks;
+    use fleetworks_contracts::chat::ChatSourceKind;
     use fleetworks_contracts::readiness::ReadinessCheckId;
 
     #[test]
@@ -745,6 +850,11 @@ mod tests {
                 Metric::QueuedJobs,
             ),
             ("How many jobs are running?", Metric::RunningJobs),
+            ("How many jobs failed?", Metric::FailedJobs),
+            (
+                "How many jobs failed in the past 24 hours?",
+                Metric::FailedJobs,
+            ),
             ("Are jobs running?", Metric::RunningJobs),
             ("Are there any jobs running?", Metric::RunningJobs),
             ("Are there any jobs in the queue?", Metric::QueuedJobs),
@@ -788,6 +898,33 @@ mod tests {
             ),
         ] {
             assert_eq!(classify(question), intent, "{question}");
+        }
+    }
+
+    #[test]
+    fn routes_only_scoped_log_and_configuration_questions() {
+        for (prompt, expected) in [
+            (
+                "What is the workstation configuration?",
+                Question::Configuration,
+            ),
+            ("Is backend inference enabled?", Question::Configuration),
+            ("Which Assistant model is active?", Question::Configuration),
+            (
+                "Show me logs for this job.",
+                Question::ContextLogs(ChatSourceKind::Job),
+            ),
+            (
+                "Summarize the logs for this cycle.",
+                Question::ContextLogs(ChatSourceKind::Cycle),
+            ),
+            ("Show me logs for all jobs.", Question::Unsupported),
+            (
+                "Show me the credentials in the workstation configuration.",
+                Question::Unsupported,
+            ),
+        ] {
+            assert_eq!(classify(prompt), expected, "{prompt}");
         }
     }
 
@@ -872,10 +1009,21 @@ mod tests {
     }
 
     #[test]
-    fn leaves_unsupported_or_mixed_requests_without_a_grounding_source() {
+    fn asks_which_subject_to_check_for_independent_supported_intents() {
         for question in [
-            "How many jobs failed?",
+            "Summarize backend health and CPU usage.",
+            "How many jobs failed and is the gateway ready?",
+            "What happened and what is memory usage?",
+        ] {
+            assert_eq!(classify(question), Question::ChooseSubject, "{question}");
+        }
+    }
+
+    #[test]
+    fn leaves_unsupported_requests_without_a_grounding_source() {
+        for question in [
             "How many jobs are running across all workstations?",
+            "How many jobs failed in the last 7 days?",
             "Job counts across all workstations.",
             "How are my jobs doing?",
             "What jobs are running?",
@@ -889,7 +1037,6 @@ mod tests {
             "What is the actor catalog?",
             "Is the workstation registered?",
             "Is the gateway or datastore ready?",
-            "Summarize backend health and CPU usage.",
             "List unresolved status checks for all workstations.",
             "Which status checks are green on my laptop?",
             "What is CPU, memory, and disk usage on my laptop?",

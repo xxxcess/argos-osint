@@ -250,12 +250,15 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
 
         wait_for(activate, app, key, timeout=timeout)
 
-    def sources_ready(expanded):
+    def find_citation(turn_id, index):
+        return find(f"chat-citation-{turn_id}-{index}")
+
+    def sources_ready(turn_id, *, expanded):
         toggle = find(SOURCES_TOGGLE, button=True)
         if screen_bounds(toggle, atspi) is None:
             return None
         sources = find(SOURCES_CONTENT)
-        citation = find("chat-citation-0")
+        citation = find_citation(turn_id, 0)
         if expanded:
             return citation if sources is not None and screen_bounds(citation, atspi) is not None else None
         require(sources is None and citation is None, "a new turn's citations were visible before expanding Sources")
@@ -372,7 +375,8 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         if len(admitted) < expected_admissions:
             return None
         require(len(admitted) == expected_admissions, "the UI submitted more exchanges than expected")
-        pages = event_pages(records, admitted[-1]["turn_id"])
+        turn_id = admitted[-1]["turn_id"]
+        pages = event_pages(records, turn_id)
         require(not any(row["state"] in TERMINAL for row in pages),
                 "the turn finished before the barrier was released")
         if not pages or pages[-1]["state"] != "running" or len(pages[-1]["findings"]) != 1:
@@ -380,10 +384,10 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         stop = find("inbox-qa-stop", button=True)
         if screen_bounds(stop, atspi) is None:
             return None
-        sources = sources_ready(expanded)
+        sources = sources_ready(turn_id, expanded=expanded)
         if sources is None:
             return None
-        require(find("chat-citation-1") is None, "the drawer showed another citation before release")
+        require(find_citation(turn_id, 1) is None, "the drawer showed another citation before release")
         companions = [row["companion_pid"] for row in records if "companion_pid" in row]
         require(len(companions) == 1, "expected one IPC companion")
         return pages[-1], companions[0], sources.name if expanded else None
@@ -410,12 +414,13 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         final = settled_turn(pages, early, "answered")
         if find("inbox-qa-stop") is not None:
             return None
-        citation = sources_ready(expanded=True)
+        citation = sources_ready(final["turn_id"], expanded=True)
         if citation is None or citation.name != citation_name:
             return None
         count = len(final["findings"])
-        require(all(find(f"chat-citation-{i}") is not None for i in range(count))
-                and find(f"chat-citation-{count}") is None, "drawer citations do not match the canonical exchange")
+        require(all(find_citation(final["turn_id"], index) is not None for index in range(count))
+                and find_citation(final["turn_id"], count) is None,
+                "drawer citations do not match the canonical exchange")
         return final
 
     final = wait_for(completed_frame, app, "completion in the same drawer", timeout=12)
@@ -445,10 +450,10 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
             for node in descendants(answer)
         ):
             return None
-        sources = sources_ready(expanded)
+        sources = sources_ready(turn["turn_id"], expanded=expanded)
         if sources is None or (expanded and sources.name != expected_citation):
             return None
-        require(find("chat-citation-1") is None and find("inbox-qa-stop") is None,
+        require(find_citation(turn["turn_id"], 1) is None and find("inbox-qa-stop") is None,
                 "the completed memory answer showed unrelated evidence or an unfinished turn")
         return sample
 
@@ -488,7 +493,7 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         require(stopped[0]["state"] == "canceled" and stopped[0]["cursor"] == canceled["cursor"]
                 and canceled["cursor"] == pending["cursor"] + 1,
                 "Stop did not add exactly one terminal cursor to the held turn")
-        citation = sources_ready(expanded=True)
+        citation = sources_ready(canceled["turn_id"], expanded=True)
         if citation is None or citation.name != cancel_citation_name:
             return None
         return canceled

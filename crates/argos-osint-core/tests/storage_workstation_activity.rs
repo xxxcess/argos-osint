@@ -33,7 +33,11 @@ use fleetworks_contracts::qa_worker::QaPassage;
 use fleetworks_contracts::qa_worker::QaWorkerRequest;
 use support::Server;
 use surrealdb::engine::any::Any;
+use surrealdb::types::RecordId;
 use surrealdb::Surreal;
+
+const QA_WORKER: &str = "qa-model-fixture";
+const QA_PLACEMENT: &str = "qa-placement-fixture";
 
 fn authority() -> RegistryAuthority {
     RegistryAuthority::new("scope-a", "fixture-native", "fixture-access")
@@ -443,26 +447,89 @@ async fn qa_generator_replacement_fences_leased_output_and_leaves_decision_indep
         .await
         .unwrap();
 
-    const WORKER: &str = "qa-model-fixture";
-    const PLACEMENT: &str = "qa-placement-fixture";
+    let (request, lease) = start_qa_fixture(
+        &repo,
+        &actor,
+        &context,
+        enabled,
+        "lease-before-model-switch",
+    )
+    .await;
+
+    let decision = qa::update(
+        &repo,
+        &actor,
+        enabled.revision,
+        qa::SettingUpdate {
+            decision_preference: Some(QaDecisionPreference::Julia1Q8),
+            ..qa::SettingUpdate::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(decision.generation, enabled.generation);
+    assert!(
+        qa::beat(&repo, QA_PLACEMENT, QA_WORKER, enabled.generation, true)
+            .await
+            .unwrap()
+    );
+    let running = qa::replay(&repo, &actor, &request).await.unwrap().unwrap();
+    assert_eq!(running.state, QaTurnState::Running);
+
+    let generator = qa::update(
+        &repo,
+        &actor,
+        decision.revision,
+        qa::SettingUpdate {
+            generator_preference: Some(QaGeneratorPreference::FlanT5Small),
+            ..qa::SettingUpdate::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(generator.decision_generation, decision.decision_generation);
+    assert!(
+        !qa::beat(&repo, QA_PLACEMENT, QA_WORKER, enabled.generation, true)
+            .await
+            .unwrap()
+    );
+    assert!(!qa::publish(&repo, &lease, QaTurnState::Failed, None)
+        .await
+        .unwrap());
+    let canceled = qa::replay(&repo, &actor, &request).await.unwrap().unwrap();
+    assert_eq!(canceled.turn_id, running.turn_id);
+    assert_eq!(canceled.state, QaTurnState::Canceled);
+    assert!(canceled.findings.is_empty());
+}
+
+async fn start_qa_fixture(
+    repo: &Repository,
+    actor: &qa::Actor,
+    context: &RegisteredContext,
+    enabled: qa::Setting,
+    request_id: &str,
+) -> (QaTurnRequest, Box<job_dispatch::DeliveryLease>) {
+    let db = repo.db();
     assert_eq!(
-        qa::claim_replica(&repo, PLACEMENT, WORKER, enabled.generation)
+        qa::claim_replica(repo, QA_PLACEMENT, QA_WORKER, enabled.generation)
             .await
             .unwrap(),
         qa::ReplicaClaim::Warm,
     );
-    assert!(qa::beat(&repo, PLACEMENT, WORKER, enabled.generation, true)
-        .await
-        .unwrap());
+    assert!(
+        qa::beat(repo, QA_PLACEMENT, QA_WORKER, enabled.generation, true)
+            .await
+            .unwrap()
+    );
     job_dispatch::enable_pool(db, qa::POOL).await.unwrap();
     let request = QaTurnRequest::new(
-        "lease-before-model-switch".into(),
-        MutationContext::new(&context),
+        request_id.into(),
+        MutationContext::new(context),
         "Is the gateway ready?".into(),
         None,
     )
     .unwrap();
-    let id = qa::accepted_turn_id(&actor, &request, enabled.history_generation).unwrap();
+    let id = qa::accepted_turn_id(actor, &request, enabled.history_generation).unwrap();
     let at = Utc::now();
     let evidence = qa::FrozenEvidence {
         answer_mode: qa::AnswerMode::Model,
@@ -489,8 +556,8 @@ async fn qa_generator_replacement_fences_leased_output_and_leaves_decision_indep
         sampled_at_ms: at.timestamp_millis(),
     };
     let queued = qa::admit(
-        &repo,
-        &actor,
+        repo,
+        actor,
         &request,
         evidence,
         qa::AdmissionMetadata {
@@ -510,57 +577,139 @@ async fn qa_generator_replacement_fences_leased_output_and_leaves_decision_indep
     let job_dispatch::DeliveryClaim::Claimed(lease) = job_dispatch::claim_delivery(
         db,
         &claim.envelope,
-        WORKER,
+        QA_WORKER,
         30,
         Utc::now(),
-        "qa-switch-fixture-claim",
+        "qa-fixture-claim",
     )
     .await
     .unwrap() else {
         panic!("model delivery must be leased");
     };
-    assert!(qa::start(&repo, &lease).await.unwrap().is_some());
+    assert!(qa::start(repo, &lease).await.unwrap().is_some());
+    (request, lease)
+}
 
-    let decision = qa::update(
+#[tokio::test]
+async fn qa_off_serializes_with_worker_and_health_writes_and_retires_their_generation() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "workstation_assistant_off").await;
+    let context = register(&repo, "node-a", "research").await;
+    let actor = qa::Actor::new(
+        "scope-a".into(),
+        "fixture-native".into(),
+        "fixture-access".into(),
+        context.clone(),
+    );
+    let enabled = qa::update(
         &repo,
         &actor,
-        enabled.revision,
+        qa::setting(&repo).await.unwrap().revision,
         qa::SettingUpdate {
-            decision_preference: Some(QaDecisionPreference::Julia1Q8),
-            ..qa::SettingUpdate::default()
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(decision.generation, enabled.generation);
-    assert!(qa::beat(&repo, PLACEMENT, WORKER, enabled.generation, true)
-        .await
-        .unwrap());
-    let running = qa::replay(&repo, &actor, &request).await.unwrap().unwrap();
-    assert_eq!(running.state, QaTurnState::Running);
-
-    let generator = qa::update(
-        &repo,
-        &actor,
-        decision.revision,
-        qa::SettingUpdate {
+            enabled: Some(true),
             generator_preference: Some(QaGeneratorPreference::FlanT5Small),
-            ..qa::SettingUpdate::default()
+            decision_preference: Some(QaDecisionPreference::Julia1Q8),
         },
     )
     .await
     .unwrap();
-    assert_eq!(generator.decision_generation, decision.decision_generation);
+    let (request, lease) =
+        start_qa_fixture(&repo, &actor, &context, enabled, "lease-before-off").await;
+    assert_eq!(
+        qa::latest(&repo, &actor).await.unwrap().unwrap().0.state,
+        QaTurnState::Running,
+    );
+
+    const PROBE: &str = "qa-health-fixture";
+    assert!(matches!(
+        qa::claim_health(&repo, PROBE, enabled.generation, 0, true)
+            .await
+            .unwrap(),
+        qa::HealthClaim::Probe(_),
+    ));
+    let sample = qa::HealthSample {
+        sampled_at_ms: Utc::now().timestamp_millis(),
+        facts: Vec::new(),
+    };
+    let worker_repo = repo.clone();
+    let probe_repo = repo.clone();
+    let reader_repo = repo.clone();
+    // The transcript lookup also writes the registration guard.
+    let (renewed, sampled, transcript, off) = tokio::join!(
+        biased;
+        qa::beat(&worker_repo, QA_PLACEMENT, QA_WORKER, enabled.generation, true),
+        qa::put_health(&probe_repo, PROBE, enabled.generation, &sample),
+        qa::latest(&reader_repo, &actor),
+        qa::set(&repo, &actor, enabled.revision, false),
+    );
+    assert!(renewed.expect("worker heartbeat before Off"));
+    assert!(sampled.expect("health publication before Off"));
+    assert_eq!(
+        transcript
+            .expect("transcript lookup before Off")
+            .unwrap()
+            .0
+            .state,
+        QaTurnState::Running,
+    );
+    let off = off.expect("one Off request commits despite overlapping QA writes");
+    assert_eq!(qa::setting(&repo).await.unwrap(), off);
+    assert!(!off.enabled);
+    assert_eq!(off.revision, enabled.revision + 1);
+    assert_eq!(off.generator_preference, enabled.generator_preference);
+    assert_eq!(off.decision_preference, enabled.decision_preference);
+
+    assert!(!qa::beat(
+        &worker_repo,
+        QA_PLACEMENT,
+        QA_WORKER,
+        enabled.generation,
+        true
+    )
+    .await
+    .unwrap());
     assert!(
-        !qa::beat(&repo, PLACEMENT, WORKER, enabled.generation, true)
+        !qa::put_health(&probe_repo, PROBE, enabled.generation, &sample)
             .await
             .unwrap()
     );
-    assert!(!qa::publish(&repo, &lease, QaTurnState::Failed, None)
+    assert!(
+        !qa::publish(&worker_repo, &lease, QaTurnState::Failed, None)
+            .await
+            .unwrap()
+    );
+    assert!(matches!(
+        qa::replay(&repo, &actor, &request).await,
+        Err(TxError::Abort(reason)) if reason == "inbox_qa:off"
+    ));
+    assert!(qa::latest(&repo, &actor).await.unwrap().is_none());
+    let mut stored = repo
+        .db()
+        .query(
+            "RETURN record::exists($job) OR record::exists($task) OR record::exists($turn)
+                OR record::exists(inbox_qa_health:current);
+         SELECT VALUE true FROM attempt WHERE root=$job LIMIT 1;
+         SELECT VALUE true FROM inbox_qa_latest LIMIT 1;",
+        )
+        .bind(("job", RecordId::new("job", lease.task.job_id.clone())))
+        .bind(("task", RecordId::new("task", lease.task.id.clone())))
+        .bind((
+            "turn",
+            RecordId::new("inbox_qa_exchange", lease.task.job_id.clone()),
+        ))
         .await
-        .unwrap());
-    let canceled = qa::replay(&repo, &actor, &request).await.unwrap().unwrap();
-    assert_eq!(canceled.turn_id, running.turn_id);
-    assert_eq!(canceled.state, QaTurnState::Canceled);
-    assert!(canceled.findings.is_empty());
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(stored.take::<Option<bool>>(0).unwrap(), Some(false));
+    assert!(stored.take::<Vec<bool>>(1).unwrap().is_empty());
+    assert!(stored.take::<Vec<bool>>(2).unwrap().is_empty());
+
+    assert!(qa::replica_stopping(&repo).await.unwrap());
+    qa::forget_replica(&worker_repo, QA_PLACEMENT, QA_WORKER)
+        .await
+        .unwrap();
+    assert!(!qa::replica_stopping(&repo).await.unwrap());
 }

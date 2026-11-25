@@ -1,5 +1,7 @@
 //! Transactional Inbox state. Model processes never receive this repository.
 
+use std::future::Future;
+
 use chrono::Utc;
 use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::ChatSourceReference;
@@ -43,6 +45,7 @@ use super::jobs;
 use super::jobs_view;
 use super::repo::Repository;
 use super::tx::run_tx;
+use super::tx::Committed;
 use super::tx::RetryPolicy;
 use super::tx::Tx;
 use super::tx::TxError;
@@ -429,6 +432,20 @@ pub async fn setting(repo: &Repository) -> Result<Setting, TxError> {
     .value)
 }
 
+// The companion shares its repository between IPC, the executor and the
+// health sampler. Queue their writes before opening a database snapshot so
+// background work cannot repeatedly invalidate a settings transaction.
+// Transcript reads with registration validation also write the registry guard.
+// The database still fences independently connected writers.
+async fn write<T, F, Fut>(repo: &Repository, body: F) -> Result<Committed<T>, TxError>
+where
+    F: FnMut(Tx) -> Fut,
+    Fut: Future<Output = Result<T, TxError>>,
+{
+    let _writer = repo.lock_inbox_qa_writer().await;
+    run_tx(repo.db(), RetryPolicy::default(), body).await
+}
+
 #[derive(SurrealValue)]
 struct EventMarker {
     event_revision: i64,
@@ -505,7 +522,7 @@ pub async fn update(
     expected_revision: i64,
     update: SettingUpdate,
 ) -> Result<Setting, TxError> {
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+    Ok(write(repo, |tx| async move {
         actor.validate_in(&tx).await?;
         let row = settings_row(&tx).await?;
         if row.revision != expected_revision {
@@ -638,7 +655,7 @@ pub async fn claim_replica(
     owner: &str,
     generation: i64,
 ) -> Result<ReplicaClaim, TxError> {
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+    Ok(write(repo, |tx| async move {
         let state = settings_in(&tx).await?;
         if state.generation != generation {
             return Ok(ReplicaClaim::Wait);
@@ -669,7 +686,7 @@ pub async fn beat(
     generation: i64,
     ready: bool,
 ) -> Result<bool, TxError> {
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+    Ok(write(repo, |tx| async move {
         let state = settings_in(&tx).await?;
         if !state.enabled || state.generation != generation {
             return Ok(false);
@@ -703,6 +720,7 @@ pub async fn forget_replica(
     placement: &str,
     owner: &str,
 ) -> Result<(), TxError> {
+    let _writer = repo.lock_inbox_qa_writer().await;
     repo.db()
         .query("DELETE $worker WHERE owner=$owner RETURN NONE")
         .bind(("worker", jobs::rid("inbox_qa_replica", placement)))
@@ -771,7 +789,7 @@ pub async fn replay(
     request: &QaTurnRequest,
 ) -> Result<Option<QaTurn>, TxError> {
     let key = actor.key()?;
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
+    Ok(write(repo, |tx| {
         let key = &key;
         async move {
             actor.validate_in(&tx).await?;
@@ -976,7 +994,7 @@ pub async fn admit(
     expected_generation: i64,
 ) -> Result<QaTurn, TxError> {
     let key = actor.key()?;
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
+    Ok(write(repo, |tx| {
         let key = &key;
         let evidence = &evidence;
         let metadata = &metadata;
@@ -1133,7 +1151,7 @@ pub async fn last_answered_prompt(
     actor: &Actor,
 ) -> Result<Option<AnsweredPrompt>, TxError> {
     let key = actor.key()?;
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
+    Ok(write(repo, |tx| {
         let key = &key;
         async move {
             actor.validate_in(&tx).await?;
@@ -1180,7 +1198,7 @@ pub async fn last_answered_prompt(
 
 async fn latest_exchange(repo: &Repository, actor: &Actor) -> Result<Option<Exchange>, TxError> {
     let key = actor.key()?;
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
+    Ok(write(repo, |tx| {
         let key = &key;
         async move {
             actor.validate_in(&tx).await?;
@@ -1289,7 +1307,7 @@ async fn append_event_in(
 /// Seal the caller's turn without erasing already delivered findings.
 pub async fn cancel(repo: &Repository, actor: &Actor, id: &str) -> Result<QaTurn, TxError> {
     let owner = actor.key()?;
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
+    Ok(write(repo, |tx| {
         let owner = &owner;
         async move {
             actor.validate_in(&tx).await?;
@@ -1383,7 +1401,7 @@ pub async fn start(
     repo: &Repository,
     lease: &job_dispatch::DeliveryLease,
 ) -> Result<Option<FrozenEvidence>, TxError> {
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+    Ok(write(repo, |tx| async move {
         let Some((row, mut exchange)) = live_exchange_in(&tx, lease).await? else {
             return Ok(None);
         };
@@ -1422,7 +1440,7 @@ pub async fn is_live(
     repo: &Repository,
     lease: &job_dispatch::DeliveryLease,
 ) -> Result<bool, TxError> {
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+    Ok(write(repo, |tx| async move {
         Ok(live_exchange_in(&tx, lease).await?.is_some())
     })
     .await?
@@ -1445,7 +1463,7 @@ pub async fn publish_draft(
     lease: &job_dispatch::DeliveryLease,
     text: String,
 ) -> Result<bool, TxError> {
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
+    Ok(write(repo, |tx| {
         let text = text.clone();
         async move {
             let Some((row, mut exchange)) = live_exchange_in(&tx, lease).await? else {
@@ -1512,7 +1530,7 @@ pub async fn publish_with_model_result(
     finding: Option<QaFinding>,
     result: ModelResult,
 ) -> Result<bool, TxError> {
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
+    Ok(write(repo, |tx| {
         let finding = finding.clone();
         let ModelResult {
             context,
@@ -1626,7 +1644,7 @@ pub async fn claim_health(
     min_after: i64,
     for_admission: bool,
 ) -> Result<HealthClaim, TxError> {
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+    Ok(write(repo, |tx| async move {
         let setting = settings_in(&tx).await?;
         if !setting.enabled || setting.generation != generation {
             return Err(abort("off"));
@@ -1666,7 +1684,7 @@ pub async fn put_health(
     sample: &HealthSample,
 ) -> Result<bool, TxError> {
     let payload = serde_json::to_string(sample).map_err(|_| abort("invalid_store"))?;
-    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
+    Ok(write(repo, |tx| {
         let payload = &payload;
         async move {
             let setting = settings_in(&tx).await?;
@@ -1686,6 +1704,7 @@ pub async fn put_health(
 
 /// Release a failed/obsolete probe without canceling a successor's lease.
 pub async fn abandon_health(repo: &Repository, publisher: &str) -> Result<(), TxError> {
+    let _writer = repo.lock_inbox_qa_writer().await;
     repo.db()
         .query("UPDATE inbox_qa_health:current SET lease_until=0 WHERE publisher=$publisher AND lease_until>0 RETURN NONE")
         .bind(("publisher", publisher.to_owned()))
@@ -1719,7 +1738,7 @@ async fn retire_in(tx: &Tx, ids: Vec<String>) -> Result<(), TxError> {
 
 /// Retire expired private payloads and ensure an absent executor cannot leave an open turn.
 pub async fn cleanup(repo: &Repository) -> Result<(), TxError> {
-    run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+    write(repo, |tx| async move {
         let enabled = settings_in(&tx).await?.enabled;
         let mut expired = jobs::run(&tx, tx.query(
             "SELECT VALUE record::id(id) FROM inbox_qa_exchange

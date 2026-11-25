@@ -274,17 +274,29 @@ pub fn valid_dialogue_reply(reply: &str) -> bool {
         && !contains_prompt_marker(reply)
 }
 
+const PROMPT_MARKERS: [&str; 5] = [
+    "earlier user",
+    "earlier assistant",
+    "current user",
+    "approved observations:",
+    "reply:",
+];
+
 fn contains_prompt_marker(text: &str) -> bool {
     let text = text.to_ascii_lowercase();
-    [
-        "earlier user",
-        "earlier assistant",
-        "current user",
-        "approved observations:",
-        "reply:",
-    ]
-    .iter()
-    .any(|marker| text.contains(marker))
+    PROMPT_MARKERS.iter().any(|marker| text.contains(marker))
+}
+
+fn extends_with_prompt_marker(draft: &str, previous_length: usize) -> bool {
+    // The previous draft was already checked. Look back far enough to detect
+    // any marker completed by the new delta, including inside UTF-8 text.
+    let overlap = PROMPT_MARKERS
+        .iter()
+        .map(|marker| marker.len())
+        .max()
+        .unwrap_or(0);
+    let start = draft.floor_char_boundary(previous_length.saturating_sub(overlap));
+    contains_prompt_marker(&draft[start..])
 }
 
 /// Admit only complete, quoted operational facts and harmless introductory wording.
@@ -490,13 +502,16 @@ impl QaWorkerSequence {
                 }
                 let previous_length = self.draft.len();
                 self.draft.push_str(text);
-                if contains_prompt_marker(&self.draft)
-                    || (request
-                        .dialogue
-                        .as_ref()
-                        .is_some_and(|dialogue| dialogue.kind == QaDialogueKind::Operational)
-                        && verified_operational_sources(request, &self.draft).is_none())
+                let invalid_draft = if request
+                    .dialogue
+                    .as_ref()
+                    .is_some_and(|dialogue| dialogue.kind == QaDialogueKind::Operational)
                 {
+                    verified_operational_sources(request, &self.draft).is_none()
+                } else {
+                    extends_with_prompt_marker(&self.draft, previous_length)
+                };
+                if invalid_draft {
                     self.draft.truncate(previous_length);
                     return Err(invalid("QA worker returned an invalid draft"));
                 }
@@ -648,6 +663,17 @@ mod tests {
         assert!(sequence.accept(&request, &delta(1, "Hi! Earlier")).is_ok());
         assert!(sequence
             .accept(&request, &delta(2, " user: summarize the workstation"))
+            .is_err());
+        assert!(sequence
+            .accept(&request, &delta(2, " today is a greeting."))
+            .is_ok());
+
+        let mut sequence = QaWorkerSequence::default();
+        assert!(sequence
+            .accept(&request, &delta(1, "Hi! ☕é! Approved observa"))
+            .is_ok());
+        assert!(sequence
+            .accept(&request, &delta(2, "tions: Ready."))
             .is_err());
     }
 

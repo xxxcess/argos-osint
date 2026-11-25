@@ -222,9 +222,16 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
         pack.check(0 < size <= 512 * 1024, "QA checkpoint reply exceeds its limit")
         return json.loads(read(size))
 
+    def has_prompt_marker(text):
+        text = text.lower()
+        return any(marker in text for marker in (
+            "earlier user", "earlier assistant", "current user", "approved observations:", "reply:",
+        ))
+
     def valid_reply(reply):
         return (isinstance(reply, str) and bool(reply.strip()) and reply.isprintable()
-                and len(reply.encode("utf-8")) <= 1024 and len(reply.split()) <= 60)
+                and len(reply.encode("utf-8")) <= 1024 and len(reply.split()) <= 60
+                and not has_prompt_marker(reply))
 
     def receive_event(request, sequence):
         envelope = receive()
@@ -271,6 +278,8 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
         greeting = {
             "turn_id": "pack-dialogue-probe", "snapshot_id": "pack-dialogue-probe",
             "question": "Hello!", "passages": [],
+            # Keep the older companion input shape to check that the worker
+            # can stream a greeting even when unrelated history is supplied.
             "dialogue": {"kind": "greeting", "history": [
                 {"question": "What can I call you?", "reply": "You can call me Fleetworks."},
                 {"question": "Good morning.", "reply": "Good morning!"},
@@ -282,6 +291,7 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
         greeting_terminal, greeting_sequence, greeting_draft, first_delta = read_drafts(greeting)
         pack.check(first_delta is not None and greeting_draft.strip(),
                    "generator did not stream any conversational text before completion")
+        pack.check(not has_prompt_marker(greeting_draft), "generator streamed a conversational prompt marker")
         greeting_context, _ = complete_turn(greeting_terminal, prose_required=True)
         greeted = time.monotonic()
         sample_rss()

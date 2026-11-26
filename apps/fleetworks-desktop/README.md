@@ -42,7 +42,9 @@ The debug bundle is `target/native/aarch64-apple-darwin/debug/Fleetworks.app` on
 
 #### Add the Assistant pack
 
-Sign in with `gh auth login` using an account with access to the repository. Find the **Fleetworks-Inbox-QA-Pack** artifact from a Fleetworks Actions run with compatible worker inputs for your selected build source. Intel uses `x86_64-apple-darwin` and Apple Silicon uses `aarch64-apple-darwin`. Use the numeric artifact ID from its link as `QA_ARTIFACT_ID`. The launcher checks the pack against the matching platform's Embedded inference smoke receipt, including the archive and manifest digests. Use `--pr` or `--commit` to select the intended source when installing a pack for a PR or pinned revision.
+Quick Start checks for a compatible, verified Assistant pack for the selected build and Mac architecture. Sign in with `gh auth login` using an account with access to the repository. Pack updates activate before a stopped profile launches. Quick Start uses the installed pack while a new pack is being verified or Actions is unavailable. Pass `--no-inbox-sync` to skip the automatic check.
+
+To select a specific pack, find the **Fleetworks-Inbox-QA-Pack** artifact from a completed Fleetworks Actions run with compatible worker inputs. Intel uses `x86_64-apple-darwin` and Apple Silicon uses `aarch64-apple-darwin`. Use the numeric artifact ID from its link as `QA_ARTIFACT_ID`. The launcher checks the matching platform’s Embedded inference smoke receipt, including the archive and manifest digests. Use `--pr` or `--commit` to select the intended source.
 
 ```sh
 PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=1 \
@@ -50,7 +52,7 @@ PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=1 \
   --inbox-artifact "$QA_ARTIFACT_ID"
 ```
 
-The script registers the pack in the Quick Start profile. In the app it opens, enable **Backend inference** under **Settings → Connection**, then check **Settings → Assistant**. The pack includes FLAN-T5 Small and the native worker. The companion provisions Base separately when selected and resources allow. On a new computer, run the same script with that computer's matching artifact ID. The installed pack and downloaded model assets persist across app rebuilds. If the artifact expires, use a newer compatible run with a verified pack. [Offline setup and resource requirements](../../deploy/inbox-qa.md)
+The script registers the verified pack in the Quick Start profile. In the app it opens, enable **Backend inference** under **Settings → Connection**, then check **Settings → Assistant**. The pack includes FLAN-T5 Small and the native worker. The companion provisions Base separately when selected and resources allow. Model assets and previous pack installations persist across app rebuilds. [Offline setup and resource requirements](../../deploy/inbox-qa.md)
 
 If an older copy of the launcher reports `Select the root of a Fleetworks checkout` from the repository root, run `git --version`. Older Git versions such as 2.30 can trigger this error on either Mac architecture. The current launcher resolves Git's checkout paths on both older and newer versions. To run an older copy, use Apple Git by prepending `/usr/bin` to `PATH` for that command.
 

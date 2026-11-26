@@ -55,14 +55,14 @@ fn verify_file(metadata: &fs::Metadata) -> Result<()> {
 pub(crate) struct Journal(sqlite::Journal);
 
 impl Journal {
-    pub(crate) async fn open(
+    pub(crate) fn start(
         path: PathBuf,
         deployment: String,
         state_lock: impl Send + 'static,
-    ) -> Result<Self> {
-        Ok(Self(
-            sqlite::Journal::open(path, deployment, state_lock).await?,
-        ))
+    ) -> Self {
+        Self(sqlite::Journal::start(path, deployment, state_lock, || {
+            tracing::warn!(code = "embedded_workstation_context_unavailable");
+        }))
     }
 
     pub(crate) async fn shutdown(&self) {

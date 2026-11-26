@@ -31,6 +31,7 @@ CONTEXT_WINDOW_TOKENS = 512
 FIXTURE_MODEL_MEMORY_MIB = 1536
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 DIAGNOSTIC = re.compile(r'\b(qa_(?:warm|replica|queue|turn|settings)_stage)="?([a-z0-9_]{1,40})\b')
+CONTEXT_DIAGNOSTIC = re.compile(r'\bcode="?(embedded_workstation_context_(?:path_)?unavailable)\b')
 DIAGNOSTIC_DETAIL = re.compile(
     r'\b(qa_warm_reason|qa_warm_elapsed_ms|landlock_abi|sanitized_os_error|worker_exit_code|worker_signal)'
     r'="?(Some\(-?\d{1,9}\)|-?\d{1,9}|abandoned|landlock_abi)(?=["\s,|]|$)'
@@ -144,6 +145,8 @@ def report_diagnostics(logs):
     stages = set()
     lines = ANSI.sub("", logs).splitlines()
     for line in lines:
+        for code in CONTEXT_DIAGNOSTIC.findall(line):
+            stages.add(("workstation_context", code, ()))
         for stage, code in DIAGNOSTIC.findall(line):
             details = DIAGNOSTIC_DETAIL.findall(line) + FIXED_DIAGNOSTIC_DETAIL.findall(line)
             stages.add((stage, code, tuple(sorted(details))))

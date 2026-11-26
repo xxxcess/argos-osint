@@ -150,36 +150,27 @@ pub struct Journal {
 }
 
 impl Journal {
-    /// Open a separate disk journal under an existing exclusive companion state lock.
-    /// The worker holds its own copy of the lock until the SQLite connection closes.
-    pub async fn open(
+    /// Start a separate disk journal under an existing exclusive companion state lock.
+    /// The queue accepts observations while the owner opens and migrates the database.
+    /// The owner holds its copy of the lock until the SQLite connection closes.
+    pub fn start(
         path: PathBuf,
         deployment: String,
         state_lock: impl Send + 'static,
-    ) -> Result<Self> {
+        on_open_failure: impl FnOnce() + Send + 'static,
+    ) -> Self {
         let (queue, messages) = mpsc::channel(MAX_QUEUE);
-        let (opened, status) = oneshot::channel();
         let dropped = Arc::new(AtomicU64::new(0));
         let owner_dropped = Arc::clone(&dropped);
         let runtime = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
             let _state_lock = state_lock;
             match Worker::open(path, &deployment, owner_dropped) {
-                Ok(worker) => {
-                    if opened.send(Ok(())).is_ok() {
-                        worker.run(messages, &runtime);
-                    }
-                }
-                Err(error) => {
-                    let _ = opened.send(Err(error));
-                }
+                Ok(worker) => worker.run(messages, &runtime),
+                Err(_) => on_open_failure(),
             }
         });
-        tokio::time::timeout(QUERY_BUDGET, status)
-            .await
-            .context("open workstation journal budget")?
-            .context("open workstation journal worker")??;
-        Ok(Self { queue, dropped })
+        Self { queue, dropped }
     }
 
     /// Enqueue one observation without blocking the existing gateway read.
@@ -892,6 +883,39 @@ mod tests {
         assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
         assert!(query.cancelled.load(Ordering::Acquire));
         assert!(query.reply.is_closed());
+    }
+
+    #[test]
+    fn delayed_owner_captures_observation_after_early_query_times_out() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("context.sqlite3");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        let observed_at = now_ms();
+        runtime.block_on(async {
+            let (release, wait) = oneshot::channel();
+            let delay_owner = tokio::task::spawn_blocking(move || wait.blocking_recv());
+            let journal = Journal::start(path.clone(), "deployment-a".into(), (), || {
+                panic!("the journal must open after the blocking thread is available")
+            });
+            journal.record(observation("scope-a", observed_at, 1, "paused"));
+            assert!(journal
+                .query(lookup("scope-a", Range::Current))
+                .await
+                .is_none());
+            release.send(()).unwrap();
+            delay_owner.await.unwrap().unwrap();
+            journal.shutdown().await;
+        });
+        let worker = owner(&path);
+        let page = worker
+            .read(&history(observed_at, now_ms() + 1), now_ms())
+            .unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].observed_at_ms, observed_at);
     }
 
     #[test]

@@ -392,28 +392,18 @@ mod embedded {
                 .with_qa_decision(decision.clone());
             let lock = Arc::new(lock);
             let context_journal = if let Some(path) = layout.context {
-                match workstation_context::Journal::open(
+                let journal = Arc::new(workstation_context::Journal::start(
                     path,
                     deployment.deployment_id.clone(),
                     Arc::clone(&lock),
-                )
-                .await
-                {
-                    Ok(journal) => {
-                        let journal = Arc::new(journal);
-                        let observer = Arc::new(context::Observer::new(
-                            journal.clone(),
-                            deployment.deployment_id.clone(),
-                            deployment.configuration_epoch.clone(),
-                        ));
-                        gateway = gateway.with_workstation_context(Arc::clone(&observer));
-                        Some((journal, observer))
-                    }
-                    Err(_) => {
-                        tracing::warn!(code = "embedded_workstation_context_unavailable");
-                        None
-                    }
-                }
+                ));
+                let observer = Arc::new(context::Observer::new(
+                    journal.clone(),
+                    deployment.deployment_id.clone(),
+                    deployment.configuration_epoch.clone(),
+                ));
+                gateway = gateway.with_workstation_context(Arc::clone(&observer));
+                Some((journal, observer))
             } else {
                 None
             };

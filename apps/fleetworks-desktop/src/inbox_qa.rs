@@ -2665,7 +2665,7 @@ mod tests {
             ] {
                 let mut active = turn(QaTurnState::Running, 1);
                 active.stage = Some(stage);
-                let mut runtime = qa_drawer(size, Some(active));
+                let runtime = qa_drawer(size, Some(active));
                 assert!(runtime.accessibility_json().to_string().contains(label));
             }
         }

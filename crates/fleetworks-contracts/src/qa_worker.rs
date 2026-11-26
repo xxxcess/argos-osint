@@ -57,15 +57,26 @@ pub enum QaModelTarget {
     FlanT5Small,
     #[serde(rename = "flan-t5-base")]
     FlanT5Base,
+    #[serde(rename = "gpt2-small")]
+    Gpt2Small,
+    #[serde(rename = "gpt2-medium")]
+    Gpt2Medium,
 }
 
 impl QaModelTarget {
-    pub const ALL: [Self; 2] = [Self::FlanT5Base, Self::FlanT5Small];
+    pub const ALL: [Self; 4] = [
+        Self::FlanT5Base,
+        Self::FlanT5Small,
+        Self::Gpt2Small,
+        Self::Gpt2Medium,
+    ];
 
     pub const fn slug(self) -> &'static str {
         match self {
             Self::FlanT5Small => "flan-t5-small",
             Self::FlanT5Base => "flan-t5-base",
+            Self::Gpt2Small => "gpt2-small",
+            Self::Gpt2Medium => "gpt2-medium",
         }
     }
 
@@ -73,6 +84,8 @@ impl QaModelTarget {
         match self {
             Self::FlanT5Small => "FLAN-T5 Small",
             Self::FlanT5Base => "FLAN-T5 Base",
+            Self::Gpt2Small => "GPT-2 Small",
+            Self::Gpt2Medium => "GPT-2 Medium",
         }
     }
 
@@ -84,6 +97,8 @@ impl QaModelTarget {
         match self {
             Self::FlanT5Small => QA_CHAT_MODEL_REVISION,
             Self::FlanT5Base => "7bcac572ce56db69c1ea7c8af255c5d7c9672fc2",
+            Self::Gpt2Small => "607a30d783dfa663caf39e06633721c8d4cfcd7e",
+            Self::Gpt2Medium => "6dcaa7a952f72f9298047fd5137cd6e4f05f41da",
         }
     }
 
@@ -91,6 +106,8 @@ impl QaModelTarget {
         match self {
             Self::FlanT5Small => 307_867_048,
             Self::FlanT5Base => 990_345_061,
+            Self::Gpt2Small => 548_105_171,
+            Self::Gpt2Medium => 1_519_984_962,
         }
     }
 
@@ -254,6 +271,7 @@ pub enum QaDialogueKind {
     Acknowledgement,
     Help,
     Recall,
+    Clarification,
     Operational,
 }
 

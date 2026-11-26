@@ -168,45 +168,36 @@ def cited_finding(turn, kind, source_id, *, count=1):
     return finding
 
 
-def require_context(turn, *, inferred, window=CONTEXT_WINDOW_TOKENS):
+def require_context(turn, *, window=CONTEXT_WINDOW_TOKENS):
     usage = turn.get("context")
     require(isinstance(usage, dict) and usage.get("window_tokens") == window,
             "terminal turn lacks its model context window")
     peak = usage.get("peak_input_tokens")
     windows = usage.get("model_windows")
     require(type(peak) is int and type(windows) is int
-            and (0 < peak <= window and 0 < windows <= 48 if inferred else peak == windows == 0),
+            and 0 < peak <= window and 0 < windows <= 48,
             "terminal turn has incorrect model context usage")
     return usage
 
 
-def settled_turn(request, context, case, question, *, source=None, mode="direct"):
+def settled_turn(request, context, case, question, *, source=None, mode="operational"):
     payload = {"request_id": f"inbox-qa-smoke-{case}", "context": context, "question": question}
     if source is not None:
         payload["source"] = source
     accepted = request("turns", payload, expected=(200, 201, 202))
     query = {"turn_id": accepted["turn_id"], "after": 0, "wait_seconds": 0}
-    inferred = mode != "direct"
-    if inferred:
-        accepted = until(lambda: request("events", query=query)["turn"],
-                         lambda turn: turn["state"] in TERMINAL,
-                         f"{case} did not complete the local inference turn", timeout=45)
-        if mode == "dialogue":
-            require(accepted["state"] == "answered" and accepted.get("reply") and not accepted["findings"],
-                    f"{case} did not produce bounded conversational text")
-        else:
-            require(accepted["state"] == "answered" and accepted["findings"],
-                    f"{case} did not produce a grounded explanation")
-    else:
-        require(accepted["state"] in TERMINAL, f"{case} did not finish within admission")
+    accepted = until(lambda: request("events", query=query)["turn"],
+                     lambda turn: turn["state"] in TERMINAL,
+                     f"{case} did not complete the local inference turn", timeout=45)
+    require(accepted["state"] == "answered" and accepted.get("reply"),
+            f"{case} did not return a generated reply")
+    require(bool(accepted["findings"]) == (mode != "dialogue"),
+            f"{case} did not match the expected grounding scope")
     require(type(accepted.get("response_time_ms")) is int and accepted["response_time_ms"] >= 0,
             f"{case} terminal turn omitted its response duration")
-    # Generation-preferred operational turns may finish with the same typed
-    # facts if generation cannot produce a verifiable reply.
-    used_model = inferred and (mode != "preferred" or bool((accepted.get("context") or {}).get("model_windows")))
-    usage = require_context(accepted, inferred=used_model)
-    if used_model:
-        require(usage["model_windows"] == 1, f"{case} did not use a single model input window")
+    usage = require_context(accepted)
+    require(usage["model_windows"] == 1 and accepted.get("model_target") and accepted.get("model_generation"),
+            f"{case} did not use one input window on its selected generator")
     page = request("events", query=query)
     require(page["turn"] == accepted and not page["gap"], f"{case} admission differed from its event snapshot")
     require(not accepted.get("provisional_reply") and not any(event.get("provisional_delta") for event in page["events"]),
@@ -407,7 +398,7 @@ def exercise(request, registration, model, readiness, running_jobs):
     require(terminal_events == 1 and snapshot["cursor"] == cursor, "terminal delivery was not exactly once")
     require(snapshot["state"] == "answered" and first_finding_ms is not None and not snapshot.get("provisional_reply"),
             "real local checkpoint did not seal a cited answer")
-    model_context = require_context(snapshot, inferred=True)
+    model_context = require_context(snapshot)
     require(model_context["model_windows"] == 1, "operational reply did not use a single model input window")
     require(1 <= len(snapshot["findings"]) <= 3, "QA finding count exceeds its contract")
     for finding in snapshot["findings"]:
@@ -433,7 +424,7 @@ def exercise(request, registration, model, readiness, running_jobs):
         lambda: request("events", query={"turn_id": follow_up_id, "after": 0, "wait_seconds": 0})["turn"],
         lambda value: value["state"] in TERMINAL, "fresh-evidence turn did not finish")
     require(next_turn["state"] == "answered" and next_turn["findings"], "fresh evidence did not support the follow-up")
-    require_context(next_turn, inferred=True)
+    require_context(next_turn)
 
     def observed(finding):
         return datetime.fromisoformat(finding["observed_at"].replace("Z", "+00:00"))
@@ -443,17 +434,11 @@ def exercise(request, registration, model, readiness, running_jobs):
 
     context = authorize(registration)
 
-    preferred_model_fallback_count = 0
-
-    def ask(case, question, *, mode="direct"):
-        nonlocal preferred_model_fallback_count
-        turn = settled_turn(request, context, case, question, mode=mode)
-        if mode == "preferred" and not turn.get("reply"):
-            preferred_model_fallback_count += 1
-        return turn
+    def ask(case, question, *, mode="operational"):
+        return settled_turn(request, context, case, question, mode=mode)
 
     def check_status_group(question, group, prior_observation):
-        status_turn = ask(f"{group}-status-checks", question, mode="preferred")
+        status_turn = ask(f"{group}-status-checks", question)
         findings = status_turn["findings"]
         require(status_turn["state"] == "answered" and status_turn["question"] == question
                 and 1 <= len(findings) <= 3,
@@ -474,7 +459,7 @@ def exercise(request, registration, model, readiness, running_jobs):
 
     gateway = settled_turn(
         request, context, "gateway", "What does this mean?",
-        source={"kind": "readiness", "id": "gateway"}, mode="grounded",
+        source={"kind": "readiness", "id": "gateway"},
     )
     gateway_finding = cited_finding(gateway, "readiness", "gateway")
     require(gateway_finding["text"]
@@ -511,7 +496,7 @@ def exercise(request, registration, model, readiness, running_jobs):
     for source_id, metric_question, label in questions:
         metric = ask(source_id, metric_question)
         readings[source_id] = cited_metric(metric, source_id, label)
-    memory_again = ask("memory-follow-up", "How much memory consumption we are at?", mode="preferred")
+    memory_again = ask("memory-follow-up", "How much memory consumption we are at?")
     readings["memory_follow_up"] = cited_metric(memory_again, "memory", "memory usage")
     require(datetime.fromisoformat(readings["memory_follow_up"]["observed_at"])
             > datetime.fromisoformat(readings["memory"]["observed_at"]),
@@ -523,12 +508,12 @@ def exercise(request, registration, model, readiness, running_jobs):
     dialogue_rss_bytes = embedded.read_process_rss_bytes(worker)
     preceding = readings["memory_follow_up"]
     for index, question in enumerate(("And now?", "Has that changed?"), start=1):
-        turn = ask(f"conversational-follow-up-{index}", question, mode="preferred")
+        turn = ask(f"conversational-follow-up-{index}", question)
         measured = cited_metric(turn, "memory", "memory usage", previous=preceding)
         require(turn["question"] == question and observed(measured) > observed(preceding),
                 "a conversational follow-up changed the displayed prompt or reused a metric sample")
         preceding = measured
-    resources = ask("resources", "What is our resource usage?", mode="preferred")
+    resources = ask("resources", "What is our resource usage?")
     require(resources["state"] == "answered"
             and {part["source"]["id"] for part in resources["findings"]} == {"cpu", "memory", "disk"}
             and len(resources["findings"]) == 3
@@ -538,11 +523,9 @@ def exercise(request, registration, model, readiness, running_jobs):
     help_turn = ask("help", "What can you help with?", mode="dialogue")
     require(help_turn.get("conversation") == "help" and not help_turn["findings"],
             "the assistant did not explain how to start a task")
-    unsupported = ask("general-context", "What is the capital of Japan?")
-    require(unsupported["state"] == "insufficient_context" and not unsupported["findings"]
-            and unsupported.get("notice") == "out_of_scope"
-            and unsupported.get("conversation") == "context_needed",
-            "the assistant did not ask for grounding context")
+    unsupported = ask("general-context", "What is the capital of Japan?", mode="dialogue")
+    require(not unsupported["findings"] and "tokyo" not in unsupported["reply"].casefold(),
+            "the generator did not keep the out-of-scope response within Assistant's scope")
 
     history = request("history")
     require(1 < len(history) <= 16 and history[0] == unsupported and jobs in history
@@ -558,7 +541,6 @@ def exercise(request, registration, model, readiness, running_jobs):
     request("events", query=query, expected=404)
     return {"model_warm_ms": ready_ms, "admission_ms": admission_ms, "first_cited_finding_ms": first_finding_ms,
             "completion_ms": completed_ms, "unload_ms": round((time.monotonic() - started) * 1000, 1),
-            "preferred_model_fallback_count": preferred_model_fallback_count,
             "model_pid_count": len(active), "warm_model_rss_bytes": worker_rss_bytes,
             "model_context": model_context,
             "fresh_observation": True, "terminal_events": terminal_events, "terminal_state": snapshot["state"],
@@ -1372,7 +1354,7 @@ def select_generator(request, context, preference, *, enable=False):
     return request("settings", update)
 
 
-def exercise_context_without_model(request, context):
+def exercise_contextual_status(request, context):
     jobs = settled_turn(request, context, "running-jobs-list", "what jobs are running?")
     require(jobs["state"] == "answered"
             and any(finding["source"]["kind"] == "job_count" for finding in jobs["findings"]),
@@ -1399,10 +1381,10 @@ def exercise_context_without_model(request, context):
     if followed_group == "failed":
         require(f"The earlier count of {match[2]} was for unresolved checks." in summary["text"],
                 "The follow-up omitted the difference between failed and unresolved checks")
-    recap = settled_turn(request, context, "recap-last-answer", "What was your last answer?")
+    recap = settled_turn(request, context, "recap-last-answer", "What was your last answer?", mode="dialogue")
     require(recap["state"] == "answered" and recap.get("used_previous_exchange") is True
-            and "unresolved" in (recap.get("reply") or "").casefold(),
-            "The rules path could not report the previous answer from retained context")
+            and any(word in recap["reply"].casefold() for word in ("unresolved", "status", "checks")),
+            "The generator could not report the previous answer from retained context")
 
 
 def verify_explicit_base_unavailable(request, registration, model, reason, *, enable=False):
@@ -1416,12 +1398,11 @@ def verify_explicit_base_unavailable(request, registration, model, reason, *, en
     require(generator["preference"] == "flan_t5_base" and generator.get("effective") is None
             and generator["reason"] == reason and not model(),
             "Explicit Base was replaced by Small or reported the wrong availability reason")
-    facts = settled_turn(request, context, f"explicit-base-{reason}", "What is the current memory usage?")
-    cited_metric(facts, "memory", "memory usage")
-    require(facts.get("model_target") is None and facts.get("model_generation") is None,
-            "Direct facts acquired generator provenance while Explicit Base was unavailable")
-    if reason == "insufficient_resources":
-        exercise_context_without_model(request, context)
+    latest = request("latest")
+    request("turns", {"request_id": f"explicit-base-{reason}", "context": context,
+                      "question": "What is the current memory usage?"}, expected=503)
+    require(request("latest") == latest,
+            "An unavailable generator modified history when rejecting a new question")
     stop_model(request, registration, model, unavailable)
 
 
@@ -1445,7 +1426,7 @@ def named_small_startup(args, binary, digests):
             ready = ready_model(request, "flan-t5-small", updated=enabled)
             require("base_model_provision" in session.stderr_excerpt(),
                     "The offline fixture did not attempt Base with the available memory headroom")
-            answer = settled_turn(request, context, "named-small-fallback", SUMMARY_QUESTION, mode="operational")
+            answer = settled_turn(request, context, "named-small-fallback", SUMMARY_QUESTION)
             require(all(finding["source"]["kind"] == "readiness" for finding in answer["findings"]),
                     "Named Small fallback did not preserve grounded readiness citations")
             require(ready["generator"]["preference"] == "automatic"
@@ -1468,7 +1449,7 @@ def named_small_startup(args, binary, digests):
                                                 "wait_seconds": 0})
             require(retained["turn"] == answer and not retained["events"],
                     "Changing generator cleared a completed exchange or duplicated its terminal event")
-            explicit_answer = settled_turn(request, context, "explicit-small", SUMMARY_QUESTION, mode="operational")
+            explicit_answer = settled_turn(request, context, "explicit-small", SUMMARY_QUESTION)
             require(explicit_answer["model_target"] == "flan-t5-small"
                     and explicit_answer["model_generation"] == ready["generation"],
                     "Turn provenance did not identify the actual explicit Small worker and generation")
@@ -1489,10 +1470,12 @@ def named_small_startup(args, binary, digests):
                     and model() == [small_worker],
                     "The generator failed to complete a turn on its existing worker after Decision edits")
 
+            exercise_contextual_status(request, context)
             verify_explicit_base_unavailable(request, registration, model, "model_provision_failed")
         return {"base_provision_attempted": True, "selected_model": "flan-t5-small",
                 "grounded_answer": True, "explicit_small_worker": True,
-                "decision_changes_kept_generator": True, "base_provision_error_preserved": True}
+                "decision_changes_kept_generator": True, "base_provision_error_preserved": True,
+                "contextual_status_used_generator": True}
 
 
 def run_embedded(args):
@@ -1537,7 +1520,6 @@ def run_embedded(args):
             if linux:
                 verify_explicit_base_unavailable(request, registration, model, "insufficient_resources", enable=True)
                 result["explicit_base_memory_admission"] = "insufficient_resources"
-                result["contextual_status_without_model"] = True
             result["installer_stages"] = ["downloading_pack", "verifying_pack"]
             attestation = session.transport_attestation
 

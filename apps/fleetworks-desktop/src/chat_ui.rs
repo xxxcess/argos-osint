@@ -141,23 +141,17 @@ pub(crate) fn bubble(message: &ChatMessage, kit: &Kit) -> El {
             )
             .child(citation_rows(&message.id, &message.citations, kit))
     });
-    bubble_with_sources(message, sources, Some(message.role), [], kit)
+    bubble_with_sources(message, sources, Some(message.role), kit)
 }
 
-pub(crate) fn inbox_answer(
-    message: &ChatMessage,
-    sources: Option<El>,
-    metadata: impl IntoIterator<Item = El>,
-    kit: &Kit,
-) -> El {
-    bubble_with_sources(message, sources, None, metadata, kit)
+pub(crate) fn inbox_answer(message: &ChatMessage, sources: Option<El>, kit: &Kit) -> El {
+    bubble_with_sources(message, sources, None, kit)
 }
 
 fn bubble_with_sources(
     message: &ChatMessage,
     sources: Option<El>,
     visible_owner: Option<Role>,
-    metadata: impl IntoIterator<Item = El>,
     kit: &Kit,
 ) -> El {
     let state = message
@@ -165,18 +159,13 @@ fn bubble_with_sources(
         .chip()
         .map(|(label, tone)| chip(label, tone, kit).key(format!("chat-state-{}", message.id)));
     let key = message_key(&message.id);
-    let header = message_header(
-        &key,
-        visible_owner,
-        message.timestamp.as_deref(),
-        metadata,
-        kit,
-    );
+    let header = (visible_owner.is_some() || message.timestamp.is_some())
+        .then(|| message_header(&key, visible_owner, message.timestamp.as_deref(), kit));
     message_bubble(
         key,
         message.role,
         &message.text,
-        Some(header),
+        header,
         state,
         sources,
         kit,
@@ -191,7 +180,6 @@ fn message_header(
     key: &str,
     visible_owner: Option<Role>,
     timestamp: Option<&str>,
-    metadata: impl IntoIterator<Item = El>,
     kit: &Kit,
 ) -> El {
     rune::row()
@@ -212,7 +200,6 @@ fn message_header(
                 .font(kit.ty.text_xsmall)
                 .color(theme::hex(theme::TEXT_MUTED))
         }))
-        .children(metadata)
 }
 
 fn message_bubble(

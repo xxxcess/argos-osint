@@ -70,8 +70,8 @@ use fleetworks_contracts::chat::QaRelatedActivityRequest;
 use fleetworks_contracts::chat::QaRelationshipReason;
 use fleetworks_contracts::chat::QaSettingsUpdate;
 use fleetworks_contracts::chat::QaTurnRequest;
-use fleetworks_contracts::chat::QaTurnState;
 use fleetworks_contracts::chat::CHAT_TURNS_PATH;
+use fleetworks_contracts::chat::QA_GPT2_GENERATORS_FEATURE;
 use fleetworks_contracts::chat::QA_HISTORY_FEATURE;
 use fleetworks_contracts::chat::QA_MODEL_SETTINGS_FEATURE;
 use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
@@ -663,6 +663,12 @@ async fn run_shared_flow(
     let local = transport == "ipc";
     assert_eq!(caps.features.iter().any(|f| f == "inbox-qa-v2"), local);
     assert_eq!(caps.features.iter().any(|f| f == QA_HISTORY_FEATURE), local);
+    assert_eq!(
+        caps.features
+            .iter()
+            .any(|f| f == QA_GPT2_GENERATORS_FEATURE),
+        local,
+    );
     assert!(caps.features.iter().any(|f| f == "jobs"));
     assert!(caps.features.iter().any(|f| f == "logs"));
     let local_nlp = local && cfg!(feature = "nlp");
@@ -1545,29 +1551,24 @@ async fn run_shared_flow(
                 .is_none(),
             "inline triage must not create a transcript"
         );
-        let count = QaTurnRequest::new(
-            format!("parity-failed-count-{transport}"),
-            qa_context.clone(),
-            "How many jobs failed?".into(),
-            None,
-        )
-        .expect("valid scoped count question");
-        let answered = client.submit_qa_turn(&count).await.expect("direct answer");
-        assert_eq!(answered.state, QaTurnState::Answered);
-        assert!(answered
-            .accepted_at
-            .zip(answered.completed_at)
-            .is_some_and(|(accepted, completed)| accepted <= completed));
-        assert!(answered.response_time_ms.is_some());
-        assert_eq!(answered.findings.len(), 1);
-        assert_eq!(answered.findings[0].source.kind, ChatSourceKind::JobCount);
-        let usage = answered.context.expect("direct answer context usage");
-        assert_eq!(usage.model_windows, 0);
-        assert_eq!(usage.peak_input_tokens, 0);
-        assert_eq!(
-            client.submit_qa_turn(&count).await.expect("direct replay"),
-            answered
-        );
+        for (suffix, question) in [
+            ("failed-count", "How many jobs failed?"),
+            ("running-list", "What jobs are running?"),
+            ("recall", "What did I ask?"),
+        ] {
+            let request = QaTurnRequest::new(
+                format!("parity-{suffix}-{transport}"),
+                qa_context.clone(),
+                question.into(),
+                None,
+            )
+            .expect("valid Assistant question");
+            assert_eq!(
+                client.submit_qa_turn(&request).await.unwrap_err(),
+                ClientError::Status(503),
+                "No generator is running for {question}",
+            );
+        }
 
         let job = ChatSourceReference::new(ChatSourceKind::Job, seed_receipt.job_id.clone())
             .expect("private seed job reference");
@@ -1580,56 +1581,23 @@ async fn run_shared_flow(
             QaRelatedActivity::Found { target, .. }
                 if target.kind == ChatSourceKind::Readiness && target.id == "actor_catalog"
         ));
-        assert_eq!(
-            client.latest_qa_turn().await.expect("read latest QA"),
-            Some(answered.clone())
-        );
-        assert_eq!(
-            client
-                .qa_events(&QaEventQuery::new(answered.turn_id.clone(), 0, 0))
-                .await
-                .expect("read canonical turn in the event page")
-                .turn,
-            answered,
-        );
         let explain = QaTurnRequest::new(
             format!("parity-explain-job-{transport}"),
             qa_context.clone(),
             "What happened?".into(),
-            Some(job.clone()),
+            Some(job),
         )
         .expect("selected job question");
-        let explanation = client
-            .submit_qa_turn(&explain)
-            .await
-            .expect("direct job explanation");
-        assert_eq!(explanation.state, QaTurnState::Answered);
-        assert!(!explanation.used_previous_exchange);
-        assert_eq!(explanation.findings[0].source, job);
-        assert_eq!(explanation.related_activity, Some(related_job));
-        let follow_up = QaTurnRequest::new(
-            format!("parity-follow-job-{transport}"),
-            qa_context.clone(),
-            "What about now?".into(),
-            None,
-        )
-        .expect("follow-up after focus was cleared");
-        let refreshed = client
-            .submit_qa_turn(&follow_up)
-            .await
-            .expect("new observation for the retained subject");
-        assert_eq!(refreshed.state, QaTurnState::Answered);
-        assert!(refreshed.used_previous_exchange);
-        assert_eq!(refreshed.question, follow_up.question);
-        assert_eq!(refreshed.findings[0].source, job);
-        assert!(refreshed.findings[0].observed_at > explanation.findings[0].observed_at);
-        assert_eq!(refreshed.findings.len(), 2);
-        assert_eq!(refreshed.findings[1].source, job);
-        assert_eq!(refreshed.findings[1].label, "Previous observation");
         assert_eq!(
-            refreshed.findings[1].observed_at,
-            explanation.findings[0].observed_at,
+            client.submit_qa_turn(&explain).await.unwrap_err(),
+            ClientError::Status(503),
         );
+        assert!(client
+            .latest_qa_turn()
+            .await
+            .expect("read latest QA")
+            .is_none());
+        assert!(client.qa_history().await.expect("read history").is_empty());
 
         let julia_update = QaSettingsUpdate::preferences(qa_context.clone(), enabled.revision)
             .with_decision_preference(QaDecisionPreference::Julia1Q8);
@@ -1676,46 +1644,40 @@ async fn run_shared_flow(
             QaDecisionPreference::Julia1Q8
         );
         assert!(small.generation > same.generation);
-        assert_eq!(
-            client
-                .latest_qa_turn()
-                .await
-                .expect("history after generator switch"),
-            Some(refreshed.clone())
-        );
-        assert_eq!(
-            client.qa_history().await.expect("retained Inbox exchanges"),
-            vec![refreshed, explanation.clone(), answered],
-            "History preserves canonical exchanges, newest first, across generator changes",
-        );
-        let list = QaTurnRequest::new(
-            format!("parity-running-job-list-{transport}"),
-            qa_context.clone(),
-            "What jobs are running?".into(),
-            None,
-        )
-        .expect("valid scoped running job question");
-        let running = client
-            .submit_qa_turn(&list)
+        assert!(client
+            .qa_history()
             .await
-            .expect("direct running jobs answer");
-        assert_eq!(running.state, QaTurnState::Answered);
-        assert_eq!(running.findings[0].source.kind, ChatSourceKind::JobCount);
-        assert_eq!(running.findings[0].source.id, "running");
-        assert_eq!(running.context.unwrap().model_windows, 0);
-        assert!(running.findings[1..].iter().all(|finding| {
-            finding.source.kind == ChatSourceKind::Job && finding.text.ends_with(" is running.")
-        }));
+            .expect("read history after generator switch")
+            .is_empty());
         assert_eq!(
-            client
-                .submit_qa_turn(&explain)
-                .await
-                .expect("replay after generator switch"),
-            explanation
+            client.submit_qa_turn(&explain).await.unwrap_err(),
+            ClientError::Status(503),
         );
+        let mut previous = small;
+        for preference in [
+            QaGeneratorPreference::Gpt2Small,
+            QaGeneratorPreference::Gpt2Medium,
+        ] {
+            let saved = client
+                .update_qa_settings(
+                    &QaSettingsUpdate::preferences(qa_context.clone(), previous.revision)
+                        .with_generator_preference(preference),
+                )
+                .await
+                .expect("save explicit GPT-2 generator");
+            assert_eq!(saved.generator.unwrap().preference, preference);
+            assert_eq!(saved.decision, previous.decision);
+            assert!(saved.generation > previous.generation);
+            let fetched = client
+                .qa_settings()
+                .await
+                .expect("read saved GPT-2 generator");
+            assert_eq!(fetched.generator.unwrap().preference, preference);
+            previous = saved;
+        }
         let base = client
             .update_qa_settings(
-                &QaSettingsUpdate::preferences(qa_context.clone(), small.revision)
+                &QaSettingsUpdate::preferences(qa_context.clone(), previous.revision)
                     .with_generator_preference(QaGeneratorPreference::FlanT5Base),
             )
             .await
@@ -1724,7 +1686,7 @@ async fn run_shared_flow(
             base.generator.unwrap().preference,
             QaGeneratorPreference::FlanT5Base
         );
-        assert!(base.generation > small.generation);
+        assert!(base.generation > previous.generation);
         let edge = client
             .update_qa_settings(
                 &QaSettingsUpdate::preferences(qa_context.clone(), base.revision)

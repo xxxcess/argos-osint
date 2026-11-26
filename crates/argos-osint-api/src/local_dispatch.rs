@@ -22,6 +22,7 @@ use axum::http::StatusCode;
 use fleetworks_contracts::capabilities::Capabilities;
 use fleetworks_contracts::capabilities::CONNECT_REGISTRY_FEATURE;
 use fleetworks_contracts::chat::ChatSourceKind;
+use fleetworks_contracts::chat::QA_GPT2_GENERATORS_FEATURE;
 use fleetworks_contracts::chat::QA_HISTORY_FEATURE;
 use fleetworks_contracts::chat::QA_MODEL_SETTINGS_FEATURE;
 use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
@@ -1286,6 +1287,7 @@ impl LocalGateway {
             QA_TRIAGE_FEATURE,
             QA_MODEL_SETTINGS_FEATURE,
             QA_HISTORY_FEATURE,
+            QA_GPT2_GENERATORS_FEATURE,
         ]
         .into_iter()
         .map(str::to_owned)

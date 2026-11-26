@@ -28,13 +28,11 @@ use fleetworks_contracts::qa_worker::verified_operational_sources;
 use fleetworks_contracts::qa_worker::QaContextUsage;
 use fleetworks_contracts::qa_worker::QaDialogueExchange;
 use fleetworks_contracts::qa_worker::QaDialogueKind;
-use fleetworks_contracts::qa_worker::QaWorkerDialogue;
 use fleetworks_contracts::qa_worker::QaWorkerRequest;
 use fleetworks_contracts::qa_worker::QA_MAX_DIALOGUE_HISTORY;
 use fleetworks_contracts::qa_worker::QA_MAX_DIALOGUE_MESSAGE_BYTES;
 use fleetworks_contracts::qa_worker::QA_MAX_DRAFT_BYTES;
 use fleetworks_contracts::qa_worker::QA_MAX_DRAFT_EVENTS;
-use fleetworks_contracts::qa_worker::QA_MAX_VISIBLE_WORDS;
 use futures_util::{Stream, StreamExt};
 use serde::Deserialize;
 use serde::Serialize;
@@ -182,24 +180,9 @@ pub const PREVIOUS_OBSERVATION_LABEL: &str = "Previous observation";
 /// The cited aggregate for a Workstation Status check report.
 pub const STATUS_CHECKS_SOURCE_ID: &str = "workstation_status_checks";
 
-/// Decide whether a frozen request is answered from an exact fact or sent to the model.
-#[derive(Clone, Copy, Default, Deserialize, Serialize)]
-pub enum AnswerMode {
-    #[default]
-    Model,
-    /// Publish complete, measured facts without model selection.
-    Grounded,
-}
-
 /// Frozen evidence and metadata retained inside the coordinator during execution.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct FrozenEvidence {
-    #[serde(default)]
-    pub answer_mode: AnswerMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notice: Option<QaTurnNotice>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conversation: Option<QaConversationReply>,
     pub request: QaWorkerRequest,
     pub sources: Vec<Source>,
     pub sampled_at_ms: i64,
@@ -411,6 +394,8 @@ impl SettingsRow {
             None | Some("automatic") => QaGeneratorPreference::Automatic,
             Some("flan_t5_small") => QaGeneratorPreference::FlanT5Small,
             Some("flan_t5_base") => QaGeneratorPreference::FlanT5Base,
+            Some("gpt2_small") => QaGeneratorPreference::Gpt2Small,
+            Some("gpt2_medium") => QaGeneratorPreference::Gpt2Medium,
             Some(_) => return Err(abort("invalid_store")),
         };
         let decision_preference = match self.decision_preference.as_deref() {
@@ -636,6 +621,8 @@ pub async fn update(
             QaGeneratorPreference::Automatic => "automatic",
             QaGeneratorPreference::FlanT5Small => "flan_t5_small",
             QaGeneratorPreference::FlanT5Base => "flan_t5_base",
+            QaGeneratorPreference::Gpt2Small => "gpt2_small",
+            QaGeneratorPreference::Gpt2Medium => "gpt2_medium",
             _ => return Err(abort("invalid_store")),
         };
         let decision_preference = match next.decision_preference {
@@ -927,58 +914,6 @@ async fn boundary_in(tx: &Tx, key: &str, generation: i64) -> Result<i64, TxError
     Ok(own.max(jobs::take::<Option<i64>>(&mut global, 0)?.unwrap_or_default()))
 }
 
-fn grounded_findings(evidence: &FrozenEvidence) -> Result<Vec<QaFinding>, TxError> {
-    evidence
-        .request
-        .validate()
-        .map_err(|_| abort("invalid_part"))?;
-    let passages = &evidence.request.passages;
-    if passages.len() != evidence.sources.len() || passages.len() > QA_MAX_FINDINGS {
-        return Err(abort("invalid_part"));
-    }
-    passages
-        .iter()
-        .zip(&evidence.sources)
-        .map(|(passage, source)| {
-            if passage.source_id != source.opaque_id {
-                return Err(abort("invalid_part"));
-            }
-            let end =
-                u32::try_from(passage.text.chars().count()).map_err(|_| abort("invalid_part"))?;
-            Ok(source.finding(passage.text.clone(), 0, end))
-        })
-        .collect()
-}
-
-fn fallback_findings(evidence: &FrozenEvidence) -> Result<Vec<QaFinding>, TxError> {
-    evidence
-        .request
-        .validate()
-        .map_err(|_| abort("invalid_part"))?;
-    let passages = &evidence.request.passages;
-    if passages.len() != evidence.sources.len() {
-        return Err(abort("invalid_part"));
-    }
-    let mut remaining_words = QA_MAX_WORDS;
-    let mut findings = Vec::new();
-    for (passage, source) in passages.iter().zip(&evidence.sources) {
-        if passage.source_id != source.opaque_id {
-            return Err(abort("invalid_part"));
-        }
-        let Some(words) = remaining_words.checked_sub(passage.text.split_whitespace().count())
-        else {
-            continue;
-        };
-        let end = u32::try_from(passage.text.chars().count()).map_err(|_| abort("invalid_part"))?;
-        findings.push(source.finding(passage.text.clone(), 0, end));
-        remaining_words = words;
-        if findings.len() == QA_MAX_FINDINGS {
-            break;
-        }
-    }
-    Ok(findings)
-}
-
 fn dialogue_line(text: &str) -> &str {
     text[..text.floor_char_boundary(QA_MAX_DIALOGUE_MESSAGE_BYTES.min(text.len()))].trim()
 }
@@ -1059,45 +994,6 @@ async fn recent_dialogue_in(
     Ok(history)
 }
 
-fn bounded_recap_quote(text: &str, max_bytes: usize, max_words: usize) -> String {
-    const ELLIPSIS: &str = "…";
-    let mut quote = String::with_capacity(text.len().min(max_bytes));
-    for (index, word) in text.split_whitespace().enumerate() {
-        let separator = usize::from(index > 0);
-        if index == max_words || quote.len() + separator + word.len() + ELLIPSIS.len() > max_bytes {
-            quote.push_str(ELLIPSIS);
-            break;
-        }
-        if index > 0 {
-            quote.push(' ');
-        }
-        quote.push_str(word);
-    }
-    quote
-}
-
-fn recalled_reply(dialogue: &QaWorkerDialogue) -> Option<String> {
-    if dialogue.kind != QaDialogueKind::Recall {
-        return None;
-    }
-    let exchange = dialogue.history.last()?;
-    let framing = "You asked “” and I answered “”";
-    let max_bytes = QA_MAX_DIALOGUE_MESSAGE_BYTES - framing.len();
-    let max_words = QA_MAX_VISIBLE_WORDS - framing.split_whitespace().count();
-    let question = bounded_recap_quote(&exchange.question, max_bytes / 2, max_words / 2);
-    let answer = bounded_recap_quote(
-        &exchange.reply,
-        max_bytes - question.len(),
-        max_words - question.split_whitespace().count(),
-    );
-    let recap = format!("You asked “{question}” and I answered “{answer}”");
-    if valid_dialogue_reply(&recap) {
-        return Some(recap);
-    }
-    let question = format!("You asked “{question}”");
-    valid_dialogue_reply(&question).then_some(question)
-}
-
 /// Atomically accept evidence, latest exchange and the work needed to answer it.
 pub async fn admit(
     repo: &Repository,
@@ -1163,33 +1059,33 @@ pub async fn admit(
               .bind(("workstation", actor.workstation())).bind(("active_cap", MAX_ACTIVE)).bind(("owner_cap", MAX_PER_REGISTRATION))
               .bind(("retained_cap", MAX_RETAINED))).await?;
             let ready = jobs::take::<Vec<bool>>(&mut reply, 1)?.len() as i64;
-            let needs_model = matches!(evidence.answer_mode, AnswerMode::Model) && ready > 0;
+            if ready == 0 {
+                return Err(abort("generator_unavailable"));
+            }
             if !jobs::take::<Vec<bool>>(&mut reply, 2)?.is_empty() {
                 return Err(abort("active"));
             }
             let active = jobs::take::<Option<i64>>(&mut reply, 3)?.ok_or_else(|| abort("invalid_store"))?;
             let owner_retained = jobs::take::<Option<i64>>(&mut reply, 4)?.ok_or_else(|| abort("invalid_store"))?;
             let total_retained = jobs::take::<Option<i64>>(&mut reply, 5)?.ok_or_else(|| abort("invalid_store"))?;
-            if (needs_model && active >= MAX_ACTIVE.min(ready * 2))
+            if active >= MAX_ACTIVE.min(ready * 2)
                 || owner_retained >= MAX_PER_REGISTRATION
                 || total_retained >= MAX_RETAINED
             {
                 return Err(abort("busy"));
             }
             let mut frozen = evidence.clone();
-            if let Some(dialogue) = frozen.request.dialogue.as_mut() {
-                if dialogue.kind == QaDialogueKind::Operational && needs_model {
-                    // The snapshot already resolves the approved subject and comparison.
-                    frozen.request.question = request.question.clone();
-                } else if dialogue.kind == QaDialogueKind::Recall {
-                    dialogue.history = recent_dialogue_in(&tx, key, generation, timestamp).await?;
+            let dialogue = frozen.request.dialogue.as_mut().ok_or_else(|| abort("invalid_part"))?;
+            if dialogue.kind == QaDialogueKind::Operational {
+                // The snapshot already resolves the approved subject and comparison.
+                frozen.request.question = request.question.clone();
+            } else if dialogue.kind == QaDialogueKind::Recall {
+                dialogue.history = recent_dialogue_in(&tx, key, generation, timestamp).await?;
+                if dialogue.history.is_empty() {
+                    dialogue.kind = QaDialogueKind::Clarification;
                 }
             }
-            let direct_recall = if needs_model {
-                None
-            } else {
-                frozen.request.dialogue.as_ref().and_then(recalled_reply)
-            };
+            frozen.request.validate().map_err(|_| abort("invalid_part"))?;
             let mut exchange = Exchange {
                 actor: actor.clone(),
                 source: request.source.clone(),
@@ -1215,38 +1111,6 @@ pub async fn admit(
             ).bind(("turn", jobs::rid("inbox_qa_exchange", id))).bind(("gen", generation))
               .bind(("owner", key.clone())).bind(("workstation", actor.workstation())).bind(("at", timestamp)).bind(("payload", payload))
               .bind(("latest", jobs::rid("inbox_qa_latest", key))).bind(("boundary", boundary))).await?;
-            if !needs_model {
-                // Exact facts need no worker lease. Publish the canonical turn and its
-                // events in the admission transaction so Off need not race settlement.
-                let findings = if (0..=MAX_EVIDENCE_AGE_MS)
-                    .contains(&now_ms().saturating_sub(evidence.sampled_at_ms))
-                {
-                    if matches!(evidence.answer_mode, AnswerMode::Grounded) {
-                        grounded_findings(evidence)?
-                    } else {
-                        fallback_findings(evidence)?
-                    }
-                } else {
-                    Vec::new()
-                };
-                let terminal = if let Some(reply) = direct_recall {
-                    exchange.turn.reply = Some(reply);
-                    exchange.turn.used_previous_exchange = true;
-                    QaTurnState::Answered
-                } else if findings.is_empty() {
-                    exchange.turn.notice = evidence.notice.or(Some(QaTurnNotice::ObservationUnavailable));
-                    exchange.turn.conversation = evidence.conversation;
-                    QaTurnState::InsufficientContext
-                } else {
-                    for finding in findings {
-                        append_in(&tx, key, generation, &mut exchange, QaTurnState::Running, Some(finding)).await?;
-                    }
-                    QaTurnState::Answered
-                };
-                exchange.turn.context = Some(QaContextUsage::new(QaModelTarget::default().input_tokens(), 0, 0));
-                append_in(&tx, key, generation, &mut exchange, terminal, None).await?;
-                return Ok(exchange.turn);
-            }
             job_dispatch::submit_in(&tx, &jobs::NewJob {
                 id, kind: POOL, operation: POOL, parent: None, created_at: now,
             }, &jobs::NewTask {
@@ -1763,7 +1627,7 @@ pub async fn publish_with_model_result(
     publish_parts(repo, lease, state, finding, None, result).await
 }
 
-/// Commit fallback findings and the terminal state together under the live lease.
+/// Commit generator-selected findings and the terminal state under the live lease.
 /// Rechecks operational freshness after acquiring the writer, before recording the batch.
 pub async fn publish_findings_and_complete(
     repo: &Repository,
@@ -1810,7 +1674,7 @@ async fn publish_parts(
                 });
                 if expired {
                     reply = None;
-                    if state == QaTurnState::Answered && exchange.turn.findings.is_empty() {
+                    if state == QaTurnState::Answered {
                         state = QaTurnState::InsufficientContext;
                     }
                 } else {
@@ -1824,54 +1688,36 @@ async fn publish_parts(
                     }
                 }
             }
-            let dialogue_evidence = exchange
+            let dialogue = exchange
                 .evidence
                 .as_ref()
-                .filter(|evidence| evidence.request.dialogue.is_some());
-            if reply.as_deref().is_some_and(|text| {
-                dialogue_evidence.is_none()
-                    || state != QaTurnState::Answered
-                    || !valid_dialogue_reply(text)
-            }) || (state == QaTurnState::Answered
-                && exchange.turn.findings.is_empty()
-                && reply.is_none())
-            {
+                .and_then(|evidence| evidence.request.dialogue.as_ref());
+            let has_model_usage = context.is_some_and(|usage| usage.model_windows > 0);
+            if state == QaTurnState::Answered {
+                if dialogue.is_none()
+                    || !has_model_usage
+                    || model_target.is_none()
+                    || !reply.as_deref().is_some_and(valid_dialogue_reply)
+                {
+                    return Err(abort("invalid_part"));
+                }
+            } else if reply.is_some() {
                 return Err(abort("invalid_part"));
             }
             if state.is_terminal() {
+                if state == QaTurnState::Answered
+                    && dialogue.is_some_and(|dialogue| {
+                        dialogue.kind == QaDialogueKind::Recall && !dialogue.history.is_empty()
+                    })
+                {
+                    exchange.turn.used_previous_exchange = true;
+                }
                 exchange.turn.context = context;
                 exchange.turn.reply = reply;
-                if let Some(target) =
-                    model_target.filter(|_| context.is_some_and(|usage| usage.model_windows > 0))
-                {
+                if let Some(target) = model_target.filter(|_| has_model_usage) {
                     exchange.turn.model_target = Some(target);
                     exchange.turn.model_generation =
                         u64::try_from(exchange.generator_generation.unwrap_or(row.generation)).ok();
-                }
-                if let Some(evidence) = dialogue_evidence.filter(|_| {
-                    matches!(
-                        state,
-                        QaTurnState::Answered | QaTurnState::InsufficientContext
-                    )
-                }) {
-                    exchange.turn.notice = evidence.notice;
-                    exchange.turn.conversation = evidence.conversation;
-                    if let Some(dialogue) = evidence
-                        .request
-                        .dialogue
-                        .as_ref()
-                        .filter(|dialogue| dialogue.kind == QaDialogueKind::Recall)
-                    {
-                        if exchange.turn.reply.is_none() {
-                            exchange.turn.reply = recalled_reply(dialogue);
-                        }
-                        if exchange.turn.reply.is_some() && !dialogue.history.is_empty() {
-                            exchange.turn.used_previous_exchange = true;
-                            exchange.turn.notice = None;
-                            exchange.turn.conversation = None;
-                            state = QaTurnState::Answered;
-                        }
-                    }
                 }
             }
             append_in(

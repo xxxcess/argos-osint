@@ -32,6 +32,7 @@ mod native {
     use fleetworks_contracts::chat::QaStartupStage;
     use fleetworks_contracts::chat::QaTurn;
     use fleetworks_contracts::chat::QaTurnState;
+    use fleetworks_contracts::chat::QA_GPT2_GENERATORS_FEATURE;
     use fleetworks_contracts::chat::QA_MODEL_SETTINGS_FEATURE;
     use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
     use fleetworks_contracts::connect::RegistrationReceipt;
@@ -778,15 +779,18 @@ mod native {
             true,
         );
         if provisioning {
-            settings.model_target = QaModelTarget::FlanT5Base;
+            settings.model_target = QaModelTarget::Gpt2Medium;
             settings.startup_stage = Some(QaStartupStage::DownloadingPack);
         }
         if let Some(capabilities) = &mut state.connection.capabilities {
             capabilities.features.push(QA_MODEL_SETTINGS_FEATURE.into());
+            capabilities
+                .features
+                .push(QA_GPT2_GENERATORS_FEATURE.into());
         }
         settings.generator = Some(QaGeneratorSettings::new(
             if provisioning {
-                QaGeneratorPreference::FlanT5Base
+                QaGeneratorPreference::Gpt2Medium
             } else {
                 QaGeneratorPreference::Automatic
             },

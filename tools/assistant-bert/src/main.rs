@@ -499,7 +499,7 @@ fn operational_answer(
             return Ok((reply, findings));
         }
     }
-    Ok((None, complete_passage_findings(request, &request.passages)?))
+    Ok((None, Vec::new()))
 }
 
 fn draft_prefix<'a>(
@@ -513,6 +513,9 @@ fn draft_prefix<'a>(
         return None;
     }
     if operational {
+        if verified_operational_sources(request, text).is_some() {
+            return Some(text);
+        }
         text.rmatch_indices('.').find_map(|(index, _)| {
             let prefix = &text[..=index];
             verified_operational_sources(request, prefix)
@@ -800,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn grounds_operational_reply_or_publishes_complete_fallback_findings() {
+    fn operational_findings_require_a_verified_generated_reply() {
         let mut request = QaWorkerRequest::new(
             "turn".into(),
             "snapshot".into(),
@@ -831,14 +834,10 @@ mod tests {
                 if source_id == "gateway" && text == "Gateway is ready."
         ));
 
-        let (reply, findings) =
-            operational_answer(&request, Some("Actor search is stopped.".into())).unwrap();
-        assert!(reply.is_none());
-        assert_eq!(findings.len(), 2);
-        assert!(matches!(
-            &findings[0],
-            QaWorkerEvent::Finding { source_id, sequence: 1, start: 0, end: 22, text, .. }
-                if source_id == "actor-search" && text == "Actor search is ready."
-        ));
+        for reply in [Some("Actor search is stopped.".into()), None] {
+            let (reply, findings) = operational_answer(&request, reply).unwrap();
+            assert!(reply.is_none());
+            assert!(findings.is_empty());
+        }
     }
 }

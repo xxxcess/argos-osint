@@ -26,28 +26,6 @@ pub(super) enum Question {
 }
 
 impl Question {
-    /// Keep unambiguous single-fact requests on the direct path.
-    fn is_exact_fact(self, question: &str) -> bool {
-        if let Self::Metric(metric) = self {
-            let current = strip_any_suffix(question, CURRENT_TIME).unwrap_or(question);
-            if short_job_count(workstation_jobs_query(current)) == Some(metric) {
-                return true;
-            }
-        }
-        let canonical = match self {
-            Self::Metric(Metric::Cpu) => "what is the current cpu utilization",
-            Self::Metric(Metric::Memory) => "what is the current memory usage",
-            Self::Metric(Metric::Disk) => "what is the current disk usage",
-            Self::Metric(Metric::QueuedJobs) => "how many jobs are queued",
-            Self::Metric(Metric::RunningJobs) => "how many jobs are running",
-            Self::Metric(Metric::RetryingJobs) => "how many jobs are retrying",
-            Self::Metric(Metric::FailedJobs) => "how many jobs failed in the past 24 hours",
-            Self::Readiness(ReadinessCheckId::ActorCatalog) => "does the catalog need seeding",
-            _ => return false,
-        };
-        question == canonical
-    }
-
     pub(super) fn wants_measurement(self, metric: Metric) -> bool {
         match (self, metric) {
             (Self::Metric(requested), metric) => requested == metric,
@@ -93,14 +71,8 @@ const GREETINGS: &[&str] = &[
 ];
 const CURRENT_TIME: &[&str] = &[" right now", " currently", " at the moment", " now"];
 
-#[derive(Clone, Copy)]
-pub(super) struct Classified {
-    pub(super) intent: Question,
-    pub(super) exact_fact: bool,
-}
-
 /// Match the whole question so additional subjects or qualifiers cannot silently change its scope.
-pub(super) fn classify(question: &str) -> Classified {
+pub(super) fn classify(question: &str) -> Question {
     let normalized = question
         .to_ascii_lowercase()
         .replace(['_', '-'], " ")
@@ -119,10 +91,7 @@ pub(super) fn classify(question: &str) -> Classified {
             }
         }
     }
-    Classified {
-        intent,
-        exact_fact: intent.is_exact_fact(normalized),
-    }
+    intent
 }
 
 fn is_operational(intent: Question) -> bool {
@@ -873,7 +842,7 @@ mod tests {
     use fleetworks_contracts::readiness::ReadinessCheckId;
 
     fn classify(prompt: &str) -> Question {
-        super::classify(prompt).intent
+        super::classify(prompt)
     }
 
     #[test]
@@ -1008,7 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn answers_scoped_job_shorthand_without_model_inference() {
+    fn matches_scoped_job_shorthand() {
         for (question, metric) in [
             ("any jobs running?", Metric::RunningJobs),
             (
@@ -1021,22 +990,18 @@ mod tests {
             ("Any jobs waiting to retry?", Metric::RetryingJobs),
             ("Any failed jobs in the last 24 hours?", Metric::FailedJobs),
         ] {
-            let route = super::classify(question);
-            assert_eq!(route.intent, Question::Metric(metric), "{question}");
-            assert!(route.exact_fact, "{question} is a scoped single fact");
+            assert_eq!(classify(question), Question::Metric(metric), "{question}");
         }
 
         for question in [
             "Are any jobs running?",
             "Do we have any jobs in progress right now?",
         ] {
-            let route = super::classify(question);
             assert_eq!(
-                route.intent,
+                classify(question),
                 Question::Metric(Metric::RunningJobs),
                 "{question}"
             );
-            assert!(!route.exact_fact, "{question} can use model-guided wording");
         }
     }
 

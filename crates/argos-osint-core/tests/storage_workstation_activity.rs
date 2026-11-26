@@ -20,6 +20,7 @@ use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::chat::QaDecisionPreference;
 use fleetworks_contracts::chat::QaGeneratorPreference;
+use fleetworks_contracts::chat::QaModelTarget;
 use fleetworks_contracts::chat::QaTurnRequest;
 use fleetworks_contracts::chat::QaTurnState;
 use fleetworks_contracts::context::ActivityScope;
@@ -27,13 +28,19 @@ use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::OriginSource;
 use fleetworks_contracts::context::RegisteredContext;
+use fleetworks_contracts::qa_worker::QaContextUsage;
+use fleetworks_contracts::qa_worker::QaDialogueKind;
 use fleetworks_contracts::qa_worker::QaPassage;
+use fleetworks_contracts::qa_worker::QaWorkerDialogue;
 use fleetworks_contracts::qa_worker::QaWorkerRequest;
 use support::Server;
 use surrealdb::engine::any::Any;
 use surrealdb::types::RecordId;
 use surrealdb::Surreal;
-use workstation::{authority, register, start_qa_fixture, QA_PLACEMENT, QA_WORKER};
+use workstation::{
+    authority, ready_qa_replica, register, start_qa_delivery, start_qa_fixture, QA_PLACEMENT,
+    QA_WORKER,
+};
 
 fn scope(context: &RegisteredContext, child: bool) -> ActivityScope {
     let _ = child;
@@ -286,19 +293,19 @@ async fn shared_reuse_preserves_creator_but_private_fields_and_search_stay_unava
     .unwrap();
     let id = qa::accepted_turn_id(&actor, &request, setting.history_generation).unwrap();
     let at = Utc::now();
+    let text = "Private-title-shared is running.";
+    let mut worker_request = QaWorkerRequest::new(
+        id.clone(),
+        id,
+        request.question.clone(),
+        vec![QaPassage::new("passage-0".into(), text.into())],
+    );
+    worker_request.dialogue = Some(QaWorkerDialogue {
+        kind: QaDialogueKind::Operational,
+        history: Vec::new(),
+    });
     let evidence = qa::FrozenEvidence {
-        answer_mode: qa::AnswerMode::Grounded,
-        notice: None,
-        conversation: None,
-        request: QaWorkerRequest::new(
-            id.clone(),
-            id,
-            request.question.clone(),
-            vec![QaPassage::new(
-                "passage-0".into(),
-                "Private-title-shared is running.".into(),
-            )],
-        ),
+        request: worker_request,
         sources: vec![qa::Source {
             opaque_id: "passage-0".into(),
             reference: source.clone(),
@@ -317,7 +324,13 @@ async fn shared_reuse_preserves_creator_but_private_fields_and_search_stay_unava
         used_previous_exchange: false,
         response_started_at_ms: None,
     };
-    let answer = qa::admit(
+    assert!(matches!(
+        qa::admit(&repo, &actor, &request, evidence.clone(), metadata(), setting.generation).await,
+        Err(TxError::Abort(reason)) if reason == "inbox_qa:generator_unavailable"
+    ));
+    assert!(qa::latest(&repo, &actor).await.unwrap().is_none());
+    ready_qa_replica(&repo, setting.generation).await;
+    let queued = qa::admit(
         &repo,
         &actor,
         &request,
@@ -326,7 +339,29 @@ async fn shared_reuse_preserves_creator_but_private_fields_and_search_stay_unava
         setting.generation,
     )
     .await
-    .expect("private job answer");
+    .expect("admit private job question with a ready worker");
+    assert_eq!(queued.state, QaTurnState::Queued);
+    let lease = start_qa_delivery(&repo).await;
+    let target = QaModelTarget::default();
+    assert!(qa::publish_findings_and_complete(
+        &repo,
+        &lease,
+        QaTurnState::Answered,
+        &[evidence.sources[0].finding(text.into(), 0, text.chars().count() as u32)],
+        qa::ModelResult {
+            context: Some(QaContextUsage::new(target.input_tokens(), 48, 1)),
+            reply: Some(text.into()),
+            model_target: Some(target),
+        },
+    )
+    .await
+    .unwrap());
+    let answer = qa::latest(&repo, &actor).await.unwrap().unwrap().0;
+    assert!(
+        qa::beat(&repo, QA_PLACEMENT, QA_WORKER, setting.generation, false)
+            .await
+            .unwrap()
+    );
     assert_eq!(answer.state, QaTurnState::Answered);
     assert_eq!(
         qa::replay(&repo, &actor, &request).await.unwrap(),

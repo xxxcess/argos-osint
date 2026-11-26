@@ -450,14 +450,18 @@ mod tests {
     }
 
     #[test]
-    fn expanded_notice_resolves_inline_and_prefills_the_limited_composer() {
+    fn expanded_notice_resolves_inline_and_prefills_once_the_generator_is_ready() {
         let mut initial = triage_state();
         initial.fixture_show_triage_notice();
         let mut runtime = runtime(initial);
         let unread = runtime.state.inbox.unread();
         let tree = runtime.accessibility_json().to_string();
         assert!(tree.contains("View status"));
-        assert!(tree.contains("Direct facts and verified links are available"));
+        assert!(tree.contains("Preparing the selected Assistant generator"));
+        assert!(runtime.find("inbox-qa-composer").is_none());
+        assert!(runtime.elements().iter().any(|element| {
+            element.key.as_deref() == Some("triage-explain") && !element.focusable
+        }));
 
         press(&mut runtime, "triage-find-related", 0.5);
         assert!(runtime
@@ -486,6 +490,10 @@ mod tests {
         assert!(runtime.find("inbox-qa-exchange").is_none());
         assert_eq!(runtime.state.inbox.unread(), unread);
 
+        runtime.update(|state, _| {
+            state.seed_inbox_qa_fixture(QaSettings::new(true, QaPhase::Ready, 2, 1, true), None);
+        });
+        runtime.frame(0.9);
         press(&mut runtime, "triage-explain", 1.0);
         let tree = runtime.accessibility_json().to_string();
         assert!(tree.contains("What happened with this readiness check?"));

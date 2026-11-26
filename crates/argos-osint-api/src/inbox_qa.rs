@@ -24,10 +24,9 @@ use axum::http::StatusCode;
 use fleetworks_contracts::chat::QaMeasurement;
 use fleetworks_contracts::chat::QaMeasurementUnit;
 use fleetworks_contracts::chat::{
-    ChatSourceKind, ChatSourceReference, QaAvailabilityReason, QaCancelRequest,
-    QaConversationReply, QaEventPage, QaEventQuery, QaGeneratorSettings, QaModelTarget, QaPhase,
-    QaRelatedActivity, QaSettings, QaSettingsUpdate, QaStartupStage, QaTurn, QaTurnNotice,
-    QaTurnRequest, QA_MAX_FINDINGS, QA_MAX_WORDS,
+    ChatSourceKind, ChatSourceReference, QaAvailabilityReason, QaCancelRequest, QaEventPage,
+    QaEventQuery, QaGeneratorSettings, QaModelTarget, QaPhase, QaRelatedActivity, QaSettings,
+    QaSettingsUpdate, QaStartupStage, QaTurn, QaTurnRequest, QA_MAX_FINDINGS, QA_MAX_WORDS,
 };
 use fleetworks_contracts::context::{CredentialPurpose, MutationContext, Permission};
 use fleetworks_contracts::qa_worker::{
@@ -137,6 +136,13 @@ impl QaRuntimeAvailability {
         self.0
             .borrow()
             .filter(|current| current.generation == generation)
+            .and_then(|current| current.model)
+    }
+
+    fn ready_model(&self, generation: i64) -> Option<QaModelTarget> {
+        self.0
+            .borrow()
+            .filter(|current| current.generation == generation && current.observation.is_none())
             .and_then(|current| current.model)
     }
 
@@ -511,6 +517,7 @@ fn storage_error(error: TxError) -> ApiError {
                 return ApiError(StatusCode::SERVICE_UNAVAILABLE, "Backend inference is off");
             }
             "inbox_qa:freshness" => return current_health_unavailable(),
+            "inbox_qa:generator_unavailable" => return generator_unavailable(),
             _ => {}
         }
     }
@@ -539,6 +546,13 @@ fn settings_storage_error(stage: &'static str, error: TxError) -> ApiError {
         "Inbox settings storage error"
     );
     storage_error(error)
+}
+
+fn generator_unavailable() -> ApiError {
+    ApiError(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Assistant generator is unavailable",
+    )
 }
 
 fn current_health_unavailable() -> ApiError {
@@ -589,10 +603,13 @@ async fn settings_value(
         Some(StartupObservation::Failure(reason)) => (None, Some(reason)),
         None => (None, None),
     };
+    let ready_model =
+        availability.and_then(|availability| availability.ready_model(setting.generation));
     let phase = if setting.enabled {
-        if store::replica_present(&state.repo, setting.generation)
-            .await
-            .map_err(storage_error)?
+        if ready_model.is_some()
+            && store::replica_present(&state.repo, setting.generation)
+                .await
+                .map_err(storage_error)?
         {
             QaPhase::Ready
         } else if startup_stage.is_some()
@@ -639,12 +656,8 @@ async fn settings_value(
     }
     settings.generator = Some(QaGeneratorSettings::new(
         setting.generator_preference,
-        model.filter(|_| phase == QaPhase::Ready),
-        if phase == QaPhase::Ready && model.is_none() {
-            QaPhase::Starting
-        } else {
-            phase
-        },
+        ready_model.filter(|_| phase == QaPhase::Ready),
+        phase,
         settings.availability_reason,
     ));
     settings.decision = Some(target.decision_status(&setting));
@@ -761,8 +774,8 @@ pub(crate) async fn submit_request(
     )?;
     request.validate().map_err(|_| crate::bad())?;
     context.revalidate(&state.repo).await?;
-    let classified = question::classify(&request.question);
-    require_evidence_permission(context, classified.intent, request.source.as_ref())?;
+    let intent = question::classify(&request.question);
+    require_evidence_permission(context, intent, request.source.as_ref())?;
     if let Some(turn) = store::replay(&state.repo, &actor, &request)
         .await
         .map_err(storage_error)?
@@ -778,30 +791,32 @@ pub(crate) async fn submit_request(
             "Backend inference is off",
         ));
     }
+    if availability.ready_model(setting.generation).is_none()
+        || !store::replica_present(&state.repo, setting.generation)
+            .await
+            .map_err(storage_error)?
+    {
+        return Err(generator_unavailable());
+    }
     let deadline = Instant::now() + Duration::from_secs(4);
-    let follow_up = match classified.intent {
+    let follow_up = match intent {
         Question::FollowUp | Question::StatusChecksFollowUp(..) => {
-            resolve_follow_up(state, &actor, &request, classified.intent, deadline).await?
+            resolve_follow_up(state, &actor, &request, intent, deadline).await?
         }
         _ => None,
     };
-    let (evidence_request, classified) = if let Some(follow_up) = &follow_up {
-        require_evidence_permission(
-            context,
-            follow_up.classified.intent,
-            follow_up.request.source.as_ref(),
-        )?;
-        (&follow_up.request, follow_up.classified)
+    let (evidence_request, intent) = if let Some(follow_up) = &follow_up {
+        require_evidence_permission(context, follow_up.intent, follow_up.request.source.as_ref())?;
+        (&follow_up.request, follow_up.intent)
     } else {
-        (&request, classified)
+        (&request, intent)
     };
     let runtime = SnapshotRuntime {
-        classified,
+        intent,
         generation: setting.generation,
         history_generation: setting.history_generation,
         availability,
         response_started_at_ms,
-        is_follow_up: follow_up.is_some(),
         used_previous_exchange: follow_up
             .as_ref()
             .is_some_and(|turn| turn.used_previous_exchange),
@@ -927,7 +942,7 @@ async fn resolve_follow_up(
         }
         resolved.question = "What happened?".into();
         return Ok(Some(ResolvedFollowUp {
-            classified: question::classify(&resolved.question),
+            intent: question::classify(&resolved.question),
             request: resolved,
             observation: None,
             used_previous_exchange: false,
@@ -951,10 +966,7 @@ async fn resolve_follow_up(
         };
         resolved.question = previous.question;
         return Ok(Some(ResolvedFollowUp {
-            classified: question::Classified {
-                intent: Question::StatusChecks(selection),
-                exact_fact: true,
-            },
+            intent: Question::StatusChecks(selection),
             request: resolved,
             observation: None,
             used_previous_exchange: true,
@@ -966,8 +978,8 @@ async fn resolve_follow_up(
             }),
         }));
     }
-    let classified = question::classify(&previous.question);
-    let supported = match classified.intent {
+    let previous_intent = question::classify(&previous.question);
+    let supported = match previous_intent {
         Question::ContextStatus(_) | Question::ContextLogs(_) | Question::ExplainSelected => {
             previous.subject.is_some()
         }
@@ -988,7 +1000,7 @@ async fn resolve_follow_up(
     resolved.question = previous.question;
     resolved.source = previous.subject;
     Ok(Some(ResolvedFollowUp {
-        classified,
+        intent: previous_intent,
         request: resolved,
         observation: previous.observation,
         used_previous_exchange: true,
@@ -997,7 +1009,7 @@ async fn resolve_follow_up(
 }
 
 struct ResolvedFollowUp {
-    classified: question::Classified,
+    intent: Question,
     request: QaTurnRequest,
     observation: Option<store::Observation>,
     used_previous_exchange: bool,
@@ -1010,33 +1022,24 @@ struct Snapshot {
 }
 
 struct SnapshotRuntime<'a> {
-    classified: question::Classified,
+    intent: Question,
     generation: i64,
     history_generation: i64,
     availability: &'a QaRuntimeAvailability,
     response_started_at_ms: i64,
-    is_follow_up: bool,
     used_previous_exchange: bool,
     status_check_follow_up: Option<readiness::StatusCheckFollowUp>,
     previous_observation: Option<&'a store::Observation>,
 }
 
-fn dialogue_kind(
-    classified: question::Classified,
-    has_evidence: bool,
-    is_follow_up: bool,
-    may_read_backend: bool,
-) -> Option<QaDialogueKind> {
-    match classified.intent {
-        Question::Greeting if may_read_backend => Some(QaDialogueKind::Greeting),
-        Question::Acknowledgement if may_read_backend => Some(QaDialogueKind::Acknowledgement),
-        Question::Help if may_read_backend => Some(QaDialogueKind::Help),
-        Question::Recall if may_read_backend => Some(QaDialogueKind::Recall),
-        Question::RunningJobList => None,
-        _ if may_read_backend && has_evidence && (is_follow_up || !classified.exact_fact) => {
-            Some(QaDialogueKind::Operational)
-        }
-        _ => None,
+fn dialogue_kind(intent: Question, has_evidence: bool, may_read_backend: bool) -> QaDialogueKind {
+    match intent {
+        Question::Greeting => QaDialogueKind::Greeting,
+        Question::Acknowledgement => QaDialogueKind::Acknowledgement,
+        Question::Help => QaDialogueKind::Help,
+        Question::Recall if may_read_backend => QaDialogueKind::Recall,
+        _ if has_evidence => QaDialogueKind::Operational,
+        _ => QaDialogueKind::Clarification,
     }
 }
 
@@ -1062,7 +1065,7 @@ async fn snapshot(
     // Leave headroom for decoding within the five-second evidence budget.
     let health_boundary = terminal_boundary.max(now - 1_000);
     let boundary = terminal_boundary.max(now - 1);
-    let intent = runtime.classified.intent;
+    let intent = runtime.intent;
     let source = request.source.as_ref();
     let mut selected_activity = None;
     if let Some(source) = source {
@@ -1148,8 +1151,6 @@ async fn snapshot(
             whole_passage,
         });
     };
-    let mut notice = None;
-    let mut conversation = None;
     let mut related_activity = None;
     let mut observed_state = None;
     let mut status_check_tally = None;
@@ -1339,9 +1340,6 @@ async fn snapshot(
                         false,
                     );
                 }
-            } else {
-                notice = Some(QaTurnNotice::OutOfScope);
-                conversation = Some(QaConversationReply::ContextNeeded);
             }
         }
         Question::Configuration => {
@@ -1423,9 +1421,6 @@ async fn snapshot(
                         }
                     }
                 }
-            } else {
-                notice = Some(QaTurnNotice::OutOfScope);
-                conversation = Some(QaConversationReply::ContextNeeded);
             }
         }
         Question::Summary => {
@@ -1455,31 +1450,14 @@ async fn snapshot(
                 }
             }
         }
-        Question::Greeting => notice = Some(QaTurnNotice::Greeting),
-        Question::Acknowledgement => {
-            notice = Some(QaTurnNotice::Greeting);
-            conversation = Some(QaConversationReply::Acknowledgement);
-        }
-        Question::Help => {
-            notice = Some(QaTurnNotice::Greeting);
-            conversation = Some(QaConversationReply::Help);
-        }
-        Question::FollowUp | Question::StatusChecksFollowUp(..) => {
-            notice = Some(QaTurnNotice::OutOfScope);
-            conversation = Some(QaConversationReply::FollowUpNeedsTopic);
-        }
-        Question::ChooseSubject => {
-            notice = Some(QaTurnNotice::OutOfScope);
-            conversation = Some(QaConversationReply::ChooseSubject);
-        }
-        Question::Recall => {
-            notice = Some(QaTurnNotice::OutOfScope);
-            conversation = Some(QaConversationReply::RecallNeedsHistory);
-        }
-        Question::Unsupported => {
-            notice = Some(QaTurnNotice::OutOfScope);
-            conversation = Some(QaConversationReply::ContextNeeded);
-        }
+        Question::Greeting
+        | Question::Acknowledgement
+        | Question::Help
+        | Question::FollowUp
+        | Question::StatusChecksFollowUp(..)
+        | Question::ChooseSubject
+        | Question::Recall
+        | Question::Unsupported => {}
     }
     let observation = if intent == Question::RunningJobList {
         None
@@ -1496,32 +1474,19 @@ async fn snapshot(
     .timestamp_millis();
     let turn_id = store::accepted_turn_id(actor, request, runtime.history_generation)
         .map_err(storage_error)?;
-    let dialogue = if runtime.status_check_follow_up.is_some() {
-        None
-    } else {
-        dialogue_kind(
-            runtime.classified,
-            !passages.is_empty(),
-            runtime.is_follow_up,
-            context.permits(Permission::ReadBackend),
-        )
-    };
+    let kind = dialogue_kind(
+        intent,
+        !passages.is_empty(),
+        context.permits(Permission::ReadBackend),
+    );
     let mut worker_request =
         QaWorkerRequest::new(turn_id.clone(), turn_id, request.question.clone(), passages);
-    let answer_mode = if let Some(kind) = dialogue {
-        worker_request.dialogue = Some(QaWorkerDialogue {
-            kind,
-            history: Vec::new(),
-        });
-        store::AnswerMode::Model
-    } else {
-        store::AnswerMode::Grounded
-    };
+    worker_request.dialogue = Some(QaWorkerDialogue {
+        kind,
+        history: Vec::new(),
+    });
     Ok(Snapshot {
         evidence: store::FrozenEvidence {
-            answer_mode,
-            notice,
-            conversation,
             request: worker_request,
             sources,
             sampled_at_ms,
@@ -1654,55 +1619,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn routes_only_exact_facts_directly_when_evidence_is_available() {
+    fn all_supported_facts_use_the_generator_when_evidence_is_available() {
         for prompt in [
             "What is the current CPU utilization?",
-            "  What  is the current CPU utilization ? ",
-            "What is the current memory usage ?",
             "How many jobs are running?",
-            "How many jobs failed in the past 24 hours?",
+            "What jobs are running?",
             "Does the catalog need seeding?",
+            "What's our RAM consumption right now?",
+            "Can you give me the big picture on this workstation?",
         ] {
-            let classified = question::classify(prompt);
-            assert_ne!(classified.intent, Question::Unsupported, "{prompt}");
-            assert!(
-                dialogue_kind(classified, true, false, true).is_none(),
-                "{prompt} is an exact fact"
-            );
+            let intent = question::classify(prompt);
+            assert_ne!(intent, Question::Unsupported, "{prompt}");
             assert!(matches!(
-                dialogue_kind(classified, true, true, true),
-                Some(QaDialogueKind::Operational)
+                dialogue_kind(intent, true, true),
+                QaDialogueKind::Operational
+            ));
+            assert!(matches!(
+                dialogue_kind(intent, true, false),
+                QaDialogueKind::Operational
+            ));
+            assert!(matches!(
+                dialogue_kind(intent, false, true),
+                QaDialogueKind::Clarification
             ));
         }
 
-        for prompt in [
-            "How much memory consumption we are at?",
-            "What's our RAM consumption right now?",
-            "How's everything looking?",
-            "Can you give me the big picture on this workstation?",
-            "What needs attention?",
-            "Are any jobs running?",
-            "What does this mean?",
-        ] {
-            let classified = question::classify(prompt);
-            assert_ne!(classified.intent, Question::Unsupported, "{prompt}");
-            assert!(
-                matches!(
-                    dialogue_kind(classified, true, false, true),
-                    Some(QaDialogueKind::Operational)
-                ),
-                "{prompt} should use the generator with approved evidence"
-            );
-            assert!(dialogue_kind(classified, false, false, true).is_none());
-        }
-
-        let activity = "Are any jobs running?";
-        assert!(dialogue_kind(question::classify(activity), true, false, false).is_none());
-
         let unsupported = "Can you give me the big picture on this workstation and reboot it?";
-        let classified = question::classify(unsupported);
-        assert_eq!(classified.intent, Question::Unsupported);
-        assert!(dialogue_kind(classified, false, false, true).is_none());
+        let intent = question::classify(unsupported);
+        assert_eq!(intent, Question::Unsupported);
+        assert!(matches!(
+            dialogue_kind(intent, false, true),
+            QaDialogueKind::Clarification
+        ));
     }
 
     #[test]
@@ -1721,6 +1669,8 @@ mod tests {
         assert_eq!(availability.observe(2), None);
 
         supervisor.record_stage(2, QaStartupStage::LoadingModel);
+        supervisor.record_model(2, QaModelTarget::default());
+        assert_eq!(availability.ready_model(2), None);
         supervisor.record(1, Some(QaAvailabilityReason::WorkerStartFailed));
         assert_eq!(
             availability.observe(2),
@@ -1738,8 +1688,11 @@ mod tests {
                 QaAvailabilityReason::SandboxUnsupported
             ))
         );
+        assert_eq!(availability.ready_model(2), None);
         supervisor.record(2, None);
         assert_eq!(availability.observe(2), None);
+        assert_eq!(availability.ready_model(2), Some(QaModelTarget::default()));
+        assert_eq!(availability.ready_model(1), None);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

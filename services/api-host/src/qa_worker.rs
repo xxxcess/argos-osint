@@ -87,6 +87,8 @@ const MIB: u64 = 1024 * 1024;
 pub(crate) const WORKSTATION_RESERVE: u64 = 1024 * MIB;
 const SMALL_RESIDENT_LIMIT: u64 = 1536 * MIB;
 const BASE_RESIDENT_LIMIT: u64 = 3584 * MIB;
+const GPT2_SMALL_RESIDENT_LIMIT: u64 = 2048 * MIB;
+const GPT2_MEDIUM_RESIDENT_LIMIT: u64 = 4608 * MIB;
 
 fn configured_u16(name: &str) -> Option<u16> {
     env::var(name).ok()?.parse().ok()
@@ -100,18 +102,27 @@ fn select_target(
     let limit = available_memory
         .saturating_sub(WORKSTATION_RESERVE)
         .min(operator_limit);
-    match preference {
-        QaGeneratorPreference::Automatic | QaGeneratorPreference::FlanT5Base
-            if limit >= BASE_RESIDENT_LIMIT =>
-        {
-            Some(QaModelTarget::FlanT5Base)
+    let target = match preference {
+        QaGeneratorPreference::Automatic if limit >= BASE_RESIDENT_LIMIT => {
+            QaModelTarget::FlanT5Base
         }
-        QaGeneratorPreference::Automatic | QaGeneratorPreference::FlanT5Small
-            if limit >= SMALL_RESIDENT_LIMIT =>
-        {
-            Some(QaModelTarget::FlanT5Small)
+        QaGeneratorPreference::Automatic | QaGeneratorPreference::FlanT5Small => {
+            QaModelTarget::FlanT5Small
         }
-        _ => None,
+        QaGeneratorPreference::FlanT5Base => QaModelTarget::FlanT5Base,
+        QaGeneratorPreference::Gpt2Small => QaModelTarget::Gpt2Small,
+        QaGeneratorPreference::Gpt2Medium => QaModelTarget::Gpt2Medium,
+        _ => return None,
+    };
+    (limit >= resident_limit(target)).then_some(target)
+}
+
+fn resident_limit(target: QaModelTarget) -> u64 {
+    match target {
+        QaModelTarget::FlanT5Base => BASE_RESIDENT_LIMIT,
+        QaModelTarget::Gpt2Small => GPT2_SMALL_RESIDENT_LIMIT,
+        QaModelTarget::Gpt2Medium => GPT2_MEDIUM_RESIDENT_LIMIT,
+        _ => SMALL_RESIDENT_LIMIT,
     }
 }
 
@@ -135,10 +146,7 @@ impl WorkerLimits {
             threads: configured_u16("FLEETWORKS_QA_CPU_THREADS")
                 .filter(|n| (1..=4).contains(n))
                 .unwrap_or(1),
-            resident_bytes: match target {
-                QaModelTarget::FlanT5Base => BASE_RESIDENT_LIMIT,
-                _ => SMALL_RESIDENT_LIMIT,
-            },
+            resident_bytes: resident_limit(target),
         }
     }
 }
@@ -848,8 +856,17 @@ fn load_installed_pointer(state_dir: &Path, target: QaModelTarget) -> Result<Pac
         }
     }
     match read_pointer(&state_dir.join("qa-pack.json")) {
-        Err(error) if pointer_missing(&error) && named && target == QaModelTarget::FlanT5Base => {
-            // A named Small pack also contains the shared verified generator runtime.
+        Err(error)
+            if pointer_missing(&error)
+                && named
+                && matches!(
+                    target,
+                    QaModelTarget::FlanT5Base
+                        | QaModelTarget::Gpt2Small
+                        | QaModelTarget::Gpt2Medium
+                ) =>
+        {
+            // The standard Small pack also contains the shared verified generator runtime.
             read_pointer(&targets.join("flan-t5-small.json"))
         }
         other => other,
@@ -1181,6 +1198,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn explicit_gpt2_preferences_admit_only_the_requested_target() {
+        for (preference, target, resident) in [
+            (
+                QaGeneratorPreference::Gpt2Small,
+                QaModelTarget::Gpt2Small,
+                GPT2_SMALL_RESIDENT_LIMIT,
+            ),
+            (
+                QaGeneratorPreference::Gpt2Medium,
+                QaModelTarget::Gpt2Medium,
+                GPT2_MEDIUM_RESIDENT_LIMIT,
+            ),
+        ] {
+            let available = resident + WORKSTATION_RESERVE;
+            assert_eq!(select_target(preference, available, resident), Some(target));
+            assert_eq!(select_target(preference, available, resident - 1), None);
+            assert_eq!(select_target(preference, available - 1, resident), None);
+            assert_eq!(WorkerLimits::for_target(target).resident_bytes, resident);
+        }
+    }
+
     use std::os::unix::fs::PermissionsExt;
 
     use fleetworks_contracts::qa_worker::{
@@ -1228,7 +1267,7 @@ mod tests {
     }
 
     #[test]
-    fn base_admission_finds_named_small_runtime_only_when_preferred_pointers_are_missing() {
+    fn alternate_models_find_named_small_runtime_when_preferred_pointers_are_missing() {
         let state = tempfile::tempdir().unwrap();
         fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let targets = state.path().join("qa-model-packs");
@@ -1244,7 +1283,6 @@ mod tests {
         assert!(!state.path().join("qa-model-assets").exists());
 
         let small = targets.join("flan-t5-small.json");
-        let base = targets.join("flan-t5-base.json");
         let generic = state.path().join("qa-pack.json");
         let write = |path: &Path, root: &str| {
             let pointer = serde_json::json!({
@@ -1254,20 +1292,24 @@ mod tests {
             fs::write(path, pointer.to_string()).unwrap();
             fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
         };
-        let found = || load_installed_pointer(state.path(), target).map(|pointer| pointer.root);
         write(&small, "/named-small");
-        assert_eq!(found().unwrap(), Path::new("/named-small"));
+        for target in [target, QaModelTarget::Gpt2Small, QaModelTarget::Gpt2Medium] {
+            let named = targets.join(format!("{}.json", target.slug()));
+            let found = || load_installed_pointer(state.path(), target).map(|pointer| pointer.root);
+            assert_eq!(found().unwrap(), Path::new("/named-small"));
 
-        write(&generic, "/default-pack");
-        assert_eq!(found().unwrap(), Path::new("/default-pack"));
-        write(&base, "/named-base");
-        assert_eq!(found().unwrap(), Path::new("/named-base"));
+            write(&generic, "/default-pack");
+            assert_eq!(found().unwrap(), Path::new("/default-pack"));
+            write(&named, "/named-exact");
+            assert_eq!(found().unwrap(), Path::new("/named-exact"));
 
-        fs::write(&base, b"malformed pointer").unwrap();
-        assert!(!pointer_missing(&found().unwrap_err()));
-        fs::remove_file(&base).unwrap();
-        fs::write(&generic, b"malformed pointer").unwrap();
-        assert!(!pointer_missing(&found().unwrap_err()));
+            fs::write(&named, b"malformed pointer").unwrap();
+            assert!(!pointer_missing(&found().unwrap_err()));
+            fs::remove_file(&named).unwrap();
+            fs::write(&generic, b"malformed pointer").unwrap();
+            assert!(!pointer_missing(&found().unwrap_err()));
+            fs::remove_file(&generic).unwrap();
+        }
     }
 
     #[tokio::test]

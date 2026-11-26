@@ -20,7 +20,6 @@ from fleetworks_qa_pack import install_gated_fixture
 from fleetworks_qa_smoke import FIXTURE_MODEL_MEMORY_MIB
 
 SUMMARY_QUESTION = "What is the current workstation readiness?"
-# The middle turn exercises direct admission while the worker fixture gates model replies.
 MEMORY_QUESTION = "What is the current memory usage ?"
 SOURCES_TOGGLE = "inbox-qa-sources-toggle"
 SOURCES_CONTENT = "inbox-qa-sources"
@@ -327,7 +326,7 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         return fields[0] if fields else None
 
     button("inbox-toggle")
-    wait_for(shown_composer, app, "Inbox drawer and editable composer opened from toolbar", timeout=4)
+    wait_for(shown_drawer, app, "Inbox drawer opened from toolbar", timeout=4)
     button("inbox-close", timeout=4)
     wait_for(lambda: True if shown_drawer() is None else None, app, "Inbox drawer closed", timeout=4)
     button(WORKSTATION_ASSISTANT, "Open Assistant", timeout=4)
@@ -442,13 +441,23 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
     subprocess.run(["scrot", "--overwrite", str(output / "completed-turn.png")], check=True, timeout=5)
 
     submit(MEMORY_QUESTION)
+    _, metric_companion, _ = wait_for(
+        lambda: first_frame(2, expanded=False), app,
+        "first generated memory finding at the worker barrier", timeout=16,
+    )
+    require(metric_companion == companion, "the companion changed while producing the metric reply")
+    release_gate(metric_companion, worker)
 
     def grounded_memory(*, expanded):
-        admitted = [row for row in read_journal(journal) if row.get("op") == "qa_turn_submit"]
+        records = read_journal(journal)
+        admitted = [row for row in records if row.get("op") == "qa_turn_submit"]
         if len(admitted) < 2:
             return None
         require(len(admitted) == 2, "the GUI submitted more than one metric turn")
-        turn = admitted[-1]
+        pages = event_pages(records, admitted[-1]["turn_id"])
+        if not pages or pages[-1]["state"] not in TERMINAL:
+            return None
+        turn = pages[-1]
         sample = turn["memory_observation"]
         require(turn["turn_id"] != final["turn_id"] and turn["state"] == "answered"
                 and len(turn["findings"]) == 1 and sample is not None,
@@ -458,9 +467,11 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         if answer is None:
             return None
         expected_text = f"The API host memory usage is {whole}.{tenths}%."
+        allowed_text = (expected_text, "Here is the current status. " + expected_text,
+                        "Here are the current checks. " + expected_text)
         expected_citation = f"Host metric: API host memory usage · {sample['observed_at']}"
         if not any(
-            node.name == expected_text and screen_bounds(node, atspi) is not None
+            node.name in allowed_text and screen_bounds(node, atspi) is not None
             for node in descendants(answer)
         ):
             return None

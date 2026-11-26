@@ -61,6 +61,20 @@ pub(super) async fn register(repo: &Repository, node: &str, child: &str) -> Regi
     .expect("actual current registration context")
 }
 
+pub(super) async fn ready_qa_replica(repo: &Repository, generation: i64) {
+    let db = repo.db();
+    assert_eq!(
+        qa::claim_replica(repo, QA_PLACEMENT, QA_WORKER, generation)
+            .await
+            .unwrap(),
+        qa::ReplicaClaim::Warm,
+    );
+    assert!(qa::beat(repo, QA_PLACEMENT, QA_WORKER, generation, true)
+        .await
+        .unwrap());
+    job_dispatch::enable_pool(db, qa::POOL).await.unwrap();
+}
+
 pub(super) async fn start_qa_fixture(
     repo: &Repository,
     actor: &qa::Actor,
@@ -68,19 +82,7 @@ pub(super) async fn start_qa_fixture(
     enabled: qa::Setting,
     request_id: &str,
 ) -> (QaTurnRequest, Box<job_dispatch::DeliveryLease>) {
-    let db = repo.db();
-    assert_eq!(
-        qa::claim_replica(repo, QA_PLACEMENT, QA_WORKER, enabled.generation)
-            .await
-            .unwrap(),
-        qa::ReplicaClaim::Warm,
-    );
-    assert!(
-        qa::beat(repo, QA_PLACEMENT, QA_WORKER, enabled.generation, true)
-            .await
-            .unwrap()
-    );
-    job_dispatch::enable_pool(db, qa::POOL).await.unwrap();
+    ready_qa_replica(repo, enabled.generation).await;
     let request = QaTurnRequest::new(
         request_id.into(),
         MutationContext::new(context),
@@ -108,9 +110,6 @@ pub(super) async fn start_qa_fixture(
         history: Vec::new(),
     });
     let evidence = qa::FrozenEvidence {
-        answer_mode: qa::AnswerMode::Model,
-        notice: None,
-        conversation: None,
         request: worker_request,
         sources: facts
             .iter()
@@ -144,6 +143,11 @@ pub(super) async fn start_qa_fixture(
     .await
     .unwrap();
     assert_eq!(queued.state, QaTurnState::Queued);
+    (request, start_qa_delivery(repo).await)
+}
+
+pub(super) async fn start_qa_delivery(repo: &Repository) -> Box<job_dispatch::DeliveryLease> {
+    let db = repo.db();
     let claim = job_dispatch::claim_ready(db, qa::POOL, "qa-fixture-relay", Utc::now())
         .await
         .unwrap()
@@ -161,5 +165,5 @@ pub(super) async fn start_qa_fixture(
         panic!("model delivery must be leased");
     };
     assert!(qa::start(repo, &lease).await.unwrap().is_some());
-    (request, lease)
+    lease
 }

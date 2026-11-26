@@ -22,18 +22,18 @@ import fleetworks_qa_smoke as qa
 
 # Fixed questions with both exact and conversational versions of supported intents.
 CASES = (
-    ("cpu", "What is the current CPU utilization?", "cpu", "direct"),
-    ("running-jobs", "How many jobs are running?", "running", "direct"),
-    ("memory", "How much memory consumption we are at?", "memory", "generate"),
-    ("memory-follow-up", "And now?", "follow_up", "generate"),
-    ("resources", "What is our resource usage?", "resources", "generate"),
-    ("failed-jobs", "How many jobs failed in the past 24 hours?", "failed_last_24_hours", "direct"),
-    ("catalog", "Does the catalog need seeding?", "catalog", "direct"),
-    ("overview", "How's everything looking?", "overview", "generate"),
-    ("big-picture", "Can you give me the big picture on this workstation?", "overview", "generate"),
-    ("blockers", "What needs attention?", "overview", "generate"),
-    ("greeting", "Hi!", "greeting", "generate"),
-    ("scope-boundary", "Can you reboot this workstation for me?", "unsupported", "decline"),
+    ("cpu", "What is the current CPU utilization?", "cpu"),
+    ("running-jobs", "How many jobs are running?", "running"),
+    ("memory", "How much memory consumption we are at?", "memory"),
+    ("memory-follow-up", "And now?", "follow_up"),
+    ("resources", "What is our resource usage?", "resources"),
+    ("failed-jobs", "How many jobs failed in the past 24 hours?", "failed_last_24_hours"),
+    ("catalog", "Does the catalog need seeding?", "catalog"),
+    ("overview", "How's everything looking?", "overview"),
+    ("big-picture", "Can you give me the big picture on this workstation?", "overview"),
+    ("blockers", "What needs attention?", "overview"),
+    ("greeting", "Hi!", "greeting"),
+    ("scope-boundary", "Can you reboot this workstation for me?", "unsupported"),
 )
 
 READINESS_PHRASES = {
@@ -130,12 +130,11 @@ def factual_errors(turn, kind, oracle, previous_memory):
     findings = turn["findings"]
     errors = []
     if kind == "unsupported":
-        if turn["state"] != "insufficient_context" or findings:
-            errors.append("unsupported action was not declined without evidence")
+        if turn["state"] != "answered" or not turn.get("reply") or findings:
+            errors.append("expected a generated clarification without workstation evidence")
         return errors
     if kind == "greeting":
-        fallback = turn["state"] == "insufficient_context" and not turn.get("reply")
-        if (turn["state"] != "answered" and not fallback) or turn.get("notice") != "greeting" or findings:
+        if turn["state"] != "answered" or not turn.get("reply") or turn.get("notice") != "greeting" or findings:
             errors.append("expected a conversational greeting without workstation claims")
         reply = (turn.get("reply") or "").casefold()
         if reply and (not GREETING.search(reply) or contains_prompt_marker(reply)):
@@ -191,7 +190,7 @@ def factual_errors(turn, kind, oracle, previous_memory):
 
 
 def result_row(case, turn, timings, admitted_to_worker, oracle, previous_memory):
-    key, question, kind, expectation = case
+    key, question, kind = case
     usage = turn.get("context") or {}
     windows = usage.get("model_windows", 0)
     reply = turn.get("reply") or ""
@@ -207,11 +206,7 @@ def result_row(case, turn, timings, admitted_to_worker, oracle, previous_memory)
     else:
         route = "direct_evidence" if findings else "direct_reply"
 
-    expected_route = {
-        "direct": "direct_evidence",
-        "generate": "generated_reply",
-        "decline": "insufficient_context",
-    }[expectation]
+    expected_route = "generated_reply"
     errors = factual_errors(turn, kind, oracle, previous_memory)
     answer = reply or " ".join(finding["text"] for finding in findings)
     parts = sentences(reply)

@@ -1,6 +1,6 @@
 //! Dedicated durable Jobs consumer for the Embedded Assistant.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::future::poll_fn;
 use std::future::Future;
 use std::time::Duration;
@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use argos_osint_api::inbox_qa::{
     validated_summary_finding, CancellationToken, QaInference, QaRuntimeAvailability,
 };
-use argos_osint_core::storage::inbox_qa::{self as store, AnswerMode, FrozenEvidence, POOL};
+use argos_osint_core::storage::inbox_qa::{self as store, FrozenEvidence, POOL};
 use argos_osint_core::storage::job_dispatch::{
     self, DeliveryClaim, DeliveryFinish, DeliveryLease, DeliveryOutcome, Envelope,
 };
@@ -17,15 +17,12 @@ use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::tx::TxError;
 use chrono::DateTime;
 use chrono::Utc;
-use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::QaGeneratorPreference;
 use fleetworks_contracts::chat::QaModelTarget;
-use fleetworks_contracts::chat::QA_MAX_FINDINGS;
-use fleetworks_contracts::chat::QA_MAX_WORDS;
 use fleetworks_contracts::chat::{QaAvailabilityReason, QaFinding, QaStartupStage, QaTurnState};
 use fleetworks_contracts::qa_worker::{
     verified_operational_sources, QaContextUsage, QaDialogueKind, QaWorkerEvent, QaWorkerOutcome,
-    QaWorkerSequence, QA_CONTEXT_WINDOW_TOKENS,
+    QaWorkerSequence,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
@@ -42,8 +39,7 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(2);
 const WARM_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const STOP_TIMEOUT: Duration = Duration::from_secs(8);
 const TURN_TIMEOUT: Duration = Duration::from_secs(30);
-const OPERATIONAL_FALLBACK_RESERVE_MS: i64 = 500;
-const OPERATIONAL_DRAIN_LIMIT: Duration = Duration::from_secs(2);
+const OPERATIONAL_COMMIT_RESERVE_MS: i64 = 500;
 const WARM_RETRY: Duration = Duration::from_secs(10);
 
 struct Executor {
@@ -285,6 +281,10 @@ impl Executor {
                         );
                     }
                     if !matches!(result, Ok(true)) {
+                        self.record_availability(
+                            generation,
+                            Some(QaAvailabilityReason::WorkerStartFailed),
+                        );
                         self.unload().await;
                         loaded = None;
                         next_warm = Instant::now() + WARM_RETRY;
@@ -293,6 +293,10 @@ impl Executor {
                 Ok(Ok(None)) => {}
                 _ => {
                     tracing::warn!(qa_queue_stage = "claim", "Inbox QA queue claim unavailable");
+                    self.record_availability(
+                        generation,
+                        Some(QaAvailabilityReason::WorkerStartFailed),
+                    );
                     self.unload().await;
                     loaded = None;
                     next_warm = Instant::now() + WARM_RETRY;
@@ -518,11 +522,17 @@ impl Executor {
             .infer(&evidence, &lease, &delivery, generation, stop)
             .await;
         let (outcome, keep_warm) = match result {
-            RunResult::Completed | RunResult::CompletedReset => (
+            RunResult::Completed => (
                 DeliveryOutcome::Complete {
                     result_ref: "qa_terminal",
                 },
-                matches!(result, RunResult::Completed),
+                true,
+            ),
+            RunResult::FailedTerminal => (
+                DeliveryOutcome::Failed {
+                    reason: "qa_inference_failed",
+                },
+                false,
             ),
             RunResult::Stopped => (
                 DeliveryOutcome::Relinquish {
@@ -597,52 +607,34 @@ impl Executor {
         stop: &CancellationToken,
     ) -> RunResult {
         // Only this executor can replace the generator while it owns the delivery lease.
-        let model_target = match evidence.answer_mode {
-            AnswerMode::Model => self.model.active_model().await,
-            AnswerMode::Grounded => None,
-        };
-        let mut publication = Publication {
-            model_target,
-            ..Publication::default()
-        };
-        let operational = is_operational(evidence);
-        let budget = inference_budget(evidence, Utc::now().timestamp_millis());
         if stop.is_cancelled() {
             return RunResult::Stopped;
         }
-        if operational && budget.is_zero() {
-            return self
-                .operational_fallback(&publication, lease, evidence)
-                .await;
+        let Some(model_target) = self.model.active_model().await else {
+            return RunResult::Error;
+        };
+        let budget = inference_budget(evidence, Utc::now().timestamp_millis());
+        if budget.is_zero() || evidence.request.dialogue.is_none() {
+            return RunResult::Error;
         }
-
+        let mut publication = Publication::new(model_target);
         let deadline = Instant::now() + budget;
         let (sender, mut receiver) = mpsc::channel(4);
         let cancel = CancellationToken::new();
-        let inference: argos_osint_api::inbox_qa::QaInferenceFuture<'_> = match evidence.answer_mode
-        {
-            AnswerMode::Model => self
-                .model
-                .ask(evidence.request.clone(), sender, cancel.clone()),
-            AnswerMode::Grounded => Box::pin(grounded_events(
-                evidence,
-                sender,
-                Utc::now().timestamp_millis(),
-            )),
-        };
+        let inference = self
+            .model
+            .ask(evidence.request.clone(), sender, cancel.clone());
         tokio::pin!(inference);
         let mut next_check = Instant::now() + CHECK;
         let mut model_finished = false;
         let mut model_polled = false;
         let mut received_event = false;
-        let mut publication_deadline_elapsed = false;
-        let mut result = loop {
+        let result = loop {
             tokio::select! {
                 biased;
                 () = stop.cancelled() => break RunResult::Stopped,
                 () = tokio::time::sleep_until(deadline) => {
                     tracing::warn!(qa_turn_stage = "turn_deadline", "Inbox QA turn exceeded its budget");
-                    publication_deadline_elapsed = operational && model_polled;
                     break RunResult::Error;
                 }
                 () = tokio::time::sleep_until(next_check) => {
@@ -696,66 +688,13 @@ impl Executor {
                 }
             }
         };
-        if matches!(result, RunResult::Error) && operational && !stop.is_cancelled() {
-            if !publication_deadline_elapsed {
-                cancel.cancel();
-            }
-            result = self
-                .operational_fallback(&publication, lease, evidence)
-                .await;
-            if model_polled
-                && matches!(result, RunResult::Completed)
-                && (!publication_deadline_elapsed
-                    || !drain_operational_worker(
-                        &mut inference,
-                        &mut receiver,
-                        &mut model_finished,
-                        stop,
-                    )
-                    .await)
-            {
-                result = RunResult::CompletedReset;
-            }
-        }
         if model_polled && !model_finished {
             if !matches!(result, RunResult::Completed) {
                 cancel.cancel();
             }
             let _ = timeout(STOP_TIMEOUT, inference).await;
         }
-        if matches!(result, RunResult::Error)
-            && evidence.request.dialogue.is_some()
-            && !stop.is_cancelled()
-            && matches!(
-                timeout(
-                    AUTH_TIMEOUT,
-                    store::publish(&self.repo, lease, QaTurnState::InsufficientContext, None),
-                )
-                .await,
-                Ok(Ok(true))
-            )
-        {
-            return RunResult::CompletedReset;
-        }
         result
-    }
-
-    async fn operational_fallback(
-        &self,
-        publication: &Publication,
-        lease: &DeliveryLease,
-        evidence: &FrozenEvidence,
-    ) -> RunResult {
-        match timeout(
-            AUTH_TIMEOUT,
-            publication.publish_operational_fallback(&self.repo, lease, evidence),
-        )
-        .await
-        {
-            Ok(Ok(true)) => RunResult::Completed,
-            Ok(Ok(false)) => RunResult::Fenced,
-            _ => RunResult::Error,
-        }
     }
 
     async fn renew(
@@ -774,89 +713,10 @@ impl Executor {
     }
 }
 
-/// The supervisor validates every frame before delivery. A sealed turn can discard
-/// its remaining frames and keep the worker only after a successful terminal reply.
-async fn drain_operational_worker(
-    inference: &mut (impl Future<Output = Result<()>> + Unpin),
-    receiver: &mut mpsc::Receiver<QaWorkerEvent>,
-    model_finished: &mut bool,
-    stop: &CancellationToken,
-) -> bool {
-    let drain = async {
-        let mut clean_terminal = false;
-        loop {
-            tokio::select! {
-                result = &mut *inference, if !*model_finished => {
-                    *model_finished = true;
-                    if result.is_err() {
-                        return false;
-                    }
-                }
-                event = receiver.recv(), if !clean_terminal => {
-                    match event {
-                        Some(QaWorkerEvent::Complete { outcome, .. }) => {
-                            if !matches!(outcome, QaWorkerOutcome::Answered | QaWorkerOutcome::InsufficientContext) {
-                                return false;
-                            }
-                            clean_terminal = true;
-                        }
-                        None => return false,
-                        _ => {}
-                    }
-                }
-            }
-            if *model_finished && clean_terminal {
-                return true;
-            }
-        }
-    };
-    tokio::select! {
-        biased;
-        () = stop.cancelled() => false,
-        result = timeout(OPERATIONAL_DRAIN_LIMIT, drain) => result.unwrap_or_default(),
-    }
-}
-
-/// Publish the exact same validated event protocol used by the inference worker.
-async fn grounded_events(
-    evidence: &FrozenEvidence,
-    sender: mpsc::Sender<QaWorkerEvent>,
-    now_ms: i64,
-) -> Result<()> {
-    let turn_id = &evidence.request.turn_id;
-    let (sequence, outcome) = match evidence.request.passages.as_slice() {
-        [passage] if observation_is_fresh(evidence.sampled_at_ms, now_ms) => {
-            sender
-                .send(QaWorkerEvent::Finding {
-                    turn_id: turn_id.clone(),
-                    sequence: 1,
-                    source_id: passage.source_id.clone(),
-                    start: 0,
-                    end: u32::try_from(passage.text.chars().count())?,
-                    text: passage.text.clone(),
-                })
-                .await?;
-            (2, QaWorkerOutcome::Answered)
-        }
-        [] | [_] => (1, QaWorkerOutcome::InsufficientContext),
-        _ => return Err(anyhow!("grounded Inbox QA turn has multiple passages")),
-    };
-    sender
-        .send(QaWorkerEvent::Complete {
-            turn_id: turn_id.clone(),
-            sequence,
-            outcome,
-            context: Some(QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 0, 0)),
-            reply: None,
-        })
-        .await?;
-    Ok(())
-}
-
 enum RunResult {
     More,
     Completed,
-    CompletedReset,
+    FailedTerminal,
     Stopped,
     Fenced,
     Error,
@@ -868,15 +728,15 @@ fn cited_finding(
     start: u32,
     end: u32,
     text: String,
+    now_ms: i64,
 ) -> Result<Option<QaFinding>> {
     let source = evidence
         .sources
         .iter()
         .find(|source| source.opaque_id == source_id)
         .ok_or_else(|| anyhow!("unknown Inbox QA source"))?;
-    let now = Utc::now().timestamp_millis();
-    if !observation_is_fresh(evidence.sampled_at_ms, now)
-        || !source_observation_is_valid(source, evidence.sampled_at_ms, now)
+    if !observation_is_fresh(evidence.sampled_at_ms, now_ms)
+        || !source_observation_is_valid(source, evidence.sampled_at_ms, now_ms)
     {
         return Ok(None);
     }
@@ -915,7 +775,7 @@ fn inference_budget(evidence: &FrozenEvidence, now_ms: i64) -> Duration {
     }
     let deadline = evidence
         .sampled_at_ms
-        .saturating_add(store::MAX_EVIDENCE_AGE_MS - OPERATIONAL_FALLBACK_RESERVE_MS);
+        .saturating_add(store::MAX_EVIDENCE_AGE_MS - OPERATIONAL_COMMIT_RESERVE_MS);
     Duration::from_millis(deadline.saturating_sub(now_ms).max(0) as u64)
 }
 
@@ -935,118 +795,58 @@ fn requires_complete_snapshot(evidence: &FrozenEvidence) -> bool {
     is_operational(evidence) && evidence.sources.iter().any(|source| !source.whole_passage)
 }
 
-fn fallback_findings(evidence: &FrozenEvidence, now_ms: i64) -> Vec<(&str, QaFinding)> {
-    if !matches!(evidence.answer_mode, AnswerMode::Model)
-        || !observation_is_fresh(evidence.sampled_at_ms, now_ms)
-    {
-        return Vec::new();
-    }
-
-    let mut candidates = Vec::new();
-    let complete_snapshot = requires_complete_snapshot(evidence);
-    for source in &evidence.sources {
-        if (!complete_snapshot
-            && (source.reference.kind != ChatSourceKind::Readiness || !source.whole_passage))
-            || !source_observation_is_valid(source, evidence.sampled_at_ms, now_ms)
-        {
-            continue;
-        }
-        let Some(passage) = evidence
-            .request
-            .passages
-            .iter()
-            .find(|passage| passage.source_id == source.opaque_id)
-        else {
-            continue;
-        };
-        let Ok(end) = u32::try_from(passage.text.chars().count()) else {
-            continue;
-        };
-        let priority = if complete_snapshot {
-            0
-        } else {
-            let Some(complete) =
-                validated_summary_finding(&passage.text, &source.label, 0, end, &passage.text)
-            else {
-                continue;
-            };
-            let Some(state) = complete.strip_prefix(source.label.as_str()) else {
-                continue;
-            };
-            if state.starts_with(" is ready.") {
-                1
-            } else if state.starts_with(" readiness is not applicable.") {
-                2
-            } else {
-                0
-            }
-        };
-        candidates.push((priority, source, &passage.text, end));
-    }
-    candidates.sort_by_key(|(priority, _, _, _)| *priority);
-
-    let mut remaining_words = QA_MAX_WORDS;
-    let findings: Vec<_> = candidates
-        .into_iter()
-        .filter_map(|(_, source, complete, end)| {
-            remaining_words = remaining_words.checked_sub(complete.split_whitespace().count())?;
-            Some((
-                source.opaque_id.as_str(),
-                source.finding(complete.to_owned(), 0, end),
-            ))
-        })
-        .take(QA_MAX_FINDINGS)
-        .collect();
-    if complete_snapshot && findings.len() != evidence.sources.len() {
-        return Vec::new();
-    }
-    findings
-}
-
-#[derive(Default)]
 struct Publication {
-    model_target: Option<QaModelTarget>,
+    model_target: QaModelTarget,
     sequence: QaWorkerSequence,
-    cited_sources: BTreeSet<String>,
-    published_sources: BTreeSet<String>,
+    cited: BTreeMap<String, QaFinding>,
 }
 
 impl Publication {
-    async fn publish_operational_fallback(
+    fn new(model_target: QaModelTarget) -> Self {
+        Self {
+            model_target,
+            sequence: QaWorkerSequence::default(),
+            cited: BTreeMap::new(),
+        }
+    }
+
+    fn accepted_reply(
         &self,
-        repo: &Repository,
-        lease: &DeliveryLease,
         evidence: &FrozenEvidence,
-    ) -> Result<bool> {
-        let findings: Vec<_> = if self.published_sources.is_empty() {
-            fallback_findings(evidence, Utc::now().timestamp_millis())
-                .into_iter()
-                .map(|(_, finding)| finding)
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let state = if self.published_sources.is_empty() && findings.is_empty() {
-            QaTurnState::InsufficientContext
-        } else {
-            QaTurnState::Answered
-        };
-        store::publish_findings_and_complete(
-            repo,
-            lease,
-            state,
-            &findings,
-            store::ModelResult {
-                context: Some(QaContextUsage::new(
-                    self.model_target.unwrap_or_default().input_tokens(),
-                    0,
-                    0,
-                )),
-                ..store::ModelResult::default()
-            },
-        )
-        .await
-        .map_err(Into::into)
+        context: Option<QaContextUsage>,
+        reply: Option<String>,
+        now_ms: i64,
+    ) -> Option<(String, Vec<QaFinding>)> {
+        if !context.is_some_and(|usage| usage.model_windows > 0) {
+            return None;
+        }
+        let reply = reply?;
+        if !is_operational(evidence) {
+            return Some((reply, Vec::new()));
+        }
+        if !observation_is_fresh(evidence.sampled_at_ms, now_ms) {
+            return None;
+        }
+        let selected = verified_operational_sources(&evidence.request, &reply)?;
+        let complete = requires_complete_snapshot(evidence);
+        if complete && selected.len() != evidence.sources.len() {
+            return None;
+        }
+        let mut findings = Vec::new();
+        for passage in selected {
+            let finding = self.cited.get(&passage.source_id)?;
+            let source = evidence
+                .sources
+                .iter()
+                .find(|source| source.opaque_id == passage.source_id)?;
+            if !source_observation_is_valid(source, evidence.sampled_at_ms, now_ms) {
+                return None;
+            }
+            if complete {
+                findings.push(finding.clone());
+            }
+        }
+        Some((reply, findings))
     }
 
     async fn publish(
@@ -1081,18 +881,25 @@ impl Publication {
                 text,
                 ..
             } => {
-                let Some(finding) = cited_finding(evidence, &source_id, start, end, text)? else {
+                let Some(finding) = cited_finding(
+                    evidence,
+                    &source_id,
+                    start,
+                    end,
+                    text,
+                    Utc::now().timestamp_millis(),
+                )?
+                else {
                     return Ok(RunResult::More);
                 };
-                self.cited_sources.insert(source_id.clone());
-                // Grouped facts and comparisons keep their complete, server-defined order.
-                if requires_complete_snapshot(evidence) {
-                    return Ok(RunResult::More);
-                }
-                if !store::publish(repo, lease, QaTurnState::Running, Some(finding)).await? {
+                // Grouped facts and comparisons retain the generator’s selected order.
+                if !requires_complete_snapshot(evidence)
+                    && !store::publish(repo, lease, QaTurnState::Running, Some(finding.clone()))
+                        .await?
+                {
                     return Ok(RunResult::Fenced);
                 }
-                self.published_sources.insert(source_id);
+                self.cited.insert(source_id, finding);
                 return Ok(RunResult::More);
             }
             QaWorkerEvent::Complete {
@@ -1101,69 +908,27 @@ impl Publication {
                 reply,
                 ..
             } => {
-                let now = Utc::now().timestamp_millis();
-                let reply = reply.filter(|text| {
-                    if !is_operational(evidence) {
-                        return true;
+                let (state, reply, findings) = match outcome {
+                    QaWorkerOutcome::Answered => {
+                        match self.accepted_reply(
+                            evidence,
+                            context,
+                            reply,
+                            Utc::now().timestamp_millis(),
+                        ) {
+                            Some((reply, findings)) => {
+                                (QaTurnState::Answered, Some(reply), findings)
+                            }
+                            None => (QaTurnState::Failed, None, Vec::new()),
+                        }
                     }
-                    observation_is_fresh(evidence.sampled_at_ms, now)
-                        && (!requires_complete_snapshot(evidence)
-                            || self.cited_sources.len() == evidence.sources.len())
-                        && verified_operational_sources(&evidence.request, text).is_some_and(
-                            |passages| {
-                                passages.iter().all(|passage| {
-                                    self.cited_sources.contains(&passage.source_id)
-                                        && evidence.sources.iter().any(|source| {
-                                            source.opaque_id == passage.source_id
-                                                && source_observation_is_valid(
-                                                    source,
-                                                    evidence.sampled_at_ms,
-                                                    now,
-                                                )
-                                        })
-                                })
-                            },
-                        )
-                });
-                let had_finding = !self.published_sources.is_empty();
-                let fallback = if !had_finding
-                    && (matches!(
-                        outcome,
-                        QaWorkerOutcome::Answered | QaWorkerOutcome::InsufficientContext
-                    ) || (is_operational(evidence) && outcome == QaWorkerOutcome::Failed))
-                {
-                    fallback_findings(evidence, now)
-                } else {
-                    Vec::new()
-                };
-                let reply = reply.filter(|_| {
-                    self.cited_sources.iter().all(|id| {
-                        self.published_sources.contains(id)
-                            || fallback.iter().any(|(source, _)| *source == id.as_str())
-                    })
-                });
-                let has_finding = had_finding || !fallback.is_empty();
-                let state = match outcome {
-                    QaWorkerOutcome::Answered if has_finding || reply.is_some() => {
-                        QaTurnState::Answered
+                    QaWorkerOutcome::InsufficientContext => {
+                        (QaTurnState::InsufficientContext, None, Vec::new())
                     }
-                    QaWorkerOutcome::InsufficientContext if !had_finding && has_finding => {
-                        QaTurnState::Answered
-                    }
-                    QaWorkerOutcome::Failed if is_operational(evidence) && has_finding => {
-                        QaTurnState::Answered
-                    }
-                    QaWorkerOutcome::Answered | QaWorkerOutcome::InsufficientContext => {
-                        QaTurnState::InsufficientContext
-                    }
-                    QaWorkerOutcome::Failed => QaTurnState::Failed,
-                    QaWorkerOutcome::Cancelled => QaTurnState::Canceled,
+                    QaWorkerOutcome::Failed => (QaTurnState::Failed, None, Vec::new()),
+                    QaWorkerOutcome::Cancelled => (QaTurnState::Canceled, None, Vec::new()),
                     _ => return Err(anyhow!("unsupported Inbox QA outcome")),
                 };
-                let findings = fallback
-                    .into_iter()
-                    .map(|(_, finding)| finding)
-                    .collect::<Vec<_>>();
                 (state, context, reply, findings)
             }
             _ => return Err(anyhow!("unsupported Inbox QA event")),
@@ -1171,21 +936,22 @@ impl Publication {
         let result = store::ModelResult {
             context,
             reply,
-            model_target: self.model_target,
+            model_target: Some(self.model_target),
         };
         if !store::publish_findings_and_complete(repo, lease, state, &findings, result).await? {
             return Ok(RunResult::Fenced);
         }
-        Ok(if state.is_terminal() {
-            RunResult::Completed
+        Ok(if state == QaTurnState::Failed {
+            RunResult::FailedTerminal
         } else {
-            RunResult::More
+            RunResult::Completed
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use fleetworks_contracts::chat::ChatSourceKind;
     use fleetworks_contracts::chat::ChatSourceReference;
     use fleetworks_contracts::chat::QaMeasurement;
     use fleetworks_contracts::chat::QaMeasurementUnit;
@@ -1235,44 +1001,8 @@ mod tests {
         assert!(matches!(lease, ReplicaLease::Unclaimed));
     }
 
-    #[tokio::test]
-    async fn keeps_drained_worker_only_after_a_successful_terminal_frame() {
-        for (outcome, keep_warm) in [
-            (QaWorkerOutcome::Answered, true),
-            (QaWorkerOutcome::Failed, false),
-        ] {
-            let (sender, mut receiver) = mpsc::channel(1);
-            let mut inference = Box::pin(async move {
-                sender
-                    .send(QaWorkerEvent::Delta {
-                        turn_id: "turn".into(),
-                        sequence: 1,
-                        text: "Late text".into(),
-                    })
-                    .await?;
-                sender
-                    .send(QaWorkerEvent::Complete {
-                        turn_id: "turn".into(),
-                        sequence: 2,
-                        outcome,
-                        context: None,
-                        reply: None,
-                    })
-                    .await?;
-                Ok(())
-            });
-            let mut model_finished = false;
-            let stop = CancellationToken::new();
-            assert_eq!(
-                drain_operational_worker(&mut inference, &mut receiver, &mut model_finished, &stop)
-                    .await,
-                keep_warm
-            );
-        }
-    }
-
     #[test]
-    fn comparison_fallback_keeps_current_and_approved_historical_measurements() {
+    fn generated_comparison_requires_usage_freshness_and_both_verified_citations() {
         let now = 10_000;
         let source = |id: &str, label: &str, observed_at, value| store::Source {
             opaque_id: id.into(),
@@ -1306,9 +1036,6 @@ mod tests {
             history: vec![],
         });
         let mut evidence = FrozenEvidence {
-            answer_mode: AnswerMode::Model,
-            notice: None,
-            conversation: None,
             request,
             sources: vec![
                 source("current", "API host memory usage", now, 125),
@@ -1316,160 +1043,52 @@ mod tests {
             ],
             sampled_at_ms: now,
         };
-        let findings = fallback_findings(&evidence, now);
+        let target = QaModelTarget::default();
+        let context = Some(QaContextUsage::new(target.input_tokens(), 100, 1));
+        let reply = || {
+            Some("The API host memory usage is 12.5%. The previous observation was 10.0%.".into())
+        };
+        let mut publication = Publication::new(target);
+        assert!(publication
+            .accepted_reply(&evidence, context, reply(), now)
+            .is_none());
+        for passage in &evidence.request.passages {
+            let end = u32::try_from(passage.text.chars().count()).unwrap();
+            publication.cited.insert(
+                passage.source_id.clone(),
+                cited_finding(
+                    &evidence,
+                    &passage.source_id,
+                    0,
+                    end,
+                    passage.text.clone(),
+                    now,
+                )
+                .unwrap()
+                .unwrap(),
+            );
+        }
+        let (_, findings) = publication
+            .accepted_reply(&evidence, context, reply(), now)
+            .unwrap();
         assert_eq!(findings.len(), 2);
-        assert_eq!(findings[0].1.measurement.as_ref().unwrap().value, 125);
-        assert_eq!(findings[1].1.measurement.as_ref().unwrap().value, 100);
-        assert_eq!(findings[1].1.label, store::PREVIOUS_OBSERVATION_LABEL);
+        assert_eq!(findings[0].measurement.as_ref().unwrap().value, 125);
+        assert_eq!(findings[1].measurement.as_ref().unwrap().value, 100);
+        assert_eq!(findings[1].label, store::PREVIOUS_OBSERVATION_LABEL);
+        assert!(publication
+            .accepted_reply(&evidence, None, reply(), now)
+            .is_none());
         assert_eq!(
             inference_budget(&evidence, now),
             Duration::from_millis(4_500)
         );
         assert!(inference_budget(&evidence, 14_500).is_zero());
-        assert_eq!(fallback_findings(&evidence, 14_500).len(), 2);
-        assert!(fallback_findings(&evidence, 15_001).is_empty());
+        assert!(publication
+            .accepted_reply(&evidence, context, reply(), 15_001)
+            .is_none());
         evidence.sources[1].label = "API host memory usage".into();
-        assert!(fallback_findings(&evidence, now).is_empty());
-    }
-
-    #[test]
-    fn summary_fallback_keeps_complete_fresh_readiness_facts_in_priority_order() {
-        let now = 10_000;
-        let rows = [
-            (
-                "Gateway",
-                "Gateway is ready.",
-                "gateway",
-                ChatSourceKind::Readiness,
-                now,
-            ),
-            (
-                "Actor catalog",
-                "Actor catalog is not ready. No seed was verified — check setup.",
-                "actor_catalog",
-                ChatSourceKind::Readiness,
-                now,
-            ),
-            (
-                "Classifier service",
-                "Classifier service readiness is unknown.",
-                "classifier",
-                ChatSourceKind::Readiness,
-                now,
-            ),
-            (
-                "Brain service",
-                "Brain service readiness is unknown.",
-                "brain",
-                ChatSourceKind::Readiness,
-                now - store::MAX_EVIDENCE_AGE_MS - 1,
-            ),
-            (
-                "Actor search",
-                "Actor search is degraded.",
-                "actor_search",
-                ChatSourceKind::Readiness,
-                now,
-            ),
-            (
-                "API host CPU usage",
-                "API host CPU usage is 11.0%.",
-                "cpu",
-                ChatSourceKind::HostMetric,
-                now,
-            ),
-        ];
-        let sources = rows
-            .iter()
-            .map(|(label, _, id, kind, observed_at)| store::Source {
-                opaque_id: (*id).into(),
-                reference: ChatSourceReference::new(*kind, (*id).into()).unwrap(),
-                label: (*label).into(),
-                observed_at: DateTime::from_timestamp_millis(*observed_at)
-                    .unwrap()
-                    .to_rfc3339(),
-                measurement: None,
-                whole_passage: true,
-            })
-            .collect();
-        let passages = rows
-            .iter()
-            .map(|(_, text, id, _, _)| QaPassage::new((*id).into(), (*text).into()))
-            .collect();
-        let evidence = FrozenEvidence {
-            answer_mode: AnswerMode::Model,
-            notice: None,
-            conversation: None,
-            request: QaWorkerRequest::new(
-                "turn".into(),
-                "snapshot".into(),
-                "Summarize workstation health.".into(),
-                passages,
-            ),
-            sources,
-            sampled_at_ms: now,
-        };
-
-        let findings = fallback_findings(&evidence, now);
-        assert_eq!(findings.len(), QA_MAX_FINDINGS);
-        for ((_, finding), index) in findings.iter().zip([1, 2, 4]) {
-            assert_eq!(finding.source.id, rows[index].2);
-            assert_eq!(finding.text, rows[index].1);
-            assert_eq!(finding.start, 0);
-            assert_eq!(finding.end as usize, finding.text.chars().count());
-        }
-        assert!(fallback_findings(&evidence, now + store::MAX_EVIDENCE_AGE_MS + 1).is_empty());
-    }
-
-    #[tokio::test]
-    async fn grounded_turn_publishes_fresh_facts_and_withholds_stale_ones() {
-        let evidence = FrozenEvidence {
-            answer_mode: AnswerMode::Grounded,
-            notice: None,
-            conversation: None,
-            request: QaWorkerRequest::new(
-                "turn".into(),
-                "snapshot".into(),
-                "Is the actor catalog ready?".into(),
-                vec![QaPassage::new(
-                    "catalog".into(),
-                    "Actor catalog is not ready.".into(),
-                )],
-            ),
-            sources: Vec::new(),
-            sampled_at_ms: 10_000,
-        };
-        let (sender, mut receiver) = mpsc::channel(2);
-        grounded_events(&evidence, sender, 10_001).await.unwrap();
-        let mut sequence = QaWorkerSequence::default();
-        let finding = receiver.recv().await.unwrap();
-        assert!(
-            matches!(&finding, QaWorkerEvent::Finding { text, .. } if text == "Actor catalog is not ready.")
-        );
-        assert!(!sequence.accept(&evidence.request, &finding).unwrap());
-        let terminal = receiver.recv().await.unwrap();
-        assert!(sequence.accept(&evidence.request, &terminal).unwrap());
-        assert!(matches!(
-            terminal,
-            QaWorkerEvent::Complete {
-                outcome: QaWorkerOutcome::Answered,
-                context: Some(context), ..
-            } if context == QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 0, 0)
-        ));
-
-        let (sender, mut receiver) = mpsc::channel(2);
-        grounded_events(&evidence, sender, 15_001).await.unwrap();
-        let terminal = receiver.recv().await.unwrap();
-        assert!(QaWorkerSequence::default()
-            .accept(&evidence.request, &terminal)
-            .unwrap());
-        assert!(matches!(
-            terminal,
-            QaWorkerEvent::Complete {
-                outcome: QaWorkerOutcome::InsufficientContext,
-                context: Some(context), ..
-            } if context == QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 0, 0)
-        ));
-        assert!(receiver.recv().await.is_none());
+        assert!(publication
+            .accepted_reply(&evidence, context, reply(), now)
+            .is_none());
     }
 }

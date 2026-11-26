@@ -29,6 +29,7 @@ pub const QA_CANCEL_PATH: &str = "/api/v2/workstation/chat/cancel";
 pub const QA_TRIAGE_FEATURE: &str = "inbox-qa-triage-v1";
 /// Embedded capability for independently revisioned generator and decision preferences.
 pub const QA_MODEL_SETTINGS_FEATURE: &str = "inbox-qa-model-settings-v1";
+pub const QA_GPT2_GENERATORS_FEATURE: &str = "inbox-qa-gpt2-v1";
 /// Embedded capability for browsing a registration's retained Inbox exchanges.
 pub const QA_HISTORY_FEATURE: &str = "inbox-qa-history-v1";
 /// Read-only related activity lookup over private Embedded IPC.
@@ -96,6 +97,8 @@ pub enum QaGeneratorPreference {
     Automatic,
     FlanT5Small,
     FlanT5Base,
+    Gpt2Small,
+    Gpt2Medium,
 }
 
 /// Saved decision policy, as well as the effective rules or local scorer.

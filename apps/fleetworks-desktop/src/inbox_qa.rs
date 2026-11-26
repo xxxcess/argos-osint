@@ -84,6 +84,8 @@ const HISTORY_PREVIOUS: &str = "inbox-qa-history-previous";
 const HISTORY_NEXT: &str = "inbox-qa-history-next";
 const HISTORY_ARROW_SIZE: f32 = 28.0;
 const CONTEXT_DIAL: &str = "inbox-qa-context";
+const RESPONSE_TIME: &str = "inbox-qa-response-time";
+const PREVIOUS_EXCHANGE_USED: &str = "inbox-qa-previous-exchange-used";
 const SETTINGS_CONTROL: &str = "inbox-qa-toggle";
 #[cfg(test)]
 const REPLY: &str = "chat-message-inbox-qa-answer";
@@ -1981,7 +1983,29 @@ fn history_arrow_slot(
 
 fn local_message_time(seconds: Option<i64>) -> Option<String> {
     let timestamp = DateTime::from_timestamp(seconds?, 0)?;
-    Some(timestamp.with_timezone(&Local).format("%H:%M").to_string())
+    Some(
+        timestamp
+            .with_timezone(&Local)
+            .format("%-I:%M %p")
+            .to_string(),
+    )
+}
+
+fn response_time(milliseconds: u64, kit: &Kit) -> El {
+    let duration = Duration::from_millis(milliseconds);
+    let seconds = duration.as_secs();
+    let value = if seconds >= 60 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else if seconds >= 1 {
+        format!("{:.1} s", duration.as_secs_f64())
+    } else {
+        format!("{milliseconds} ms")
+    };
+    rune::text(format!("Took {value}"))
+        .key(RESPONSE_TIME)
+        .label(format!("Response time {value}"))
+        .font(kit.ty.text_xsmall)
+        .color(kit.c.text_muted)
 }
 
 pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -> Option<El> {
@@ -1991,6 +2015,9 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
     let qa = &state.inbox_qa;
     let browsing = state.browsed_inbox_qa_turn().is_some();
     let pending = qa.pending.as_ref().filter(|_| !browsing);
+    let displayed_turn = state
+        .displayed_inbox_qa_turn()
+        .filter(|_| pending.is_none());
     let (
         question,
         stage,
@@ -2011,7 +2038,7 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
             None,
             [Some(pending.sent_at), None],
         )
-    } else if let Some(turn) = state.displayed_inbox_qa_turn() {
+    } else if let Some(turn) = displayed_turn {
         let (stage, detail) = answer_state(turn);
         let draft = turn
             .provisional_reply
@@ -2089,6 +2116,23 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
     } else {
         LiveRegion::Polite
     };
+    let terminal_turn = displayed_turn.filter(|turn| turn.state.is_terminal());
+    let metadata = [
+        terminal_turn
+            .and_then(|turn| turn.response_time_ms)
+            .map(|milliseconds| response_time(milliseconds, kit)),
+        Some(context_dial(usage, kit)),
+        terminal_turn
+            .filter(|turn| turn.used_previous_exchange)
+            .map(|_| {
+                rune::text("Used previous exchange")
+                    .key(PREVIOUS_EXCHANGE_USED)
+                    .font(kit.ty.text_xsmall)
+                    .color(kit.c.text_muted)
+            }),
+    ]
+    .into_iter()
+    .flatten();
     let bubbles = rune::col()
         .w_full()
         .gap(8.0)
@@ -2100,13 +2144,12 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
         ))
         .child(crate::inbox::enter_from_below(
             message_row(
-                chat_ui::bubble_with_sources(&answer, sources, kit),
+                chat_ui::inbox_answer(&answer, sources, metadata, kit),
                 ANSWER_ROW,
             )
             .live_region(live_region),
             preferences,
         ))
-        .child(context_dial(usage, kit))
         .children(state.canonical_related_activity().map(|related| {
             crate::activity_triage::result_view(state, related, None, kit, preferences)
         }));
@@ -2431,6 +2474,7 @@ mod tests {
             let rendered = tree.to_string();
             assert!(rendered.contains("Assistant message"));
             assert!(!rendered.contains(r#""name":"Assistant""#));
+            assert!(runtime.find("inbox-qa-greeting-header").is_none());
             assert!(rendered.contains("workstation readiness, memory usage, or running jobs"));
             assert!(runtime.find(COMPOSER).is_some());
             assert!(runtime.find(SOURCES_TOGGLE).is_none());
@@ -2960,6 +3004,8 @@ mod tests {
 
     #[test]
     fn context_dial_uses_the_response_usage_and_distinguishes_bypass_from_unknown() {
+        const ANSWER_HEADER: &str = "chat-message-inbox-qa-answer-header";
+        const ANSWER_TIME: &str = "chat-message-inbox-qa-answer-time";
         let mut runtime = active_drawer((640.0, 480.0));
         let assert_unknown = |runtime: &Runtime<State>| {
             let tree = runtime.accessibility_json();
@@ -2967,6 +3013,8 @@ mod tests {
             let rendered = tree.to_string();
             assert!(rendered.contains("Model context window, usage unavailable"));
             assert!(!rendered.contains("model bypassed"));
+            assert!(runtime.find(RESPONSE_TIME).is_none());
+            assert!(runtime.find(PREVIOUS_EXCHANGE_USED).is_none());
         };
         assert_unknown(&runtime);
 
@@ -2975,6 +3023,9 @@ mod tests {
             modeled.reply = Some(format!("Here are the current checks. {FINDING}"));
             modeled.notice = Some(QaTurnNotice::Greeting);
             modeled.conversation = Some(QaConversationReply::Help);
+            modeled.completed_at = Some(1_767_225_665);
+            modeled.response_time_ms = Some(1_240);
+            modeled.used_previous_exchange = true;
             modeled.context = Some(QaContextUsage::new(
                 QaModelTarget::FlanT5Small.input_tokens(),
                 448,
@@ -2993,13 +3044,33 @@ mod tests {
         assert!(!rendered.contains("Select a job to ask about its status"));
         assert!(runtime.find(SOURCES_TOGGLE).is_some());
         assert!(runtime.find(FIXTURE_CITATION).is_none());
+        assert!(rendered.contains("Assistant message"));
         assert!(rendered.contains("448 of 512 tokens, 88% peak usage"));
-        assert!(runtime.elements().iter().any(|element| {
-            !element.exiting && element.text.as_deref() == Some("448/512 tokens")
+        assert!(rendered.contains("Used previous exchange"));
+        let elements = runtime.elements();
+        for text in ["448/512 tokens", "Took 1.2 s", "You"] {
+            assert!(elements
+                .iter()
+                .any(|element| !element.exiting && element.text.as_deref() == Some(text)));
+        }
+        let (header, _) = runtime.presented(ANSWER_HEADER).unwrap();
+        for key in [
+            ANSWER_TIME,
+            RESPONSE_TIME,
+            CONTEXT_DIAL,
+            PREVIOUS_EXCHANGE_USED,
+        ] {
+            let (rect, _) = runtime.presented(key).unwrap();
+            assert!(rect[0] >= header[0] - 0.5 && rect[0] + rect[2] <= header[0] + header[2] + 0.5);
+            assert!(rect[1] >= header[1] - 0.5 && rect[1] + rect[3] <= header[1] + header[3] + 0.5);
+        }
+        assert!(!elements.iter().any(|element| {
+            element.text.as_deref() == Some("Assistant")
+                && element.rect[0] >= header[0]
+                && element.rect[0] < header[0] + header[2]
+                && element.rect[1] >= header[1]
+                && element.rect[1] < header[1] + header[3]
         }));
-        let (reply, _) = runtime.presented(REPLY).unwrap();
-        let (dial, _) = runtime.presented(CONTEXT_DIAL).unwrap();
-        assert!(dial[1] >= reply[1] + reply[3]);
 
         runtime.update(|state, _| {
             let mut direct = turn(QaTurnState::Answered, 2);
@@ -3016,6 +3087,8 @@ mod tests {
         let rendered = runtime.accessibility_json().to_string();
         assert!(rendered.contains("0 of 512 tokens, 0%, model bypassed"));
         assert!(!rendered.contains("448 of 512 tokens"));
+        assert!(runtime.find(RESPONSE_TIME).is_none());
+        assert!(runtime.find(PREVIOUS_EXCHANGE_USED).is_none());
 
         runtime.update(|state, _| {
             let mut stopped = turn(QaTurnState::Canceled, 3);
@@ -3148,6 +3221,9 @@ mod tests {
             older.question = OLDER_QUESTION.into();
             older.accepted_at = Some(1_767_225_600);
             older.completed_at = Some(1_767_225_665);
+            older.response_time_ms = Some(65_000);
+            older.used_previous_exchange = true;
+            older.context = Some(QaContextUsage::new(512, 0, 0));
             let older_times = [
                 (
                     QUESTION_TIME,
@@ -3172,6 +3248,8 @@ mod tests {
             runtime.frame(0.75);
             assert!(runtime.find(HISTORY_NEXT).is_none());
             assert!(runtime.find(ANSWER_TIME).is_none());
+            assert!(runtime.find(RESPONSE_TIME).is_none());
+            assert!(runtime.find(PREVIOUS_EXCHANGE_USED).is_none());
             assert_eq!(
                 accessibility_nodes_with_key(&runtime.accessibility_json(), HISTORY_NEXT),
                 0
@@ -3187,8 +3265,16 @@ mod tests {
             assert!(tree.to_string().contains(OLDER_QUESTION));
             for (key, time) in older_times {
                 assert!(runtime.find(key).is_some());
+                assert!(time.ends_with(" AM") || time.ends_with(" PM"));
+                let hour = time.split_once(':').unwrap().0.parse::<u8>().unwrap();
+                assert!((1..=12).contains(&hour));
                 assert!(tree.to_string().contains(&time));
             }
+            assert!(runtime.find(RESPONSE_TIME).is_some());
+            let rendered = tree.to_string();
+            assert!(rendered.contains("1m 5s"));
+            assert!(rendered.contains("0 of 512 tokens, 0%, model bypassed"));
+            assert!(rendered.contains("Used previous exchange"));
             assert!(runtime.find("inbox-qa-stop").is_some());
             let (middle_rect, _) = runtime.presented("inbox-qa-turn-older-request").unwrap();
             let elements = runtime.elements();
@@ -3238,6 +3324,8 @@ mod tests {
             let tree = runtime.accessibility_json();
             assert!(!tree.to_string().contains(OLDER_QUESTION));
             assert!(runtime.find(OLDER_CITATION).is_none());
+            assert!(runtime.find(RESPONSE_TIME).is_none());
+            assert!(runtime.find(PREVIOUS_EXCHANGE_USED).is_none());
             assert_eq!(runtime.state.inbox_qa.draft.text, "Unsent follow-up");
             assert!(runtime.find(HISTORY_NEXT).is_none());
             assert_eq!(accessibility_nodes_with_key(&tree, HISTORY_NEXT), 0);

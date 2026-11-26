@@ -656,7 +656,7 @@ mod native {
         state.backend_kind = BackendKind::Local;
         state.connection.origin = TextEdit::new("local://embedded");
         let question = if stage == QaTurnState::Answered {
-            "Summarize workstation readiness."
+            "And now?"
         } else {
             "Is actor search ready?"
         };
@@ -672,7 +672,8 @@ mod native {
             turn.provisional_reply = Some("Let me check actor search readiness.".into());
         }
         if matches!(stage, QaTurnState::Answered | QaTurnState::Canceled) {
-            turn.completed_at = Some(1_767_225_665);
+            turn.completed_at = Some(1_767_225_602);
+            turn.response_time_ms = Some(2_410);
             let answer = "Actor search is ready.";
             turn.findings.push(QaFinding::new(
                 ChatSourceReference::new(ChatSourceKind::Readiness, "actor-search".into())
@@ -686,6 +687,7 @@ mod native {
             turn.cursor = 3;
         }
         if stage == QaTurnState::Answered {
+            turn.used_previous_exchange = true;
             turn.context = Some(QaContextUsage::new(
                 QaModelTarget::FlanT5Small.input_tokens(),
                 448,
@@ -694,12 +696,13 @@ mod native {
             let mut prior = QaTurn::queued(
                 "fixture-turn-previous".into(),
                 "fixture-request-previous".into(),
-                "Is the Embedded gateway ready?".into(),
+                "Is actor search ready?".into(),
             );
             prior.state = QaTurnState::Answered;
             prior.accepted_at = Some(1_767_225_480);
             prior.completed_at = Some(1_767_225_515);
-            prior.reply = Some("The Embedded gateway is ready.".into());
+            prior.response_time_ms = Some(35_000);
+            prior.reply = Some("Actor search was ready.".into());
             prior.cursor = 2;
             state.seed_inbox_qa_history_fixture(vec![turn.clone(), prior]);
         }

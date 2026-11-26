@@ -258,7 +258,7 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
 
     def message_time(message):
         node = find(f"chat-message-inbox-qa-{message}-time")
-        if screen_bounds(node, atspi) is not None and re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", node.name or ""):
+        if screen_bounds(node, atspi) is not None and re.fullmatch(r"(?:[1-9]|1[0-2]):[0-5]\d [AP]M", node.name or ""):
             return node.name
         return None
 
@@ -428,6 +428,9 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
             message_time(message) for message in ("question", "answer")
         ):
             return None
+        if any(screen_bounds(find(key), atspi) is None
+               for key in ("inbox-qa-response-time", "inbox-qa-context")):
+            return None
         count = len(final["findings"])
         require(all(find_citation(final["turn_id"], index) is not None for index in range(count))
                 and find_citation(final["turn_id"], count) is None,
@@ -555,6 +558,7 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         "sources_retained_after_cancel": True,
         "transcript_previous_and_next": True,
         "transcript_boundary_arrows_hidden": True, "message_times_visible": True,
+        "response_duration_and_context_visible": True,
         "stop_enabled_before_release": True, "same_turn": True,
         "terminal_state": final["state"], "terminal_events": final["terminal_events"],
         "stop_while_running": True, "cancelled_terminal_state": canceled["state"],

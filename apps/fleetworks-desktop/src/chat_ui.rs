@@ -141,19 +141,42 @@ pub(crate) fn bubble(message: &ChatMessage, kit: &Kit) -> El {
             )
             .child(citation_rows(&message.id, &message.citations, kit))
     });
-    bubble_with_sources(message, sources, kit)
+    bubble_with_sources(message, sources, Some(message.role), [], kit)
 }
 
-pub(crate) fn bubble_with_sources(message: &ChatMessage, sources: Option<El>, kit: &Kit) -> El {
+pub(crate) fn inbox_answer(
+    message: &ChatMessage,
+    sources: Option<El>,
+    metadata: impl IntoIterator<Item = El>,
+    kit: &Kit,
+) -> El {
+    bubble_with_sources(message, sources, None, metadata, kit)
+}
+
+fn bubble_with_sources(
+    message: &ChatMessage,
+    sources: Option<El>,
+    visible_owner: Option<Role>,
+    metadata: impl IntoIterator<Item = El>,
+    kit: &Kit,
+) -> El {
     let state = message
         .state
         .chip()
         .map(|(label, tone)| chip(label, tone, kit).key(format!("chat-state-{}", message.id)));
-    message_bubble(
-        message_key(&message.id),
-        message.role,
+    let key = message_key(&message.id);
+    let header = message_header(
+        &key,
+        visible_owner,
         message.timestamp.as_deref(),
+        metadata,
+        kit,
+    );
+    message_bubble(
+        key,
+        message.role,
         &message.text,
+        Some(header),
         state,
         sources,
         kit,
@@ -161,14 +184,42 @@ pub(crate) fn bubble_with_sources(message: &ChatMessage, sources: Option<El>, ki
 }
 
 pub(crate) fn greeting(key: &str, text: &str, kit: &Kit) -> El {
-    message_bubble(key.to_owned(), Role::Assistant, None, text, None, None, kit)
+    message_bubble(key.to_owned(), Role::Assistant, text, None, None, None, kit)
+}
+
+fn message_header(
+    key: &str,
+    visible_owner: Option<Role>,
+    timestamp: Option<&str>,
+    metadata: impl IntoIterator<Item = El>,
+    kit: &Kit,
+) -> El {
+    rune::row()
+        .key(format!("{key}-header"))
+        .min_w(0.0)
+        .gap(6.0)
+        .flex_wrap()
+        .center_y()
+        .children(visible_owner.map(|role| {
+            rune::text(role.label())
+                .font(kit.ty.small_medium)
+                .color(theme::hex(theme::TEXT_MUTED))
+                .a11y_hidden()
+        }))
+        .children(timestamp.map(|time| {
+            rune::text(time)
+                .key(format!("{key}-time"))
+                .font(kit.ty.text_xsmall)
+                .color(theme::hex(theme::TEXT_MUTED))
+        }))
+        .children(metadata)
 }
 
 fn message_bubble(
     key: String,
     role: Role,
-    timestamp: Option<&str>,
     text: &str,
+    header: Option<El>,
     state: Option<El>,
     sources: Option<El>,
     kit: &Kit,
@@ -179,22 +230,7 @@ fn message_bubble(
     } else {
         StatusTone::Neutral
     };
-    let header = rune::row()
-        .gap(8.0)
-        .center_y()
-        .child(
-            rune::text(role.label())
-                .font(kit.ty.small_medium)
-                .color(theme::hex(theme::TEXT_MUTED))
-                .a11y_hidden(),
-        )
-        .children(timestamp.map(|time| {
-            rune::text(time)
-                .key(format!("{key}-time"))
-                .font(kit.ty.text_xsmall)
-                .color(theme::hex(theme::TEXT_MUTED))
-        }));
-    let mut body = rune::col().w_full().gap(6.0).child(header);
+    let mut body = rune::col().w_full().gap(6.0).children(header);
     if !text.is_empty() {
         body = body.child(
             rune::text(text)

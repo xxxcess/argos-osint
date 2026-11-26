@@ -24,8 +24,14 @@ pub(super) enum Question {
 }
 
 impl Question {
-    /// Keep canonical, single-fact requests on the direct path.
+    /// Keep unambiguous single-fact requests on the direct path.
     fn is_exact_fact(self, question: &str) -> bool {
+        if let Self::Metric(metric) = self {
+            let current = strip_any_suffix(question, CURRENT_TIME).unwrap_or(question);
+            if short_job_count(workstation_jobs_query(current)) == Some(metric) {
+                return true;
+            }
+        }
         let canonical = match self {
             Self::Metric(Metric::Cpu) => "what is the current cpu utilization",
             Self::Metric(Metric::Memory) => "what is the current memory usage",
@@ -83,6 +89,7 @@ const GREETINGS: &[&str] = &[
     "hello",
     "hey",
 ];
+const CURRENT_TIME: &[&str] = &[" right now", " currently", " at the moment", " now"];
 
 #[derive(Clone, Copy)]
 pub(super) struct Classified {
@@ -169,11 +176,7 @@ fn classify_simple(question: &str) -> Question {
     if let Some(intent) = conversational_intent(question) {
         return intent;
     }
-    let question = strip_any_suffix(
-        question,
-        &[" right now", " currently", " at the moment", " now"],
-    )
-    .unwrap_or(question);
+    let question = strip_any_suffix(question, CURRENT_TIME).unwrap_or(question);
     let request =
         strip_any_prefix(question, &["could you please ", "can you please "]).unwrap_or(question);
     let query = strip_article(
@@ -233,24 +236,30 @@ fn classify_simple(question: &str) -> Question {
         return Question::ExplainSelected;
     }
     let context = match query {
-        "status of this job" | "state of this job" | "current job status" => {
-            Some(ChatSourceKind::Job)
-        }
-        "status of this cycle" | "state of this cycle" | "current cycle status" => {
-            Some(ChatSourceKind::Cycle)
-        }
+        "status of this job"
+        | "state of this job"
+        | "current job status"
+        | "how's this job doing"
+        | "is this job still running" => Some(ChatSourceKind::Job),
+        "status of this cycle"
+        | "state of this cycle"
+        | "current cycle status"
+        | "how's this cycle doing"
+        | "has this cycle finished" => Some(ChatSourceKind::Cycle),
         _ => None,
     };
     if let Some(context) = context {
         return Question::ContextStatus(context);
     }
     let log_source = match current_query {
-        "logs for this job" | "job log summary" | "summarize the logs for this job" => {
-            Some(ChatSourceKind::Job)
-        }
-        "logs for this cycle" | "cycle log summary" | "summarize the logs for this cycle" => {
-            Some(ChatSourceKind::Cycle)
-        }
+        "logs for this job"
+        | "job log summary"
+        | "summarize the logs for this job"
+        | "any errors or warnings for this job" => Some(ChatSourceKind::Job),
+        "logs for this cycle"
+        | "cycle log summary"
+        | "summarize the logs for this cycle"
+        | "any errors or warnings for this cycle" => Some(ChatSourceKind::Cycle),
         _ => None,
     };
     if let Some(source) = log_source {
@@ -263,6 +272,7 @@ fn classify_simple(question: &str) -> Question {
             | "backend mode"
             | "assistant configuration"
             | "which backend is this workstation using"
+            | "which backend am i connected to"
             | "active assistant model"
             | "which assistant model is active"
             | "which model is the assistant using"
@@ -400,8 +410,12 @@ fn metric(query: &str) -> Option<Metric> {
         return Some(metric);
     }
 
-    let jobs_query = strip_any_suffix(query, &[" on this workstation", " for this workstation"])
-        .unwrap_or(query);
+    let jobs_query = workstation_jobs_query(query);
+    let presence_query =
+        strip_any_prefix(jobs_query, &["are there ", "are ", "do we have "]).unwrap_or(jobs_query);
+    if let Some(metric) = short_job_count(presence_query) {
+        return Some(metric);
+    }
     let failed_query = strip_any_suffix(
         jobs_query,
         &[" in the last 24 hours", " in the past 24 hours"],
@@ -423,14 +437,7 @@ fn metric(query: &str) -> Option<Metric> {
         .strip_prefix("workstation ")
         .unwrap_or(jobs_query);
     match (jobs_query, count_subject.is_some()) {
-        (
-            "queued job count"
-            | "job queue depth"
-            | "are any jobs queued"
-            | "are there any queued jobs"
-            | "are there any jobs in the queue",
-            _,
-        )
+        ("queued job count" | "job queue depth", _)
         | (
             "queued jobs"
             | "jobs are queued"
@@ -440,13 +447,7 @@ fn metric(query: &str) -> Option<Metric> {
             | "jobs are waiting in the queue",
             true,
         ) => Some(Metric::QueuedJobs),
-        (
-            "running job count"
-            | "are jobs running"
-            | "are any jobs running"
-            | "are there any jobs running",
-            _,
-        )
+        ("running job count" | "are jobs running", _)
         | (
             "running jobs"
             | "jobs are running"
@@ -454,7 +455,7 @@ fn metric(query: &str) -> Option<Metric> {
             | "jobs are in progress",
             true,
         ) => Some(Metric::RunningJobs),
-        ("retrying job count" | "are any jobs retrying" | "are any jobs waiting to retry", _)
+        ("retrying job count", _)
         | (
             "retrying jobs"
             | "jobs are retrying"
@@ -466,6 +467,29 @@ fn metric(query: &str) -> Option<Metric> {
         ) => Some(Metric::RetryingJobs),
         _ => None,
     }
+}
+
+fn workstation_jobs_query(query: &str) -> &str {
+    strip_any_suffix(query, &[" on this workstation", " for this workstation"]).unwrap_or(query)
+}
+
+fn short_job_count(query: &str) -> Option<Metric> {
+    let query = strip_any_suffix(query, CURRENT_TIME).unwrap_or(query);
+    Some(match query {
+        "any queued jobs" | "any jobs queued" | "any jobs in the queue" => Metric::QueuedJobs,
+        "any running jobs"
+        | "any jobs running"
+        | "any jobs currently running"
+        | "any jobs still running"
+        | "any jobs in progress" => Metric::RunningJobs,
+        "any retrying jobs" | "any jobs retrying" | "any jobs waiting to retry" => {
+            Metric::RetryingJobs
+        }
+        "any failed jobs in the last 24 hours" | "any failed jobs in the past 24 hours" => {
+            Metric::FailedJobs
+        }
+        _ => return None,
+    })
 }
 
 fn host_resource_query(query: &str) -> &str {
@@ -507,6 +531,8 @@ fn host_resources(query: &str) -> bool {
         "resources"
         | "host resources"
         | "system resources"
+        | "resource snapshot"
+        | "host resource snapshot"
         | "cpu, memory, and disk"
         | "cpu, memory and disk"
         | "cpu memory and disk"
@@ -561,6 +587,8 @@ fn host_usage(query: &str) -> Option<Metric> {
             " are we using",
             " we are using",
             " we're using",
+            " is the api host using",
+            " is the backend host using",
         ],
     ) {
         return host_resource(strip_any_prefix(usage, &["the ", "our "]).unwrap_or(usage));
@@ -584,10 +612,8 @@ fn host_resource(resource: &str) -> Option<Metric> {
 }
 
 fn jobs_summary(query: &str) -> bool {
-    let query = strip_any_suffix(query, &[" on this workstation", " for this workstation"])
-        .unwrap_or(query);
     matches!(
-        query,
+        workstation_jobs_query(query),
         "job counts"
             | "workstation job counts"
             | "job activity"
@@ -596,6 +622,8 @@ fn jobs_summary(query: &str) -> bool {
             | "jobs summary"
             | "summary of jobs"
             | "overview of jobs"
+            | "job queue overview"
+            | "how busy is the job queue"
             | "summarize jobs"
             | "summarise jobs"
             | "how are the jobs doing"
@@ -641,6 +669,8 @@ fn readiness(question: &str, query: &str) -> Option<ReadinessCheckId> {
                 &[
                     " not ready",
                     " not applicable",
+                    " ready for use",
+                    " ready to use",
                     " ready",
                     " healthy",
                     " working",
@@ -703,6 +733,7 @@ fn summary(question: &str, query: &str) -> bool {
             | "is anything wrong"
             | "any problems with this workstation"
             | "any problems with the workstation"
+            | "any blockers on this workstation"
             | "are there any problems with this workstation"
             | "is anything wrong with this workstation"
     ) {
@@ -747,7 +778,13 @@ fn health_subject(query: &str) -> Option<&str> {
     .or_else(|| {
         strip_any_suffix(
             query,
-            &[" status update", " status", " readiness", " health"],
+            &[
+                " status update",
+                " status",
+                " readiness",
+                " health",
+                " health summary",
+            ],
         )
     })
 }
@@ -917,6 +954,85 @@ mod tests {
     }
 
     #[test]
+    fn answers_scoped_job_shorthand_without_model_inference() {
+        for (question, metric) in [
+            ("any jobs running?", Metric::RunningJobs),
+            (
+                "Any   running jobs on this workstation right now ?",
+                Metric::RunningJobs,
+            ),
+            ("Any jobs currently running?", Metric::RunningJobs),
+            ("Any jobs still running?", Metric::RunningJobs),
+            ("Any jobs in the queue?", Metric::QueuedJobs),
+            ("Any jobs waiting to retry?", Metric::RetryingJobs),
+            ("Any failed jobs in the last 24 hours?", Metric::FailedJobs),
+        ] {
+            let route = super::classify(question);
+            assert_eq!(route.intent, Question::Metric(metric), "{question}");
+            assert!(route.exact_fact, "{question} is a scoped single fact");
+        }
+
+        for question in [
+            "Are any jobs running?",
+            "Do we have any jobs in progress right now?",
+        ] {
+            let route = super::classify(question);
+            assert_eq!(
+                route.intent,
+                Question::Metric(Metric::RunningJobs),
+                "{question}"
+            );
+            assert!(!route.exact_fact, "{question} can use model-guided wording");
+        }
+    }
+
+    #[test]
+    fn binds_natural_workstation_queries_to_known_evidence() {
+        for (question, expected) in [
+            (
+                "How much RAM is the API host using?",
+                Question::Metric(Metric::Memory),
+            ),
+            (
+                "Could you check the host resource snapshot?",
+                Question::HostResources,
+            ),
+            (
+                "How busy is the job queue on this workstation?",
+                Question::JobsSummary,
+            ),
+            (
+                "Is the actor index ready for use?",
+                Question::Readiness(ReadinessCheckId::ActorSearch),
+            ),
+            (
+                "Please show the workstation health summary.",
+                Question::Summary,
+            ),
+            ("Any blockers on this workstation?", Question::Summary),
+            (
+                "How's this job doing?",
+                Question::ContextStatus(ChatSourceKind::Job),
+            ),
+            (
+                "Has this cycle finished?",
+                Question::ContextStatus(ChatSourceKind::Cycle),
+            ),
+            (
+                "Any errors or warnings for this job?",
+                Question::ContextLogs(ChatSourceKind::Job),
+            ),
+            (
+                "Any errors or warnings for this cycle?",
+                Question::ContextLogs(ChatSourceKind::Cycle),
+            ),
+            ("Which backend am I connected to?", Question::Configuration),
+        ] {
+            assert_eq!(classify(question), expected, "{question}");
+        }
+    }
+
+    #[test]
     fn recognizes_grouped_resource_and_job_observations() {
         for (question, intent) in [
             ("What is our resource usage?", Question::HostResources),
@@ -1066,6 +1182,15 @@ mod tests {
         for question in [
             "How many jobs are running across all workstations?",
             "How many jobs failed in the last 7 days?",
+            "Any jobs running on another workstation?",
+            "Do we have any jobs running across all workstations?",
+            "Any jobs running yesterday?",
+            "Any failed jobs in the last 7 days?",
+            "Any jobs running and stop them?",
+            "Any jobs running? Change the config.",
+            "Any errors or warnings for this job since last week?",
+            "How much RAM is the API host using for this user?",
+            "Which backend am I connected to and what's its token?",
             "Job counts across all workstations.",
             "How are my jobs doing?",
             "What jobs are running?",

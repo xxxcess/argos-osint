@@ -198,11 +198,29 @@ fn run(args: &[&str]) -> Option<String> {
     }
 }
 
-/// Fresh physical memory headroom, constrained by Linux cgroup limits when available.
+/// Fresh physical memory headroom for local workers.
+///
+/// Count reclaimable cache on macOS at normal memory pressure, and constrain
+/// Linux headroom by the cgroup limit when available.
 #[must_use]
 pub fn available_memory_bytes() -> u64 {
     let mut system = System::new();
     system.refresh_memory();
+    #[cfg(target_os = "macos")]
+    if let Some(available) = run(&[
+        "/usr/sbin/sysctl",
+        "-n",
+        "kern.memorystatus_vm_pressure_level",
+        "hw.pagesize",
+        "vm.page_free_count",
+        "vm.page_pageable_external_count",
+        "vm.page_purgeable_count",
+    ])
+    .as_deref()
+    .and_then(macos_reclaimable_memory_bytes)
+    {
+        return available.min(system.total_memory());
+    }
     let available = system.available_memory().min(system.total_memory());
     if available == 0 {
         return 0;
@@ -210,6 +228,26 @@ pub fn available_memory_bytes() -> u64 {
     system
         .cgroup_limits()
         .map_or(available, |limits| available.min(limits.free_memory))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_reclaimable_memory_bytes(output: &str) -> Option<u64> {
+    // The pressure sysctl reports the userspace event mask, where normal is 1.
+    // Free, file-backed and purgeable pages can be reclaimed without swapping.
+    let mut values = output.split_whitespace();
+    if values.next()? != "1" {
+        return None;
+    }
+    let page_size: u64 = values.next()?.parse().ok()?;
+    let free: u64 = values.next()?.parse().ok()?;
+    let file_backed: u64 = values.next()?.parse().ok()?;
+    let purgeable: u64 = values.next()?.parse().ok()?;
+    if values.next().is_some() || page_size == 0 {
+        return None;
+    }
+    free.checked_add(file_backed)?
+        .checked_add(purgeable)?
+        .checked_mul(page_size)
 }
 
 /// Free bytes available to the current user on the filesystem containing the path.
@@ -466,6 +504,26 @@ fn write_cache(profile: &HardwareProfile) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn macos_headroom_counts_reclaimable_pages_only_in_normal_pressure() {
+        let pages = "4096\n65536\n655360\n196608";
+        assert_eq!(
+            macos_reclaimable_memory_bytes(&format!("1\n{pages}")),
+            Some(3584 * 1024 * 1024),
+        );
+        for pressure in [2, 4] {
+            assert_eq!(
+                macos_reclaimable_memory_bytes(&format!("{pressure}\n{pages}")),
+                None,
+            );
+        }
+        assert_eq!(macos_reclaimable_memory_bytes("1\n4096\n65536"), None);
+        assert_eq!(
+            macos_reclaimable_memory_bytes("1\n4096\n18446744073709551615\n1\n0"),
+            None,
+        );
+    }
 
     #[test]
     fn metal_budget_tracks_ram_class() {

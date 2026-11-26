@@ -82,6 +82,7 @@ pub(crate) struct Citation {
 pub(crate) struct ChatMessage {
     pub id: String,
     pub role: Role,
+    pub timestamp: Option<String>,
     pub state: TurnState,
     pub text: String,
     pub citations: Vec<Citation>,
@@ -151,6 +152,7 @@ pub(crate) fn bubble_with_sources(message: &ChatMessage, sources: Option<El>, ki
     message_bubble(
         message_key(&message.id),
         message.role,
+        message.timestamp.as_deref(),
         &message.text,
         state,
         sources,
@@ -159,12 +161,13 @@ pub(crate) fn bubble_with_sources(message: &ChatMessage, sources: Option<El>, ki
 }
 
 pub(crate) fn greeting(key: &str, text: &str, kit: &Kit) -> El {
-    message_bubble(key.to_owned(), Role::Assistant, text, None, None, kit)
+    message_bubble(key.to_owned(), Role::Assistant, None, text, None, None, kit)
 }
 
 fn message_bubble(
     key: String,
     role: Role,
+    timestamp: Option<&str>,
     text: &str,
     state: Option<El>,
     sources: Option<El>,
@@ -176,12 +179,22 @@ fn message_bubble(
     } else {
         StatusTone::Neutral
     };
-    let mut body = rune::col().w_full().gap(6.0).child(
-        rune::text(role.label())
-            .font(kit.ty.small_medium)
-            .color(theme::hex(theme::TEXT_MUTED))
-            .a11y_hidden(),
-    );
+    let header = rune::row()
+        .gap(8.0)
+        .center_y()
+        .child(
+            rune::text(role.label())
+                .font(kit.ty.small_medium)
+                .color(theme::hex(theme::TEXT_MUTED))
+                .a11y_hidden(),
+        )
+        .children(timestamp.map(|time| {
+            rune::text(time)
+                .key(format!("{key}-time"))
+                .font(kit.ty.text_xsmall)
+                .color(theme::hex(theme::TEXT_MUTED))
+        }));
+    let mut body = rune::col().w_full().gap(6.0).child(header);
     if !text.is_empty() {
         body = body.child(
             rune::text(text)
@@ -254,6 +267,7 @@ mod tests {
         ChatMessage {
             id: id.to_string(),
             role,
+            timestamp: None,
             state,
             text: format!("message {id}"),
             citations: Vec::new(),

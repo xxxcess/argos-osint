@@ -256,6 +256,12 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
     def find_citation(turn_id, index):
         return find(f"chat-citation-{turn_id}-{index}")
 
+    def message_time(message):
+        node = find(f"chat-message-inbox-qa-{message}-time")
+        if screen_bounds(node, atspi) is not None and re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", node.name or ""):
+            return node.name
+        return None
+
     def sources_ready(turn_id, *, expanded):
         toggle = find(SOURCES_TOGGLE, button=True)
         if screen_bounds(toggle, atspi) is None:
@@ -418,7 +424,9 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         if find("inbox-qa-stop") is not None:
             return None
         citation = sources_ready(final["turn_id"], expanded=True)
-        if citation is None or citation.name != citation_name:
+        if citation is None or citation.name != citation_name or not all(
+            message_time(message) for message in ("question", "answer")
+        ):
             return None
         count = len(final["findings"])
         require(all(find_citation(final["turn_id"], index) is not None for index in range(count))
@@ -467,25 +475,33 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
                       "grounded memory reading and its original timestamp", timeout=4)
     subprocess.run(["scrot", "--overwrite", str(output / "grounded-memory.png")], check=True, timeout=5)
 
-    def transcript_shows(question, *, disabled_arrow):
+    def transcript_shows(question, *, hidden_arrow):
         message = find("chat-message-inbox-qa-question")
-        arrow = find(disabled_arrow)
-        if message is None or arrow is None or arrow.getState().contains(atspi.STATE_ENABLED):
+        if message is None or find(hidden_arrow) is not None:
             return None
         return next((node for node in descendants(message)
                      if node.name == question and screen_bounds(node, atspi) is not None), None)
 
     button(PREVIOUS_EXCHANGE, "Previous exchange", timeout=12)
-    wait_for(lambda: transcript_shows(SUMMARY_QUESTION, disabled_arrow=PREVIOUS_EXCHANGE),
-             app, "previous readiness exchange and disabled older boundary", timeout=8)
+    wait_for(lambda: transcript_shows(SUMMARY_QUESTION, hidden_arrow=PREVIOUS_EXCHANGE),
+             app, "oldest readiness exchange with the previous arrow hidden", timeout=8)
     button(SOURCES_TOGGLE, timeout=8)
     previous_source = wait_for(lambda: sources_ready(final["turn_id"], expanded=True),
                                app, "previous exchange with its original source", timeout=8)
     require(previous_source.name == citation_name, "history replaced the previous exchange's original citation")
     subprocess.run(["scrot", "--overwrite", str(output / "previous-exchange.png")], check=True, timeout=5)
-    button(NEXT_EXCHANGE, "Next exchange", timeout=8)
-    wait_for(lambda: transcript_shows(MEMORY_QUESTION, disabled_arrow=NEXT_EXCHANGE),
-             app, "latest memory exchange and disabled newer boundary", timeout=8)
+
+    def focused_next_exchange():
+        arrow = find(NEXT_EXCHANGE, label="Next exchange", button=True)
+        if screen_bounds(arrow, atspi) and arrow.getState().contains(atspi.STATE_FOCUSED):
+            return arrow
+        return None
+
+    # Exercise the focus transfer at the oldest exchange through the real keyboard path.
+    wait_for(focused_next_exchange, app, "keyboard focus on the newer exchange arrow", timeout=8)
+    subprocess.run(["xdotool", "key", "--clearmodifiers", "Return"], check=True, timeout=5)
+    wait_for(lambda: transcript_shows(MEMORY_QUESTION, hidden_arrow=NEXT_EXCHANGE),
+             app, "latest memory exchange with the next arrow hidden", timeout=8)
     require(len([row for row in read_journal(journal) if row.get("op") == "qa_turn_submit"]) == 2,
             "browsing the transcript submitted another turn")
 
@@ -538,6 +554,7 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         "sources_default_collapsed": True, "sources_retained_after_completion": True,
         "sources_retained_after_cancel": True,
         "transcript_previous_and_next": True,
+        "transcript_boundary_arrows_hidden": True, "message_times_visible": True,
         "stop_enabled_before_release": True, "same_turn": True,
         "terminal_state": final["state"], "terminal_events": final["terminal_events"],
         "stop_while_running": True, "cancelled_terminal_state": canceled["state"],

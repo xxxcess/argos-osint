@@ -4,6 +4,9 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use chrono::DateTime;
+use chrono::Local;
+use chrono::Utc;
 use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::chat::QaAvailabilityReason;
@@ -71,11 +74,15 @@ const HISTORY_REFRESH: f64 = 15.0;
 const STARTUP_REFRESH: f64 = 1.0;
 const MIN_EVENT_INTERVAL: f64 = 0.2;
 const GREETING: &str = "inbox-qa-greeting";
+const WELCOME_ROW: &str = "inbox-qa-welcome";
+const QUESTION_ROW: &str = "inbox-qa-question-row";
+const ANSWER_ROW: &str = "inbox-qa-live-answer";
 const COMPOSER: &str = "inbox-qa-composer";
 const SOURCES_TOGGLE: &str = "inbox-qa-sources-toggle";
 const SOURCES_CONTENT: &str = "inbox-qa-sources";
 const HISTORY_PREVIOUS: &str = "inbox-qa-history-previous";
 const HISTORY_NEXT: &str = "inbox-qa-history-next";
+const HISTORY_ARROW_SIZE: f32 = 28.0;
 const CONTEXT_DIAL: &str = "inbox-qa-context";
 const SETTINGS_CONTROL: &str = "inbox-qa-toggle";
 #[cfg(test)]
@@ -106,6 +113,16 @@ impl Binding {
 
 struct Pending {
     request: QaTurnRequest,
+    sent_at: i64,
+}
+
+impl Pending {
+    fn new(request: QaTurnRequest) -> Self {
+        Self {
+            request,
+            sent_at: Utc::now().timestamp(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1128,7 +1145,7 @@ impl State {
             return;
         };
         if self.dispatch_inbox_qa(Request::Submit(request.clone())) {
-            self.inbox_qa.pending = Some(Pending { request });
+            self.inbox_qa.pending = Some(Pending::new(request));
             self.inbox_qa.history.select(None);
             self.inbox_qa.status = None;
             tx.scroll_to_bottom_instant(crate::inbox::SCROLL);
@@ -1803,7 +1820,10 @@ fn answer_state(turn: &QaTurn) -> (chat_ui::TurnState, &'static str) {
 
 fn answer_sources(turn_id: &str, citations: &[chat_ui::Citation], expanded: bool, kit: &Kit) -> El {
     let active_turn_id = turn_id.to_owned();
-    let trigger = rune_kit::Button::new(format!("Sources ({})", citations.len()))
+    let label = format!("Sources ({})", citations.len());
+    let font = kit.ty.small;
+    let trigger = rune_kit::Button::new(label.clone())
+        .label_with(move |_, ink| rune::text(label).font(font).color(ink))
         .variant(rune_kit::ButtonVariant::Ghost)
         .icon(if expanded {
             kit.glyph.triangle_down
@@ -1910,23 +1930,40 @@ fn context_dial(usage: Option<QaContextUsage>, kit: &Kit) -> El {
     }))
 }
 
-pub(crate) fn greeting(state: &State, kit: &Kit) -> Option<El> {
+// Keep the message's content and status changes immediate inside its entrance.
+fn message_row(message: El, key: &str) -> El {
+    rune::col().key(key).w_full().child(
+        message
+            .instant_changes()
+            .transition(rune::Transition::none()),
+    )
+}
+
+pub(crate) fn greeting(state: &State, kit: &Kit, preferences: ViewPreferences) -> Option<El> {
     state.can_send_inbox_qa().then(|| {
         let text = if state.permission(Permission::ReadWorkstationActivity) {
             "Hi! Ask me about workstation readiness, memory usage, or running jobs."
         } else {
             "Hi! Ask me about workstation readiness or memory usage."
         };
-        chat_ui::greeting(GREETING, text, kit)
+        crate::inbox::fade_in(
+            message_row(chat_ui::greeting(GREETING, text, kit), WELCOME_ROW),
+            preferences,
+        )
     })
 }
 
-fn history_arrow(
+fn history_arrow_slot(
     qa: &InboxQa,
     direction: HistoryDirection,
     kit: &Kit,
     preferences: ViewPreferences,
 ) -> El {
+    if !qa.can_browse(direction) {
+        return rune::row()
+            .size(HISTORY_ARROW_SIZE, HISTORY_ARROW_SIZE)
+            .a11y_hidden();
+    }
     let (icon, label) = match direction {
         HistoryDirection::Previous => (&icons::CHEVRON_LEFT, "Previous exchange"),
         HistoryDirection::Next => (&icons::CHEVRON_RIGHT, "Next exchange"),
@@ -1935,11 +1972,16 @@ fn history_arrow(
         .variant(IconButtonVariant::Ghost)
         .control_size(ControlSize::Large)
         .label(label)
-        .disabled(!qa.can_browse(direction))
         .on_press_tx(move |state: &mut State, tx| state.browse_inbox_qa_history(direction, tx))
         .build(kit)
+        .size(HISTORY_ARROW_SIZE, HISTORY_ARROW_SIZE)
         .key(direction.key());
     material::glass_control(control, preferences)
+}
+
+fn local_message_time(seconds: Option<i64>) -> Option<String> {
+    let timestamp = DateTime::from_timestamp(seconds?, 0)?;
+    Some(timestamp.with_timezone(&Local).format("%H:%M").to_string())
 }
 
 pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -> Option<El> {
@@ -1949,62 +1991,73 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
     let qa = &state.inbox_qa;
     let browsing = state.browsed_inbox_qa_turn().is_some();
     let pending = qa.pending.as_ref().filter(|_| !browsing);
-    let (question, stage, answer, findings, request_id, turn_id, usage) =
-        if let Some(pending) = pending {
-            (
-                pending.request.question.as_str(),
-                chat_ui::TurnState::Queued,
-                String::new(),
-                &[][..],
-                pending.request.request_id.as_str(),
-                None,
-                None,
-            )
-        } else if let Some(turn) = state.displayed_inbox_qa_turn() {
-            let (stage, detail) = answer_state(turn);
-            let draft = turn
-                .provisional_reply
-                .as_deref()
-                .filter(|draft| turn.state == QaTurnState::Running && !draft.trim().is_empty());
-            let stage = if draft.is_some() {
-                chat_ui::TurnState::Streaming
-            } else {
-                stage
-            };
-            let reply = match turn.state {
-                QaTurnState::Answered | QaTurnState::InsufficientContext => turn
-                    .reply
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|reply| !reply.is_empty()),
-                _ => draft,
-            };
-            let answer = reply.map_or_else(
-                || {
-                    turn.findings
-                        .iter()
-                        .map(|finding| finding.text.as_str())
-                        .chain((!detail.is_empty()).then_some(detail))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                },
-                str::to_owned,
-            );
-            (
-                turn.question.as_str(),
-                stage,
-                answer,
-                turn.findings.as_slice(),
-                turn.request_id.as_str(),
-                Some(turn.turn_id.as_str()),
-                turn.context,
-            )
+    let (
+        question,
+        stage,
+        answer,
+        findings,
+        request_id,
+        turn_id,
+        usage,
+        [accepted_at, completed_at],
+    ) = if let Some(pending) = pending {
+        (
+            pending.request.question.as_str(),
+            chat_ui::TurnState::Queued,
+            String::new(),
+            &[][..],
+            pending.request.request_id.as_str(),
+            None,
+            None,
+            [Some(pending.sent_at), None],
+        )
+    } else if let Some(turn) = state.displayed_inbox_qa_turn() {
+        let (stage, detail) = answer_state(turn);
+        let draft = turn
+            .provisional_reply
+            .as_deref()
+            .filter(|draft| turn.state == QaTurnState::Running && !draft.trim().is_empty());
+        let stage = if draft.is_some() {
+            chat_ui::TurnState::Streaming
         } else {
-            return None;
+            stage
         };
+        let reply = match turn.state {
+            QaTurnState::Answered | QaTurnState::InsufficientContext => turn
+                .reply
+                .as_deref()
+                .map(str::trim)
+                .filter(|reply| !reply.is_empty()),
+            _ => draft,
+        };
+        let answer = reply.map_or_else(
+            || {
+                turn.findings
+                    .iter()
+                    .map(|finding| finding.text.as_str())
+                    .chain((!detail.is_empty()).then_some(detail))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            },
+            str::to_owned,
+        );
+        (
+            turn.question.as_str(),
+            stage,
+            answer,
+            turn.findings.as_slice(),
+            turn.request_id.as_str(),
+            Some(turn.turn_id.as_str()),
+            turn.context,
+            [turn.accepted_at, turn.completed_at],
+        )
+    } else {
+        return None;
+    };
     let question = chat_ui::ChatMessage {
         id: "inbox-qa-question".into(),
         role: chat_ui::Role::Operator,
+        timestamp: local_message_time(accepted_at),
         state: chat_ui::TurnState::Final,
         text: question.to_owned(),
         citations: Vec::new(),
@@ -2012,6 +2065,7 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
     let answer = chat_ui::ChatMessage {
         id: "inbox-qa-answer".into(),
         role: chat_ui::Role::Assistant,
+        timestamp: local_message_time(completed_at),
         state: stage,
         text: answer,
         citations: findings
@@ -2040,35 +2094,42 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
         .gap(8.0)
         .instant_changes()
         .transition(rune::Transition::none())
-        .child(chat_ui::bubble(&question, kit))
-        .child(
-            chat_ui::bubble_with_sources(&answer, sources, kit)
-                .key("inbox-qa-live-answer")
-                .live_region(live_region),
-        )
+        .child(crate::inbox::enter_from_below(
+            message_row(chat_ui::bubble(&question, kit), QUESTION_ROW),
+            preferences,
+        ))
+        .child(crate::inbox::enter_from_below(
+            message_row(
+                chat_ui::bubble_with_sources(&answer, sources, kit),
+                ANSWER_ROW,
+            )
+            .live_region(live_region),
+            preferences,
+        ))
         .child(context_dial(usage, kit))
         .children(state.canonical_related_activity().map(|related| {
             crate::activity_triage::result_view(state, related, None, kit, preferences)
         }));
     // Admission and streaming keep the same request key as the queued draft.
-    let turn = crate::inbox::enter_from_below(
-        rune::col()
-            .key(format!("inbox-qa-turn-{request_id}"))
-            .w_full()
-            .child(bubbles),
-        preferences,
-    );
+    let turn = rune::col()
+        .key(format!("inbox-qa-turn-{request_id}"))
+        .w_full()
+        .transition(rune::Transition::none())
+        .child(bubbles);
     let show_arrows = state.supports_inbox_qa_history() && qa.earlier_turns().next().is_some();
     let transcript = rune::row()
         .key("inbox-qa-history")
         .w_full()
-        .items_end()
+        .items_center()
         .gap(6.0)
         .children(
-            show_arrows.then(|| history_arrow(qa, HistoryDirection::Previous, kit, preferences)),
+            show_arrows
+                .then(|| history_arrow_slot(qa, HistoryDirection::Previous, kit, preferences)),
         )
         .child(turn.grow(1.0).min_w(0.0))
-        .children(show_arrows.then(|| history_arrow(qa, HistoryDirection::Next, kit, preferences)));
+        .children(
+            show_arrows.then(|| history_arrow_slot(qa, HistoryDirection::Next, kit, preferences)),
+        );
     Some(
         rune::col()
             .key("inbox-qa-exchange")
@@ -2411,7 +2472,7 @@ mod tests {
                 )
                 .unwrap();
                 state.inbox_qa.resume = false;
-                state.inbox_qa.pending = Some(Pending { request });
+                state.inbox_qa.pending = Some(Pending::new(request));
                 tx.scroll_to_bottom_instant(crate::inbox::SCROLL);
             });
             runtime.frame(1.0);
@@ -3076,73 +3137,112 @@ mod tests {
     fn transcript_arrows_browse_retained_turns_without_changing_the_live_exchange() {
         const OLDER_QUESTION: &str = "Which earlier check finished?";
         const OLDER_CITATION: &str = "chat-citation-older-turn-0";
+        const OLDEST_QUESTION: &str = "Which check was first?";
+        const QUESTION_TIME: &str = "chat-message-inbox-qa-question-time";
+        const ANSWER_TIME: &str = "chat-message-inbox-qa-answer-time";
         for size in [(640.0, 480.0), (1280.0, 800.0)] {
             let mut runtime = active_drawer(size);
             let mut older = turn(QaTurnState::Answered, 3);
             older.turn_id = "older-turn".into();
             older.request_id = "older-request".into();
             older.question = OLDER_QUESTION.into();
+            older.accepted_at = Some(1_767_225_600);
+            older.completed_at = Some(1_767_225_665);
+            let older_times = [
+                (
+                    QUESTION_TIME,
+                    local_message_time(older.accepted_at).unwrap(),
+                ),
+                (ANSWER_TIME, local_message_time(older.completed_at).unwrap()),
+            ];
+            let mut oldest = turn(QaTurnState::Answered, 3);
+            oldest.turn_id = "oldest-turn".into();
+            oldest.request_id = "oldest-request".into();
+            oldest.question = OLDEST_QUESTION.into();
             runtime.update(move |state, tx| {
                 state.seed_inbox_qa_history_fixture(vec![
                     turn(QaTurnState::Running, 1),
                     older.clone(),
                     older,
+                    oldest,
                 ]);
                 state.inbox_qa.draft = TextEdit::new("Unsent follow-up");
                 tx.scroll_to_bottom_instant(crate::inbox::SCROLL);
             });
             runtime.frame(0.75);
-            let elements = runtime.elements();
-            let previous = elements
-                .iter()
-                .find(|element| element.key.as_deref() == Some(HISTORY_PREVIOUS))
-                .expect("left transcript control");
-            let next = elements
-                .iter()
-                .find(|element| element.key.as_deref() == Some(HISTORY_NEXT))
-                .expect("right transcript control");
-            assert_eq!(previous.label.as_deref(), Some("Previous exchange"));
-            assert_eq!(next.label.as_deref(), Some("Next exchange"));
-            assert!(previous.focusable && !next.focusable);
-            let (turn_rect, _) = runtime.presented("inbox-qa-turn-fixture-request").unwrap();
-            assert!(previous.rect[0] + previous.rect[2] <= turn_rect[0]);
-            assert!(turn_rect[0] + turn_rect[2] <= next.rect[0]);
+            assert!(runtime.find(HISTORY_NEXT).is_none());
+            assert!(runtime.find(ANSWER_TIME).is_none());
+            assert_eq!(
+                accessibility_nodes_with_key(&runtime.accessibility_json(), HISTORY_NEXT),
+                0
+            );
+            let (latest_rect, _) = runtime.presented("inbox-qa-turn-fixture-request").unwrap();
             let (x, y) = runtime.find(HISTORY_PREVIOUS).unwrap();
             let (viewport, _) = runtime.presented(crate::inbox::SCROLL).unwrap();
             assert!(y >= viewport[1] && y < viewport[1] + viewport[3]);
             runtime.pointer_down(x, y);
             runtime.pointer_up(x, y);
             runtime.frame(1.0);
-            assert!(runtime
-                .accessibility_json()
-                .to_string()
-                .contains(OLDER_QUESTION));
+            let tree = runtime.accessibility_json();
+            assert!(tree.to_string().contains(OLDER_QUESTION));
+            for (key, time) in older_times {
+                assert!(runtime.find(key).is_some());
+                assert!(tree.to_string().contains(&time));
+            }
             assert!(runtime.find("inbox-qa-stop").is_some());
+            let (middle_rect, _) = runtime.presented("inbox-qa-turn-older-request").unwrap();
+            let elements = runtime.elements();
+            for (key, label) in [
+                (HISTORY_PREVIOUS, "Previous exchange"),
+                (HISTORY_NEXT, "Next exchange"),
+            ] {
+                let arrow = elements
+                    .iter()
+                    .find(|element| element.key.as_deref() == Some(key))
+                    .expect("transcript control");
+                assert_eq!(arrow.label.as_deref(), Some(label));
+                assert!(arrow.focusable);
+                let mid_y = middle_rect[1] + middle_rect[3] * 0.5;
+                assert!((arrow.rect[1] + arrow.rect[3] * 0.5 - mid_y).abs() < 1.0);
+            }
+            let (previous, _) = runtime.presented(HISTORY_PREVIOUS).unwrap();
+            let (next, _) = runtime.presented(HISTORY_NEXT).unwrap();
+            assert!(previous[0] + previous[2] <= middle_rect[0]);
+            assert!(middle_rect[0] + middle_rect[2] <= next[0]);
+            assert!((latest_rect[0] - middle_rect[0]).abs() < 1.0);
+            assert!((latest_rect[2] - middle_rect[2]).abs() < 1.0);
+
+            press_disclosure(&mut runtime, HISTORY_PREVIOUS, 1.1);
+            let tree = runtime.accessibility_json();
+            assert!(tree.to_string().contains(OLDEST_QUESTION));
+            assert!(runtime.find(HISTORY_PREVIOUS).is_none());
+            assert_eq!(accessibility_nodes_with_key(&tree, HISTORY_PREVIOUS), 0);
             assert!(runtime.elements().iter().any(|element| {
-                element.key.as_deref() == Some(HISTORY_PREVIOUS) && !element.focusable
+                element.key.as_deref() == Some(HISTORY_NEXT) && element.focused
             }));
-            press_disclosure(&mut runtime, SOURCES_TOGGLE, 1.1);
+            press_disclosure(&mut runtime, HISTORY_NEXT, 1.5);
+            press_disclosure(&mut runtime, SOURCES_TOGGLE, 1.9);
             assert!(runtime.find(OLDER_CITATION).is_some());
 
             runtime.update(|state, _| {
                 state.inbox_qa.adopt(Some(turn(QaTurnState::Answered, 3)));
             });
-            runtime.frame(1.5);
+            runtime.frame(2.5);
             assert!(runtime
                 .accessibility_json()
                 .to_string()
                 .contains(OLDER_QUESTION));
             assert!(runtime.find(OLDER_CITATION).is_some());
             assert!(runtime.find("inbox-qa-stop").is_none());
-            press_disclosure(&mut runtime, HISTORY_NEXT, 1.75);
-            assert!(!runtime
-                .accessibility_json()
-                .to_string()
-                .contains(OLDER_QUESTION));
+            press_disclosure(&mut runtime, HISTORY_NEXT, 2.75);
+            let tree = runtime.accessibility_json();
+            assert!(!tree.to_string().contains(OLDER_QUESTION));
             assert!(runtime.find(OLDER_CITATION).is_none());
             assert_eq!(runtime.state.inbox_qa.draft.text, "Unsent follow-up");
+            assert!(runtime.find(HISTORY_NEXT).is_none());
+            assert_eq!(accessibility_nodes_with_key(&tree, HISTORY_NEXT), 0);
             assert!(runtime.elements().iter().any(|element| {
-                element.key.as_deref() == Some(HISTORY_NEXT) && !element.focusable
+                element.key.as_deref() == Some(HISTORY_PREVIOUS) && element.focused
             }));
         }
     }
@@ -3250,8 +3350,15 @@ mod tests {
     }
 
     #[test]
-    fn queued_turn_rises_once_and_keeps_its_slot_on_acceptance() {
+    fn messages_slide_in_once_and_keep_their_slots_during_streaming() {
         const TURN: &str = "inbox-qa-turn-fixture-queued";
+        let positions = |runtime: &Runtime<State>| {
+            let (turn, _) = runtime.presented(TURN).unwrap();
+            [QUESTION_ROW, ANSWER_ROW].map(|key| {
+                let (rect, opacity) = runtime.presented(key).unwrap();
+                (rect[1] - turn[1], rect[3], opacity)
+            })
+        };
         for reduced_motion in [false, true] {
             let mut runtime = active_drawer((1280.0, 800.0));
             runtime.update(move |state, _| {
@@ -3272,30 +3379,84 @@ mod tests {
                     None,
                 )
                 .unwrap();
-                state.inbox_qa.pending = Some(Pending { request });
+                state.inbox_qa.pending = Some(Pending::new(request));
                 tx.scroll_to_bottom_instant(crate::inbox::SCROLL);
             });
             runtime.frame(0.0);
-            let (exchange, _) = runtime.presented("inbox-qa-exchange").unwrap();
-            let (queued, _) = runtime.presented(TURN).unwrap();
-            if reduced_motion {
-                assert_eq!(queued, exchange);
-            } else {
-                assert!(queued[1] > exchange[1] + 1.0);
-            }
+            let entering = positions(&runtime);
             assert_eq!(runtime.scroll_at_bottom(crate::inbox::SCROLL), Some(true));
             runtime.frame(0.5);
+            let settled = positions(&runtime);
+            if reduced_motion {
+                assert_eq!(entering, settled);
+            } else {
+                for ((enter_y, _, enter_opacity), (settled_y, _, settled_opacity)) in
+                    entering.into_iter().zip(settled)
+                {
+                    assert!(enter_y > settled_y + 1.0);
+                    assert!(enter_opacity < settled_opacity);
+                }
+            }
             runtime.update(|state, _| {
                 let mut accepted = turn(QaTurnState::Running, 1);
                 accepted.turn_id = "fixture-accepted".into();
                 accepted.request_id = "fixture-queued".into();
+                accepted.question = "What is the current memory usage?".into();
                 assert!(state.inbox_qa.accept_pending(&accepted));
                 state.inbox_qa.adopt(Some(accepted));
             });
             runtime.frame(0.0);
-            let (exchange, _) = runtime.presented("inbox-qa-exchange").unwrap();
-            let (accepted, _) = runtime.presented(TURN).unwrap();
-            assert_eq!(accepted, exchange);
+            let [(question_y, question_height, question_opacity), (answer_y, _, answer_opacity)] =
+                positions(&runtime);
+            assert!(question_y.abs() < 1.0);
+            assert!((answer_y - question_height - 8.0).abs() < 1.0);
+            assert_eq!((question_opacity, answer_opacity), (1.0, 1.0));
+
+            for draft in ["Memory usage", "Memory usage is 51%."] {
+                runtime.update(move |state, _| {
+                    let mut streaming = state.inbox_qa.latest.as_ref().unwrap().clone();
+                    streaming.cursor += 1;
+                    streaming.provisional_reply = Some(draft.into());
+                    state.inbox_qa.adopt(Some(streaming));
+                });
+                runtime.frame(0.0);
+                let [question, (streaming_y, _, streaming_opacity)] = positions(&runtime);
+                assert_eq!(question, (question_y, question_height, question_opacity));
+                assert!((streaming_y - answer_y).abs() < 1.0);
+                assert_eq!(streaming_opacity, 1.0);
+                assert!(runtime.accessibility_json().to_string().contains(draft));
+            }
+        }
+    }
+
+    #[test]
+    fn welcome_fades_in_place_with_a_static_reduced_motion_fallback() {
+        for reduced_motion in [false, true] {
+            let mut runtime = qa_drawer((1280.0, 800.0), None);
+            runtime.update(move |state, _| {
+                state
+                    .accessibility
+                    .fixture_override
+                    .as_mut()
+                    .unwrap()
+                    .reduced_motion = reduced_motion;
+                state.inbox_qa.resume = true;
+            });
+            runtime.frame(0.5);
+            assert!(runtime.find(GREETING).is_none());
+
+            runtime.update(|state, _| state.inbox_qa.resume = false);
+            runtime.frame(0.0);
+            let (entering, enter_opacity) = runtime.presented(GREETING).unwrap();
+            runtime.frame(0.5);
+            let (settled, settled_opacity) = runtime.presented(GREETING).unwrap();
+            assert_eq!(entering, settled);
+            assert_eq!(settled_opacity, 1.0);
+            if reduced_motion {
+                assert_eq!(enter_opacity, settled_opacity);
+            } else {
+                assert!(enter_opacity < settled_opacity);
+            }
         }
     }
 
@@ -3564,10 +3725,9 @@ mod tests {
             let context = MutationContext::new(state.registration.context.as_ref().unwrap());
             state.inbox_qa.adopt(Some(turn(QaTurnState::Answered, 3)));
             state.inbox_qa.draft = TextEdit::new(draft);
-            state.inbox_qa.pending = Some(Pending {
-                request: QaTurnRequest::new("new-request".into(), context, draft.into(), None)
-                    .unwrap(),
-            });
+            state.inbox_qa.pending = Some(Pending::new(
+                QaTurnRequest::new("new-request".into(), context, draft.into(), None).unwrap(),
+            ));
             tx.scroll_to_bottom_instant("inbox-scroll");
         });
         runtime.frame(1.0);

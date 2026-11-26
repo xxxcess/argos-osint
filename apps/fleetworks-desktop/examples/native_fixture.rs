@@ -667,10 +667,12 @@ mod native {
         );
         turn.state = stage;
         turn.cursor = 1;
+        turn.accepted_at = Some(1_767_225_600);
         if stage == QaTurnState::Running {
             turn.provisional_reply = Some("Let me check actor search readiness.".into());
         }
         if matches!(stage, QaTurnState::Answered | QaTurnState::Canceled) {
+            turn.completed_at = Some(1_767_225_665);
             let answer = "Actor search is ready.";
             turn.findings.push(QaFinding::new(
                 ChatSourceReference::new(ChatSourceKind::Readiness, "actor-search".into())
@@ -695,6 +697,8 @@ mod native {
                 "Is the Embedded gateway ready?".into(),
             );
             prior.state = QaTurnState::Answered;
+            prior.accepted_at = Some(1_767_225_480);
+            prior.completed_at = Some(1_767_225_515);
             prior.reply = Some("The Embedded gateway is ready.".into());
             prior.cursor = 2;
             state.seed_inbox_qa_history_fixture(vec![turn.clone(), prior]);

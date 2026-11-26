@@ -375,6 +375,7 @@ impl State {
             ChatMessage {
                 id: "fixture-1".into(),
                 role: Role::Operator,
+                timestamp: None,
                 state: TurnState::Final,
                 text: "Why is this job slow?".into(),
                 citations: Vec::new(),
@@ -382,6 +383,7 @@ impl State {
             ChatMessage {
                 id: "fixture-2".into(),
                 role: Role::Assistant,
+                timestamp: None,
                 state: TurnState::Running,
                 text: String::new(),
                 citations: vec![Citation {
@@ -392,6 +394,7 @@ impl State {
             ChatMessage {
                 id: "fixture-3".into(),
                 role: Role::Assistant,
+                timestamp: None,
                 state: TurnState::Failed {
                     reason: "backend restarted".into(),
                 },
@@ -682,6 +685,7 @@ mod tests {
         assistant.messages.push(crate::chat_ui::ChatMessage {
             id: "m".into(),
             role: crate::chat_ui::Role::Operator,
+            timestamp: None,
             state: crate::chat_ui::TurnState::Final,
             text: "hi".into(),
             citations: Vec::new(),
@@ -791,6 +795,7 @@ mod render_tests {
                 ChatMessage {
                     id: "1".into(),
                     role: Role::Operator,
+                    timestamp: None,
                     state: TurnState::Final,
                     text: "Why is this job slow?".into(),
                     citations: Vec::new(),
@@ -798,6 +803,7 @@ mod render_tests {
                 ChatMessage {
                     id: "2".into(),
                     role: Role::Assistant,
+                    timestamp: None,
                     state: TurnState::Running,
                     text: String::new(),
                     citations: vec![Citation {
@@ -808,6 +814,7 @@ mod render_tests {
                 ChatMessage {
                     id: "3".into(),
                     role: Role::Assistant,
+                    timestamp: None,
                     state: TurnState::Final,
                     text: "The preceding job finished.".into(),
                     citations: vec![Citation {

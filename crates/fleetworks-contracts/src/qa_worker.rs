@@ -606,7 +606,7 @@ pub enum QaWorkerCommand {
     OpenWithDialogue,
     OpenWithStreaming,
     Ping,
-    Ask { request: QaWorkerRequest },
+    Ask { request: Box<QaWorkerRequest> },
     Shutdown,
 }
 

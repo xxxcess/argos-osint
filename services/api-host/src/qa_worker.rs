@@ -687,7 +687,7 @@ impl WorkerSession {
         events: mpsc::Sender<QaWorkerEvent>,
     ) -> Result<()> {
         self.send(&QaWorkerCommand::Ask {
-            request: request.clone(),
+            request: Box::new(request.clone()),
         })
         .await?;
         let mut validation = QaWorkerSequence::default();

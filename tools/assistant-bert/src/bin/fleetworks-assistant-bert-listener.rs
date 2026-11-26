@@ -611,7 +611,7 @@ mod tests {
         frame::write(
             &mut executor,
             &QaWorkerCommand::Ask {
-                request: QaWorkerRequest::new(
+                request: Box::new(QaWorkerRequest::new(
                     "turn-a".into(),
                     "snapshot-a".into(),
                     "Is search ready?".into(),
@@ -619,7 +619,7 @@ mod tests {
                         "search".into(),
                         "Actor search is ready.".into(),
                     )],
-                ),
+                )),
             },
         )
         .unwrap();

@@ -492,7 +492,7 @@ impl Worker {
                     lookup.resource,
                     since,
                     until,
-                    MAX_CANDIDATES
+                    MAX_CANDIDATES as i64
                 ],
                 |row| {
                     Ok(Entry {

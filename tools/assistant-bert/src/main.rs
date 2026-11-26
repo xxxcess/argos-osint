@@ -768,6 +768,7 @@ pub(crate) fn run(
                 None,
             )?,
             QaWorkerCommand::Ask { request } => {
+                let request = *request;
                 request.validate()?;
                 ensure!(
                     request.plan.is_none() || response_plan,

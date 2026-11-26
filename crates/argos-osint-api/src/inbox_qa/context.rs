@@ -15,6 +15,7 @@ use fleetworks_contracts::readiness::ReadinessCheck;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
 use futures_util::stream;
+use futures_util::FutureExt;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde::Serialize;
@@ -583,24 +584,27 @@ impl Observer {
             let scope = activity::scope_for_request(&state.repo, request, None)
                 .await
                 .ok()?;
-            let ids: HashSet<&str> = history
+            let ids: HashSet<String> = history
                 .entries
                 .iter()
                 .filter_map(|entry| match &entry.value {
-                    ObservationValue::Job { id, .. } if safe_job_id(id) => Some(id.as_str()),
+                    ObservationValue::Job { id, .. } if safe_job_id(id) => Some(id.clone()),
                     _ => None,
                 })
                 .collect();
+            let db = state.repo.db();
+            let authority_scope = request.scope_id();
             let visible: HashSet<String> = stream::iter(ids)
                 .map(|id| {
                     let scope = &scope;
                     async move {
-                        jobs_view::get_activity_job(state.repo.db(), request.scope_id(), scope, id)
+                        jobs_view::get_activity_job(db, authority_scope, scope, &id)
                             .await
                             .ok()
                             .flatten()
-                            .map(|_| id.to_owned())
+                            .map(|_| id)
                     }
+                    .boxed()
                 })
                 .buffer_unordered(4)
                 .filter_map(std::future::ready)

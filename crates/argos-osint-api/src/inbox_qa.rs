@@ -939,6 +939,7 @@ pub(crate) async fn submit_request(
         generation: setting.generation,
         history_generation: setting.history_generation,
         availability,
+        deadline,
         response_started_at_ms,
         used_previous_exchange: used_previous,
         status_check_follow_up,
@@ -950,16 +951,7 @@ pub(crate) async fn submit_request(
     };
     let mut freshness_retries = 0;
     loop {
-        let snapshot = snapshot(
-            state,
-            context,
-            target,
-            &actor,
-            &routed_request,
-            &runtime,
-            deadline,
-        )
-        .await?;
+        let snapshot = snapshot(state, context, target, &actor, &routed_request, &runtime).await?;
         context.revalidate(&state.repo).await?;
         match store::admit(
             &state.repo,
@@ -1135,6 +1127,7 @@ struct SnapshotRuntime<'a> {
     generation: i64,
     history_generation: i64,
     availability: &'a QaRuntimeAvailability,
+    deadline: Instant,
     response_started_at_ms: i64,
     used_previous_exchange: bool,
     status_check_follow_up: Option<readiness::StatusCheckFollowUp>,
@@ -1163,8 +1156,8 @@ async fn snapshot(
     actor: &store::Actor,
     request: &QaTurnRequest,
     runtime: &SnapshotRuntime<'_>,
-    deadline: Instant,
 ) -> Result<Snapshot, ApiError> {
+    let deadline = runtime.deadline;
     let _permit = target.probes.try_acquire().map_err(|_| {
         ApiError(
             StatusCode::TOO_MANY_REQUESTS,
@@ -1181,10 +1174,8 @@ async fn snapshot(
     let intent = runtime.intent;
     let source = request.source.as_ref();
     if runtime.historical.is_some() {
-        return historical_snapshot(
-            state, context, target, actor, request, runtime, boundary, deadline,
-        )
-        .await;
+        return historical_snapshot(state, context, target, actor, request, runtime, boundary)
+            .await;
     }
     let mut selected_activity = None;
     if let Some(source) = source {
@@ -1674,8 +1665,8 @@ async fn historical_snapshot(
     request: &QaTurnRequest,
     runtime: &SnapshotRuntime<'_>,
     boundary: i64,
-    deadline: Instant,
 ) -> Result<Snapshot, ApiError> {
+    let deadline = runtime.deadline;
     let interval = runtime.historical.ok_or_else(crate::bad)?;
     let mut passages = Vec::new();
     let mut sources = Vec::new();

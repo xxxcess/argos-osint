@@ -249,7 +249,7 @@ pub fn validated_summary_finding<'a>(
 #[cfg(test)]
 mod tests {
     use super::answer;
-    use super::explanation;
+    use super::guidance;
     use super::retained_status_check_tally;
     use super::status_check_summary;
     use super::validated_summary_finding;
@@ -257,7 +257,7 @@ mod tests {
     use super::StatusCheckFollowUp;
     use super::StatusChecks;
     use argos_osint_core::storage::inbox_qa::HealthFact;
-    use argos_osint_core::storage::inbox_qa::StatusCheckTally;
+    use fleetworks_contracts::qa_worker::QaGuidance;
 
     fn fact(id: &str, status: &str, reason: Option<&str>) -> HealthFact {
         HealthFact {

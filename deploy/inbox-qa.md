@@ -9,6 +9,8 @@ Workstation Status keeps its deterministic warnings and diagnostic checks availa
 
 ## Verified offline packs
 
+On macOS, Quick Start accepts `--inbox-artifact` with the numeric Actions artifact ID. Select a build source with compatible worker inputs and use the pack verified by the Embedded smoke for your Mac architecture. [Quick Start pack setup](../apps/fleetworks-desktop/README.md#add-the-assistant-pack)
+
 Use the offline pack and digest record for the app’s architecture. Obtain the digests from the trusted release or the exact CI artifact used for verification. The importer verifies the archive, manifest, native architecture, worker, libraries, and pinned model assets.
 
 ```sh

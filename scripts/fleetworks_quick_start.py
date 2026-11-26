@@ -35,7 +35,7 @@ def source_checkouts():
     try:
         common_dir = git_path(SCRIPT_CHECKOUT, "--git-common-dir")
         repository = common_dir.parent
-        checkout = selection.source_dir.expanduser().resolve() if selection.source_dir else repository
+        checkout = selection.source_dir.expanduser().resolve() if selection.source_dir else SCRIPT_CHECKOUT
         if git_path(checkout, "--show-toplevel") != checkout:
             parser.error("Select the root of a Fleetworks checkout")
         if git_path(checkout, "--git-common-dir") != common_dir:
@@ -54,6 +54,8 @@ import fleetworks_candidate as native
 import fleetworks_qa_pack as qa
 
 REPO = "xxxcess/argos-osint"
+NIGHTLY = "nightly"
+BUILD_SOURCE_REF = "refs/fleetworks/quick-start/source"
 DEFAULT_PROFILE = REPOSITORY / ".agent-scratch" / "native-quick-start-profile"
 APP_ARTIFACT_FAMILIES = {
     "debug": ("Fleetworks-macOS-Desktop-App-debug",),
@@ -69,6 +71,7 @@ CI_ROUTING_INPUTS = {
     ".gitignore",
     "README.md",
     "apps/fleetworks-desktop/README.md",
+    "deploy/inbox-qa.md",
     ".github/scripts/fleetworks_ci.py",
     ".github/scripts/test_fleetworks_ci.py",
     ".github/workflows/fleetworks.yml",
@@ -110,6 +113,20 @@ on run arguments
     error "Could not find the Embedded startup controls"
 end run
 """
+QUIT_APP = r"""
+use framework "AppKit"
+on run arguments
+    set targetPid to item 1 of arguments as integer
+    set targetApp to current application's NSRunningApplication's runningApplicationWithProcessIdentifier:targetPid
+    if targetApp is missing value then return
+    set targetBundle to targetApp's bundleURL()
+    if targetBundle is missing value then error "The process is no longer the selected Fleetworks app"
+    if (targetBundle's |path|() as text) is not item 2 of arguments then
+        error "The process is no longer the selected Fleetworks app"
+    end if
+    if not (targetApp's terminate() as boolean) then error "Fleetworks did not accept the quit request"
+end run
+"""
 
 
 def require(condition, message):
@@ -123,6 +140,134 @@ def command(*args):
 
 def gh_json(endpoint):
     return json.loads(command("gh", "api", f"repos/{REPO}/{endpoint}"))
+
+
+def pull_request_number(value):
+    if not re.fullmatch(r"[1-9][0-9]{0,9}", value):
+        raise argparse.ArgumentTypeError("Enter a positive PR number")
+    return int(value)
+
+
+def commit_sha(value):
+    if not re.fullmatch(r"[0-9a-fA-F]{7,40}", value):
+        raise argparse.ArgumentTypeError("Enter a Git commit SHA (7–40 hex digits)")
+    return value.lower()
+
+
+def open_nightly_pull_requests():
+    try:
+        listings = command(
+            "gh", "api", "--paginate", f"repos/{REPO}/pulls?state=open&base={NIGHTLY}&per_page=100",
+            "--jq", ".[] | {number,title}",
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError("Could not list open Nightly PRs. Check GitHub CLI access with gh auth status") from error
+    return [json.loads(line) for line in listings.splitlines()]
+
+
+def prompt_source():
+    while True:
+        try:
+            value = input("Build source [nightly] (Enter, 'pr' for the list, PR number, or commit SHA): ").strip()
+        except EOFError:
+            return NIGHTLY
+        if not value or value.lower() == NIGHTLY:
+            return NIGHTLY
+        if value.lower() == "pr":
+            pulls = open_nightly_pull_requests()
+            if not pulls:
+                print("There are no open PRs targeting nightly.")
+                continue
+            numbers = {pull["number"] for pull in pulls}
+            for pull in pulls:
+                title = "".join(char if char.isprintable() else " " for char in pull["title"])
+                print(f'  #{pull["number"]}  {title}')
+            while True:
+                try:
+                    value = input("Enter an open PR number, or press Enter for nightly: ").strip()
+                except EOFError:
+                    return NIGHTLY
+                if not value:
+                    return NIGHTLY
+                try:
+                    number = pull_request_number(value.removeprefix("#"))
+                except argparse.ArgumentTypeError:
+                    number = None
+                if number in numbers:
+                    return f"#{number}"
+                print("Select a PR number from the list.")
+        try:
+            return f'#{pull_request_number(value.removeprefix("#"))}'
+        except argparse.ArgumentTypeError:
+            pass
+        try:
+            return commit_sha(value)
+        except argparse.ArgumentTypeError as error:
+            print(error)
+
+
+def git_at(checkout, *args):
+    return subprocess.check_output(["git", "-C", str(checkout), *args], text=True, timeout=180).strip()
+
+
+def fetch_build_revision(shared, ref, *, remote="origin"):
+    git_at(shared, "fetch", "--no-tags", "--no-write-fetch-head",
+           remote, f"+{ref}:{BUILD_SOURCE_REF}")
+    return git_at(shared, "rev-parse", "--verify", f"{BUILD_SOURCE_REF}^{{commit}}")
+
+
+def build_revision(shared, source):
+    if source == NIGHTLY:
+        return fetch_build_revision(shared, f"refs/heads/{NIGHTLY}")
+    if source.startswith("#"):
+        number = pull_request_number(source[1:])
+        pull = gh_json(f"pulls/{number}")
+        require(pull["number"] == number and pull["state"] == "open"
+                and pull["base"]["ref"] == NIGHTLY and pull["base"]["repo"]["full_name"].lower() == REPO.lower(),
+                f"PR #{number} must be open and target {REPO}:{NIGHTLY}")
+        expected = pull["head"]["sha"]
+        require(re.fullmatch(r"[0-9a-f]{40}", expected), f"PR #{number} has no valid head commit")
+        revision = fetch_build_revision(shared, f"refs/pull/{number}/head", remote=f"https://github.com/{REPO}.git")
+        require(revision == expected, f"PR #{number} changed while fetching. Run Quick Start again")
+        return revision
+    sha = commit_sha(source)
+    try:
+        return git_at(shared, "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}")
+    except subprocess.CalledProcessError:
+        require(len(sha) == 40, "Commit abbreviation is unknown or ambiguous. Supply the full SHA")
+        try:
+            revision = fetch_build_revision(shared, sha)
+        except subprocess.CalledProcessError as fetch_error:
+            raise ValueError(f"Commit {sha} is unavailable from origin") from fetch_error
+        require(revision == sha, "The fetched commit did not match the requested SHA")
+        return revision
+
+
+def checkout_build_source(shared, source):
+    revision = build_revision(shared, source)
+    require(re.fullmatch(r"[0-9a-f]{40}", revision), "Build source must resolve to an exact Git commit")
+    checkout = shared / ".agent-scratch" / "worktrees" / "quick-start-source"
+    require(not checkout.is_symlink() and checkout.resolve() == checkout,
+            "The Quick Start worktree must have a regular path inside this repository")
+    if checkout.exists():
+        require(git_path(checkout, "--show-toplevel") == checkout
+                and git_path(checkout, "--git-common-dir") == git_path(shared, "--git-common-dir")
+                and git_at(checkout, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD",
+                "The Quick Start worktree must be a detached worktree of this repository")
+        require_clean_build_source(checkout)
+        if git_at(checkout, "rev-parse", "HEAD") != revision:
+            git_at(checkout, "switch", "--detach", revision)
+    else:
+        checkout.parent.mkdir(parents=True, exist_ok=True)
+        git_at(shared, "worktree", "add", "--detach", str(checkout), revision)
+    require_clean_build_source(checkout)
+    print(f"Building {source} at {revision} in {checkout}", flush=True)
+    return checkout
+
+
+def require_clean_build_source(checkout):
+    require(not git_at(checkout, "status", "--porcelain", "--untracked-files=normal"),
+            "The Quick Start worktree has local changes. Use --source-dir to build those changes")
 
 
 def build_inputs_match(revision, *, local_desktop=False):
@@ -329,38 +474,39 @@ def existing_app(output):
     return app, read_receipt(receipt)
 
 
-def ensure_replaceable(output, app, current, target):
-    require(bundle_pid(app) is None, "Close this app and its Embedded companion before replacing the bundle")
+def validate_installed_output(output, app, current, target):
     if current is not None:
         require({path.name for path in output.iterdir()} == {native.NATIVE_APP, native.NATIVE_MANIFEST},
                 "The output contains other files. Select a dedicated directory for the new bundle")
         check_bundle(app, current, target, checkout_pin=False)
 
 
-def publish_app(staged, output, app, current, target):
+def ensure_replaceable(output, app, current, target):
+    require(bundle_pid(app) is None, "Close this app and its Embedded companion before replacing the bundle")
+    validate_installed_output(output, app, current, target)
+
+
+def publish_app(staged, output, app, current, target, *, restart_profile=None):
     _, installed = existing_app(output)
     require(installed == current, "The output bundle changed while the candidate was prepared")
-    ensure_replaceable(output, app, current, target)
+    validate_installed_output(output, app, current, target)
+    if restart_profile is not None:
+        require_no_other_app(app)
+        close_app(app, restart_profile)
+    require(bundle_pid(app) is None, "Close this app and its Embedded companion before replacing the bundle")
     output.mkdir(exist_ok=True)
     native._atomic_install_stage(output, staged, [native.NATIVE_APP, native.NATIVE_MANIFEST],
                                  native.NATIVE_APP, native.NATIVE_MANIFEST)
     return app
 
 
-def prepare_source(target, output, app, current, shared, profile):
-    revision, dirty = native.repository_identity()
-    if not dirty and current is not None and current.get("workflow") == SOURCE_WORKFLOW \
-            and current.get("dirty") is False and current.get("revision") == revision \
-            and current.get("profile") == profile \
-            and current.get("version") == native.artifact_version() \
-            and current.get("dependency_provenance", {}).get("cargo_lock_sha256") == native.sha256(ROOT / "Cargo.lock"):
-        check_bundle(app, current, target, profile=profile)
-        return app
-    ensure_replaceable(output, app, current, target)
+def prepare_source(target, output, app, current, shared, profile, profile_dir):
+    revision, _ = native.repository_identity(root=ROOT)
     with tempfile.TemporaryDirectory(prefix=".native-quick-start-", dir=output.parent) as temp:
         staged = Path(temp) / "bundle"
         build_source(staged, revision, shared, profile)
-        return publish_app(staged, output, app, current, target)
+        native.repository_identity(root=ROOT, revision=revision)
+        return publish_app(staged, output, app, current, target, restart_profile=profile_dir)
 
 
 def prepare_artifact(args, info, target, output, app, current, shared):
@@ -422,7 +568,7 @@ def prepare_artifact(args, info, target, output, app, current, shared):
         return publish_app(staged, output, app, current, target)
 
 
-def prepare_app(args, info, target, output, shared):
+def prepare_app(args, info, target, output, shared, profile_dir):
     app, current = existing_app(output)
     if args.reuse_bundle:
         require(current is not None and current.get("dirty") is False
@@ -432,7 +578,7 @@ def prepare_app(args, info, target, output, shared):
         return app
     if args.app_artifact is not None:
         return prepare_artifact(args, info, target, output, app, current, shared)
-    return prepare_source(target, output, app, current, shared, args.profile)
+    return prepare_source(target, output, app, current, shared, args.profile, profile_dir)
 
 
 def process_table():
@@ -470,9 +616,12 @@ def wait_for(check, message, timeout=30):
 
 
 def require_no_other_app(app):
-    if app_pid(app) is None:
-        require("fleetworks-desktop" not in [Path(line).name for line in command("ps", "-axo", "comm=").splitlines()],
-                "Close the other Fleetworks app before opening this bundle")
+    selected = app_pid(app)
+    processes = [line.split(maxsplit=1) for line in command("ps", "-axo", "pid=,comm=").splitlines()
+                 if line.strip()]
+    require(not any(Path(executable).name == native.NATIVE_BINARY and int(pid) != selected
+                    for pid, executable in processes),
+            "Close the other Fleetworks app before opening this bundle")
 
 
 def require_private_profile(profile):
@@ -484,6 +633,23 @@ def require_private_profile(profile):
 def app_profile_matches(pid, profile):
     invocation = f" {command('ps', 'eww', '-p', str(pid), '-o', 'command=')} "
     return all(f" {key}={profile} " in invocation for key in ("HOME", "CFFIXED_USER_HOME"))
+
+
+def close_app(app, profile):
+    pid = app_pid(app)
+    if pid is not None:
+        state = profile / ".fleetworks" / "local-backend" / "embedded"
+        if executable_pid(app / COMPANION) is not None:
+            require(embedded_running(app, pid, state),
+                    "The running Embedded companion uses a different profile. Stop it before replacing this bundle")
+        else:
+            require(app_profile_matches(pid, profile),
+                    "The running app uses a different profile. Close it before replacing this bundle")
+        print(f"Quitting {app} and waiting for Embedded shutdown", flush=True)
+        subprocess.run(["osascript", "-", str(pid), str(app)], input=QUIT_APP, text=True,
+                       check=True, timeout=30)
+    wait_for(lambda: bundle_pid(app) is None,
+             "Fleetworks or its Embedded companion did not quit. The installed bundle is still available")
 
 
 def start_companion(app, pid, state):
@@ -598,9 +764,14 @@ def install_inbox(identity, target, profile, state):
 
 
 def main():
+    global ROOT
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    parser.add_argument("--source-dir", type=Path,
-                        help="Build from this local worktree (default: the main repository checkout)")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--source-dir", type=Path, help="Use a local worktree and include its uncommitted changes")
+    source.add_argument("--nightly", action="store_true", help="Build the latest origin/nightly without prompting")
+    source.add_argument("--pr", type=pull_request_number, metavar="NUMBER",
+                        help="Build the head of this open PR targeting nightly without prompting")
+    source.add_argument("--commit", type=commit_sha, metavar="SHA", help="Build this Git commit without prompting")
     parser.add_argument("--profile", choices=tuple(APP_ARTIFACT_FAMILIES), default="debug",
                         help="Use the debug or optimized release build profile (default: debug)")
     mode = parser.add_mutually_exclusive_group()
@@ -618,6 +789,9 @@ def main():
     args = parser.parse_args()
     if args.rebuild_desktop and args.app_artifact is None:
         parser.error("--rebuild-desktop requires --app-artifact")
+    source_build = args.app_artifact is None and not args.reuse_bundle
+    if not source_build and (args.nightly or args.pr is not None or args.commit):
+        parser.error("--nightly, --pr, and --commit require a source build")
     try:
         info = native.detect()
         target = info.native_target
@@ -633,15 +807,23 @@ def main():
                 and not profile.is_relative_to(output)
                 and not output.is_relative_to(profile),
                 "Select a dedicated profile directory outside the app output")
+        selection = args.commit
+        if source_build and args.source_dir is None:
+            if args.nightly:
+                selection = NIGHTLY
+            elif args.pr is not None:
+                selection = f"#{args.pr}"
+            elif selection is None:
+                selection = prompt_source()
         print(f"Fleetworks {target} ({args.profile}): {output / native.NATIVE_APP}", flush=True)
-        source_build = args.app_artifact is None and not args.reuse_bundle
         with quick_start_lock(shared):
-            if not source_build:
-                require_no_other_app(output / native.NATIVE_APP)
+            require_no_other_app(output / native.NATIVE_APP)
             if profile.exists():
                 require_private_profile(profile)
+            if selection is not None:
+                ROOT = checkout_build_source(shared, selection)
             output.parent.mkdir(parents=True, exist_ok=True)
-            app = prepare_app(args, info, target, output, shared)
+            app = prepare_app(args, info, target, output, shared, profile)
             profile.mkdir(parents=True, mode=0o700, exist_ok=True)
             require_private_profile(profile)
             pid, state = open_app(app, profile, start_embedded=args.start_embedded or bool(args.inbox_artifact))
@@ -653,6 +835,8 @@ def main():
                 print(f"Embedded companion launched with state in {state}")
             else:
                 print('Choose Embedded, then "Start Embedded Backend".')
+    except KeyboardInterrupt:
+        parser.exit(130, "\nQuick Start cancelled.\n")
     except (BadZipFile, KeyError, OSError, TypeError, ValueError, subprocess.SubprocessError) as error:
         parser.exit(1, f"fleetworks-quick-start: {error}\n")
 

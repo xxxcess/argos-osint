@@ -12,7 +12,7 @@ The Rune/rune-kit macOS and Linux x86_64 API client supports **Embedded** and **
 
 ### macOS quick start
 
-You’ll need the pinned Rust **1.95.0** toolchain, Python 3, Xcode Command Line Tools, and the bundled actor catalog checked out through Git LFS. Quit Fleetworks before rebuilding an open app.
+You’ll need the pinned Rust **1.95.0** toolchain, Python 3, Xcode Command Line Tools, and the bundled actor catalog checked out through Git LFS.
 
 **RustRover.** Open the repository root, choose **Build and open Fleetworks (Embedded)** from the run configuration menu, and click **Run**. [Shared run configuration](../../.idea/runConfigurations/Build_and_open_Fleetworks_Embedded.xml)
 
@@ -25,11 +25,24 @@ PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=1 \
 
 The launcher builds and opens the app, then starts its bundled Embedded companion. Automatic startup uses macOS Accessibility. If macOS asks for permission, allow RustRover or Terminal under **System Settings → Privacy & Security → Accessibility**. To start the companion by hand, omit `--start-embedded`, then click **Start Embedded Backend** in Fleetworks.
 
-The launcher reuses the repository's Cargo cache and prints the app path before building. The debug bundle is `target/native/aarch64-apple-darwin/debug/Fleetworks.app` on Apple Silicon and `target/native/x86_64-apple-darwin/debug/Fleetworks.app` on Intel. Use `--profile release` for the optimized bundle in the sibling `release` directory. Embedded data stays in `.agent-scratch/native-quick-start-profile/` across rebuilds. Use `--help` for custom paths and verified offline artifacts.
+At the source prompt, press Enter for the latest `origin/nightly`. Type `pr` to list open PRs targeting `nightly`, then enter a PR number. You can also enter a PR number or commit SHA directly. Sign in with `gh auth login` for PR selection.
+
+| Flag | Build source |
+| --- | --- |
+| `--nightly` | Fetch and build the latest `origin/nightly`. |
+| `--pr 78` | Build the exact head of open PR #78 against `nightly`. |
+| `--commit <sha>` | Build a Git commit. Supply the full SHA if the commit is unavailable locally. |
+| `--source-dir .` | Build the current checkout, including uncommitted edits. You can also point to another worktree of the same repository. |
+
+Each flag skips the source prompt. Nightly, PR, and commit selections switch the dedicated `.agent-scratch/worktrees/quick-start-source/` worktree to the selected revision. Cargo checks both the desktop and Embedded companion for changes using the shared `target/agents` cache.
+
+Once a source build succeeds, Quick Start asks the running app for the selected bundle and profile to quit, waits for its Embedded companion to exit, then installs and opens the replacement. A build failure leaves the running app available. Embedded data stays in `.agent-scratch/native-quick-start-profile/` across rebuilds.
+
+The debug bundle is `target/native/aarch64-apple-darwin/debug/Fleetworks.app` on Apple Silicon and `target/native/x86_64-apple-darwin/debug/Fleetworks.app` on Intel. Use `--profile release` for the optimized bundle in the sibling `release` directory. Use `--reuse-bundle` to open a compatible installed bundle or `--app-artifact <id>` to open a compatible verified Actions app. Use `--help` for custom paths.
 
 #### Add the Assistant pack
 
-Sign in with `gh auth login` using an account with access to the repository. In a Fleetworks Actions run for your checkout, find the **Fleetworks-Inbox-QA-Pack** artifact with the target printed by Quick Start. Intel uses `x86_64-apple-darwin` and Apple Silicon uses `aarch64-apple-darwin`. Use the numeric artifact ID from that artifact's link as `QA_ARTIFACT_ID`. The launcher checks the pack against the matching platform's Embedded inference smoke receipt, including the archive and manifest digests.
+Sign in with `gh auth login` using an account with access to the repository. Find the **Fleetworks-Inbox-QA-Pack** artifact from a Fleetworks Actions run with compatible worker inputs for your selected build source. Intel uses `x86_64-apple-darwin` and Apple Silicon uses `aarch64-apple-darwin`. Use the numeric artifact ID from its link as `QA_ARTIFACT_ID`. The launcher checks the pack against the matching platform's Embedded inference smoke receipt, including the archive and manifest digests. Use `--pr` or `--commit` to select the intended source when installing a pack for a PR or pinned revision.
 
 ```sh
 PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=1 \

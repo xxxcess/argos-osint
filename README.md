@@ -23,9 +23,11 @@ PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=1 \
   python3 -B scripts/fleetworks_quick_start.py --profile debug --start-embedded
 ```
 
-The script builds and opens the complete app for your Mac and starts Embedded in the Quick Start profile. In RustRover, **Build and open Fleetworks (Embedded)** runs the same script. Quit Fleetworks normally before rebuilding its bundle.
+Press Enter to build the latest `origin/nightly`, or type `pr` to list open PRs targeting `nightly` and select one by number. Use `--pr 78` or `--commit <sha>` to choose directly, or `--source-dir .` to include uncommitted edits. In RustRover, **Build and open Fleetworks (Embedded)** runs the same script.
 
-**Enable Assistant on a new Mac.** Sign in with `gh auth login`, then add `--inbox-artifact "$QA_ARTIFACT_ID"` to the command above. Set `QA_ARTIFACT_ID` to the numeric Actions artifact ID for the **Fleetworks-Inbox-QA-Pack** from a compatible checkout's verified Embedded smoke run. Choose `x86_64-apple-darwin` on Intel or `aarch64-apple-darwin` on Apple Silicon. After installation, enable **Backend inference** in **Settings → Connection**. [Prerequisites, bundle paths, and QA pack setup](apps/fleetworks-desktop/README.md#macos-quick-start)
+Quick Start builds the desktop and companion through the shared Cargo cache. Once the build succeeds, it quits a matching running app, waits for its companion to stop, and opens the replacement in the same private profile. [Source flags, bundle paths, and restart behavior](apps/fleetworks-desktop/README.md#macos-quick-start)
+
+**Enable Assistant on a new Mac.** Sign in with `gh auth login`, then add `--inbox-artifact "$QA_ARTIFACT_ID"` to the command above. Use the numeric **Fleetworks-Inbox-QA-Pack** artifact ID from a verified Embedded smoke run with compatible worker inputs for the selected build source. Choose `x86_64-apple-darwin` on Intel or `aarch64-apple-darwin` on Apple Silicon. After installation, enable **Backend inference** in **Settings → Connection**. [Set up the Assistant pack](apps/fleetworks-desktop/README.md#add-the-assistant-pack)
 
 ### Linux and manual native builds
 

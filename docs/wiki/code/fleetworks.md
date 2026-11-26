@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Architecture](architecture.md) · [Deployment guide](../../../deploy/README.md)
 
-Fleetworks Desktop is the API-only macOS and Linux x86_64 control hub. Its sidebar lists Actor Maintenance, News Cycles, Brain Search, Tool Box, Model Assignments and Jobs & Logs. The startup wizard guides actor seeding, indexing and workstation health review. The health checklist shows Atlas BERT inference from the selected backend. The sidebar opens Workstation Status and Workstation Settings. The **Actor search** card reserves space for a labeled status tag and shows progress and next steps under **Details**. **Settings → General** shows the app name and version. **Settings → Connection** walks through Embedded and Distributed setup. The Inbox shows notifications and a grounded QA transcript when backend inference is enabled. Backend resources remain shared within permissions, while activity is attributed to the registered workstation. Start with [native connections](native-connections.md), [protected identity](native-workspaces.md), the [design system](native-design-system.md) and [native build/fixture guide](../../../apps/fleetworks-desktop/README.md). App launch never launches the backend or Intel Web.
+Fleetworks Desktop is the API-only macOS and Linux x86_64 control hub. Its sidebar lists Actor Maintenance, News Cycles, Brain Search, Tool Box, Model Assignments and Jobs & Logs. The startup wizard guides actor seeding, indexing and workstation health review. The health checklist shows Atlas BERT inference from the selected backend. The sidebar opens Workstation Status and Workstation Settings. The **Actor search** card reserves space for a labeled status tag and shows progress and next steps under **Details**. **Settings → General** shows the app name and version. **Settings → Connection** walks through Embedded and Distributed setup. The Inbox shows notifications and a grounded QA transcript when backend inference is enabled. Backend resources remain shared within permissions, while activity is attributed to the registered workstation. Start with [native connections](native-connections.md), [protected identity](native-workspaces.md), the [design system](native-design-system.md) and [native build/fixture guide](../../../apps/fleetworks-desktop/README.md). Embedded startup requires an explicit action. Operators manage Distributed and Intel Web separately.
 
 Distributed Linux domain services share the network datastore. Jobs exclusively owns its SQLite operational logs and embedded RocksDB queue; [actor discovery](actor-search.md) has a separate private Tantivy service. The [isolated native-review deployment](../../../deploy/README.md) builds backend-only images and leaves web/client launch independent. Backend network readers accept explicit current-format configuration and saved credentials; they do not migrate historical files or revive environment provider keys during ordinary reads.
 
@@ -13,6 +13,10 @@ Venture, the six Fleetworks terminal clients and the legacy `argos` executable a
 ## Build and connect the native app
 
 The [native connection guide](native-connections.md#backend-types-and-parity) describes both backend types and their shared contracts. [Verification status](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md) distinguishes implemented behavior from pending runtime/platform evidence.
+
+On macOS, Quick Start builds the app and companion from `nightly`, an open PR targeting `nightly`, or a commit. Use `--start-embedded` to start the companion in the private Quick Start profile after launch. [macOS Quick Start](../../../apps/fleetworks-desktop/README.md#macos-quick-start)
+
+For manual packaging on macOS or Linux x86_64, run the candidate helper.
 
 ```sh
 python3 scripts/fleetworks_candidate.py build-native --target host --profile debug

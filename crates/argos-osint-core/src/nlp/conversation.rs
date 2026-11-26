@@ -431,6 +431,7 @@ mod decode {
 
     fn calendar_interval<Tz: TimeZone>(phrase: &str, reference: DateTime<Tz>) -> Option<Interval> {
         let timezone = reference.timezone();
+        let offset = reference.offset().fix();
         let reference_ms = reference.timestamp_millis();
         let today = reference.date_naive();
         let yesterday = today.checked_sub_days(Days::new(1))?;
@@ -490,7 +491,6 @@ mod decode {
         if start_ms >= end_ms {
             return None;
         }
-        let offset = reference.offset().fix();
         Some(Interval {
             start_ms,
             end_ms,

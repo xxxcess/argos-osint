@@ -154,16 +154,15 @@ pub(super) async fn start_qa_delivery(repo: &Repository) -> Box<job_dispatch::De
         .await
         .unwrap()
         .expect("model delivery");
-    let job_dispatch::DeliveryClaim::Claimed(lease) = job_dispatch::claim_delivery(
-        db,
-        &claim.envelope,
-        QA_WORKER,
-        30,
-        Utc::now(),
-        "qa-fixture-claim",
-    )
-    .await
-    .unwrap() else {
+    let claim_key = format!(
+        "qa-fixture-claim-{}-{}",
+        claim.envelope.task_id, claim.envelope.revision
+    );
+    let job_dispatch::DeliveryClaim::Claimed(lease) =
+        job_dispatch::claim_delivery(db, &claim.envelope, QA_WORKER, 30, Utc::now(), &claim_key)
+            .await
+            .unwrap()
+    else {
         panic!("model delivery must be leased");
     };
     assert!(qa::start(repo, &lease).await.unwrap().is_some());

@@ -31,7 +31,11 @@ mod tests {
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+#[cfg(unix)]
+use std::io::Read;
 use std::net::SocketAddr;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -2049,6 +2053,11 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
             .is_some_and(|obs| obs.status == "complete"),
         "durable setup_jobs seed observation must persist in embedded SurrealDB"
     );
+    let context_db = Path::new("context").join("workstation-context.sqlite3");
+    assert!(
+        !http.root.join(&context_db).exists(),
+        "the HTTP backend does not own an Embedded observation journal"
+    );
     http.shutdown().await;
 
     // 2. Run exact same shared scenario suite against compiled `argos-api-host --role local-ipc`.
@@ -2103,6 +2112,19 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
         .expect("IPC graceful shutdown ack");
     assert!(shutdown_ack.checkpointed);
 
+    #[cfg(unix)]
+    let journal_identity = {
+        let path = ipc_root.join(&context_db);
+        let mut file = std::fs::File::open(path).expect("Embedded workstation observation journal");
+        let mut signature = [0; 16];
+        file.read_exact(&mut signature)
+            .expect("journal SQLite header");
+        assert_eq!(&signature, b"SQLite format 3\0");
+        let metadata = file.metadata().expect("journal metadata");
+        assert_eq!(metadata.mode() & 0o077, 0, "journal is owner-only");
+        (metadata.dev(), metadata.ino())
+    };
+
     // Check protocol mismatch intentional exception on fresh non-destructive handshake probe.
     let mismatch_dir = create_private_dir("fleetworks-ipc-mismatch");
     verify_ipc_protocol_mismatch_exception(&mismatch_dir).await;
@@ -2125,6 +2147,12 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
     let ipc_client2 = Client::from_local_ipc(Arc::clone(&ipc2))
         .with_registered_context(&ipc_res.registered_context)
         .expect("attach saved registered context after restart");
+
+    #[cfg(unix)]
+    {
+        let metadata = std::fs::metadata(ipc_root.join(&context_db)).expect("reopened journal");
+        assert_eq!((metadata.dev(), metadata.ino()), journal_identity);
+    }
 
     let restarted_qa = ipc_client2
         .qa_settings()

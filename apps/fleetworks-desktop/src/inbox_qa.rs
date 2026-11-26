@@ -26,8 +26,10 @@ use fleetworks_contracts::chat::QaSettings;
 use fleetworks_contracts::chat::QaSettingsUpdate;
 use fleetworks_contracts::chat::QaStartupStage;
 use fleetworks_contracts::chat::QaTurn;
+use fleetworks_contracts::chat::QaTurnLimitation;
 use fleetworks_contracts::chat::QaTurnNotice;
 use fleetworks_contracts::chat::QaTurnRequest;
+use fleetworks_contracts::chat::QaTurnStage;
 use fleetworks_contracts::chat::QaTurnState;
 use fleetworks_contracts::chat::MAX_EVENT_WAIT_SECS;
 use fleetworks_contracts::chat::MAX_INPUT_BYTES;
@@ -1840,7 +1842,14 @@ fn answer_state(turn: &QaTurn) -> (chat_ui::TurnState, &'static str) {
     use chat_ui::TurnState;
     let (stage, fallback) = match turn.state {
         QaTurnState::Queued => (TurnState::Queued, ""),
-        QaTurnState::Running => (TurnState::Running, ""),
+        QaTurnState::Running => (
+            match turn.stage {
+                Some(QaTurnStage::Thinking) => TurnState::Thinking,
+                Some(QaTurnStage::Writing) => TurnState::Writing,
+                _ => TurnState::Running,
+            },
+            "",
+        ),
         QaTurnState::Answered => (TurnState::Final, ""),
         QaTurnState::InsufficientContext => (
             TurnState::Final,
@@ -1878,6 +1887,15 @@ fn answer_state(turn: &QaTurn) -> (chat_ui::TurnState, &'static str) {
             }
             _ => fallback,
         },
+    };
+    let detail = match turn.limitation {
+        Some(QaTurnLimitation::CapabilityUnavailable) => {
+            "The current backend and model cannot answer this kind of question."
+        }
+        Some(QaTurnLimitation::QuestionTooLong) => {
+            "Shorten the question or ask about one subject at a time."
+        }
+        _ => detail,
     };
     (stage, detail)
 }
@@ -2635,6 +2653,22 @@ mod tests {
         runtime.frame(0.0);
         runtime.frame(0.5);
         runtime
+    }
+
+    #[test]
+    fn running_turn_stages_use_existing_inbox_status_chrome() {
+        for size in [(640.0, 480.0), (1280.0, 800.0)] {
+            for (stage, label) in [
+                (QaTurnStage::Working, "Working"),
+                (QaTurnStage::Thinking, "Thinking"),
+                (QaTurnStage::Writing, "Writing"),
+            ] {
+                let mut active = turn(QaTurnState::Running, 1);
+                active.stage = Some(stage);
+                let mut runtime = qa_drawer(size, Some(active));
+                assert!(runtime.accessibility_json().to_string().contains(label));
+            }
+        }
     }
 
     fn accessibility_nodes_with_key(node: &serde_json::Value, key: &str) -> usize {

@@ -297,6 +297,7 @@ async fn jobs_for_check(
             };
             let label = crate::workstation::qa_readiness_label(id).ok_or_else(crate::missing)?;
             let menu = DecisionMenu {
+                task: super::decision::DecisionTask::RelatedActivity,
                 state: format!(
                     "A workstation readiness notice needs relevant recorded activity for {label}."
                 ),

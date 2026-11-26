@@ -22,7 +22,9 @@ Use the Embedded companion’s state directory for the selected installation. Th
 
 The default pack carries the verified worker, its runtime libraries and FLAN-T5 Small. With Automatic selected, the companion prefers FLAN-T5 Base when measured memory headroom allows it. When Base assets cannot be provisioned, the verified Small checkpoint in the offline pack is available as a fallback. With a GPT-2 choice, a compatible worker uses a verified named pack or provisions the pinned checkpoint and BPE files into the private profile. Downloads are used to obtain model files. Response generation runs inside the existing offline worker sandbox. The companion loads one model at a time. The [news classifier](../docs/wiki/code/classifier.md) uses its own model and configuration.
 
-Current workers reserve 128 of GPT-2’s 1,024 positions for generation and accept up to 896 input tokens on both GPT-2 checkpoints. That budget includes the question, recent exchanges, and any attached evidence. Older worker packs retain their 512-token streaming budget. The context meter uses the budget reported for each turn.
+FLAN-T5 accepts 512 input tokens and GPT-2 accepts up to 896. Both allow up to 128 output tokens. The input window includes the question, resolved focus, whole evidence passages and the plan's instruction of up to 64 tokens. Recall uses its own bounded exchange history. The context meter uses the budget reported for each turn.
+
+The companion asks the worker for plan support with `FLEETWORKS_QA_RESPONSE_PLAN=1`. The worker confirms support in its Ready response before it can receive the new fields. Older packs keep their existing request shape and can use their 512-token window. If a request requires plan support, the older worker reports unavailable capability for that turn. [Protocol and tokenizer limits](../docs/wiki/code/assistant-chat-contract.md#models-and-lifecycle)
 
 ## Host requirements
 
@@ -31,6 +33,12 @@ The worker requires Linux Landlock ABI 3 or newer, or macOS Seatbelt. The compan
 At startup, the companion reserves 1 GiB of available memory for the workstation and its other workloads. The worker’s resident-memory limits are 3,584 MiB for FLAN-T5 Base, 1,536 MiB for FLAN-T5 Small, 2,048 MiB for GPT-2 Small and 4,608 MiB for GPT-2 Medium. If available memory cannot accommodate the chosen worker and the reserve, Settings reports insufficient resources. Model asset downloads also leave a 512 MiB reserve on the private profile filesystem. The fixture and operator ceiling `FLEETWORKS_QA_MEMORY_MIB` accepts 512 to 6144 MiB. The worker runs at reduced priority with one CPU thread by default. `FLEETWORKS_QA_CPU_THREADS` accepts 1 to 4.
 
 The offline package smoke uses a 1,536 MiB ceiling and verifies Small without network access. The Linux pack job exercises Base separately. Turning inference off cancels active work, unloads workers, and leaves the preferences and Inbox notifications available.
+
+## Local operational context
+
+The Embedded companion writes allowlisted observations to `context/workstation-context.sqlite3` under the selected `--state-dir`. Ordinary authorized readiness and job reads can contribute while Backend inference is off. The journal adds no polling, and entries reflect observed changes. Assistant history can be incomplete due to retention, collection gaps or resource visibility changes.
+
+Keep the journal and its sidecars inside the owner-only Embedded state directory. The companion checks its deployment identity and protects it with the existing state lock. Turning Backend inference off stops execution and clears conversations, choices and response plans. The separate observation journal follows its seven-day and 10,000-event retention policy. Distributed deployments keep their existing notification path. [Storage and coverage](../docs/wiki/code/storage.md#embedded-workstation-observation-journal)
 
 ## Workstation question benchmark
 

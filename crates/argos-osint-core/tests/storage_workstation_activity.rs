@@ -311,6 +311,7 @@ async fn shared_reuse_preserves_creator_but_private_fields_and_search_stay_unava
             reference: source.clone(),
             label: "Selected job".into(),
             observed_at: at.to_rfc3339(),
+            provenance: None,
             measurement: None,
             whole_passage: false,
         }],
@@ -323,6 +324,7 @@ async fn shared_reuse_preserves_creator_but_private_fields_and_search_stay_unava
         status_check_tally: None,
         used_previous_exchange: false,
         response_started_at_ms: None,
+        conversation: Default::default(),
     };
     assert!(matches!(
         qa::admit(&repo, &actor, &request, evidence.clone(), metadata(), setting.generation).await,

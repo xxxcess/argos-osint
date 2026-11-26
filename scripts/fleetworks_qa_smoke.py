@@ -3,7 +3,7 @@
 
 import argparse
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 from itertools import islice
 import json
@@ -206,6 +206,9 @@ def settled_turn(request, context, case, question, *, source=None, mode="operati
             f"{case} event cursor skipped a sequence")
     require([event["sequence"] for event in page["events"] if event["state"] in TERMINAL] == [accepted["cursor"]],
             f"{case} did not emit exactly one terminal event")
+    work_stages = list(dict.fromkeys(event["stage"] for event in page["events"] if "stage" in event))
+    require(work_stages == ["working", "thinking", "writing"] and "stage" not in accepted,
+            f"{case} did not retain the ordered execution stages")
     require([event["finding"] for event in page["events"] if event["finding"]] == accepted["findings"],
             f"{case} event evidence differs from the frozen answer")
     require(request("latest") == accepted, f"{case} latest changed the frozen answer")
@@ -507,12 +510,21 @@ def exercise(request, registration, model, readiness, running_jobs):
     worker, = model()
     dialogue_rss_bytes = embedded.read_process_rss_bytes(worker)
     preceding = readings["memory_follow_up"]
-    for index, question in enumerate(("And now?", "Has that changed?"), start=1):
-        turn = ask(f"conversational-follow-up-{index}", question)
-        measured = cited_metric(turn, "memory", "memory usage", previous=preceding)
-        require(turn["question"] == question and observed(measured) > observed(preceding),
-                "a conversational follow-up changed the displayed prompt or reused a metric sample")
-        preceding = measured
+    follow_up = ask("conversational-follow-up-1", "And now?")
+    measured = cited_metric(follow_up, "memory", "memory usage", previous=preceding)
+    require(follow_up["question"] == "And now?" and follow_up["used_previous_exchange"]
+            and observed(measured) > observed(preceding),
+            "the follow-up did not retain its subject and refresh its observation")
+    history_started = datetime.now(timezone.utc)
+    recorded = ask("recorded-index", "Is actor search ready since yesterday?")
+    historical = [finding for finding in recorded["findings"]
+                  if finding.get("provenance", {}).get("kind") == "historical"]
+    require(historical and all(finding["source"] == {"kind": "readiness", "id": "actor_search"}
+                               and finding["provenance"]["has_gaps"]
+                               and finding["provenance"]["sequence"] > 0
+                               and observed(finding) < history_started
+                               for finding in historical),
+            "local history lost its original observation times or coverage")
     resources = ask("resources", "What is our resource usage?")
     require(resources["state"] == "answered"
             and {part["source"]["id"] for part in resources["findings"]} == {"cpu", "memory", "disk"}
@@ -547,6 +559,7 @@ def exercise(request, registration, model, readiness, running_jobs):
             "grounded_readiness": True, "unresolved_status_checks": True, "passed_status_checks": True,
             "live_metrics": True, "unsupported_context": True,
             "resource_snapshot": True, "greeting": True, "conversational_follow_ups": True,
+            "local_observation_history": True, "ordered_turn_stages": True,
             "generated_dialogue": True, "startup_stages": sorted(stages),
             "automatic_model_target": current["model_target"], "worker_reused": True,
             "local_dialogue_rss_bytes": dialogue_rss_bytes,

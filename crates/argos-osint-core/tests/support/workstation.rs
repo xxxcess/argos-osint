@@ -119,6 +119,7 @@ pub(super) async fn start_qa_fixture(
                     .unwrap(),
                 label: (*label).into(),
                 observed_at: at.to_rfc3339(),
+                provenance: None,
                 measurement: None,
                 whole_passage: false,
             })
@@ -137,6 +138,7 @@ pub(super) async fn start_qa_fixture(
             status_check_tally: None,
             used_previous_exchange: false,
             response_started_at_ms: None,
+            conversation: Default::default(),
         },
         enabled.generation,
     )

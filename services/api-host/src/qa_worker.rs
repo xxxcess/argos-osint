@@ -55,6 +55,7 @@ use fleetworks_contracts::qa_worker::QA_MODEL_CONTEXT_ENV;
 use fleetworks_contracts::qa_worker::QA_MODEL_FILES;
 use fleetworks_contracts::qa_worker::QA_MODEL_REVISION;
 use fleetworks_contracts::qa_worker::QA_MODEL_TARGET_ENV;
+use fleetworks_contracts::qa_worker::QA_RESPONSE_PLAN_ENV;
 use fleetworks_contracts::qa_worker::QA_STREAMING_ENV;
 use fleetworks_contracts::qa_worker::QA_WORKER_PROTOCOL;
 use serde::Deserialize;
@@ -407,6 +408,12 @@ impl QaWorkerSupervisor {
             .map(|session| session.model_target)
     }
 
+    pub(crate) async fn response_plan_supported(&self) -> bool {
+        self.session.lock().await.as_ref().is_some_and(|session| {
+            session.lifecycle == WorkerLifecycle::Ready && session.response_plan
+        })
+    }
+
     pub(crate) async fn check_ready(&self) -> Result<()> {
         let mut slot = self.session.lock().await;
         let session = slot
@@ -437,6 +444,10 @@ impl QaInference for QaWorkerSupervisor {
                 .as_mut()
                 .filter(|session| session.lifecycle == WorkerLifecycle::Ready)
                 .ok_or_else(|| anyhow!("QA worker unavailable"))?;
+            ensure!(
+                request.plan.is_none() || session.response_plan,
+                "QA response plan support was not negotiated"
+            );
             let child_pid = session.child_id();
             let resident_limit = session.resident_limit;
             let (result, failure_stage) = tokio::select! {
@@ -509,6 +520,7 @@ struct WorkerSession {
     output: Box<dyn AsyncRead + Send + Unpin>,
     child: Option<Child>,
     streaming_window: Option<u16>,
+    response_plan: bool,
     model_target: QaModelTarget,
     resident_limit: u64,
 }
@@ -527,6 +539,7 @@ impl WorkerSession {
             .env(QA_DIALOGUE_ENV, "1")
             .env(QA_STREAMING_ENV, "1")
             .env(QA_MODEL_CONTEXT_ENV, "1")
+            .env(QA_RESPONSE_PLAN_ENV, "1")
             .env(QA_MODEL_TARGET_ENV, target.slug())
             .env("OMP_NUM_THREADS", &threads)
             .env("MKL_NUM_THREADS", &threads)
@@ -554,6 +567,7 @@ impl WorkerSession {
             output: Box::new(output),
             child: Some(child),
             streaming_window: None,
+            response_plan: false,
             model_target: target,
             resident_limit: limits.resident_bytes,
         })
@@ -592,14 +606,14 @@ impl WorkerSession {
     }
 
     fn validate_ready(&mut self, reply: QaWorkerReply) -> Result<()> {
-        let streaming_window = match reply {
+        let (streaming_window, response_plan) = match reply {
             QaWorkerReply::ReadyWithDialogue {
                 protocol,
                 model_revision,
             } if protocol == QA_WORKER_PROTOCOL
                 && model_revision == self.model_target.revision() =>
             {
-                None
+                (None, false)
             }
             QaWorkerReply::ReadyWithStreaming {
                 protocol,
@@ -607,7 +621,7 @@ impl WorkerSession {
             } if protocol == QA_WORKER_PROTOCOL
                 && model_revision == self.model_target.revision() =>
             {
-                Some(QA_LEGACY_STREAMING_WINDOW_TOKENS)
+                (Some(QA_LEGACY_STREAMING_WINDOW_TOKENS), false)
             }
             QaWorkerReply::ReadyWithStreamingContext {
                 protocol,
@@ -618,7 +632,18 @@ impl WorkerSession {
                 && window_tokens == self.model_target.input_tokens()
                 && window_tokens > QA_LEGACY_STREAMING_WINDOW_TOKENS =>
             {
-                Some(window_tokens)
+                (Some(window_tokens), false)
+            }
+            QaWorkerReply::ReadyWithResponsePlan {
+                protocol,
+                model_revision,
+                window_tokens,
+            } if protocol == QA_WORKER_PROTOCOL
+                && model_revision == self.model_target.revision()
+                && (window_tokens == self.model_target.input_tokens()
+                    || window_tokens == QA_LEGACY_STREAMING_WINDOW_TOKENS) =>
+            {
+                (Some(window_tokens), true)
             }
             QaWorkerReply::StartupFailed {
                 source,
@@ -641,10 +666,13 @@ impl WorkerSession {
             }
         };
         ensure!(
-            self.lifecycle != WorkerLifecycle::Ready || self.streaming_window == streaming_window,
+            self.lifecycle != WorkerLifecycle::Ready
+                || (self.streaming_window == streaming_window
+                    && self.response_plan == response_plan),
             "QA worker changed its negotiated context"
         );
         self.streaming_window = streaming_window;
+        self.response_plan = response_plan;
         Ok(())
     }
 
@@ -1355,6 +1383,7 @@ mod tests {
             output: Box::new(reader),
             child: Some(child),
             streaming_window: Some(QA_LEGACY_STREAMING_WINDOW_TOKENS),
+            response_plan: false,
             model_target: target,
             resident_limit: WorkerLimits::for_target(target).resident_bytes,
         });
@@ -1415,6 +1444,7 @@ mod tests {
                     output: Box::new(reader),
                     child: None,
                     streaming_window: None,
+                    response_plan: false,
                     model_target: target,
                     resident_limit: WorkerLimits::for_target(target).resident_bytes,
                 };
@@ -1490,6 +1520,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reply_plan_negotiation_is_fixed_at_startup() {
+        for target in [QaModelTarget::FlanT5Small, QaModelTarget::Gpt2Small] {
+            let (io, _peer) = UnixStream::pair().unwrap();
+            let (reader, writer) = io.into_split();
+            let mut session = WorkerSession {
+                lifecycle: WorkerLifecycle::Starting,
+                input: Box::new(writer),
+                output: Box::new(reader),
+                child: None,
+                streaming_window: None,
+                response_plan: false,
+                model_target: target,
+                resident_limit: WorkerLimits::for_target(target).resident_bytes,
+            };
+            let plan = |window_tokens| QaWorkerReply::ReadyWithResponsePlan {
+                protocol: QA_WORKER_PROTOCOL,
+                model_revision: target.revision().into(),
+                window_tokens,
+            };
+            assert!(session.validate_ready(plan(256)).is_err());
+            session.validate_ready(plan(target.input_tokens())).unwrap();
+            session.lifecycle = WorkerLifecycle::Ready;
+            session.validate_ready(plan(target.input_tokens())).unwrap();
+            assert!(session.response_plan);
+            assert!(session
+                .validate_ready(QaWorkerReply::ReadyWithStreaming {
+                    protocol: QA_WORKER_PROTOCOL,
+                    model_revision: target.revision().into(),
+                })
+                .is_err());
+        }
+    }
+
+    #[tokio::test]
     async fn streaming_draft_arrives_before_the_canonical_completion() {
         let (io, mut peer) = UnixStream::pair().unwrap();
         let (input, output) = io.into_split();
@@ -1501,6 +1565,7 @@ mod tests {
             output: Box::new(input),
             child: None,
             streaming_window: None,
+            response_plan: false,
             model_target: target,
             resident_limit: WorkerLimits::for_target(target).resident_bytes,
         };

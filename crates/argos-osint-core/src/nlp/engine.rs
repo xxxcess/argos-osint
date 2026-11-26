@@ -126,6 +126,7 @@ impl Engine {
                     ctx.eval::<(), _>(core)?;
                     ctx.eval::<(), _>(dates)?;
                     ctx.eval::<(), _>(bridge)?;
+                    ctx.eval::<(), _>(include_str!("conversation.js"))?;
                     Ok(())
                 })
                 .map_err(|e| format!("NLP startup: {e}"))?;
@@ -137,6 +138,44 @@ impl Engine {
             })
         }
     }
+    pub(crate) fn conversation(
+        &mut self,
+        question: &str,
+        context: &conversation::Context,
+        cancel: Arc<AtomicBool>,
+        deadline: std::time::Instant,
+    ) -> conversation::Features {
+        #[cfg(not(feature = "nlp"))]
+        {
+            let _ = (question, context, cancel, deadline);
+            conversation::Features::terminal(Status::Disabled)
+        }
+        #[cfg(feature = "nlp")]
+        {
+            {
+                let Ok(mut guard) = self.guard.lock() else {
+                    return conversation::Features::terminal(Status::Failed);
+                };
+                guard.cancel = cancel.clone();
+                guard.deadline = deadline;
+            }
+            let result = self.context.with(|ctx| -> rquickjs::Result<String> {
+                let parse: rquickjs::Function = ctx.globals().get("argosConversation")?;
+                parse.call((question,))
+            });
+            let features = result
+                .ok()
+                .and_then(|json| conversation::decode(question, &json, context));
+            if cancel.load(Ordering::Acquire) {
+                conversation::Features::terminal(Status::Cancelled)
+            } else if (self.clock)() >= deadline {
+                conversation::Features::terminal(Status::Timeout)
+            } else {
+                features.unwrap_or_else(|| conversation::Features::terminal(Status::Failed))
+            }
+        }
+    }
+
     pub fn annotate(
         &mut self,
         source: &Source,

@@ -41,6 +41,8 @@ impl Role {
 pub(crate) enum TurnState {
     Queued,
     Running,
+    Thinking,
+    Writing,
     Streaming,
     Retrying { attempt: u32 },
     Final,
@@ -53,6 +55,8 @@ impl TurnState {
         match self {
             Self::Queued => Some(("Queued".to_owned(), StatusTone::Neutral)),
             Self::Running => Some(("Working".to_owned(), StatusTone::Info)),
+            Self::Thinking => Some(("Thinking".to_owned(), StatusTone::Info)),
+            Self::Writing => Some(("Writing".to_owned(), StatusTone::Info)),
             Self::Streaming => Some(("Draft · unverified".to_owned(), StatusTone::Info)),
             Self::Retrying { attempt } => {
                 Some((format!("Retrying, attempt {attempt}"), StatusTone::Warn))
@@ -65,7 +69,12 @@ impl TurnState {
     pub(crate) fn is_pending(&self) -> bool {
         matches!(
             self,
-            Self::Queued | Self::Running | Self::Streaming | Self::Retrying { .. }
+            Self::Queued
+                | Self::Running
+                | Self::Thinking
+                | Self::Writing
+                | Self::Streaming
+                | Self::Retrying { .. }
         )
     }
 }

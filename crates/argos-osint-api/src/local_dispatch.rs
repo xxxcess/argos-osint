@@ -19,6 +19,7 @@ use argos_osint_core::storage::upload_ticket;
 use argos_osint_core::storage::upload_ticket::UploadTicketBinding;
 use axum::body::Bytes;
 use axum::http::StatusCode;
+use chrono::Utc;
 use fleetworks_contracts::capabilities::Capabilities;
 use fleetworks_contracts::capabilities::CONNECT_REGISTRY_FEATURE;
 use fleetworks_contracts::chat::ChatSourceKind;
@@ -56,6 +57,8 @@ use crate::connect;
 use crate::cycle_history;
 use crate::datasets;
 use crate::host_metrics;
+use crate::inbox_qa::context::GeneratorState;
+use crate::inbox_qa::context::Observer;
 use crate::maintenance;
 use crate::operational_logs;
 use crate::operations;
@@ -157,6 +160,7 @@ pub struct LocalGateway {
     services: PrivateServices,
     qa: crate::inbox_qa::QaTarget,
     qa_availability: crate::inbox_qa::QaRuntimeAvailability,
+    context: Option<Arc<Observer>>,
     capability_config: LocalCapabilityConfig,
     job_cursors: Arc<activity_paging::JobsCursors>,
     log_cursors: Arc<operational_logs::LogCursors>,
@@ -192,6 +196,7 @@ impl LocalGateway {
             state,
             qa,
             qa_availability: crate::inbox_qa::QaRuntimeAvailability::default(),
+            context: None,
             services,
             capability_config,
             job_cursors: Arc::new(activity_paging::JobsCursors::new()),
@@ -209,6 +214,15 @@ impl LocalGateway {
         runtime: Arc<dyn crate::inbox_qa::decision::DecisionRuntime>,
     ) -> Self {
         self.qa = self.qa.with_decision(runtime);
+        self
+    }
+
+    /// Attach the optional Embedded observation journal shared with assistant admission.
+    #[must_use]
+    pub fn with_workstation_context(mut self, observer: Arc<Observer>) -> Self {
+        self.qa = self.qa.with_context(Arc::clone(&observer));
+        self.qa_availability = self.qa_availability.with_context(Arc::clone(&observer));
+        self.context = Some(observer);
         self
     }
 
@@ -394,16 +408,24 @@ impl LocalGateway {
                 )
                 .await?,
             ),
-            IpcOperation::QaSettingsUpdate(request) => json_payload(
-                inbox_qa::update_request(
+            IpcOperation::QaSettingsUpdate(request) => {
+                let settings = inbox_qa::update_request(
                     &self.state,
                     &context,
                     &self.qa,
                     request,
                     Some(&self.qa_availability),
                 )
-                .await?,
-            ),
+                .await?;
+                if !settings.enabled {
+                    if let (Some(observer), Ok(generation)) =
+                        (&self.context, i64::try_from(settings.generation))
+                    {
+                        observer.record_generator(generation, GeneratorState::Disabled, None);
+                    }
+                }
+                json_payload(settings)
+            }
             IpcOperation::QaTurnSubmit(request) => json_payload(
                 inbox_qa::submit_request(
                     &self.state,
@@ -566,10 +588,14 @@ impl LocalGateway {
                     sort: query.sort,
                     cursor: query.cursor,
                 };
-                Ok(IpcPayload::Json(
+                let observed_at = Utc::now().timestamp_millis();
+                let value =
                     activity_paging::jobs_value(&self.state, &context, &self.job_cursors, paging)
-                        .await?,
-                ))
+                        .await?;
+                if let Some(observer) = &self.context {
+                    observer.record_jobs(&context, &value, observed_at);
+                }
+                Ok(IpcPayload::Json(value))
             }
             IpcOperation::JobDetail(query) => {
                 let context = self
@@ -591,9 +617,12 @@ impl LocalGateway {
                     text: None,
                     since: None,
                 };
-                Ok(IpcPayload::Json(
-                    activity::job_value(&self.state, &context, detail).await?,
-                ))
+                let observed_at = Utc::now().timestamp_millis();
+                let value = activity::job_value(&self.state, &context, detail).await?;
+                if let Some(observer) = &self.context {
+                    observer.record_jobs(&context, &value, observed_at);
+                }
+                Ok(IpcPayload::Json(value))
             }
             IpcOperation::ToolResult(query) => {
                 let context = self
@@ -1326,7 +1355,7 @@ impl LocalGateway {
         } else {
             None
         };
-        let value = workstation::read_value(
+        let report = workstation::read_report(
             &self.state,
             principal,
             owners,
@@ -1335,7 +1364,11 @@ impl LocalGateway {
             true,
         )
         .await?;
-        Ok(IpcPayload::Json(value))
+        let payload = json_payload(&report)?;
+        if let Some(observer) = &self.context {
+            observer.record_readiness(&report.checks);
+        }
+        Ok(payload)
     }
 
     async fn handle_dataset_upload_start(

@@ -498,6 +498,17 @@ pub enum QaTurnNotice {
     ObservationUnavailable,
 }
 
+/// Why a negotiated worker could not answer this turn.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaTurnLimitation {
+    CapabilityUnavailable,
+    QuestionTooLong,
+    #[serde(other)]
+    Unknown,
+}
+
 /// A conversational reply that asks for input or explains supported assistance.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -542,6 +553,21 @@ impl QaMeasurement {
     }
 }
 
+/// The age and origin of a cited observation. Missing metadata in older
+/// responses retains the original timestamp and label.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaEvidenceProvenance {
+    Current,
+    PreviousObservation,
+    Historical {
+        sequence: u64,
+        coverage_start_ms: i64,
+        has_gaps: bool,
+    },
+}
+
 /// A verified, cited span. The offsets count Unicode scalar values in the source passage.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
@@ -552,6 +578,8 @@ pub struct QaFinding {
     pub start: u32,
     pub end: u32,
     pub observed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<QaEvidenceProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measurement: Option<QaMeasurement>,
 }
@@ -580,9 +608,22 @@ impl QaFinding {
             start,
             end,
             observed_at,
+            provenance: None,
             measurement: None,
         }
     }
+}
+
+/// Actual executor work within a running turn, independent of model readiness.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaTurnStage {
+    Working,
+    Thinking,
+    Writing,
+    #[serde(other)]
+    Unknown,
 }
 
 /// The authoritative exchange and its highest committed event sequence.
@@ -605,6 +646,10 @@ pub struct QaTurn {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub used_previous_exchange: bool,
     pub state: QaTurnState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<QaTurnStage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limitation: Option<QaTurnLimitation>,
     pub findings: Vec<QaFinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<QaTurnNotice>,
@@ -649,6 +694,8 @@ impl QaTurn {
             response_time_ms: None,
             used_previous_exchange: false,
             state: QaTurnState::Queued,
+            stage: None,
+            limitation: None,
             findings: Vec::new(),
             notice: None,
             conversation: None,
@@ -669,6 +716,8 @@ impl QaTurn {
 pub struct QaEvent {
     pub sequence: u64,
     pub state: QaTurnState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<QaTurnStage>,
     pub finding: Option<QaFinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provisional_delta: Option<String>,
@@ -681,6 +730,7 @@ impl QaEvent {
         Self {
             sequence,
             state,
+            stage: None,
             finding,
             provisional_delta: None,
         }
@@ -810,6 +860,25 @@ mod tests {
                 settings
             );
         }
+    }
+
+    #[test]
+    fn turn_stage_and_limitations_decode_from_optional_transport_fields() {
+        let mut turn = QaTurn::queued("turn".into(), "request".into(), "Current status?".into());
+        let legacy = serde_json::to_value(&turn).unwrap();
+        let decoded: QaTurn = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(legacy.get("stage").is_none());
+        assert!(legacy.get("limitation").is_none());
+        assert_eq!(decoded, turn);
+
+        turn.state = QaTurnState::Running;
+        turn.stage = Some(QaTurnStage::Thinking);
+        let reading = QaEventPage::new(turn, Vec::new(), true);
+        let serialized = serde_json::to_value(&reading).unwrap();
+        assert_eq!(serialized["turn"]["stage"], "thinking");
+        let decoded: QaEventPage = serde_json::from_value(serialized).unwrap();
+        assert_eq!(decoded.turn.stage, Some(QaTurnStage::Thinking));
+        assert!(decoded.gap);
     }
 
     #[test]

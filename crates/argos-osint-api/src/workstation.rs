@@ -862,7 +862,7 @@ pub(crate) async fn read(
             json!({"error":"Backend diagnostic owners are not configured"}),
         );
     };
-    match read_value(
+    match read_report(
         &state,
         &principal,
         &owners,
@@ -871,7 +871,14 @@ pub(crate) async fn read(
         false,
     )
     .await
-    {
+    .and_then(|report| {
+        serde_json::to_value(report).map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Backend observations unavailable",
+            )
+        })
+    }) {
         Ok(value) => reply(StatusCode::OK, value),
         Err((status, message)) => reply(status, json!({"error":message})),
     }
@@ -883,7 +890,11 @@ pub(crate) async fn qa_snapshot(
     owners: &ReadinessOwners,
     search: Option<&SearchClient>,
     observed_after_ms: i64,
-) -> Option<(chrono::DateTime<Utc>, Vec<QaReadinessFact>)> {
+) -> Option<(
+    chrono::DateTime<Utc>,
+    Vec<QaReadinessFact>,
+    Vec<ReadinessCheck>,
+)> {
     // The protocol persists millisecond boundaries, so every independent check
     // must start strictly after the last terminal boundary.
     if Utc::now().timestamp_millis() <= observed_after_ms {
@@ -909,7 +920,8 @@ pub(crate) async fn qa_snapshot(
         Some((at, observations.checks.clone()))
     };
     let (at, checks) = projection.await?;
-    Some((at, checks.iter().filter_map(qa_fact).collect()))
+    let facts = checks.iter().filter_map(qa_fact).collect();
+    Some((at, facts, checks))
 }
 
 fn sample_time(observations: &Observations) -> Option<chrono::DateTime<Utc>> {
@@ -1000,14 +1012,14 @@ fn qa_readiness_reason(check: &ReadinessCheck) -> &'static str {
     }
 }
 
-pub(crate) async fn read_value(
+pub(crate) async fn read_report(
     state: &ApiState,
     principal: &AuthenticatedPrincipal,
     owners: &ReadinessOwners,
     search: Option<&SearchClient>,
     context: Option<RegisteredContext>,
     embedded_setup: bool,
-) -> Result<serde_json::Value, (StatusCode, &'static str)> {
+) -> Result<WorkstationReadiness, (StatusCode, &'static str)> {
     if !principal.permits(Permission::ReadBackend) {
         return Err((
             StatusCode::FORBIDDEN,
@@ -1199,12 +1211,7 @@ pub(crate) async fn read_value(
             check.explanation = "Current registered origin verified at the gateway boundary".into();
         }
     }
-    serde_json::to_value(response).map_err(|_| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Backend observations unavailable",
-        )
-    })
+    Ok(response)
 }
 
 fn reply(status: StatusCode, value: serde_json::Value) -> Response {

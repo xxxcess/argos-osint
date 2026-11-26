@@ -14,6 +14,7 @@ use argos_osint_api::inbox_qa::decision::DecisionChoice;
 use argos_osint_api::inbox_qa::decision::DecisionFuture;
 use argos_osint_api::inbox_qa::decision::DecisionMenu;
 use argos_osint_api::inbox_qa::decision::DecisionRuntime;
+use argos_osint_api::inbox_qa::decision::DecisionTask;
 use argos_osint_core::hardware;
 use argos_osint_core::storage::inbox_qa;
 use argos_osint_core::storage::repo::Repository;
@@ -69,7 +70,8 @@ impl Supervisor {
         generation: i64,
         menu: DecisionMenu,
     ) -> Result<DecisionChoice, Reason> {
-        let qualification = pack::qualified(preference).ok_or(Reason::AwaitingQualification)?;
+        let qualification =
+            pack::qualified(preference, menu.task).ok_or(Reason::AwaitingQualification)?;
         let admission = Arc::clone(&self.admission)
             .try_lock_owned()
             .map_err(|_| Reason::InsufficientResources)?;
@@ -100,9 +102,13 @@ impl Supervisor {
             return Ok(DecisionChoice::Unavailable);
         }
         let mut worker = command.spawn().map_err(|_| Reason::WorkerStartFailed)?;
-        let observation = ReadyObservation {
-            observed: &self.observed,
-            generation,
+        let observation = if menu.task == DecisionTask::RelatedActivity {
+            Some(ReadyObservation {
+                observed: &self.observed,
+                generation,
+            })
+        } else {
+            None
         };
         let replaced = async {
             while self.current(preference, generation).await {
@@ -111,11 +117,14 @@ impl Supervisor {
         };
         let session = async {
             wait_ready(&client).await;
-            observation.ready(preference);
+            if let Some(observation) = &observation {
+                observation.ready(preference);
+            }
             let body = ask(&client, &menu).await.ok_or(Reason::WorkerStartFailed)?;
             choose(
                 &body,
                 qualification.alias,
+                menu.task,
                 menu.candidates.len(),
                 qualification.threshold,
                 qualification.margin,
@@ -141,7 +150,7 @@ impl DecisionRuntime for Supervisor {
         if preference == Preference::RulesOnly {
             return decision::rules_status(preference, None);
         }
-        if pack::qualified(preference).is_none() {
+        if pack::qualified(preference, DecisionTask::RelatedActivity).is_none() {
             return decision::rules_status(preference, Some(Reason::AwaitingQualification));
         }
         if let Some(previous) = self.observed.borrow().as_ref().filter(|observation| {
@@ -168,10 +177,13 @@ impl DecisionRuntime for Supervisor {
             {
                 return DecisionChoice::Unavailable;
             }
+            let task = menu.task;
             match self.score_once(preference, generation, menu).await {
                 Ok(choice) => choice,
                 Err(reason) => {
-                    if self.current(preference, generation).await {
+                    if task == DecisionTask::RelatedActivity
+                        && self.current(preference, generation).await
+                    {
                         self.observed.send_replace(Some(Observation {
                             generation,
                             status: decision::rules_status(preference, Some(reason)),
@@ -291,23 +303,37 @@ struct Health {
 }
 
 async fn ask(client: &Client, menu: &DecisionMenu) -> Option<Vec<u8>> {
+    let (question, abstention, instructions) = match menu.task {
+        DecisionTask::RelatedActivity => (
+            "related",
+            "No listed job supplies a supported relationship.",
+            "Choose one recorded relationship to this readiness notice, or none.",
+        ),
+        DecisionTask::ResponsePlan => (
+            "response_plan",
+            "Keep the rules plan.",
+            "Choose one approved response plan that covers the operator's request and available evidence, or none.",
+        ),
+    };
     let mut criteria = menu
         .candidates
         .iter()
         .enumerate()
         .map(|(index, text)| (format!("c{index}"), text.as_str()))
         .collect::<BTreeMap<_, _>>();
-    criteria.insert(
-        "none".into(),
-        "No listed job supplies a supported relationship.",
-    );
-    let reply = client.post("http://localhost/v1/systemone").json(&serde_json::json!({
-        "state": menu.state,
-        "questions": {"related": {
-            "type": "choice", "criteria": criteria,
-            "instructions": "Choose one recorded relationship to this readiness notice, or none."
-        }}
-    })).send().await.ok()?;
+    criteria.insert("none".into(), abstention);
+    let reply = client
+        .post("http://localhost/v1/systemone")
+        .json(&serde_json::json!({
+            "state": menu.state,
+            "questions": {(question): {
+                "type": "choice", "criteria": criteria,
+                "instructions": instructions
+            }}
+        }))
+        .send()
+        .await
+        .ok()?;
     response_bytes(reply).await
 }
 
@@ -338,7 +364,8 @@ struct Reply {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Answers {
-    related: Related,
+    related: Option<Choice>,
+    response_plan: Option<Choice>,
 }
 
 #[derive(Deserialize)]
@@ -350,7 +377,7 @@ struct Usage {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Related {
+struct Choice {
     #[serde(rename = "type")]
     answer_type: String,
     choice: String,
@@ -391,19 +418,24 @@ fn probabilities<'de, D: serde::Deserializer<'de>>(
 fn choose(
     bytes: &[u8],
     model: &str,
+    task: DecisionTask,
     count: usize,
     threshold: f64,
     margin: f64,
 ) -> Option<DecisionChoice> {
     let reply: Reply = serde_json::from_slice(bytes).ok()?;
-    let related = reply.answers.related;
-    let weights = related.probabilities;
+    let choice = match (task, reply.answers.related, reply.answers.response_plan) {
+        (DecisionTask::RelatedActivity, Some(choice), None)
+        | (DecisionTask::ResponsePlan, None, Some(choice)) => choice,
+        _ => return None,
+    };
+    let weights = choice.probabilities;
     let probability = |value: f64| (0.0..=1.0).contains(&value);
     if reply.model != model
         || !(1..=16 * 1024).contains(&reply.usage.input_tokens)
         || reply.usage.output_tokens != 0
-        || related.answer_type != "choice"
-        || !probability(related.confidence)
+        || choice.answer_type != "choice"
+        || !probability(choice.confidence)
         || weights.len() != count + 1
         || !(0..count).all(|index| weights.contains_key(&format!("c{index}")))
         || !weights.contains_key("none")
@@ -412,19 +444,19 @@ fn choose(
     {
         return None;
     }
-    let winning = *weights.get(&related.choice)?;
+    let winning = *weights.get(&choice.choice)?;
     let second = weights
         .iter()
-        .filter_map(|(handle, weight)| (handle != &related.choice).then_some(*weight))
+        .filter_map(|(handle, weight)| (handle != &choice.choice).then_some(*weight))
         .fold(0.0, f64::max);
     if winning < second {
         return None;
     }
-    if related.choice == "none" || winning < threshold || winning - second < margin {
+    if choice.choice == "none" || winning < threshold || winning - second < margin {
         return Some(DecisionChoice::Abstain);
     }
     Some(DecisionChoice::Candidate(
-        related.choice.strip_prefix('c')?.parse().ok()?,
+        choice.choice.strip_prefix('c')?.parse().ok()?,
     ))
 }
 
@@ -483,23 +515,47 @@ mod tests {
             .await
             .unwrap();
         let mut menu = DecisionMenu {
+            task: DecisionTask::RelatedActivity,
             state: "Choose the first case".into(),
             candidates: vec!["Candidate one".into(), "Candidate two".into()],
         };
         let body = ask(&client, &menu).await.unwrap();
         assert!(matches!(
-            choose(&body, "decision-fixture", 2, 0.80, 0.10),
+            choose(&body, "decision-fixture", menu.task, 2, 0.80, 0.10),
             Some(DecisionChoice::Candidate(0))
         ));
-        assert!(choose(&body, "other-model", 2, 0.80, 0.10).is_none());
+        assert!(choose(
+            &body,
+            "decision-fixture",
+            DecisionTask::ResponsePlan,
+            2,
+            0.80,
+            0.10
+        )
+        .is_none());
+        assert!(choose(&body, "other-model", menu.task, 2, 0.80, 0.10).is_none());
         assert!(matches!(
-            choose(&body, "decision-fixture", 2, 0.95, 0.10),
+            choose(&body, "decision-fixture", menu.task, 2, 0.95, 0.10),
             Some(DecisionChoice::Abstain)
         ));
         menu.state = "No supported relation".into();
         let body = ask(&client, &menu).await.unwrap();
         assert!(matches!(
-            choose(&body, "decision-fixture", 2, 0.8, 0.1),
+            choose(&body, "decision-fixture", menu.task, 2, 0.8, 0.1),
+            Some(DecisionChoice::Abstain)
+        ));
+        let body = String::from_utf8(body)
+            .unwrap()
+            .replace("\"related\":", "\"response_plan\":");
+        assert!(matches!(
+            choose(
+                body.as_bytes(),
+                "decision-fixture",
+                DecisionTask::ResponsePlan,
+                2,
+                0.8,
+                0.1,
+            ),
             Some(DecisionChoice::Abstain)
         ));
         server.abort();

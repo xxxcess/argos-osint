@@ -41,6 +41,7 @@ use sha2::Sha256;
 use tch::Device;
 
 use protocol::valid_draft_delta;
+use protocol::valid_operational_draft;
 use protocol::verified_operational_sources;
 use protocol::QaContextUsage;
 use protocol::QaDialogueKind;
@@ -65,6 +66,7 @@ use protocol::QA_MODEL_CONTEXT_ENV;
 use protocol::QA_MODEL_FILES;
 use protocol::QA_MODEL_REVISION;
 use protocol::QA_MODEL_TARGET_ENV;
+use protocol::QA_RESPONSE_PLAN_ENV;
 use protocol::QA_STREAMING_ENV;
 use protocol::QA_WORKER_PROTOCOL;
 
@@ -240,6 +242,13 @@ enum ResidentModel {
     Dialogue(Box<dialogue::Generator>),
 }
 
+#[derive(Default)]
+struct DialogueResult {
+    reply: Option<String>,
+    context: Option<QaContextUsage>,
+    input_too_large: bool,
+}
+
 impl ResidentModel {
     fn extractive(&mut self, dir: &Path) -> Result<&QuestionAnsweringModel> {
         if !matches!(self, Self::Extractive(_)) {
@@ -258,8 +267,11 @@ impl ResidentModel {
         request: dialogue::DecodeRequest<'_>,
         stopping: &AtomicBool,
         draft: &mut impl FnMut(&str) -> Result<()>,
-    ) -> (Option<String>, Option<QaContextUsage>) {
-        let skipped = (None, Some(QaContextUsage::new(request.window_tokens, 0, 0)));
+    ) -> DialogueResult {
+        let skipped = DialogueResult {
+            context: Some(QaContextUsage::new(request.window_tokens, 0, 0)),
+            ..DialogueResult::default()
+        };
         let Some(dir) = dir else {
             return skipped;
         };
@@ -282,19 +294,24 @@ impl ResidentModel {
             dialogue::generate(generator, request, stopping, draft)
         }));
         match generated {
-            Ok(Ok(Some(generation))) => (
-                generation.reply,
-                Some(QaContextUsage::new(
-                    generation.window_tokens,
-                    generation.input_tokens,
-                    1,
-                )),
-            ),
+            Ok(Ok(Some(dialogue::Generation::InputTooLarge))) => DialogueResult {
+                input_too_large: true,
+                ..skipped
+            },
+            Ok(Ok(Some(dialogue::Generation::Decoded {
+                window_tokens,
+                input_tokens,
+                reply,
+            }))) => DialogueResult {
+                reply,
+                context: Some(QaContextUsage::new(window_tokens, input_tokens, 1)),
+                input_too_large: false,
+            },
             Ok(Ok(None)) => skipped,
             Ok(Err(_)) | Err(_) => {
                 // A failed native call cannot attest how much of the input was processed.
                 *self = Self::Unloaded;
-                (None, None)
+                DialogueResult::default()
             }
         }
     }
@@ -508,14 +525,12 @@ fn draft_prefix<'a>(
         return None;
     }
     if operational {
-        if verified_operational_sources(request, text).is_some() {
+        if valid_operational_draft(request, text) {
             return Some(text);
         }
         text.rmatch_indices('.').find_map(|(index, _)| {
             let prefix = &text[..=index];
-            verified_operational_sources(request, prefix)
-                .is_some()
-                .then_some(prefix)
+            valid_operational_draft(request, prefix).then_some(prefix)
         })
     } else {
         Some(text)
@@ -534,7 +549,11 @@ fn answer_dialogue(
     let operational = decode.dialogue.kind == QaDialogueKind::Operational;
     let mut sequence = QaWorkerSequence::default();
     let mut emitted = String::new();
-    let (reply, context) = model.dialogue(model_dir, decode, stopping, &mut |text| {
+    let DialogueResult {
+        reply,
+        context,
+        input_too_large,
+    } = model.dialogue(model_dir, decode, stopping, &mut |text| {
         let Some(prefix) = draft_prefix(request, text, operational) else {
             return Ok(());
         };
@@ -586,6 +605,8 @@ fn answer_dialogue(
         sequence: sequence.next_sequence(),
         outcome: if answered {
             QaWorkerOutcome::Answered
+        } else if input_too_large {
+            QaWorkerOutcome::InputTooLarge
         } else {
             QaWorkerOutcome::InsufficientContext
         },
@@ -627,10 +648,18 @@ fn receive_commands(stopping: Arc<AtomicBool>) -> io::Result<mpsc::Receiver<QaWo
 fn ready(
     dialogue: bool,
     streaming: bool,
+    response_plan: bool,
     model_revision: &str,
     window_tokens: u16,
 ) -> QaWorkerReply {
     let model_revision = model_revision.into();
+    if dialogue && streaming && response_plan {
+        return QaWorkerReply::ReadyWithResponsePlan {
+            protocol: QA_WORKER_PROTOCOL,
+            model_revision,
+            window_tokens,
+        };
+    }
     match (dialogue, streaming, window_tokens) {
         (true, true, QA_LEGACY_STREAMING_WINDOW_TOKENS) => QaWorkerReply::ReadyWithStreaming {
             protocol: QA_WORKER_PROTOCOL,
@@ -672,6 +701,10 @@ pub(crate) fn run(
     let report_context = env::var_os(QA_CONTEXT_USAGE_ENV).as_deref() == Some("1".as_ref());
     let enable_dialogue = env::var_os(QA_DIALOGUE_ENV).as_deref() == Some("1".as_ref());
     let streaming = env::var_os(QA_STREAMING_ENV).as_deref() == Some("1".as_ref());
+    let response_plan = report_context
+        && enable_dialogue
+        && streaming
+        && env::var_os(QA_RESPONSE_PLAN_ENV).as_deref() == Some("1".as_ref());
     let target = match env::var_os(QA_MODEL_TARGET_ENV) {
         None => QaModelTarget::default(),
         Some(value) => value
@@ -713,6 +746,7 @@ pub(crate) fn run(
         ready(
             generator_dir.is_some(),
             streaming,
+            response_plan,
             model_revision,
             window_tokens,
         ),
@@ -727,6 +761,7 @@ pub(crate) fn run(
                 ready(
                     generator_dir.is_some(),
                     streaming,
+                    response_plan,
                     model_revision,
                     window_tokens,
                 ),
@@ -734,6 +769,10 @@ pub(crate) fn run(
             )?,
             QaWorkerCommand::Ask { request } => {
                 request.validate()?;
+                ensure!(
+                    request.plan.is_none() || response_plan,
+                    "QA response plan support was not negotiated"
+                );
                 let kind = request.dialogue.as_ref().map(|dialogue| dialogue.kind);
                 let mut output = |reply| send(reply, kind);
                 if let Some(dialogue) = &request.dialogue {
@@ -748,6 +787,7 @@ pub(crate) fn run(
                             question: &request.question,
                             dialogue,
                             passages: &request.passages,
+                            plan: request.plan.as_ref(),
                         },
                         report_context,
                         &mut output,

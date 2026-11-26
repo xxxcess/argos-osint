@@ -671,6 +671,50 @@ async fn qa_selected_generator_seals_all_findings_atomically_under_the_live_leas
     let (request, lease) =
         start_qa_fixture(&repo, &actor, &context, enabled, "generated-batch").await;
     let evidence = qa::start(&repo, &lease).await.unwrap().unwrap();
+    use fleetworks_contracts::chat::QaTurnStage;
+    use fleetworks_contracts::qa_worker::QaWorkerPlan;
+
+    assert_eq!(
+        qa::latest(&repo, &actor).await.unwrap().unwrap().0.stage,
+        Some(QaTurnStage::Working),
+    );
+    let planning = qa::begin_planning(&repo, &lease).await.unwrap().unwrap();
+    assert_eq!(
+        qa::latest(&repo, &actor).await.unwrap().unwrap().0.stage,
+        Some(QaTurnStage::Thinking),
+    );
+    let ids = evidence
+        .request
+        .passages
+        .iter()
+        .map(|p| p.source_id.clone())
+        .collect::<Vec<_>>();
+    let note = "Answer using the verified observations.".to_owned();
+    let mut plan = qa::ResponsePlan {
+        task: qa::ResponseTask::ResponsePlan,
+        version: 1,
+        snapshot: "another-snapshot".into(),
+        decision_generation: planning.decision_generation,
+        mode: qa::ResponseMode::Current,
+        focus: None,
+        clarification: None,
+        ordered_passages: ids.clone(),
+        worker: Some(QaWorkerPlan::new(String::new(), note.clone(), ids, None)),
+        requires_worker_support: false,
+        negotiated: true,
+        note,
+    };
+    assert!(matches!(
+        qa::accept_plan(&repo, &lease, &plan).await,
+        Err(TxError::Abort(reason)) if reason == "inbox_qa:invalid_part"
+    ));
+    plan.snapshot = evidence.binding().unwrap();
+    assert!(qa::accept_plan(&repo, &lease, &plan).await.unwrap());
+    assert!(!qa::accept_plan(&repo, &lease, &plan).await.unwrap());
+    assert_eq!(
+        qa::latest(&repo, &actor).await.unwrap().unwrap().0.stage,
+        Some(QaTurnStage::Writing),
+    );
     let findings: Vec<_> = evidence
         .request
         .passages

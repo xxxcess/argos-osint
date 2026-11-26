@@ -50,6 +50,7 @@ use protocol::QA_MAX_FRAME_BYTES;
 use protocol::QA_MODEL_CONTEXT_ENV;
 use protocol::QA_MODEL_REVISION;
 use protocol::QA_MODEL_TARGET_ENV;
+use protocol::QA_RESPONSE_PLAN_ENV;
 use protocol::QA_STREAMING_ENV;
 use protocol::QA_WORKER_PROTOCOL;
 
@@ -363,6 +364,11 @@ fn relay(
                             protocol,
                             model_revision,
                             ..
+                        }
+                        | QaWorkerReply::ReadyWithResponsePlan {
+                            protocol,
+                            model_revision,
+                            ..
                         },
                         Phase::Starting | Phase::Pinging,
                     ) if protocol == QA_WORKER_PROTOCOL
@@ -482,6 +488,9 @@ fn serve(stream: UnixStream, worker: &Path, model: &Path, libraries: &Path) -> R
         command.env(QA_STREAMING_ENV, "1");
         if env::var_os(QA_MODEL_CONTEXT_ENV).as_deref() == Some("1".as_ref()) {
             command.env(QA_MODEL_CONTEXT_ENV, "1");
+        }
+        if env::var_os(QA_RESPONSE_PLAN_ENV).as_deref() == Some("1".as_ref()) {
+            command.env(QA_RESPONSE_PLAN_ENV, "1");
         }
     }
     if let Some(target) = env::var_os(QA_MODEL_TARGET_ENV) {

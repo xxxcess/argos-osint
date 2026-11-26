@@ -288,3 +288,86 @@ async fn auto_complete_policy_preserves_prose_in_every_mode_and_fallback() {
     assert_eq!(prepared.text, text);
     assert!(prepared.coverage.complete);
 }
+
+#[cfg(feature = "nlp")]
+#[tokio::test]
+async fn conversation_worker_preserves_original_spans_and_local_calendar_interval() {
+    use crate::nlp::conversation::{Context, TemporalScope};
+
+    let parse_instant = chrono::DateTime::parse_from_rfc3339("2026-11-26T16:30:00Z").unwrap();
+    let mut context = Context::utc(parse_instant.timestamp_millis());
+    context.timezone_offset_minutes = -300;
+    let service = Service::start();
+    let text = "Actually, what happened to the 😀 index since yesterday, no suggestions?";
+    let parsed = service
+        .parse_on_worker(
+            text,
+            context.clone(),
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
+        )
+        .await;
+
+    assert_eq!(parsed.status, Status::Complete);
+    assert!(parsed.validate(text));
+    assert_eq!(parsed.subjects[0].slice(text), Some("index"));
+    assert_eq!(parsed.corrections[0].slice(text), Some("Actually"));
+    assert_eq!(parsed.question_words[0].slice(text), Some("what"));
+    assert_eq!(parsed.exclusions[0].slice(text), Some(", no suggestions"));
+    assert_eq!(parsed.temporal[0].span.slice(text), Some("since yesterday"));
+
+    let TemporalScope::Historical(interval) = &parsed.temporal[0].scope else {
+        panic!("since yesterday should produce a historical interval");
+    };
+    let previous_local_midnight = chrono::DateTime::parse_from_rfc3339("2026-11-25T00:00:00-05:00")
+        .unwrap()
+        .timestamp_millis();
+    assert_eq!(interval.start_ms, previous_local_midnight);
+    assert_eq!(interval.reference_ms, parse_instant.timestamp_millis());
+    assert_eq!(interval.end_ms, interval.reference_ms + 1);
+    assert_eq!(interval.timezone, "-05:00");
+
+    context.language_hint = Some("fr-CA".into());
+    let unsupported = service
+        .parse_on_worker(
+            "Quelle est la mémoire utilisée ?",
+            context,
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
+        )
+        .await;
+    assert_eq!(unsupported.status, Status::Unsupported);
+    assert!(unsupported.subjects.is_empty());
+}
+
+#[tokio::test]
+async fn conversation_queue_returns_busy_and_drop_cancels_waiting_job() {
+    use std::time::{Duration, Instant};
+
+    let (sender, mut incoming) = mpsc::channel(1);
+    let service = Service {
+        sender,
+        bytes: Arc::new(AtomicUsize::new(0)),
+        readiness: Ok(()),
+    };
+    let context = conversation::Context::utc(0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut first = Box::pin(service.parse_on_worker("CPU usage?", context.clone(), deadline));
+    let work = tokio::select! {
+        result = &mut first => panic!("queued ask finished without a worker: {:?}", result.status),
+        work = incoming.recv() => work.expect("conversation should reach worker inbox"),
+    };
+    let Work::Conversation(job) = &work else {
+        panic!("conversation should bypass the article parser");
+    };
+    let cancel = job.cancel.clone();
+    assert!(service.sender.try_send(work).is_ok());
+
+    let busy = service
+        .parse_on_worker("memory usage?", context, deadline)
+        .await;
+    assert_eq!(busy.status, Status::Busy);
+    assert!(!cancel.load(Ordering::Acquire));
+    drop(first);
+    assert!(cancel.load(Ordering::Acquire));
+    drop(incoming);
+    assert_eq!(service.bytes.load(Ordering::Acquire), 0);
+}

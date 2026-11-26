@@ -3,6 +3,7 @@ use argos_osint_core::storage::inbox_qa::StatusCheckTally;
 use fleetworks_contracts::chat::QA_MAX_FINDINGS;
 use fleetworks_contracts::chat::QA_MAX_WORDS;
 use fleetworks_contracts::qa_worker::exact_span;
+use fleetworks_contracts::qa_worker::QaGuidance;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
 
@@ -62,32 +63,16 @@ pub(super) fn comparison_state(fact: &HealthFact) -> Option<&'static str> {
     })
 }
 
-pub(super) fn explanation(fact: &HealthFact) -> String {
-    let mut text = answer(fact);
-    if let Some(guidance) = guidance(fact) {
-        text.push(' ');
-        text.push_str(guidance);
-    }
-    text
-}
-
-fn guidance(fact: &HealthFact) -> Option<&'static str> {
+/// Project an allowlisted suggestion independently of its factual observation.
+pub(super) fn guidance(fact: &HealthFact) -> Option<QaGuidance> {
     Some(match (fact.id.as_str(), fact.status.as_str()) {
-        ("actor_catalog", "not ready" | "not_ready") => {
-            "Open the Actor catalog diagnostic in Workstation Status to review the Seed actors action."
-        }
-        ("actor_search", "not ready" | "not_ready") => {
-            "Review the catalog first, then open the Actor search diagnostic to review the index action."
-        }
-        ("actor_search", "running") => {
-            "Check the indexing progress in Workstation Status before starting another index build."
-        }
+        ("actor_catalog", "not ready" | "not_ready") => QaGuidance::ReviewActorCatalog,
+        ("actor_search", "not ready" | "not_ready") => QaGuidance::ReviewActorSearch,
+        ("actor_search", "running") => QaGuidance::CheckIndexProgress,
         ("classifier_inference", "unknown" | "unavailable") => {
-            "Review Atlas Rust-BERT inference in Workstation Status for the latest verification result."
+            QaGuidance::ReviewClassifierInference
         }
-        ("datastore", "unavailable") => {
-            "Open the Datastore diagnostic in Workstation Status for the current connection failure."
-        }
+        ("datastore", "unavailable") => QaGuidance::ReviewDatastore,
         _ => return None,
     })
 }
@@ -324,12 +309,10 @@ mod tests {
             "not ready",
             Some("No serving index was observed."),
         );
-        assert_eq!(
-            explanation(&failed),
-            "Actor search is not ready. No serving index was observed. Review the catalog first, then open the Actor search diagnostic to review the index action.",
-        );
         let passed = fact("actor_search", "ready", None);
-        assert_eq!(explanation(&passed), "Actor search is ready.");
+        assert_eq!(guidance(&failed), Some(QaGuidance::ReviewActorSearch));
+        assert_eq!(answer(&passed), "Actor search is ready.");
+        assert_eq!(guidance(&passed), None);
     }
 
     #[test]

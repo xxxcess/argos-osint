@@ -31,6 +31,8 @@ mod native {
     use fleetworks_contracts::chat::QaSettings;
     use fleetworks_contracts::chat::QaStartupStage;
     use fleetworks_contracts::chat::QaTurn;
+    use fleetworks_contracts::chat::QaTurnLimitation;
+    use fleetworks_contracts::chat::QaTurnStage;
     use fleetworks_contracts::chat::QaTurnState;
     use fleetworks_contracts::chat::QA_GPT2_GENERATORS_FEATURE;
     use fleetworks_contracts::chat::QA_MODEL_SETTINGS_FEATURE;
@@ -651,7 +653,7 @@ mod native {
         triage_connection(state, QaPhase::Ready);
     }
 
-    fn inbox_qa_turn(state: &mut State, stage: QaTurnState) {
+    fn inbox_qa_turn(state: &mut State, stage: QaTurnState, work: Option<QaTurnStage>) {
         registered(state);
         state.seed_inbox_qa_drawer_fixture();
         state.backend_kind = BackendKind::Local;
@@ -667,10 +669,14 @@ mod native {
             question.into(),
         );
         turn.state = stage;
+        turn.stage = work;
         turn.cursor = 1;
         turn.accepted_at = Some(1_767_225_600);
-        if stage == QaTurnState::Running {
+        if stage == QaTurnState::Running && work.is_none() {
             turn.provisional_reply = Some("Let me check actor search readiness.".into());
+        }
+        if stage == QaTurnState::InsufficientContext {
+            turn.limitation = Some(QaTurnLimitation::CapabilityUnavailable);
         }
         if matches!(stage, QaTurnState::Answered | QaTurnState::Canceled) {
             turn.completed_at = Some(1_767_225_602);
@@ -998,13 +1004,25 @@ mod native {
                 }),
                 ("inbox-qa-ready", inbox_qa_ready),
                 ("inbox-qa-pending", |state| {
-                    inbox_qa_turn(state, QaTurnState::Running);
+                    inbox_qa_turn(state, QaTurnState::Running, None);
+                }),
+                ("inbox-qa-working", |state| {
+                    inbox_qa_turn(state, QaTurnState::Running, Some(QaTurnStage::Working));
+                }),
+                ("inbox-qa-thinking", |state| {
+                    inbox_qa_turn(state, QaTurnState::Running, Some(QaTurnStage::Thinking));
+                }),
+                ("inbox-qa-writing", |state| {
+                    inbox_qa_turn(state, QaTurnState::Running, Some(QaTurnStage::Writing));
+                }),
+                ("inbox-qa-history-unavailable", |state| {
+                    inbox_qa_turn(state, QaTurnState::InsufficientContext, None);
                 }),
                 ("inbox-qa-answered", |state| {
-                    inbox_qa_turn(state, QaTurnState::Answered);
+                    inbox_qa_turn(state, QaTurnState::Answered, None);
                 }),
                 ("inbox-qa-stopped", |state| {
-                    inbox_qa_turn(state, QaTurnState::Canceled);
+                    inbox_qa_turn(state, QaTurnState::Canceled, None);
                 }),
                 ("inbox-qa-pack-missing", |state| {
                     inbox_qa_unavailable(state, QaAvailabilityReason::PackMissing);

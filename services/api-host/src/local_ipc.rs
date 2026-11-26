@@ -137,6 +137,7 @@ mod embedded {
     use argos_osint_api::actor_search::ActorSearchBackend;
     use argos_osint_api::classifier_activation::ActivationArtifacts;
     use argos_osint_api::datasets::DatasetStore;
+    use argos_osint_api::inbox_qa::context;
     use argos_osint_api::local_dispatch::LocalCapabilityConfig;
     use argos_osint_api::local_dispatch::LocalGateway;
     use argos_osint_api::workstation::ReadinessOwners;
@@ -188,6 +189,7 @@ mod embedded {
     use crate::native_worker;
     use crate::native_worker::LocalWorkerConfig;
     use crate::queue_client::Client;
+    use crate::workstation_context;
 
     const LOCK_FILENAME: &str = ".local-backend.lock";
     const SOURCE_EPOCH_FILENAME: &str = "source-epoch";
@@ -222,6 +224,7 @@ mod embedded {
         jobs: PathBuf,
         search: PathBuf,
         staged_datasets: PathBuf,
+        context: Option<PathBuf>,
     }
 
     pub(super) async fn run_embedded(
@@ -251,11 +254,13 @@ mod embedded {
         worker_config: Option<LocalWorkerConfig>,
         qa_broker: Client,
         model_admission: Arc<tokio::sync::Mutex<()>>,
+        decision: Arc<crate::qa_decision::Supervisor>,
+        context_journal: Option<(Arc<workstation_context::Journal>, Arc<context::Observer>)>,
         helpers: Option<HelperChildren>,
         _jobs_store: Store,
         _search_service: Arc<SearchService>,
         _engine_slot: Arc<EngineSlot>,
-        _lock: StateDirLock,
+        _lock: Arc<StateDirLock>,
     }
 
     impl LocalBackendContext {
@@ -378,15 +383,41 @@ mod embedded {
                 jobs_enabled: true,
             };
             let model_admission = Arc::new(tokio::sync::Mutex::new(()));
-            let decision = crate::qa_decision::Supervisor::new(
+            let decision = Arc::new(crate::qa_decision::Supervisor::new(
                 repo.clone(),
                 layout.root.clone(),
                 Arc::clone(&model_admission),
-            );
-            let gateway = Arc::new(
-                LocalGateway::new(state, services, capability_config)?
-                    .with_qa_decision(Arc::new(decision)),
-            );
+            ));
+            let mut gateway = LocalGateway::new(state, services, capability_config)?
+                .with_qa_decision(decision.clone());
+            let lock = Arc::new(lock);
+            let context_journal = if let Some(path) = layout.context {
+                match workstation_context::Journal::open(
+                    path,
+                    deployment.deployment_id.clone(),
+                    Arc::clone(&lock),
+                )
+                .await
+                {
+                    Ok(journal) => {
+                        let journal = Arc::new(journal);
+                        let observer = Arc::new(context::Observer::new(
+                            journal.clone(),
+                            deployment.deployment_id.clone(),
+                            deployment.configuration_epoch.clone(),
+                        ));
+                        gateway = gateway.with_workstation_context(Arc::clone(&observer));
+                        Some((journal, observer))
+                    }
+                    Err(_) => {
+                        tracing::warn!(code = "embedded_workstation_context_unavailable");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let gateway = Arc::new(gateway);
 
             let principal = AuthenticatedPrincipal::for_local_ipc(
                 "local-ipc-workstation",
@@ -408,6 +439,9 @@ mod embedded {
                 relinquish_on_shutdown: true,
             };
 
+            if let Some((_, observer)) = &context_journal {
+                observer.record_backend(context::Lifecycle::Ready);
+            }
             tracing::info!(
                 role = "local-ipc",
                 nlp = nlp_enabled,
@@ -424,6 +458,8 @@ mod embedded {
                 worker_config: Some(worker_config),
                 qa_broker,
                 model_admission,
+                decision,
+                context_journal,
                 helpers: Some(helpers),
                 _jobs_store: jobs_store,
                 _search_service: search_service,
@@ -462,6 +498,7 @@ mod embedded {
                 model,
                 "embedded".to_owned(),
                 Some(self.gateway.qa_runtime_availability()),
+                self.decision.clone(),
                 async move {
                     let _ = qa_signal.await;
                 },
@@ -488,6 +525,10 @@ mod embedded {
             report_shutdown_phase("qa_stopped");
             if let Some(helpers) = self.helpers.take() {
                 helpers.shutdown().await;
+            }
+            if let Some((journal, observer)) = self.context_journal.take() {
+                observer.record_backend(context::Lifecycle::Stopping);
+                journal.shutdown().await;
             }
             result
         }
@@ -611,6 +652,17 @@ mod embedded {
             ensure_private_dir(subdir)?;
         }
 
+        let context_dir = root.join("context");
+        let context_path = context_dir.join(workstation_context::DB_NAME);
+        let context = match ensure_private_dir(&context_dir)
+            .and_then(|()| workstation_context::prepare_path(&context_path))
+        {
+            Ok(()) => Some(context_path),
+            Err(_) => {
+                tracing::warn!(code = "embedded_workstation_context_path_unavailable");
+                None
+            }
+        };
         Ok((
             StateLayout {
                 root,
@@ -618,6 +670,7 @@ mod embedded {
                 jobs,
                 search,
                 staged_datasets,
+                context,
             },
             lock,
         ))
@@ -1129,6 +1182,22 @@ mod embedded {
             );
             // Second concurrent lock on the exact same state directory must fail closed.
             assert!(prepare_state_layout(&valid).is_err());
+        }
+
+        #[test]
+        fn insecure_context_path_disables_only_the_journal() {
+            let dir = tempfile::tempdir().expect("temporary root");
+            let state = dir.path().join("state");
+            ensure_private_dir(&state).expect("private state");
+            let outside = dir.path().join("untouched-context");
+            ensure_private_dir(&outside).expect("private external context");
+            std::os::unix::fs::symlink(&outside, state.join("context")).expect("context symlink");
+
+            let (layout, _lock) = prepare_state_layout(&state).expect("ordinary state opens");
+            assert!(layout.context.is_none());
+            assert!(layout.jobs.is_dir());
+            assert!(layout.surreal.is_dir());
+            assert!(!outside.join(workstation_context::DB_NAME).exists());
         }
 
         #[test]

@@ -1,6 +1,8 @@
 //! Authenticated Inbox QA admission and reads over private Embedded IPC.
 
 mod comparison;
+pub mod context;
+mod conversation;
 pub mod decision;
 mod metrics;
 mod question;
@@ -11,16 +13,21 @@ pub(crate) use triage::related_activity_request;
 
 pub use readiness::validated_summary_finding;
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use argos_osint_core::nlp;
+use argos_osint_core::nlp::conversation::Context as ConversationContext;
+use argos_osint_core::nlp::conversation::Interval;
 use argos_osint_core::storage::inbox_qa as store;
 use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::tx::TxError;
 use axum::http::StatusCode;
+use fleetworks_contracts::chat::QaEvidenceProvenance;
 use fleetworks_contracts::chat::QaMeasurement;
 use fleetworks_contracts::chat::QaMeasurementUnit;
 use fleetworks_contracts::chat::{
@@ -82,7 +89,10 @@ impl Default for CancellationToken {
 
 /// The selected Embedded companion's redacted startup observation.
 #[derive(Clone)]
-pub struct QaRuntimeAvailability(watch::Sender<Option<GenerationAvailability>>);
+pub struct QaRuntimeAvailability(
+    watch::Sender<Option<GenerationAvailability>>,
+    Option<Arc<context::Observer>>,
+);
 
 #[derive(Clone, Copy)]
 struct GenerationAvailability {
@@ -99,7 +109,7 @@ enum StartupObservation {
 
 impl Default for QaRuntimeAvailability {
     fn default() -> Self {
-        Self(watch::channel(None).0)
+        Self(watch::channel(None).0, None)
     }
 }
 
@@ -107,6 +117,46 @@ impl QaRuntimeAvailability {
     /// Report a failure or clear it after successful startup for an enablement generation.
     pub fn record(&self, generation: i64, reason: Option<QaAvailabilityReason>) {
         self.publish(generation, reason.map(StartupObservation::Failure));
+        if let Some(reason) = reason {
+            self.record_generator(
+                generation,
+                context::GeneratorState::Unavailable,
+                Some(reason),
+            );
+        }
+    }
+
+    pub(crate) fn with_context(mut self, observer: Arc<context::Observer>) -> Self {
+        self.1 = Some(observer);
+        self
+    }
+
+    /// Record a generator whose lease and ready handshake were confirmed.
+    pub fn record_resident(&self, generation: i64) {
+        self.record_generator(generation, context::GeneratorState::Ready, None);
+    }
+
+    /// Record a generator confirmed to have exited.
+    pub fn record_unloaded(&self, generation: i64) {
+        self.record_generator(generation, context::GeneratorState::Unloaded, None);
+    }
+
+    fn record_generator(
+        &self,
+        generation: i64,
+        state: context::GeneratorState,
+        reason: Option<QaAvailabilityReason>,
+    ) {
+        if self
+            .0
+            .borrow()
+            .is_some_and(|current| current.generation > generation)
+        {
+            return;
+        }
+        if let Some(observer) = &self.1 {
+            observer.record_generator(generation, state, reason);
+        }
     }
 
     /// Report progress of the current supervised worker startup attempt.
@@ -339,6 +389,7 @@ pub(crate) struct QaTarget {
     events: Arc<EventWake>,
     probes: Arc<Semaphore>,
     decision: Option<Arc<dyn decision::DecisionRuntime>>,
+    context: Option<Arc<context::Observer>>,
 }
 
 impl QaTarget {
@@ -351,11 +402,17 @@ impl QaTarget {
             events: Arc::new(EventWake::new()),
             probes: Arc::new(Semaphore::new(4)),
             decision: None,
+            context: None,
         }
     }
 
     pub(crate) fn with_decision(mut self, runtime: Arc<dyn decision::DecisionRuntime>) -> Self {
         self.decision = Some(runtime);
+        self
+    }
+
+    pub(crate) fn with_context(mut self, observer: Arc<context::Observer>) -> Self {
+        self.context = Some(observer);
         self
     }
 
@@ -433,7 +490,7 @@ impl QaTarget {
                 .readiness
                 .as_ref()
                 .ok_or_else(current_health_unavailable)?;
-            let Some((at, facts)) =
+            let Some((at, facts, checks)) =
                 workstation::qa_snapshot(state, readiness, self.search.as_ref(), boundary).await
             else {
                 return Ok(None);
@@ -454,6 +511,9 @@ impl QaTarget {
             let published = store::put_health(&state.repo, publisher, generation, &sample)
                 .await
                 .map_err(storage_error)?;
+            if let Some(observer) = self.context.as_ref().filter(|_| published) {
+                observer.record_readiness(&checks);
+            }
             Ok(published.then_some(sample))
         };
         let result = tokio::time::timeout(Duration::from_millis(3_500), observation)
@@ -799,33 +859,94 @@ pub(crate) async fn submit_request(
         return Err(generator_unavailable());
     }
     let deadline = Instant::now() + Duration::from_secs(4);
-    let follow_up = match intent {
-        Question::FollowUp | Question::StatusChecksFollowUp(..) => {
-            resolve_follow_up(state, &actor, &request, intent, deadline).await?
+    let features = nlp::Service::parse_conversation(
+        &request.question,
+        ConversationContext::utc(response_started_at_ms),
+        deadline,
+    )
+    .await;
+    let may_reuse = matches!(
+        intent,
+        Question::FollowUp
+            | Question::StatusChecksFollowUp(..)
+            | Question::ChooseSubject
+            | Question::ExplainSelected
+            | Question::Unsupported,
+    );
+    let read_previous = async {
+        if may_reuse {
+            store::last_answered_prompt(&state.repo, &actor).await
+        } else {
+            Ok(None)
         }
-        _ => None,
     };
-    let (evidence_request, intent) = if let Some(follow_up) = &follow_up {
-        require_evidence_permission(context, follow_up.intent, follow_up.request.source.as_ref())?;
-        (&follow_up.request, follow_up.intent)
-    } else {
-        (&request, intent)
+    let read_pending = async {
+        if features.status == nlp::Status::Complete && may_reuse && request.source.is_none() {
+            store::pending_clarification(&state.repo, &actor).await
+        } else {
+            Ok(None)
+        }
     };
+    let (previous, pending) = tokio::time::timeout_at(deadline, async {
+        tokio::try_join!(read_previous, read_pending)
+    })
+    .await
+    .map_err(|_| current_health_unavailable())?
+    .map_err(storage_error)?;
+    let resolved = conversation::resolve(
+        &request.question,
+        request.source.as_ref(),
+        intent,
+        &features,
+        previous.as_ref().and_then(|prompt| prompt.focus.as_ref()),
+        pending.as_ref(),
+    );
+    let mut routed_request = request.clone();
+    routed_request.source = resolved.source;
+    let historical = resolved
+        .focus
+        .as_ref()
+        .and_then(|focus| focus.temporal.as_ref());
+    let (mut intent, mut used_previous, mut observation) =
+        (resolved.intent, resolved.used_previous_exchange, None);
+    let mut status_check_follow_up = None;
+    if used_previous && historical.is_none() && resolved.pending.is_none() {
+        if let Some(previous) = &previous {
+            observation = previous.observation.clone();
+            if matches!(
+                intent,
+                Question::ContextStatus(_) | Question::ContextLogs(_) | Question::ExplainSelected
+            ) {
+                routed_request.question = previous.question.clone();
+            }
+        }
+    } else if matches!(
+        intent,
+        Question::FollowUp | Question::StatusChecksFollowUp(..)
+    ) && resolved.pending.is_none()
+    {
+        if let Some(follow_up) = resolve_follow_up(&routed_request, intent, previous) {
+            intent = follow_up.intent;
+            routed_request = follow_up.request;
+            observation = follow_up.observation;
+            used_previous = follow_up.used_previous_exchange;
+            status_check_follow_up = follow_up.status_check_follow_up;
+        }
+    }
+    require_evidence_permission(context, intent, routed_request.source.as_ref())?;
     let runtime = SnapshotRuntime {
         intent,
         generation: setting.generation,
         history_generation: setting.history_generation,
         availability,
         response_started_at_ms,
-        used_previous_exchange: follow_up
-            .as_ref()
-            .is_some_and(|turn| turn.used_previous_exchange),
-        status_check_follow_up: follow_up
-            .as_ref()
-            .and_then(|turn| turn.status_check_follow_up),
-        previous_observation: follow_up
-            .as_ref()
-            .and_then(|turn| turn.observation.as_ref()),
+        used_previous_exchange: used_previous,
+        status_check_follow_up,
+        previous_observation: observation.as_ref(),
+        historical,
+        focus: resolved.focus.as_ref(),
+        pending: resolved.pending.as_ref(),
+        parser_status: features.status,
     };
     let mut freshness_retries = 0;
     loop {
@@ -834,7 +955,7 @@ pub(crate) async fn submit_request(
             context,
             target,
             &actor,
-            evidence_request,
+            &routed_request,
             &runtime,
             deadline,
         )
@@ -928,44 +1049,32 @@ fn require_turn_evidence_permission(
     }
 }
 
-async fn resolve_follow_up(
-    state: &ApiState,
-    actor: &store::Actor,
+fn resolve_follow_up(
     request: &QaTurnRequest,
     intent: Question,
-    deadline: Instant,
-) -> Result<Option<ResolvedFollowUp>, ApiError> {
+    previous: Option<store::AnsweredPrompt>,
+) -> Option<ResolvedFollowUp> {
     let mut resolved = request.clone();
     if resolved.source.is_some() {
         if intent != Question::FollowUp {
-            return Ok(None);
+            return None;
         }
         resolved.question = "What happened?".into();
-        return Ok(Some(ResolvedFollowUp {
+        return Some(ResolvedFollowUp {
             intent: question::classify(&resolved.question),
             request: resolved,
             observation: None,
             used_previous_exchange: false,
             status_check_follow_up: None,
-        }));
+        });
     }
-    let previous =
-        tokio::time::timeout_at(deadline, store::last_answered_prompt(&state.repo, actor))
-            .await
-            .map_err(|_| current_health_unavailable())?
-            .map_err(storage_error)?;
-    let Some(previous) = previous else {
-        return Ok(None);
-    };
+    let previous = previous?;
     if let Question::StatusChecksFollowUp(selection, hinted_count) = intent {
-        let Some(summary) = previous
+        let summary = previous
             .status_check_summary
-            .filter(|_| !previous.intervening_turn)
-        else {
-            return Ok(None);
-        };
+            .filter(|_| !previous.intervening_turn)?;
         resolved.question = previous.question;
-        return Ok(Some(ResolvedFollowUp {
+        return Some(ResolvedFollowUp {
             intent: Question::StatusChecks(selection),
             request: resolved,
             observation: None,
@@ -976,7 +1085,7 @@ async fn resolve_follow_up(
                     .status_check_tally
                     .or_else(|| readiness::retained_status_check_tally(&summary)),
             }),
-        }));
+        });
     }
     let previous_intent = question::classify(&previous.question);
     let supported = match previous_intent {
@@ -995,17 +1104,17 @@ async fn resolve_follow_up(
         _ => false,
     };
     if !supported {
-        return Ok(None);
+        return None;
     }
     resolved.question = previous.question;
     resolved.source = previous.subject;
-    Ok(Some(ResolvedFollowUp {
+    Some(ResolvedFollowUp {
         intent: previous_intent,
         request: resolved,
         observation: previous.observation,
         used_previous_exchange: true,
         status_check_follow_up: None,
-    }))
+    })
 }
 
 struct ResolvedFollowUp {
@@ -1030,6 +1139,10 @@ struct SnapshotRuntime<'a> {
     used_previous_exchange: bool,
     status_check_follow_up: Option<readiness::StatusCheckFollowUp>,
     previous_observation: Option<&'a store::Observation>,
+    historical: Option<&'a Interval>,
+    focus: Option<&'a nlp::conversation::Focus>,
+    pending: Option<&'a nlp::conversation::PendingClarification>,
+    parser_status: nlp::Status,
 }
 
 fn dialogue_kind(intent: Question, has_evidence: bool, may_read_backend: bool) -> QaDialogueKind {
@@ -1067,6 +1180,12 @@ async fn snapshot(
     let boundary = terminal_boundary.max(now - 1);
     let intent = runtime.intent;
     let source = request.source.as_ref();
+    if runtime.historical.is_some() {
+        return historical_snapshot(
+            state, context, target, actor, request, runtime, boundary, deadline,
+        )
+        .await;
+    }
     let mut selected_activity = None;
     if let Some(source) = source {
         match source.kind {
@@ -1164,12 +1283,14 @@ async fn snapshot(
             reference,
             label,
             observed_at: observed_at.to_rfc3339(),
+            provenance: Some(QaEvidenceProvenance::Current),
             measurement,
             whole_passage,
         });
     };
     let mut related_activity = None;
     let mut observed_state = None;
+    let mut guidance = None;
     let mut status_check_tally = None;
     match intent {
         Question::Readiness(check) | Question::ReadinessExplanation(check) => {
@@ -1192,14 +1313,11 @@ async fn snapshot(
                 let at = chrono::DateTime::from_timestamp_millis(sample.sampled_at_ms)
                     .ok_or_else(current_health_unavailable)?;
                 observed_state = readiness::comparison_state(fact);
+                guidance = readiness::guidance(fact);
                 push(
                     reference,
                     readiness::label(fact).to_owned(),
-                    if explanation {
-                        readiness::explanation(fact)
-                    } else {
-                        readiness::answer(fact)
-                    },
+                    readiness::answer(fact),
                     at,
                     None,
                     explanation,
@@ -1387,10 +1505,11 @@ async fn snapshot(
         Question::ExplainSelected => {
             if let Some((source, fact, observed_at)) = selected_readiness {
                 observed_state = readiness::comparison_state(fact);
+                guidance = readiness::guidance(fact);
                 push(
                     source.clone(),
                     readiness::label(fact).to_owned(),
-                    readiness::explanation(fact),
+                    readiness::answer(fact),
                     observed_at,
                     None,
                     true,
@@ -1496,6 +1615,251 @@ async fn snapshot(
             status_check_tally,
             response_started_at_ms: Some(runtime.response_started_at_ms),
             used_previous_exchange: runtime.used_previous_exchange,
+            conversation: store::ConversationState {
+                focus: runtime.focus.cloned(),
+                pending: runtime.pending.cloned(),
+                parser_status: Some(runtime.parser_status),
+                guidance,
+                history_requested: false,
+            },
+        },
+    })
+}
+
+fn historical_resource(
+    intent: Question,
+    source: Option<&ChatSourceReference>,
+) -> Option<context::Resource> {
+    use context::Resource;
+    if let Some(source) = source {
+        if source.kind == ChatSourceKind::Job {
+            return Some(Resource::Job(source.id.clone()));
+        }
+        if source.kind == ChatSourceKind::Readiness {
+            return [
+                ReadinessCheckId::Gateway,
+                ReadinessCheckId::Datastore,
+                ReadinessCheckId::Jobs,
+                ReadinessCheckId::Brain,
+                ReadinessCheckId::Control,
+                ReadinessCheckId::Nlp,
+                ReadinessCheckId::Classifier,
+                ReadinessCheckId::ActorCatalog,
+                ReadinessCheckId::ActorSearch,
+                ReadinessCheckId::ClassifierInference,
+                ReadinessCheckId::ClassifierTraining,
+            ]
+            .into_iter()
+            .find(|check| check.as_str() == source.id)
+            .map(Resource::Readiness);
+        }
+        return None;
+    }
+    match intent {
+        Question::Readiness(check) | Question::ReadinessExplanation(check) => {
+            Some(Resource::Readiness(check))
+        }
+        Question::JobsSummary | Question::RunningJobList => Some(Resource::Jobs),
+        Question::Summary => Some(Resource::Backend),
+        Question::Configuration => Some(Resource::Generator),
+        _ => None,
+    }
+}
+
+async fn historical_snapshot(
+    state: &ApiState,
+    request_context: &ResolvedRequest,
+    target: &QaTarget,
+    actor: &store::Actor,
+    request: &QaTurnRequest,
+    runtime: &SnapshotRuntime<'_>,
+    boundary: i64,
+    deadline: Instant,
+) -> Result<Snapshot, ApiError> {
+    let interval = runtime.historical.ok_or_else(crate::bad)?;
+    let mut passages = Vec::new();
+    let mut sources = Vec::new();
+    let mut sampled_at_ms = None;
+    let mut guidance = None;
+    if let Some((observer, resource)) = target
+        .context
+        .as_ref()
+        .zip(historical_resource(runtime.intent, request.source.as_ref()))
+    {
+        let current_check = match &resource {
+            context::Resource::Readiness(check)
+                if interval.reference_ms.checked_add(1) == Some(interval.end_ms) =>
+            {
+                Some(*check)
+            }
+            _ => None,
+        };
+        let lookup = observer.history(
+            state,
+            request_context,
+            resource,
+            interval.start_ms,
+            interval.end_ms,
+        );
+        // A busy/unavailable journal must not consume a turn's current-read or
+        // generator budget.
+        let lookup_deadline = deadline.min(Instant::now() + Duration::from_millis(350));
+        if let Ok(Some(history)) = tokio::time::timeout_at(lookup_deadline, lookup).await {
+            sampled_at_ms = Some(history.retrieved_at_ms);
+            let index_pause = |entry: &&context::Entry| {
+                matches!(
+                    &entry.value,
+                    context::ObservationValue::Readiness {
+                        reason: Some(context::ReadinessReason::IndexIngestPaused),
+                        ..
+                    }
+                )
+            };
+            let mut selected = history.entries.iter().collect::<Vec<_>>();
+            if matches!(
+                runtime.intent,
+                Question::ReadinessExplanation(ReadinessCheckId::ActorSearch)
+            ) {
+                selected.sort_by_key(|entry| !index_pause(entry));
+            }
+            let mut distinct = HashSet::new();
+            for entry in selected {
+                if sources.len() >= 2 {
+                    break;
+                }
+                let mut text = entry.passage();
+                if !distinct.insert(text.clone()) {
+                    continue;
+                }
+                let Some(at) = chrono::DateTime::from_timestamp_millis(entry.observed_at_ms) else {
+                    continue;
+                };
+                let (reference, label) = match entry.value.resource() {
+                    context::Resource::Readiness(check) => (
+                        ChatSourceReference::new(ChatSourceKind::Readiness, check.as_str().into()),
+                        "Recorded readiness check",
+                    ),
+                    context::Resource::Job(id) => (
+                        ChatSourceReference::new(ChatSourceKind::Job, id),
+                        "Recorded job status",
+                    ),
+                    context::Resource::Backend => (
+                        ChatSourceReference::new(ChatSourceKind::Readiness, "gateway".into()),
+                        "Recorded backend state",
+                    ),
+                    context::Resource::Generator => (
+                        ChatSourceReference::new(
+                            ChatSourceKind::Readiness,
+                            "inbox_generator".into(),
+                        ),
+                        "Recorded generator state",
+                    ),
+                    _ => continue,
+                };
+                let (Ok(reference), Ok(sequence)) = (reference, u64::try_from(entry.sequence))
+                else {
+                    continue;
+                };
+                let opaque_id = format!("passage-{}", passages.len());
+                if passages.is_empty() && history.incomplete {
+                    text.push_str(" Local coverage for this interval is incomplete.");
+                }
+                passages.push(QaPassage::new(opaque_id.clone(), text));
+                sources.push(store::Source {
+                    opaque_id,
+                    reference,
+                    label: label.into(),
+                    observed_at: at.to_rfc3339(),
+                    provenance: Some(QaEvidenceProvenance::Historical {
+                        sequence,
+                        coverage_start_ms: history.coverage_started_at_ms,
+                        has_gaps: history.incomplete,
+                    }),
+                    measurement: None,
+                    whole_passage: false,
+                });
+            }
+            if history.entries.iter().any(|entry| index_pause(&entry)) {
+                guidance = Some(fleetworks_contracts::qa_worker::QaGuidance::CheckResourceUsage);
+            }
+            // A since/until-now request can include a single fresh reading when
+            // one is independently available for the same authorized subject.
+            if let Some(check) = current_check.filter(|_| !sources.is_empty()) {
+                let current = target.observe(
+                    state,
+                    runtime.generation,
+                    boundary.max(interval.reference_ms - 1),
+                    true,
+                );
+                let read_deadline = deadline.min(Instant::now() + Duration::from_millis(600));
+                if let Ok(Ok(Some(sample))) = tokio::time::timeout_at(read_deadline, current).await
+                {
+                    if let Some((fact, at)) = sample
+                        .facts
+                        .iter()
+                        .find(|fact| fact.id == check.as_str())
+                        .zip(chrono::DateTime::from_timestamp_millis(
+                            sample.sampled_at_ms,
+                        ))
+                    {
+                        let opaque_id = format!("passage-{}", passages.len());
+                        let reference = ChatSourceReference::new(
+                            ChatSourceKind::Readiness,
+                            check.as_str().into(),
+                        )
+                        .map_err(|_| crate::bad())?;
+                        passages.push(QaPassage::new(opaque_id.clone(), readiness::answer(fact)));
+                        sources.push(store::Source {
+                            opaque_id,
+                            reference,
+                            label: readiness::label(fact).into(),
+                            observed_at: at.to_rfc3339(),
+                            provenance: Some(QaEvidenceProvenance::Current),
+                            measurement: None,
+                            whole_passage: false,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let kind = dialogue_kind(
+        runtime.intent,
+        !passages.is_empty(),
+        request_context.permits(Permission::ReadBackend),
+    );
+    let turn_id = store::accepted_turn_id(actor, request, runtime.history_generation)
+        .map_err(storage_error)?;
+    let mut worker_request =
+        QaWorkerRequest::new(turn_id.clone(), turn_id, request.question.clone(), passages);
+    worker_request.dialogue = Some(QaWorkerDialogue {
+        kind,
+        history: Vec::new(),
+    });
+    let sampled_at_ms = match sampled_at_ms.filter(|at| *at > boundary) {
+        Some(at) => at,
+        None => observation_start(boundary).await.timestamp_millis(),
+    };
+    Ok(Snapshot {
+        evidence: store::FrozenEvidence {
+            request: worker_request,
+            sources,
+            sampled_at_ms,
+        },
+        metadata: store::AdmissionMetadata {
+            subject: request.source.clone(),
+            observation: None,
+            related_activity: None,
+            status_check_tally: None,
+            used_previous_exchange: runtime.used_previous_exchange,
+            response_started_at_ms: Some(runtime.response_started_at_ms),
+            conversation: store::ConversationState {
+                focus: runtime.focus.cloned(),
+                pending: runtime.pending.cloned(),
+                parser_status: Some(runtime.parser_status),
+                guidance,
+                history_requested: true,
+            },
         },
     })
 }

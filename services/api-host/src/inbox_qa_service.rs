@@ -3,9 +3,12 @@
 use std::collections::BTreeMap;
 use std::future::poll_fn;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+use argos_osint_api::inbox_qa::decision;
+use argos_osint_api::inbox_qa::decision::DecisionRuntime;
 use argos_osint_api::inbox_qa::{
     validated_summary_finding, CancellationToken, QaInference, QaRuntimeAvailability,
 };
@@ -15,11 +18,13 @@ use argos_osint_core::storage::job_dispatch::{
 };
 use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::tx::TxError;
-use chrono::DateTime;
 use chrono::Utc;
+use fleetworks_contracts::chat::QaEvidenceProvenance;
 use fleetworks_contracts::chat::QaGeneratorPreference;
 use fleetworks_contracts::chat::QaModelTarget;
-use fleetworks_contracts::chat::{QaAvailabilityReason, QaFinding, QaStartupStage, QaTurnState};
+use fleetworks_contracts::chat::{
+    QaAvailabilityReason, QaFinding, QaStartupStage, QaTurnLimitation, QaTurnState,
+};
 use fleetworks_contracts::qa_worker::{
     verified_operational_sources, QaContextUsage, QaDialogueKind, QaWorkerEvent, QaWorkerOutcome,
     QaWorkerSequence,
@@ -50,6 +55,8 @@ struct Executor {
     placement: String,
     availability: Option<QaRuntimeAvailability>,
     replica_lease: ReplicaLease,
+    resident_generation: Option<i64>,
+    decision: Arc<dyn DecisionRuntime>,
 }
 
 #[derive(Default)]
@@ -95,6 +102,7 @@ pub(crate) async fn run(
     model: QaWorkerSupervisor,
     placement: String,
     availability: Option<QaRuntimeAvailability>,
+    decision: Arc<dyn DecisionRuntime>,
     signal: impl Future<Output = ()>,
 ) -> Result<()> {
     let mut executor = Executor {
@@ -105,6 +113,8 @@ pub(crate) async fn run(
         placement,
         availability,
         replica_lease: ReplicaLease::default(),
+        resident_generation: None,
+        decision,
     };
     let stop = CancellationToken::new();
     let result = {
@@ -224,7 +234,11 @@ impl Executor {
                             .await
                         {
                             loaded = Some(setting.generation);
+                            self.resident_generation = loaded;
                             self.record_availability(setting.generation, None);
+                            if let Some(availability) = &self.availability {
+                                availability.record_resident(setting.generation);
+                            }
                             tracing::info!(qa_replica_stage = "ready", "Inbox QA replica ready");
                         } else {
                             if let Some(availability) = &self.availability {
@@ -426,6 +440,16 @@ impl Executor {
                 store::forget_replica(&self.repo, &self.placement, &self.owner),
             )
             .await;
+        if matches!(self.replica_lease, ReplicaLease::Claimed) {
+            return;
+        }
+        if let Some((generation, availability)) = self
+            .resident_generation
+            .take()
+            .zip(self.availability.as_ref())
+        {
+            availability.record_unloaded(generation);
+        }
     }
 
     async fn relay(&self) -> Result<()> {
@@ -486,7 +510,7 @@ impl Executor {
             }
             DeliveryClaim::Claimed(lease) => lease,
         };
-        let evidence = match timeout(AUTH_TIMEOUT, store::start(&self.repo, &lease)).await {
+        let mut evidence = match timeout(AUTH_TIMEOUT, store::start(&self.repo, &lease)).await {
             Ok(Ok(Some(evidence))) => evidence,
             Ok(Ok(None)) => {
                 tracing::debug!(
@@ -518,9 +542,13 @@ impl Executor {
                 return Err(error.into());
             }
         };
-        let result = self
-            .infer(&evidence, &lease, &delivery, generation, stop)
-            .await;
+        let result = match self.prepare(&mut evidence, &lease, stop).await {
+            RunResult::More => {
+                self.infer(&evidence, &lease, &delivery, generation, stop)
+                    .await
+            }
+            result => result,
+        };
         let (outcome, keep_warm) = match result {
             RunResult::Completed => (
                 DeliveryOutcome::Complete {
@@ -697,6 +725,64 @@ impl Executor {
         result
     }
 
+    async fn prepare(
+        &self,
+        evidence: &mut FrozenEvidence,
+        lease: &DeliveryLease,
+        stop: &CancellationToken,
+    ) -> RunResult {
+        let budget = inference_budget(evidence, Utc::now().timestamp_millis());
+        let prepare = async {
+            let Some(context) = store::begin_planning(&self.repo, lease).await? else {
+                return Ok(RunResult::Fenced);
+            };
+            let mut plan =
+                decision::select_response_plan(Some(self.decision.as_ref()), evidence, &context)
+                    .await;
+            plan.negotiated = self.model.response_plan_supported().await;
+            if plan.requires_worker_support && !plan.negotiated {
+                return Ok(
+                    if store::publish_unavailable(
+                        &self.repo,
+                        lease,
+                        QaTurnLimitation::CapabilityUnavailable,
+                    )
+                    .await?
+                    {
+                        RunResult::Completed
+                    } else {
+                        RunResult::Fenced
+                    },
+                );
+            }
+            let request = plan
+                .request(evidence)
+                .ok_or_else(|| anyhow!("approved plan evidence is unavailable"))?;
+            if !store::accept_plan(&self.repo, lease, &plan).await? {
+                return Ok(RunResult::Fenced);
+            }
+            evidence.request = request;
+            Ok::<_, anyhow::Error>(RunResult::More)
+        };
+        tokio::select! {
+            biased;
+            () = stop.cancelled() => RunResult::Stopped,
+            result = timeout(budget.min(AUTH_TIMEOUT), prepare) => {
+                match result {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(_)) => {
+                        tracing::warn!(qa_turn_stage = "plan_error", "Inbox QA response preparation failed");
+                        RunResult::Error
+                    }
+                    Err(_) => {
+                        tracing::warn!(qa_turn_stage = "plan_timeout", "Inbox QA response preparation exceeded its budget");
+                        RunResult::Error
+                    }
+                }
+            }
+        }
+    }
+
     async fn renew(
         &self,
         lease: &DeliveryLease,
@@ -736,11 +822,11 @@ fn cited_finding(
         .find(|source| source.opaque_id == source_id)
         .ok_or_else(|| anyhow!("unknown Inbox QA source"))?;
     if !observation_is_fresh(evidence.sampled_at_ms, now_ms)
-        || !source_observation_is_valid(source, evidence.sampled_at_ms, now_ms)
+        || !source.observation_is_valid(evidence.sampled_at_ms, now_ms)
     {
         return Ok(None);
     }
-    if !source.whole_passage {
+    if !source.whole_passage || evidence.request.plan.is_some() {
         return Ok(Some(source.finding(text, start, end)));
     }
     let passage = evidence
@@ -779,20 +865,29 @@ fn inference_budget(evidence: &FrozenEvidence, now_ms: i64) -> Duration {
     Duration::from_millis(deadline.saturating_sub(now_ms).max(0) as u64)
 }
 
-fn source_observation_is_valid(source: &store::Source, sampled_at_ms: i64, now_ms: i64) -> bool {
-    DateTime::parse_from_rfc3339(&source.observed_at).is_ok_and(|at| {
-        let observed_ms = at.timestamp_millis();
-        if source.label == store::PREVIOUS_OBSERVATION_LABEL {
-            // Only a resolved recheck can contribute this explicitly historical source.
-            observed_ms < sampled_at_ms
-        } else {
-            observation_is_fresh(observed_ms, now_ms)
-        }
-    })
+fn requires_complete_snapshot(evidence: &FrozenEvidence) -> bool {
+    is_operational(evidence)
+        && evidence.request.plan.is_none()
+        && evidence.sources.len() > 1
+        && evidence.sources.iter().any(|source| !source.whole_passage)
 }
 
-fn requires_complete_snapshot(evidence: &FrozenEvidence) -> bool {
-    is_operational(evidence) && evidence.sources.iter().any(|source| !source.whole_passage)
+fn defer_findings(evidence: &FrozenEvidence) -> bool {
+    requires_complete_snapshot(evidence)
+        || evidence
+            .request
+            .plan
+            .as_ref()
+            .is_some_and(|plan| plan.required_passages.len() > 1)
+        || evidence.sources.iter().any(|source| {
+            matches!(
+                source.provenance,
+                Some(
+                    QaEvidenceProvenance::PreviousObservation
+                        | QaEvidenceProvenance::Historical { .. }
+                )
+            )
+        })
 }
 
 struct Publication {
@@ -817,7 +912,7 @@ impl Publication {
         reply: Option<String>,
         now_ms: i64,
     ) -> Option<(String, Vec<QaFinding>)> {
-        if !context.is_some_and(|usage| usage.model_windows > 0) {
+        if context.is_none_or(|usage| usage.model_windows == 0) {
             return None;
         }
         let reply = reply?;
@@ -832,6 +927,7 @@ impl Publication {
         if complete && selected.len() != evidence.sources.len() {
             return None;
         }
+        let deferred = defer_findings(evidence);
         let mut findings = Vec::new();
         for passage in selected {
             let finding = self.cited.get(&passage.source_id)?;
@@ -839,10 +935,10 @@ impl Publication {
                 .sources
                 .iter()
                 .find(|source| source.opaque_id == passage.source_id)?;
-            if !source_observation_is_valid(source, evidence.sampled_at_ms, now_ms) {
+            if !source.observation_is_valid(evidence.sampled_at_ms, now_ms) {
                 return None;
             }
-            if complete {
+            if deferred {
                 findings.push(finding.clone());
             }
         }
@@ -860,7 +956,7 @@ impl Publication {
         let (state, context, reply, findings) = match event {
             QaWorkerEvent::Delta { text, .. } => {
                 if is_operational(evidence)
-                    && (requires_complete_snapshot(evidence)
+                    && (defer_findings(evidence)
                         || !observation_is_fresh(
                             evidence.sampled_at_ms,
                             Utc::now().timestamp_millis(),
@@ -892,8 +988,9 @@ impl Publication {
                 else {
                     return Ok(RunResult::More);
                 };
-                // Grouped facts and comparisons retain the generator’s selected order.
-                if !requires_complete_snapshot(evidence)
+                // Independent current facts can appear while the rest of the reply is pending.
+                // Grouped and historical facts stay together under the terminal lease fence.
+                if !defer_findings(evidence)
                     && !store::publish(repo, lease, QaTurnState::Running, Some(finding.clone()))
                         .await?
                 {
@@ -925,6 +1022,21 @@ impl Publication {
                     QaWorkerOutcome::InsufficientContext => {
                         (QaTurnState::InsufficientContext, None, Vec::new())
                     }
+                    QaWorkerOutcome::InputTooLarge => {
+                        return Ok(
+                            if store::publish_unavailable(
+                                repo,
+                                lease,
+                                QaTurnLimitation::QuestionTooLong,
+                            )
+                            .await?
+                            {
+                                RunResult::Completed
+                            } else {
+                                RunResult::Fenced
+                            },
+                        );
+                    }
                     QaWorkerOutcome::Failed => (QaTurnState::Failed, None, Vec::new()),
                     QaWorkerOutcome::Cancelled => (QaTurnState::Canceled, None, Vec::new()),
                     _ => return Err(anyhow!("unsupported Inbox QA outcome")),
@@ -951,12 +1063,15 @@ impl Publication {
 
 #[cfg(test)]
 mod tests {
+    use chrono::DateTime;
     use fleetworks_contracts::chat::ChatSourceKind;
     use fleetworks_contracts::chat::ChatSourceReference;
     use fleetworks_contracts::chat::QaMeasurement;
     use fleetworks_contracts::chat::QaMeasurementUnit;
+    use fleetworks_contracts::qa_worker::QaGuidance;
     use fleetworks_contracts::qa_worker::QaPassage;
     use fleetworks_contracts::qa_worker::QaWorkerDialogue;
+    use fleetworks_contracts::qa_worker::QaWorkerPlan;
     use fleetworks_contracts::qa_worker::QaWorkerRequest;
 
     use super::*;
@@ -1012,6 +1127,7 @@ mod tests {
             observed_at: DateTime::from_timestamp_millis(observed_at)
                 .unwrap()
                 .to_rfc3339(),
+            provenance: (id == "prior").then_some(QaEvidenceProvenance::PreviousObservation),
             measurement: Some(QaMeasurement::new(
                 value,
                 QaMeasurementUnit::PercentTenths,
@@ -1043,6 +1159,7 @@ mod tests {
             ],
             sampled_at_ms: now,
         };
+        assert!(defer_findings(&evidence));
         let target = QaModelTarget::default();
         let context = Some(QaContextUsage::new(target.input_tokens(), 100, 1));
         let reply = || {
@@ -1086,9 +1203,85 @@ mod tests {
         assert!(publication
             .accepted_reply(&evidence, context, reply(), 15_001)
             .is_none());
-        evidence.sources[1].label = "API host memory usage".into();
+        evidence.sources[1].provenance = Some(QaEvidenceProvenance::Current);
         assert!(publication
             .accepted_reply(&evidence, context, reply(), now)
             .is_none());
+    }
+
+    #[test]
+    fn planned_history_retains_observation_time_and_excludes_guidance_from_citations() {
+        let now = 20_000;
+        let observed = 1_500;
+        let observed_at = DateTime::from_timestamp_millis(observed)
+            .unwrap()
+            .to_rfc3339();
+        let mut request = QaWorkerRequest::new(
+            "turn".into(),
+            "snapshot".into(),
+            "When was memory last observed?".into(),
+            vec![QaPassage::new("past".into(), "Memory was 56%.".into())],
+        );
+        request.dialogue = Some(QaWorkerDialogue {
+            kind: QaDialogueKind::Operational,
+            history: vec![],
+        });
+        let guidance = QaGuidance::CheckResourceUsage;
+        request.plan = Some(QaWorkerPlan::new(
+            "memory usage".into(),
+            "Present the historical reading and offer the approved resource check.".into(),
+            vec!["past".into()],
+            Some(guidance),
+        ));
+        let provenance = QaEvidenceProvenance::Historical {
+            sequence: 12,
+            coverage_start_ms: 1_000,
+            has_gaps: true,
+        };
+        let mut evidence = FrozenEvidence {
+            request,
+            sources: vec![store::Source {
+                opaque_id: "past".into(),
+                reference: ChatSourceReference::new(ChatSourceKind::HostMetric, "memory".into())
+                    .unwrap(),
+                label: "Historical memory reading".into(),
+                observed_at: observed_at.clone(),
+                provenance: Some(provenance),
+                measurement: None,
+                whole_passage: false,
+            }],
+            sampled_at_ms: now,
+        };
+        assert!(defer_findings(&evidence));
+        let target = QaModelTarget::default();
+        let mut publication = Publication::new(target);
+        let text = evidence.request.passages[0].text.clone();
+        let end = u32::try_from(text.chars().count()).unwrap();
+        let citation = cited_finding(&evidence, "past", 0, end, text.clone(), now)
+            .unwrap()
+            .unwrap();
+        publication.cited.insert("past".into(), citation);
+        let usage = Some(QaContextUsage::new(target.input_tokens(), 75, 1));
+        let reply = format!("{text} {}", guidance.text());
+        let (_, findings) = publication
+            .accepted_reply(&evidence, usage, Some(reply.clone()), now)
+            .unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].text, text);
+        assert_eq!(findings[0].observed_at, observed_at);
+        assert_eq!(findings[0].provenance, Some(provenance));
+        assert!(publication
+            .accepted_reply(&evidence, usage, Some(text), now)
+            .is_none());
+        assert!(publication
+            .accepted_reply(&evidence, usage, Some(reply), now + 5_001)
+            .is_none());
+
+        evidence.sources[0].provenance = Some(QaEvidenceProvenance::Current);
+        evidence.sources[0].observed_at =
+            DateTime::from_timestamp_millis(now).unwrap().to_rfc3339();
+        assert!(!defer_findings(&evidence));
+        evidence.request.plan = None;
+        assert!(!defer_findings(&evidence));
     }
 }

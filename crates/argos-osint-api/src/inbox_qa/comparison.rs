@@ -5,6 +5,7 @@ use argos_osint_core::storage::inbox_qa::ObservationValue;
 use argos_osint_core::storage::inbox_qa::Source;
 use argos_osint_core::storage::inbox_qa::PREVIOUS_OBSERVATION_LABEL;
 use chrono::DateTime;
+use fleetworks_contracts::chat::QaEvidenceProvenance;
 use fleetworks_contracts::chat::QaMeasurement;
 use fleetworks_contracts::chat::QaMeasurementUnit;
 use fleetworks_contracts::chat::QA_MAX_WORDS;
@@ -50,6 +51,7 @@ pub(super) fn append(
         reference: previous.source.clone(),
         label: PREVIOUS_OBSERVATION_LABEL.into(),
         observed_at: previous.observed_at.clone(),
+        provenance: Some(QaEvidenceProvenance::PreviousObservation),
         measurement,
         whole_passage: false,
     });

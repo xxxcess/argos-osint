@@ -589,6 +589,12 @@ pub struct QaTurn {
     pub turn_id: String,
     pub request_id: String,
     pub question: String,
+    /// The backend admission time in UTC Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_at: Option<i64>,
+    /// The terminal transition time in UTC Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<i64>,
     pub state: QaTurnState,
     pub findings: Vec<QaFinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -629,6 +635,8 @@ impl QaTurn {
             turn_id,
             request_id,
             question,
+            accepted_at: None,
+            completed_at: None,
             state: QaTurnState::Queued,
             findings: Vec::new(),
             notice: None,

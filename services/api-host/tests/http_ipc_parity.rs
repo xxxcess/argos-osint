@@ -1554,6 +1554,10 @@ async fn run_shared_flow(
         .expect("valid scoped count question");
         let answered = client.submit_qa_turn(&count).await.expect("direct answer");
         assert_eq!(answered.state, QaTurnState::Answered);
+        assert!(answered
+            .accepted_at
+            .zip(answered.completed_at)
+            .is_some_and(|(accepted, completed)| accepted <= completed));
         assert_eq!(answered.findings.len(), 1);
         assert_eq!(answered.findings[0].source.kind, ChatSourceKind::JobCount);
         let usage = answered.context.expect("direct answer context usage");
@@ -1578,6 +1582,14 @@ async fn run_shared_flow(
         assert_eq!(
             client.latest_qa_turn().await.expect("read latest QA"),
             Some(answered.clone())
+        );
+        assert_eq!(
+            client
+                .qa_events(&QaEventQuery::new(answered.turn_id.clone(), 0, 0))
+                .await
+                .expect("read canonical turn in the event page")
+                .turn,
+            answered,
         );
         let explain = QaTurnRequest::new(
             format!("parity-explain-job-{transport}"),

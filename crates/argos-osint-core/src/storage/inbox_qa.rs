@@ -356,6 +356,7 @@ struct ExchangeRow {
     generation: i64,
     owner: String,
     active: bool,
+    accepted_at: i64,
     completed_at: i64,
     payload: String,
 }
@@ -411,8 +412,16 @@ fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
 
-fn decode(payload: &str) -> Result<Exchange, TxError> {
-    serde_json::from_str(payload).map_err(|_| abort("invalid_store"))
+impl ExchangeRow {
+    fn decode(&self) -> Result<Exchange, TxError> {
+        let mut exchange: Exchange =
+            serde_json::from_str(&self.payload).map_err(|_| abort("invalid_store"))?;
+        // Use row metadata so transcripts retained from earlier versions have the same times.
+        exchange.turn.accepted_at = Some(self.accepted_at.div_euclid(1_000));
+        exchange.turn.completed_at = (exchange.turn.state.is_terminal() && self.completed_at > 0)
+            .then(|| self.completed_at.div_euclid(1_000));
+        Ok(exchange)
+    }
 }
 
 async fn settings_row(tx: &Tx) -> Result<SettingsRow, TxError> {
@@ -637,7 +646,7 @@ async fn seal_replaced_generator_in(tx: &Tx) -> Result<(), TxError> {
     let active = jobs::take::<Vec<String>>(&mut response, 0)?;
     for id in &active {
         if let Some(row) = exchange_in(tx, id).await? {
-            let mut exchange = decode(&row.payload)?;
+            let mut exchange = row.decode()?;
             exchange.turn.findings.clear();
             exchange.turn.related_activity = None;
             exchange.events.clear();
@@ -803,7 +812,7 @@ pub fn accepted_turn_id(
 async fn exchange_in(tx: &Tx, turn_id: &str) -> Result<Option<ExchangeRow>, TxError> {
     let mut reply = jobs::run(
         tx,
-        tx.query("SELECT generation,owner,active,completed_at,payload FROM ONLY $turn")
+        tx.query("SELECT generation,owner,active,accepted_at,completed_at,payload FROM ONLY $turn")
             .bind(("turn", jobs::rid("inbox_qa_exchange", turn_id))),
     )
     .await?;
@@ -839,7 +848,7 @@ pub async fn replay(
             {
                 return Ok(None);
             }
-            let exchange = decode(&row.payload)?;
+            let exchange = row.decode()?;
             if !matching_request(&exchange, request) {
                 return Err(abort("id_conflict"));
             }
@@ -950,7 +959,7 @@ async fn recent_completed_in(
     let mut reply = jobs::run(
         tx,
         tx.query(
-            "SELECT generation,owner,active,completed_at,payload FROM inbox_qa_exchange
+            "SELECT generation,owner,active,accepted_at,completed_at,payload FROM inbox_qa_exchange
          WHERE owner=$owner AND generation=$generation AND active=false AND completed_at>$cutoff
          ORDER BY completed_at DESC, accepted_at DESC, id DESC LIMIT $limit;",
         )
@@ -972,7 +981,7 @@ async fn recent_dialogue_in(
     let retained = recent_completed_in(tx, owner, generation, now, MAX_PER_REGISTRATION).await?;
     let mut history = Vec::with_capacity(QA_MAX_DIALOGUE_HISTORY);
     for row in retained {
-        let exchange = decode(&row.payload)?;
+        let exchange = row.decode()?;
         // Keep private job and cycle observations outside the model history.
         if exchange.subject().is_some_and(private_subject)
             || exchange.turn.findings.iter().any(|finding| {
@@ -1043,7 +1052,7 @@ pub async fn admit(
                 if row.owner != *key || row.generation != generation {
                     return Err(abort("id_conflict"));
                 }
-                let exchange = decode(&row.payload)?;
+                let exchange = row.decode()?;
                 if !matching_request(&exchange, request) {
                     return Err(abort("id_conflict"));
                 }
@@ -1109,6 +1118,7 @@ pub async fn admit(
                 observation: metadata.observation.clone(),
                 generator_generation: Some(state.generation),
             };
+            exchange.turn.accepted_at = Some(timestamp.div_euclid(1_000));
             exchange.turn.related_activity = metadata.related_activity.clone();
             let payload = serde_json::to_string(&exchange).map_err(|_| abort("invalid_store"))?;
             jobs::run(&tx, tx.query(
@@ -1197,7 +1207,7 @@ pub async fn history(repo: &Repository, actor: &Actor) -> Result<Vec<QaTurn>, Tx
             .await?;
             let exchanges: Vec<Exchange> = rows
                 .into_iter()
-                .map(|row| decode(&row.payload))
+                .map(|row| row.decode())
                 .collect::<Result<_, _>>()?;
             let subjects: BTreeSet<&str> = exchanges
                 .iter()
@@ -1260,7 +1270,7 @@ pub async fn last_answered_prompt(
             )
             .await?
             {
-                let exchange = decode(&row.payload)?;
+                let exchange = row.decode()?;
                 if exchange.turn.state == QaTurnState::Answered
                     && !exchange.turn.findings.is_empty()
                 {
@@ -1304,7 +1314,7 @@ async fn latest_exchange(repo: &Repository, actor: &Actor) -> Result<Option<Exch
             let Some(row) = exchange_in(&tx, &turn_id).await? else {
                 return Ok(None);
             };
-            let exchange = decode(&row.payload)?;
+            let exchange = row.decode()?;
             if !subject_visible_in(&tx, actor, exchange.subject()).await? {
                 return Ok(None);
             }
@@ -1379,10 +1389,11 @@ async fn persist_events_in(
     tx: &Tx,
     owner: &str,
     generation: i64,
-    exchange: &Exchange,
+    exchange: &mut Exchange,
 ) -> Result<(), TxError> {
     let terminal = exchange.turn.state.is_terminal();
     let at = if terminal { now_ms() } else { 0 };
+    exchange.turn.completed_at = terminal.then(|| at.div_euclid(1_000));
     let payload = serde_json::to_string(exchange).map_err(|_| abort("invalid_store"))?;
     jobs::run(
         tx,
@@ -1432,7 +1443,7 @@ pub async fn cancel(repo: &Repository, actor: &Actor, id: &str) -> Result<QaTurn
                         && row.owner == *owner
                 })
                 .ok_or_else(|| abort("missing"))?;
-            let mut exchange = decode(&row.payload)?;
+            let mut exchange = row.decode()?;
             if !subject_visible_in(&tx, actor, exchange.subject()).await? {
                 return Err(abort("missing"));
             }
@@ -1477,7 +1488,7 @@ async fn live_exchange_in(
     {
         return Ok(None);
     }
-    let mut exchange = decode(&row.payload)?;
+    let mut exchange = row.decode()?;
     if exchange.generator_generation.unwrap_or(row.generation) != state.generation {
         return Ok(None);
     }
@@ -1907,7 +1918,7 @@ pub async fn cleanup(repo: &Repository) -> Result<(), TxError> {
         let mut retire = Vec::new();
         for id in jobs::take::<Vec<String>>(&mut expired, 0)? {
             if let Some(row) = exchange_in(&tx, &id).await?.filter(|row| row.active) {
-                let mut exchange = decode(&row.payload)?;
+                let mut exchange = row.decode()?;
                 append_in(&tx, &row.owner, row.generation, &mut exchange, QaTurnState::Failed, None).await?;
                 retire.push(id);
             }

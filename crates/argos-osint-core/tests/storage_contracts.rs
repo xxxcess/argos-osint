@@ -664,7 +664,8 @@ async fn qa_fallback_seals_all_findings_atomically_under_the_live_lease() {
     )
     .await
     .unwrap();
-    let (_, lease) = start_qa_fixture(&repo, &actor, &context, enabled, "fallback-batch").await;
+    let (request, lease) =
+        start_qa_fixture(&repo, &actor, &context, enabled, "fallback-batch").await;
     let evidence = qa::start(&repo, &lease).await.unwrap().unwrap();
     let findings: Vec<_> = evidence
         .request
@@ -691,6 +692,9 @@ async fn qa_fallback_seals_all_findings_atomically_under_the_live_lease() {
     let (running, _) = qa::latest(&repo, &actor).await.unwrap().unwrap();
     assert_eq!(running.state, QaTurnState::Running);
     assert_eq!(running.cursor, before.cursor);
+    assert!(running.accepted_at.is_some());
+    assert_eq!(running.accepted_at, before.accepted_at);
+    assert!(running.completed_at.is_none());
     assert!(running.findings.is_empty());
     assert!(
         qa::history(&repo, &actor).await.unwrap().is_empty(),
@@ -721,11 +725,49 @@ async fn qa_fallback_seals_all_findings_atomically_under_the_live_lease() {
         qa::history(&repo, &other).await.unwrap().is_empty(),
         "Another registration cannot read the terminal exchange",
     );
-    let turn_id = answered.turn_id.clone();
+    let turn = surrealdb::types::RecordId::new("inbox_qa_exchange", answered.turn_id.clone());
+    let mut stored = repo
+        .db()
+        .query(
+            "SELECT VALUE accepted_at FROM ONLY $turn;
+             SELECT VALUE completed_at FROM ONLY $turn;
+             SELECT VALUE payload FROM ONLY $turn;",
+        )
+        .bind(("turn", turn.clone()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let accepted_at = stored.take::<Option<i64>>(0).unwrap().unwrap();
+    let completed_at = stored.take::<Option<i64>>(1).unwrap().unwrap();
+    assert_eq!(answered.accepted_at, Some(accepted_at.div_euclid(1_000)));
+    assert_eq!(answered.accepted_at, running.accepted_at);
+    assert_eq!(answered.completed_at, Some(completed_at.div_euclid(1_000)));
+    let payload = stored.take::<Option<String>>(2).unwrap().unwrap();
+    let mut legacy: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    let legacy_turn = legacy["turn"].as_object_mut().unwrap();
+    legacy_turn.remove("accepted_at");
+    legacy_turn.remove("completed_at");
+    repo.db()
+        .query("UPDATE $turn SET payload=$legacy RETURN NONE")
+        .bind(("turn", turn.clone()))
+        .bind(("legacy", legacy.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(
+        qa::replay(&repo, &actor, &request).await.unwrap(),
+        Some(answered.clone()),
+    );
+    assert_eq!(
+        qa::latest(&repo, &actor).await.unwrap().unwrap().0,
+        answered
+    );
     assert_eq!(
         qa::history(&repo, &actor).await.unwrap(),
         vec![answered],
-        "History exposes the sealed current exchange",
+        "History exposes the sealed exchange and its timestamps even with a legacy payload",
     );
     assert!(!qa::publish_findings_and_complete(
         &repo,
@@ -739,10 +781,7 @@ async fn qa_fallback_seals_all_findings_atomically_under_the_live_lease() {
     // Exercise the retention filter before the asynchronous reaper removes this row.
     repo.db()
         .query("UPDATE $turn SET completed_at=$expired RETURN NONE")
-        .bind((
-            "turn",
-            surrealdb::types::RecordId::new("inbox_qa_exchange", turn_id),
-        ))
+        .bind(("turn", turn))
         .bind((
             "expired",
             chrono::Utc::now().timestamp_millis() - 16 * 60_000,

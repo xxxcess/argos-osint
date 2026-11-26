@@ -21,12 +21,16 @@ use super::MAX_INPUT_BYTES;
 pub const QA_SETTINGS_PATH: &str = "/api/v2/workstation/chat/settings";
 pub const QA_TURNS_PATH: &str = "/api/v2/workstation/chat/turns";
 pub const QA_LATEST_PATH: &str = "/api/v2/workstation/chat/latest";
+/// Read retained terminal exchanges over private Embedded IPC.
+pub const QA_HISTORY_PATH: &str = "/api/v2/workstation/chat/history";
 pub const QA_EVENTS_PATH: &str = "/api/v2/workstation/chat/events";
 pub const QA_CANCEL_PATH: &str = "/api/v2/workstation/chat/cancel";
 /// Embedded capability for direct Assistant answers and inline triage.
 pub const QA_TRIAGE_FEATURE: &str = "inbox-qa-triage-v1";
 /// Embedded capability for independently revisioned generator and decision preferences.
 pub const QA_MODEL_SETTINGS_FEATURE: &str = "inbox-qa-model-settings-v1";
+/// Embedded capability for browsing a registration's retained Inbox exchanges.
+pub const QA_HISTORY_FEATURE: &str = "inbox-qa-history-v1";
 /// Read-only related activity lookup over private Embedded IPC.
 pub const QA_RELATED_ACTIVITY_PATH: &str = "/api/v2/workstation/chat/related-activity";
 
@@ -37,6 +41,8 @@ pub const QA_EVIDENCE_VERSION: &str = "1";
 /// The Inbox displays at most three independent findings across at most 60 words.
 pub const QA_MAX_FINDINGS: usize = 3;
 pub const QA_MAX_WORDS: usize = 60;
+/// Maximum number of exchanges retained per registration.
+pub const QA_MAX_RETAINED_TURNS: usize = 16;
 
 /// The selected backend's inference lifecycle.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -576,7 +582,7 @@ impl QaFinding {
     }
 }
 
-/// The authoritative latest exchange and its highest committed event sequence.
+/// The authoritative exchange and its highest committed event sequence.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct QaTurn {

@@ -44,6 +44,7 @@ use crate::chat::QaTurnRequest;
 use crate::chat::CHAT_TURNS_PATH;
 use crate::chat::QA_CANCEL_PATH;
 use crate::chat::QA_EVENTS_PATH;
+use crate::chat::QA_HISTORY_PATH;
 use crate::chat::QA_LATEST_PATH;
 use crate::chat::QA_RELATED_ACTIVITY_PATH;
 use crate::chat::QA_SETTINGS_PATH;
@@ -726,6 +727,7 @@ pub enum IpcOperation {
     QaTurnSubmit(QaTurnRequest),
     QaRelatedActivity(QaRelatedActivityRequest),
     QaLatest,
+    QaHistory,
     QaEvents(QaEventQuery),
     QaCancel(QaCancelRequest),
     ModelRoleSet(ModelRoleSetRequest),
@@ -814,6 +816,7 @@ impl fmt::Debug for IpcOperation {
             Self::QaTurnSubmit(_) => f.write_str("QaTurnSubmit(..)"),
             Self::QaRelatedActivity(_) => f.write_str("QaRelatedActivity(..)"),
             Self::QaLatest => f.write_str("QaLatest"),
+            Self::QaHistory => f.write_str("QaHistory"),
             Self::QaEvents(_) => f.write_str("QaEvents(..)"),
             Self::QaCancel(_) => f.write_str("QaCancel(..)"),
             Self::ModelRoleSet(r) => f.debug_tuple("ModelRoleSet").field(r).finish(),
@@ -889,6 +892,7 @@ impl IpcOperation {
         "qa_turn_submit",
         "qa_related_activity",
         "qa_latest",
+        "qa_history",
         "qa_events",
         "qa_cancel",
         "model_role_set",
@@ -950,6 +954,7 @@ impl IpcOperation {
             Self::QaTurnSubmit(_) => "qa_turn_submit",
             Self::QaRelatedActivity(_) => "qa_related_activity",
             Self::QaLatest => "qa_latest",
+            Self::QaHistory => "qa_history",
             Self::QaEvents(_) => "qa_events",
             Self::QaCancel(_) => "qa_cancel",
             Self::ModelRoleSet(_) => "model_role_set",
@@ -1011,6 +1016,7 @@ impl IpcOperation {
             Self::QaTurnSubmit(_) => (IpcMethod::Post, QA_TURNS_PATH),
             Self::QaRelatedActivity(_) => (IpcMethod::Post, QA_RELATED_ACTIVITY_PATH),
             Self::QaLatest => (IpcMethod::Get, QA_LATEST_PATH),
+            Self::QaHistory => (IpcMethod::Get, QA_HISTORY_PATH),
             Self::QaEvents(_) => (IpcMethod::Get, QA_EVENTS_PATH),
             Self::QaCancel(_) => (IpcMethod::Post, QA_CANCEL_PATH),
             Self::ModelRoleSet(_) => (IpcMethod::Post, MODELS_DEFAULTS_SET_PATH),
@@ -1039,6 +1045,7 @@ impl IpcOperation {
             LOGS_PATH => Ok(Self::LogsPage(LogQuery::default())),
             QA_SETTINGS_PATH => Ok(Self::QaSettings),
             QA_LATEST_PATH => Ok(Self::QaLatest),
+            QA_HISTORY_PATH => Ok(Self::QaHistory),
             _ => Err(ClientError::InvalidRoute),
         }
     }
@@ -2810,6 +2817,7 @@ mod tests {
             TOOLS_PATH,
             MODELS_DEFAULTS_PATH,
             PROFILE_PATH,
+            QA_HISTORY_PATH,
         ] {
             let op = IpcOperation::from_get(route).unwrap();
             assert_eq!(op.into_typed_route(), (IpcMethod::Get, route));

@@ -22,6 +22,7 @@ use axum::http::StatusCode;
 use fleetworks_contracts::capabilities::Capabilities;
 use fleetworks_contracts::capabilities::CONNECT_REGISTRY_FEATURE;
 use fleetworks_contracts::chat::ChatSourceKind;
+use fleetworks_contracts::chat::QA_HISTORY_FEATURE;
 use fleetworks_contracts::chat::QA_MODEL_SETTINGS_FEATURE;
 use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
 use fleetworks_contracts::context::CredentialPurpose;
@@ -309,6 +310,7 @@ impl LocalGateway {
             | IpcOperation::QaTurnSubmit(_)
             | IpcOperation::QaRelatedActivity(_)
             | IpcOperation::QaLatest
+            | IpcOperation::QaHistory
             | IpcOperation::QaEvents(_)
             | IpcOperation::QaCancel(_)) => {
                 Box::pin(self.dispatch_qa_op(principal, registration, op)).await
@@ -365,7 +367,7 @@ impl LocalGateway {
                     _ => Permission::ReadBackend,
                 }
             }
-            IpcOperation::QaLatest | IpcOperation::QaEvents(_) => {
+            IpcOperation::QaLatest | IpcOperation::QaHistory | IpcOperation::QaEvents(_) => {
                 Permission::ReadWorkstationActivity
             }
             IpcOperation::QaTurnSubmit(_) | IpcOperation::QaCancel(_) => {
@@ -417,6 +419,9 @@ impl LocalGateway {
             ),
             IpcOperation::QaLatest => {
                 json_payload(inbox_qa::latest_request(&self.state, &context).await?)
+            }
+            IpcOperation::QaHistory => {
+                json_payload(inbox_qa::history_request(&self.state, &context).await?)
             }
             IpcOperation::QaEvents(query) => json_payload(
                 inbox_qa::events_request(&self.state, &context, &self.qa, query).await?,
@@ -1280,6 +1285,7 @@ impl LocalGateway {
             crate::inbox_qa::FEATURE,
             QA_TRIAGE_FEATURE,
             QA_MODEL_SETTINGS_FEATURE,
+            QA_HISTORY_FEATURE,
         ]
         .into_iter()
         .map(str::to_owned)
@@ -2278,19 +2284,36 @@ mod tests {
         ));
 
         // Registered context from another principal is rejected.
-        let wrong_ctx = gateway
+        for operation in [IpcOperation::JobsList(jobs_query), IpcOperation::QaHistory] {
+            let wrong_ctx = gateway
+                .dispatch(&other_principal, Some(&registration), operation)
+                .await;
+            assert!(matches!(
+                wrong_ctx,
+                IpcOutcome::Err {
+                    status: 403 | 401 | 409,
+                    ..
+                }
+            ));
+        }
+
+        let without_activity = AuthenticatedPrincipal::for_local_ipc(
+            principal.credential_id(),
+            principal.scope_id(),
+            principal.access_epoch(),
+            vec![Permission::ReadBackend],
+        )
+        .expect("same principal without activity permission");
+        let denied_history = gateway
             .dispatch(
-                &other_principal,
+                &without_activity,
                 Some(&registration),
-                IpcOperation::JobsList(jobs_query),
+                IpcOperation::QaHistory,
             )
             .await;
         assert!(matches!(
-            wrong_ctx,
-            IpcOutcome::Err {
-                status: 403 | 401 | 409,
-                ..
-            }
+            denied_history,
+            IpcOutcome::Err { status: 403, .. }
         ));
 
         // Capability gating rejects disabled operations with 503.

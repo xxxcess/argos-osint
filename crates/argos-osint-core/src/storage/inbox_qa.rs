@@ -1,5 +1,6 @@
 //! Transactional Inbox state. Model processes never receive this repository.
 
+use std::collections::BTreeSet;
 use std::future::Future;
 
 use chrono::Utc;
@@ -18,6 +19,7 @@ use fleetworks_contracts::chat::QaTurnNotice;
 use fleetworks_contracts::chat::QaTurnRequest;
 use fleetworks_contracts::chat::QaTurnState;
 use fleetworks_contracts::chat::QA_MAX_FINDINGS;
+use fleetworks_contracts::chat::QA_MAX_RETAINED_TURNS;
 use fleetworks_contracts::chat::QA_MAX_WORDS;
 use fleetworks_contracts::context::RegisteredContext;
 use fleetworks_contracts::qa_worker::valid_dialogue_reply;
@@ -36,6 +38,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
 use sha2::Sha256;
+use surrealdb::types::RecordId;
 use surrealdb::types::SurrealValue;
 
 use super::connect_registry;
@@ -56,7 +59,7 @@ const REPLICA_LEASE_MS: i64 = 12_000;
 const EXCHANGE_TTL_MS: i64 = 15 * 60_000;
 const MAX_ACTIVE_AGE_MS: i64 = 90_000;
 const MAX_ACTIVE: i64 = 16;
-const MAX_PER_REGISTRATION: i64 = 16;
+const MAX_PER_REGISTRATION: i64 = QA_MAX_RETAINED_TURNS as i64;
 const MAX_RETAINED: i64 = 512;
 
 /// Apply after registry and durable Jobs dispatch schemas.
@@ -272,6 +275,19 @@ impl Exchange {
     fn subject(&self) -> Option<&ChatSourceReference> {
         self.resolved_source.as_ref().or(self.source.as_ref())
     }
+
+    fn private_subject_ids(&self) -> impl Iterator<Item = &str> {
+        let related = match &self.turn.related_activity {
+            Some(QaRelatedActivity::Found { target, .. }) => Some(target),
+            _ => None,
+        };
+        self.subject()
+            .into_iter()
+            .chain(self.turn.findings.iter().map(|finding| &finding.source))
+            .chain(related)
+            .filter(|source| private_subject(source))
+            .map(|source| source.id.as_str())
+    }
 }
 
 fn private_subject(source: &ChatSourceReference) -> bool {
@@ -286,8 +302,22 @@ async fn subject_visible_in(
     let Some(source) = source.filter(|source| private_subject(source)) else {
         return Ok(true);
     };
+    let jobs = vec![jobs::rid("job", &source.id)];
+    Ok(!visible_private_subjects_in(tx, actor, jobs)
+        .await?
+        .is_empty())
+}
+
+async fn visible_private_subjects_in(
+    tx: &Tx,
+    actor: &Actor,
+    subjects: Vec<RecordId>,
+) -> Result<Vec<String>, TxError> {
+    if subjects.is_empty() {
+        return Ok(Vec::new());
+    }
     let query = format!(
-        "SELECT VALUE true FROM ONLY $job WHERE kind != 'service' AND {} AND ({}) AND ({})",
+        "SELECT VALUE record::id(id) FROM $subjects WHERE kind != 'service' AND {} AND ({}) AND ({})",
         jobs_view::ELIGIBLE,
         jobs_view::activity_membership(),
         jobs_view::activity_private()
@@ -295,7 +325,7 @@ async fn subject_visible_in(
     let mut result = jobs::run(
         tx,
         tx.query(query)
-            .bind(("job", jobs::rid("job", &source.id)))
+            .bind(("subjects", subjects))
             .bind(("activity_scope", actor.scope.clone()))
             .bind(("activity_deployment", actor.context.deployment_id.clone()))
             .bind(("activity_node", actor.context.workstation_id.clone()))
@@ -305,7 +335,7 @@ async fn subject_visible_in(
             )),
     )
     .await?;
-    Ok(jobs::take::<Option<bool>>(&mut result, 0)? == Some(true))
+    jobs::take(&mut result, 0)
 }
 
 #[derive(Clone, Debug, Default, SurrealValue)]
@@ -922,7 +952,7 @@ async fn recent_completed_in(
         tx.query(
             "SELECT generation,owner,active,completed_at,payload FROM inbox_qa_exchange
          WHERE owner=$owner AND generation=$generation AND active=false AND completed_at>$cutoff
-         ORDER BY completed_at DESC LIMIT $limit;",
+         ORDER BY completed_at DESC, accepted_at DESC, id DESC LIMIT $limit;",
         )
         .bind(("owner", owner.to_owned()))
         .bind(("generation", generation))
@@ -1143,6 +1173,61 @@ pub async fn latest(
     Ok(latest_exchange(repo, actor)
         .await?
         .map(|exchange| (exchange.turn, exchange.events)))
+}
+
+/// Read this registration's retained terminal exchanges, newest first.
+/// Private subjects and citations must still be visible to the caller.
+pub async fn history(repo: &Repository, actor: &Actor) -> Result<Vec<QaTurn>, TxError> {
+    let key = actor.key()?;
+    Ok(write(repo, |tx| {
+        let key = &key;
+        async move {
+            actor.validate_in(&tx).await?;
+            let setting = settings_in(&tx).await?;
+            if !setting.enabled {
+                return Ok(Vec::new());
+            }
+            let rows = recent_completed_in(
+                &tx,
+                key,
+                setting.history_generation,
+                now_ms(),
+                MAX_PER_REGISTRATION,
+            )
+            .await?;
+            let exchanges: Vec<Exchange> = rows
+                .into_iter()
+                .map(|row| decode(&row.payload))
+                .collect::<Result<_, _>>()?;
+            let subjects: BTreeSet<&str> = exchanges
+                .iter()
+                .flat_map(Exchange::private_subject_ids)
+                .collect();
+            let jobs = subjects
+                .into_iter()
+                .map(|id| jobs::rid("job", id))
+                .collect();
+            let visible: BTreeSet<String> = visible_private_subjects_in(&tx, actor, jobs)
+                .await?
+                .into_iter()
+                .collect();
+            Ok(exchanges
+                .into_iter()
+                .filter(|exchange| {
+                    exchange.turn.state.is_terminal()
+                        && exchange
+                            .private_subject_ids()
+                            .all(|id| visible.contains(id))
+                })
+                .map(|mut exchange| {
+                    exchange.turn.provisional_reply = None;
+                    exchange.turn
+                })
+                .collect())
+        }
+    })
+    .await?
+    .value)
 }
 
 /// The latest answered intent and its typed subject after registration validation.

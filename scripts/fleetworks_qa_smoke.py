@@ -498,7 +498,7 @@ def exercise(request, registration, model, readiness, running_jobs):
             "passed status checks included the unseeded Actor catalog")
 
     active_jobs = running_jobs()
-    jobs = ask("jobs", "How many jobs are running?")
+    jobs = ask("jobs", "any jobs running?")
     cited_running_jobs(jobs, active_jobs)
     questions = (
         ("cpu", "What is the current CPU utilization?", "CPU usage"),
@@ -542,10 +542,16 @@ def exercise(request, registration, model, readiness, running_jobs):
             and unsupported.get("conversation") == "context_needed",
             "the assistant did not ask for grounding context")
 
+    history = request("history")
+    require(1 < len(history) <= 16 and history[0] == unsupported and jobs in history
+            and all(turn["state"] in TERMINAL and not turn.get("provisional_reply") for turn in history),
+            "Embedded history did not retain the current and earlier settled exchanges")
+
     require(model() == active, "Ordinary turns replaced or unloaded the resident model")
     started = time.monotonic()
     stop_model(request, registration, model, current)
     require(request("latest") is None, "Off retained latest question and answer")
+    require(request("history") == [], "Off retained earlier questions or answers")
     query = {"turn_id": unsupported["turn_id"], "after": 0, "wait_seconds": 0}
     request("events", query=query, expected=404)
     return {"model_warm_ms": ready_ms, "admission_ms": admission_ms, "first_cited_finding_ms": first_finding_ms,
@@ -1316,7 +1322,7 @@ def embedded_qa_session(binary, state, *, reject_model_target=False, qa_memory_m
 
         def request(path, payload=None, *, query=None, expected=200):
             operation = {"settings": "qa_settings", "turns": "qa_turn_submit", "latest": "qa_latest",
-                         "events": "qa_events", "cancel": "qa_cancel"}[path]
+                         "history": "qa_history", "events": "qa_events", "cancel": "qa_cancel"}[path]
             if path == "settings" and payload is not None:
                 operation = "qa_settings_update"
             request = {"op": operation}

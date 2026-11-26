@@ -689,6 +689,15 @@ mod native {
                 448,
                 1,
             ));
+            let mut prior = QaTurn::queued(
+                "fixture-turn-previous".into(),
+                "fixture-request-previous".into(),
+                "Is the Embedded gateway ready?".into(),
+            );
+            prior.state = QaTurnState::Answered;
+            prior.reply = Some("The Embedded gateway is ready.".into());
+            prior.cursor = 2;
+            state.seed_inbox_qa_history_fixture(vec![turn.clone(), prior]);
         }
         state.seed_inbox_qa_fixture(
             QaSettings::new(true, QaPhase::Ready, 2, 1, true),

@@ -1,6 +1,7 @@
 //! Runtime-neutral Inbox QA state and views. The selected registered backend owns admission,
 //! model execution, evidence, and the authoritative latest exchange.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use fleetworks_contracts::chat::ChatSourceKind;
@@ -27,6 +28,8 @@ use fleetworks_contracts::chat::QaTurnRequest;
 use fleetworks_contracts::chat::QaTurnState;
 use fleetworks_contracts::chat::MAX_EVENT_WAIT_SECS;
 use fleetworks_contracts::chat::MAX_INPUT_BYTES;
+use fleetworks_contracts::chat::QA_HISTORY_FEATURE;
+use fleetworks_contracts::chat::QA_MAX_RETAINED_TURNS;
 use fleetworks_contracts::chat::QA_MODEL_SETTINGS_FEATURE;
 use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
 use fleetworks_contracts::context::MutationContext;
@@ -42,6 +45,9 @@ use rune::KeyEvent;
 use rune::LiveRegion;
 use rune::TextEdit;
 use rune::Tx;
+use rune_kit::ControlSize;
+use rune_kit::IconButton;
+use rune_kit::IconButtonVariant;
 use rune_kit::Kit;
 use rune_kit::ProgressCircle;
 use rune_kit::RadioItem;
@@ -61,12 +67,15 @@ use crate::workstation_settings::SettingsSection;
 use crate::State;
 
 const SETTINGS_REFRESH: f64 = 5.0;
+const HISTORY_REFRESH: f64 = 15.0;
 const STARTUP_REFRESH: f64 = 1.0;
 const MIN_EVENT_INTERVAL: f64 = 0.2;
 const GREETING: &str = "inbox-qa-greeting";
 const COMPOSER: &str = "inbox-qa-composer";
 const SOURCES_TOGGLE: &str = "inbox-qa-sources-toggle";
 const SOURCES_CONTENT: &str = "inbox-qa-sources";
+const HISTORY_PREVIOUS: &str = "inbox-qa-history-previous";
+const HISTORY_NEXT: &str = "inbox-qa-history-next";
 const CONTEXT_DIAL: &str = "inbox-qa-context";
 const SETTINGS_CONTROL: &str = "inbox-qa-toggle";
 #[cfg(test)]
@@ -105,6 +114,7 @@ enum Kind {
     Update,
     Submit,
     Latest,
+    History,
     Events,
     Cancel,
 }
@@ -120,6 +130,7 @@ enum Request {
     Update(QaSettingsUpdate),
     Submit(QaTurnRequest),
     Latest,
+    History,
     Events(QaEventQuery),
     Cancel(QaCancelRequest),
 }
@@ -131,6 +142,7 @@ impl Request {
             Self::Update(_) => Kind::Update,
             Self::Submit(_) => Kind::Submit,
             Self::Latest => Kind::Latest,
+            Self::History => Kind::History,
             Self::Events(_) => Kind::Events,
             Self::Cancel(_) => Kind::Cancel,
         }
@@ -142,6 +154,7 @@ enum Reply {
     Update(Result<QaSettings, ClientError>),
     Submit(Result<QaTurn, ClientError>),
     Latest(Result<Option<QaTurn>, ClientError>),
+    History(Result<Vec<QaTurn>, ClientError>),
     Events(Result<QaEventPage, ClientError>),
     Cancel(Result<QaTurn, ClientError>),
 }
@@ -179,10 +192,41 @@ impl ModelPreference {
     }
 }
 
+#[derive(Default)]
+struct TranscriptHistory {
+    turns: Vec<QaTurn>,
+    selected: Option<String>,
+    sources_open: bool,
+    next_refresh_at: f64,
+}
+
+impl TranscriptHistory {
+    fn select(&mut self, turn: Option<String>) {
+        self.selected = turn;
+        self.sources_open = false;
+    }
+}
+
+#[derive(Clone, Copy)]
+enum HistoryDirection {
+    Previous,
+    Next,
+}
+
+impl HistoryDirection {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Previous => HISTORY_PREVIOUS,
+            Self::Next => HISTORY_NEXT,
+        }
+    }
+}
+
 pub(crate) struct InboxQa {
     binding: Option<Binding>,
     settings: Option<QaSettings>,
     latest: Option<QaTurn>,
+    history: TranscriptHistory,
     pending: Option<Pending>,
     draft: TextEdit,
     source: Option<ChatSourceReference>,
@@ -211,6 +255,7 @@ impl Default for InboxQa {
             binding: None,
             settings: None,
             latest: None,
+            history: TranscriptHistory::default(),
             pending: None,
             draft: TextEdit::new(""),
             source: None,
@@ -241,11 +286,13 @@ impl InboxQa {
         self.request = None;
         self.request_revision = self.request_revision.wrapping_add(1);
         self.settings_loaded = false;
+        self.history = TranscriptHistory::default();
         self.request_resume();
     }
 
     fn retire(&mut self) {
         self.latest = None;
+        self.history = TranscriptHistory::default();
         self.sources_open = false;
         self.pending = None;
         self.draft = TextEdit::new("");
@@ -256,6 +303,7 @@ impl InboxQa {
         self.resume = true;
         self.next_turn_at = 0.0;
         self.next_settings_at = 0.0;
+        self.history.next_refresh_at = 0.0;
         self.retry_count = 0;
     }
 
@@ -288,8 +336,94 @@ impl InboxQa {
         if self.latest.as_ref().map(|turn| &turn.turn_id) != turn.as_ref().map(|turn| &turn.turn_id)
         {
             self.sources_open = false;
+            self.history.next_refresh_at = 0.0;
+        } else if self
+            .latest
+            .as_ref()
+            .is_some_and(|turn| !turn.state.is_terminal())
+            && turn.as_ref().is_some_and(|turn| turn.state.is_terminal())
+        {
+            self.history.next_refresh_at = 0.0;
         }
         self.latest = turn;
+        self.reconcile_history_selection();
+    }
+
+    fn primary_turn(&self) -> Option<&QaTurn> {
+        self.latest.as_ref().or_else(|| self.history.turns.first())
+    }
+
+    fn earlier_turns(&self) -> impl Iterator<Item = &QaTurn> {
+        let primary = if self.pending.is_none() {
+            self.primary_turn()
+        } else {
+            None
+        };
+        self.history
+            .turns
+            .iter()
+            .filter(move |turn| primary.is_none_or(|current| turn.turn_id != current.turn_id))
+    }
+
+    fn history_position(&self) -> usize {
+        self.history.selected.as_ref().map_or(0, |id| {
+            self.earlier_turns()
+                .position(|turn| &turn.turn_id == id)
+                .map_or(0, |index| index + 1)
+        })
+    }
+
+    fn browsed_turn(&self) -> Option<&QaTurn> {
+        let id = self.history.selected.as_ref()?;
+        self.earlier_turns().find(|turn| &turn.turn_id == id)
+    }
+
+    fn reconcile_history_selection(&mut self) {
+        if self.history.selected.is_some() && self.browsed_turn().is_none() {
+            self.history.select(None);
+        }
+    }
+
+    fn replace_history(&mut self, turns: Vec<QaTurn>, now: f64) {
+        let mut seen = HashSet::new();
+        self.history.turns = turns
+            .into_iter()
+            .take(QA_MAX_RETAINED_TURNS)
+            .filter(|turn| {
+                turn.state.is_terminal()
+                    && turn.provisional_reply.is_none()
+                    && seen.insert(turn.turn_id.clone())
+            })
+            .collect();
+        self.history.next_refresh_at = now + HISTORY_REFRESH;
+        self.reconcile_history_selection();
+    }
+
+    fn can_browse(&self, direction: HistoryDirection) -> bool {
+        let position = self.history_position();
+        match direction {
+            HistoryDirection::Previous => self.earlier_turns().nth(position).is_some(),
+            HistoryDirection::Next => position != 0,
+        }
+    }
+
+    fn browse(&mut self, direction: HistoryDirection) -> bool {
+        let position = self.history_position();
+        let next = match direction {
+            HistoryDirection::Previous => {
+                let Some(turn) = self.earlier_turns().nth(position) else {
+                    return false;
+                };
+                Some(turn.turn_id.clone())
+            }
+            HistoryDirection::Next if position != 0 => position
+                .checked_sub(2)
+                .and_then(|index| self.earlier_turns().nth(index))
+                .map(|turn| turn.turn_id.clone()),
+            HistoryDirection::Next => return false,
+        };
+        self.history.select(next);
+        true
     }
 
     fn apply_settings(&mut self, settings: QaSettings, now: f64) {
@@ -338,6 +472,7 @@ impl InboxQa {
             return false;
         }
         self.pending = None;
+        self.history.select(None);
         self.draft = TextEdit::new("");
         self.status = None;
         self.resume = false;
@@ -401,6 +536,23 @@ impl State {
         self.inbox_qa.resume = false;
     }
 
+    /// Install synthetic retained transcript exchanges for a native fixture.
+    #[doc(hidden)]
+    pub fn seed_inbox_qa_history_fixture(&mut self, turns: Vec<QaTurn>) {
+        if self.fixture {
+            if let Some(capabilities) = &mut self.connection.capabilities {
+                if !capabilities
+                    .features
+                    .iter()
+                    .any(|feature| feature == QA_HISTORY_FEATURE)
+                {
+                    capabilities.features.push(QA_HISTORY_FEATURE.into());
+                }
+            }
+            self.inbox_qa.replace_history(turns, self.clock);
+        }
+    }
+
     /// Open the synthetic Connection settings with QA availability details expanded.
     #[doc(hidden)]
     pub fn fixture_show_gateway_qa_details(&mut self) {
@@ -426,6 +578,42 @@ impl State {
                         .iter()
                         .any(|feature| feature == "inbox-qa-v2")
                 })
+    }
+
+    fn supports_inbox_qa_history(&self) -> bool {
+        self.supports_inbox_qa()
+            && self.permission(Permission::ReadWorkstationActivity)
+            && self
+                .connection
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| {
+                    capabilities
+                        .features
+                        .iter()
+                        .any(|feature| feature == QA_HISTORY_FEATURE)
+                })
+    }
+
+    fn browsed_inbox_qa_turn(&self) -> Option<&QaTurn> {
+        if self.supports_inbox_qa_history() {
+            self.inbox_qa.browsed_turn()
+        } else {
+            None
+        }
+    }
+
+    fn displayed_inbox_qa_turn(&self) -> Option<&QaTurn> {
+        let qa = &self.inbox_qa;
+        if let Some(turn) = self.browsed_inbox_qa_turn() {
+            Some(turn)
+        } else if qa.pending.is_some() {
+            None
+        } else if self.supports_inbox_qa_history() {
+            qa.primary_turn()
+        } else {
+            qa.latest.as_ref()
+        }
     }
 
     pub(crate) fn supports_workstation_triage(&self) -> bool {
@@ -533,7 +721,10 @@ impl State {
     }
 
     pub(crate) fn canonical_related_activity(&self) -> Option<&QaRelatedActivity> {
-        if !self.supports_workstation_triage() || !self.inbox_qa_visible() {
+        if !self.supports_workstation_triage()
+            || !self.inbox_qa_visible()
+            || self.browsed_inbox_qa_turn().is_some()
+        {
             return None;
         }
         let qa = &self.inbox_qa;
@@ -595,7 +786,12 @@ impl State {
     }
 
     pub(crate) fn poll_inbox_qa(&mut self, now: f64, tx: &mut Tx) -> bool {
-        let changed = self.sync_inbox_qa_binding();
+        let mut changed = self.sync_inbox_qa_binding();
+        let supports_history = self.supports_inbox_qa_history();
+        if !supports_history && !self.inbox_qa.history.turns.is_empty() {
+            self.inbox_qa.history = TranscriptHistory::default();
+            changed = true;
+        }
         if self.fixture || !self.supports_inbox_qa() || self.inbox_qa.request.is_some() {
             return changed;
         }
@@ -632,7 +828,12 @@ impl State {
             Some(Request::Latest)
         } else if let Some(pending) = &qa.pending {
             Some(Request::Submit(pending.request.clone()))
+        } else if self.inbox.open && supports_history && now >= qa.history.next_refresh_at {
+            Some(Request::History)
         } else {
+            if self.inbox.open && supports_history {
+                tx.wake_after(Duration::from_secs_f64(qa.history.next_refresh_at - now));
+            }
             qa.active().map(|turn| {
                 Request::Events(QaEventQuery::new(
                     turn.turn_id.clone(),
@@ -683,6 +884,7 @@ impl State {
             return;
         }
         let now = tx.clock();
+        let may_read_history = self.supports_inbox_qa_history();
         let qa = &mut self.inbox_qa;
         qa.request = None;
         match reply {
@@ -776,6 +978,19 @@ impl State {
                         tx.focus(COMPOSER, tx.focus_visible());
                     }
                 }
+            }
+            Reply::History(Ok(turns)) if may_read_history => qa.replace_history(turns, now),
+            Reply::History(Ok(_)) => qa.history = TranscriptHistory::default(),
+            Reply::History(Err(error)) if denied(error) => {
+                qa.retire();
+                qa.settings_loaded = false;
+                qa.next_settings_at = now;
+            }
+            Reply::History(Err(_)) => {
+                qa.history = TranscriptHistory {
+                    next_refresh_at: now + HISTORY_REFRESH,
+                    ..TranscriptHistory::default()
+                };
             }
             Reply::Events(Ok(page)) => {
                 if qa
@@ -914,6 +1129,7 @@ impl State {
         };
         if self.dispatch_inbox_qa(Request::Submit(request.clone())) {
             self.inbox_qa.pending = Some(Pending { request });
+            self.inbox_qa.history.select(None);
             self.inbox_qa.status = None;
             tx.scroll_to_bottom_instant(crate::inbox::SCROLL);
         }
@@ -935,6 +1151,24 @@ impl State {
             self.inbox_qa.status = None;
         }
     }
+
+    fn browse_inbox_qa_history(&mut self, direction: HistoryDirection, tx: &mut Tx) {
+        if !self.inbox.open
+            || !self.inbox_qa_visible()
+            || !self.supports_inbox_qa_history()
+            || !self.inbox_qa.browse(direction)
+        {
+            return;
+        }
+        if !self.inbox_qa.can_browse(direction) {
+            let opposite = match direction {
+                HistoryDirection::Previous => HISTORY_NEXT,
+                HistoryDirection::Next => HISTORY_PREVIOUS,
+            };
+            tx.focus(opposite, tx.focus_visible());
+        }
+        tx.scroll_to_bottom_instant(crate::inbox::SCROLL);
+    }
 }
 
 impl GatewayEffects {
@@ -948,6 +1182,7 @@ impl GatewayEffects {
                 }
                 Request::Submit(request) => Reply::Submit(client.submit_qa_turn(&request).await),
                 Request::Latest => Reply::Latest(client.latest_qa_turn().await),
+                Request::History => Reply::History(client.qa_history().await),
                 Request::Events(request) => Reply::Events(client.qa_events(&request).await),
                 Request::Cancel(request) => Reply::Cancel(client.cancel_qa_turn(&request).await),
             };
@@ -1576,14 +1811,17 @@ fn answer_sources(turn_id: &str, citations: &[chat_ui::Citation], expanded: bool
             kit.glyph.triangle_right
         })
         .on_press_tx(move |state: &mut State, tx| {
-            let qa = &mut state.inbox_qa;
-            if qa.pending.is_none()
-                && qa
-                    .latest
-                    .as_ref()
+            if state.inbox_qa_visible()
+                && state
+                    .displayed_inbox_qa_turn()
                     .is_some_and(|turn| turn.turn_id == active_turn_id)
             {
-                qa.sources_open = !qa.sources_open;
+                let expanded = if state.browsed_inbox_qa_turn().is_some() {
+                    &mut state.inbox_qa.history.sources_open
+                } else {
+                    &mut state.inbox_qa.sources_open
+                };
+                *expanded = !*expanded;
                 if !state.inbox.at_bottom {
                     tx.keep_on_screen(SOURCES_TOGGLE);
                 }
@@ -1683,13 +1921,36 @@ pub(crate) fn greeting(state: &State, kit: &Kit) -> Option<El> {
     })
 }
 
+fn history_arrow(
+    qa: &InboxQa,
+    direction: HistoryDirection,
+    kit: &Kit,
+    preferences: ViewPreferences,
+) -> El {
+    let (icon, label) = match direction {
+        HistoryDirection::Previous => (&icons::CHEVRON_LEFT, "Previous exchange"),
+        HistoryDirection::Next => (&icons::CHEVRON_RIGHT, "Next exchange"),
+    };
+    let control = IconButton::new(icon)
+        .variant(IconButtonVariant::Ghost)
+        .control_size(ControlSize::Large)
+        .label(label)
+        .disabled(!qa.can_browse(direction))
+        .on_press_tx(move |state: &mut State, tx| state.browse_inbox_qa_history(direction, tx))
+        .build(kit)
+        .key(direction.key());
+    material::glass_control(control, preferences)
+}
+
 pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -> Option<El> {
     if !state.inbox_qa_visible() {
         return None;
     }
     let qa = &state.inbox_qa;
+    let browsing = state.browsed_inbox_qa_turn().is_some();
+    let pending = qa.pending.as_ref().filter(|_| !browsing);
     let (question, stage, answer, findings, request_id, turn_id, usage) =
-        if let Some(pending) = &qa.pending {
+        if let Some(pending) = pending {
             (
                 pending.request.question.as_str(),
                 chat_ui::TurnState::Queued,
@@ -1699,7 +1960,7 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
                 None,
                 None,
             )
-        } else if let Some(turn) = &qa.latest {
+        } else if let Some(turn) = state.displayed_inbox_qa_turn() {
             let (stage, detail) = answer_state(turn);
             let draft = turn
                 .provisional_reply
@@ -1761,9 +2022,14 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
             })
             .collect(),
     };
+    let sources_open = if browsing {
+        qa.history.sources_open
+    } else {
+        qa.sources_open
+    };
     let sources = turn_id
         .filter(|_| !answer.citations.is_empty())
-        .map(|turn_id| answer_sources(turn_id, &answer.citations, qa.sources_open, kit));
+        .map(|turn_id| answer_sources(turn_id, &answer.citations, sources_open, kit));
     let live_region = if answer.state == chat_ui::TurnState::Streaming {
         LiveRegion::Off
     } else {
@@ -1792,12 +2058,23 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
             .child(bubbles),
         preferences,
     );
+    let show_arrows = state.supports_inbox_qa_history() && qa.earlier_turns().next().is_some();
+    let transcript = rune::row()
+        .key("inbox-qa-history")
+        .w_full()
+        .items_end()
+        .gap(6.0)
+        .children(
+            show_arrows.then(|| history_arrow(qa, HistoryDirection::Previous, kit, preferences)),
+        )
+        .child(turn.grow(1.0).min_w(0.0))
+        .children(show_arrows.then(|| history_arrow(qa, HistoryDirection::Next, kit, preferences)));
     Some(
         rune::col()
             .key("inbox-qa-exchange")
             .w_full()
             .min_w(0.0)
-            .child(turn),
+            .child(transcript),
     )
 }
 
@@ -1932,6 +2209,9 @@ fn footer_content(state: &State, kit: &Kit, preferences: ViewPreferences) -> El 
     }
     if let Some(status) = qa.status {
         content = content.child(hint(status, kit).role("status"));
+    }
+    if qa.active().is_some() && state.browsed_inbox_qa_turn().is_some() {
+        content = content.child(hint("A newer exchange is running.", kit).role("status"));
     }
     footer_layer(content.child(input).child(row), preferences)
 }
@@ -2790,6 +3070,114 @@ mod tests {
                 .contains(OPERATOR_NUDGE));
             assert_eq!(runtime.state.inbox.unread(), unread);
         }
+    }
+
+    #[test]
+    fn transcript_arrows_browse_retained_turns_without_changing_the_live_exchange() {
+        const OLDER_QUESTION: &str = "Which earlier check finished?";
+        const OLDER_CITATION: &str = "chat-citation-older-turn-0";
+        for size in [(640.0, 480.0), (1280.0, 800.0)] {
+            let mut runtime = active_drawer(size);
+            let mut older = turn(QaTurnState::Answered, 3);
+            older.turn_id = "older-turn".into();
+            older.request_id = "older-request".into();
+            older.question = OLDER_QUESTION.into();
+            runtime.update(move |state, tx| {
+                state.seed_inbox_qa_history_fixture(vec![
+                    turn(QaTurnState::Running, 1),
+                    older.clone(),
+                    older,
+                ]);
+                state.inbox_qa.draft = TextEdit::new("Unsent follow-up");
+                tx.scroll_to_bottom_instant(crate::inbox::SCROLL);
+            });
+            runtime.frame(0.75);
+            let elements = runtime.elements();
+            let previous = elements
+                .iter()
+                .find(|element| element.key.as_deref() == Some(HISTORY_PREVIOUS))
+                .expect("left transcript control");
+            let next = elements
+                .iter()
+                .find(|element| element.key.as_deref() == Some(HISTORY_NEXT))
+                .expect("right transcript control");
+            assert_eq!(previous.label.as_deref(), Some("Previous exchange"));
+            assert_eq!(next.label.as_deref(), Some("Next exchange"));
+            assert!(previous.focusable && !next.focusable);
+            let (turn_rect, _) = runtime.presented("inbox-qa-turn-fixture-request").unwrap();
+            assert!(previous.rect[0] + previous.rect[2] <= turn_rect[0]);
+            assert!(turn_rect[0] + turn_rect[2] <= next.rect[0]);
+            let (x, y) = runtime.find(HISTORY_PREVIOUS).unwrap();
+            let (viewport, _) = runtime.presented(crate::inbox::SCROLL).unwrap();
+            assert!(y >= viewport[1] && y < viewport[1] + viewport[3]);
+            runtime.pointer_down(x, y);
+            runtime.pointer_up(x, y);
+            runtime.frame(1.0);
+            assert!(runtime
+                .accessibility_json()
+                .to_string()
+                .contains(OLDER_QUESTION));
+            assert!(runtime.find("inbox-qa-stop").is_some());
+            assert!(runtime.elements().iter().any(|element| {
+                element.key.as_deref() == Some(HISTORY_PREVIOUS) && !element.focusable
+            }));
+            press_disclosure(&mut runtime, SOURCES_TOGGLE, 1.1);
+            assert!(runtime.find(OLDER_CITATION).is_some());
+
+            runtime.update(|state, _| {
+                state.inbox_qa.adopt(Some(turn(QaTurnState::Answered, 3)));
+            });
+            runtime.frame(1.5);
+            assert!(runtime
+                .accessibility_json()
+                .to_string()
+                .contains(OLDER_QUESTION));
+            assert!(runtime.find(OLDER_CITATION).is_some());
+            assert!(runtime.find("inbox-qa-stop").is_none());
+            press_disclosure(&mut runtime, HISTORY_NEXT, 1.75);
+            assert!(!runtime
+                .accessibility_json()
+                .to_string()
+                .contains(OLDER_QUESTION));
+            assert!(runtime.find(OLDER_CITATION).is_none());
+            assert_eq!(runtime.state.inbox_qa.draft.text, "Unsent follow-up");
+            assert!(runtime.elements().iter().any(|element| {
+                element.key.as_deref() == Some(HISTORY_NEXT) && !element.focusable
+            }));
+        }
+    }
+
+    #[test]
+    fn history_reconciliation_removes_expired_turns_and_fences_a_detached_reply() {
+        let mut runtime = qa_drawer((640.0, 480.0), Some(turn(QaTurnState::Answered, 3)));
+        let mut older = turn(QaTurnState::Answered, 3);
+        older.turn_id = "old-turn".into();
+        older.request_id = "old-request".into();
+        runtime.update(|state, _| {
+            state.fixture = false;
+            assert!(state.sync_inbox_qa_binding());
+            state.fixture = true;
+        });
+        runtime.update(|state, tx| {
+            state.seed_inbox_qa_history_fixture(vec![older.clone()]);
+            state.browse_inbox_qa_history(HistoryDirection::Previous, tx);
+            assert!(state.browsed_inbox_qa_turn().is_some());
+            let ticket = Ticket {
+                epoch: state.connection.epoch,
+                origin_revision: state.origin_revision,
+                request_revision: state.inbox_qa.request_revision,
+            };
+            state.receive_inbox_qa(
+                ticket,
+                Reply::History(Ok(vec![turn(QaTurnState::Answered, 3)])),
+                tx,
+            );
+            assert!(state.browsed_inbox_qa_turn().is_none());
+            assert!(!state.inbox_qa.can_browse(HistoryDirection::Previous));
+            state.inbox_qa.detach();
+            state.receive_inbox_qa(ticket, Reply::History(Ok(vec![older])), tx);
+            assert!(state.inbox_qa.history.turns.is_empty());
+        });
     }
 
     #[test]

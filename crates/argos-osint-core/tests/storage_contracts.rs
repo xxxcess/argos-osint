@@ -649,6 +649,7 @@ async fn qa_fallback_seals_all_findings_atomically_under_the_live_lease() {
     };
     let repo = server.repo("argos", "workstation_assistant_fallback").await;
     let context = register(&repo, "node-a", "research").await;
+    let other_context = register(&repo, "node-b", "research").await;
     let actor = qa::Actor::new(
         "scope-a".into(),
         "fixture-native".into(),
@@ -691,6 +692,10 @@ async fn qa_fallback_seals_all_findings_atomically_under_the_live_lease() {
     assert_eq!(running.state, QaTurnState::Running);
     assert_eq!(running.cursor, before.cursor);
     assert!(running.findings.is_empty());
+    assert!(
+        qa::history(&repo, &actor).await.unwrap().is_empty(),
+        "History omits the active exchange",
+    );
 
     assert!(qa::publish_findings_and_complete(
         &repo,
@@ -706,6 +711,22 @@ async fn qa_fallback_seals_all_findings_atomically_under_the_live_lease() {
     assert_eq!(answered.findings, findings);
     assert_eq!(answered.cursor, before.cursor + 3);
     assert_eq!(events.last().unwrap().state, QaTurnState::Answered);
+    let other = qa::Actor::new(
+        "scope-a".into(),
+        "fixture-native".into(),
+        "fixture-access".into(),
+        other_context,
+    );
+    assert!(
+        qa::history(&repo, &other).await.unwrap().is_empty(),
+        "Another registration cannot read the terminal exchange",
+    );
+    let turn_id = answered.turn_id.clone();
+    assert_eq!(
+        qa::history(&repo, &actor).await.unwrap(),
+        vec![answered],
+        "History exposes the sealed current exchange",
+    );
     assert!(!qa::publish_findings_and_complete(
         &repo,
         &lease,
@@ -715,4 +736,20 @@ async fn qa_fallback_seals_all_findings_atomically_under_the_live_lease() {
     )
     .await
     .unwrap());
+    // Exercise the retention filter before the asynchronous reaper removes this row.
+    repo.db()
+        .query("UPDATE $turn SET completed_at=$expired RETURN NONE")
+        .bind((
+            "turn",
+            surrealdb::types::RecordId::new("inbox_qa_exchange", turn_id),
+        ))
+        .bind((
+            "expired",
+            chrono::Utc::now().timestamp_millis() - 16 * 60_000,
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert!(qa::history(&repo, &actor).await.unwrap().is_empty());
 }

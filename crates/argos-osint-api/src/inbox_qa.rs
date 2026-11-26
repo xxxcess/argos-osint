@@ -1460,6 +1460,19 @@ pub(crate) async fn latest_request(
     }
 }
 
+pub(crate) async fn history_request(
+    state: &ApiState,
+    context: &ResolvedRequest,
+) -> Result<Vec<QaTurn>, ApiError> {
+    let actor = require(context, Permission::ReadWorkstationActivity, None)?;
+    let mut turns = store::history(&state.repo, &actor)
+        .await
+        .map_err(storage_error)?;
+    context.revalidate(&state.repo).await?;
+    turns.retain(|turn| require_turn_evidence_permission(context, turn).is_ok());
+    Ok(turns)
+}
+
 pub(crate) async fn events_request(
     state: &ApiState,
     context: &ResolvedRequest,

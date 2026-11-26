@@ -303,8 +303,9 @@ async fn shared_reuse_preserves_creator_but_private_fields_and_search_stay_unava
     assert_eq!(answer.state, QaTurnState::Answered);
     assert_eq!(
         qa::replay(&repo, &actor, &request).await.unwrap(),
-        Some(answer)
+        Some(answer.clone())
     );
+    assert_eq!(qa::history(&repo, &actor).await.unwrap(), vec![answer]);
 
     associate(&repo, &other, "shared", "reuse-other-node", "task").await;
     assert!(matches!(
@@ -318,6 +319,10 @@ async fn shared_reuse_preserves_creator_but_private_fields_and_search_stay_unava
         Err(TxError::Abort(reason)) if reason == "inbox_qa:missing"
     ));
     assert!(qa::latest(&repo, &actor).await.unwrap().is_none());
+    assert!(
+        qa::history(&repo, &actor).await.unwrap().is_empty(),
+        "A retained exchange cannot reveal private details after the job is shared",
+    );
     assert!(qa::last_answered_prompt(&repo, &actor)
         .await
         .unwrap()

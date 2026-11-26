@@ -51,7 +51,21 @@ The [V2 wire contract](../../../crates/fleetworks-contracts/src/chat/qa.rs) is a
 2. Admission selects the readiness, host metrics, Jobs counts and selected activity needed for the question. It builds the model's snapshot from authorized readings. Recall requests can include up to two completed exchanges from the same credential, registration, access epoch, and generation. A follow-up such as “What about now?” reuses the authorized subject and supported intent when they are available, then collects fresh readings. A new explicit selection takes precedence. When the retained subject has a comparable earlier observation, the reply pairs the current reading with a separate timestamped citation for the previous one. Request-ID replays preserve the original turn and its authorization boundary. [Admission and evidence](../../../crates/argos-osint-api/src/inbox_qa.rs) · [Turn store](../../../crates/argos-osint-core/src/storage/inbox_qa.rs)
 3. Exact single-fact questions have a direct path for typed timestamped facts, including the reporting window on failed-job counts. Supported paraphrases, follow-ups, and summaries with approved evidence use the ready generator first. The generator selects a bounded reply for operational questions, using approved wording and copying facts exactly from the snapshot. This preserves grouped readings and leaves room for shorter summaries with relevant details. When the worker cannot provide a verified reply, Assistant can return the authorized facts directly. The worker generates conversational replies token by token and checks for cancellation between decoding steps. [Intent routing](../../../crates/argos-osint-api/src/inbox_qa/question.rs) · [Executor](../../../services/api-host/src/inbox_qa_service.rs) · [Decoder](../../../tools/assistant-bert/src/dialogue.rs) · [Workstation question benchmark](../../../deploy/inbox-qa.md#workstation-question-benchmark)
 4. Batched text updates arrive as provisional events. The operational prompt contains only passages referenced by its approved reply options. The worker and backend validate complete passages in operational drafts and final replies. Citations keep the passages' original observation times. When inference cannot produce a verified reply, the backend can commit the fallback findings and terminal state together. A grouped reading or comparison needs the complete fresh snapshot to answer. The terminal turn clears the provisional text, seals the canonical reply, and moves the observation boundary forward for the next turn. [Validation](../../../crates/fleetworks-contracts/src/qa_worker.rs) · [Event store](../../../crates/argos-osint-core/src/storage/inbox_qa.rs)
-5. The transcript reconciles the latest turn and event pages by cursor. The compact dial reports the peak input count and percentage of the selected model's input window. **Sources** starts collapsed and shows each citation's observation time when expanded. Stop seals the turn with any already published citations. [Native transcript](../../../apps/fleetworks-desktop/src/inbox_qa.rs)
+5. The transcript reconciles the latest turn and event pages by cursor. On companions advertising `inbox-qa-history-v1`, **Previous exchange** and **Next exchange** browse completed turns still retained for the same authorized registration. The companion applies the existing expiry and history generation to these reads. Turning inference off clears the retained exchanges. A submitted question returns the transcript to the current turn. The compact dial reports the peak input count and percentage of the selected model's input window. **Sources** shows each citation's original observation time when expanded. Stop seals the current turn with any already published citations. [Native transcript](../../../apps/fleetworks-desktop/src/inbox_qa.rs)
+
+### Example workstation questions
+
+| What you want to know | Ask |
+| --- | --- |
+| Active or queued jobs | “Any jobs running?” or “How busy is the job queue?” |
+| Retries and recent failures | “Any jobs waiting to retry?” or “Any failed jobs in the last 24 hours?” |
+| CPU, memory, and disk | “Could you check the host resource snapshot?” or “How much RAM is the API host using?” |
+| Service readiness | “Any blockers on this workstation?” or “What are the current unresolved status checks about?” |
+| Actor catalog and index | “Does the catalog need seeding?” or “Is the actor index ready for use?” |
+| A selected job or cycle | “How's this job doing?” or “Has this cycle finished?” |
+| Logs for a selected job or cycle | “Any errors or warnings for this job?” |
+| Active backend | “Which backend am I connected to?” |
+| A fresh reading of the last supported subject | “And now?” |
 
 ### Jobs and Inbox triage
 
@@ -90,7 +104,7 @@ Release qualification requires combined answer and navigation checks, resource m
 | `qa_settings_update` | Registered Native `manage_inbox_qa`, current setting revision |
 | `qa_turn_submit` | Registered Native interactive submit and the evidence source’s read grant |
 | `qa_related_activity` | Registered Native backend read for readiness or workstation activity read for a job |
-| `qa_latest`, `qa_events` | Registered Native workstation activity read |
+| `qa_latest`, `qa_events`, `qa_history` | Registered Native workstation activity read |
 | `qa_cancel` | Registered Native interactive submit |
 
 Settings can include the current provision, verification, model load, or activation stage. An unavailable reason is a fixed code such as `pack_missing`, `pack_invalid`, `sandbox_unsupported`, `worker_start_failed`, `insufficient_resources`, or `model_provision_failed`. The notification feed remains available during setup and inference changes.

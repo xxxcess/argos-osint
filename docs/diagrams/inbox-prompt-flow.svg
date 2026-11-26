@@ -80,6 +80,6 @@
     <rect x="240" y="788" width="640" height="84" rx="6" class="node"/>
     <text x="260" y="816" class="label">Inbox transcript or inline card</text>
     <text x="260" y="840" class="note">Recover the canonical turn or resume from its event cursor</text>
-    <text x="260" y="864" class="note">Citations and operator-activated navigation</text>
+    <text x="260" y="864" class="note">Browse retained exchanges, expand citations, or open related activity</text>
   </g>
 </svg>

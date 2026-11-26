@@ -72,6 +72,7 @@ use fleetworks_contracts::chat::QaSettingsUpdate;
 use fleetworks_contracts::chat::QaTurnRequest;
 use fleetworks_contracts::chat::QaTurnState;
 use fleetworks_contracts::chat::CHAT_TURNS_PATH;
+use fleetworks_contracts::chat::QA_HISTORY_FEATURE;
 use fleetworks_contracts::chat::QA_MODEL_SETTINGS_FEATURE;
 use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
 use fleetworks_contracts::classifier_activation::ActivationRequest;
@@ -661,6 +662,7 @@ async fn run_shared_flow(
     assert!(caps.features.iter().any(|f| f == "workstation-readiness"));
     let local = transport == "ipc";
     assert_eq!(caps.features.iter().any(|f| f == "inbox-qa-v2"), local);
+    assert_eq!(caps.features.iter().any(|f| f == QA_HISTORY_FEATURE), local);
     assert!(caps.features.iter().any(|f| f == "jobs"));
     assert!(caps.features.iter().any(|f| f == "logs"));
     let local_nlp = local && cfg!(feature = "nlp");
@@ -1497,6 +1499,11 @@ async fn run_shared_flow(
                 .is_none(),
             "A fresh Embedded registration has no accepted Assistant exchange",
         );
+        assert!(client
+            .qa_history()
+            .await
+            .expect("history while Off")
+            .is_empty());
         assert_eq!(
             client
                 .update_qa_settings(&QaSettingsUpdate::new(
@@ -1570,7 +1577,7 @@ async fn run_shared_flow(
         ));
         assert_eq!(
             client.latest_qa_turn().await.expect("read latest QA"),
-            Some(answered)
+            Some(answered.clone())
         );
         let explain = QaTurnRequest::new(
             format!("parity-explain-job-{transport}"),
@@ -1659,7 +1666,12 @@ async fn run_shared_flow(
                 .latest_qa_turn()
                 .await
                 .expect("history after generator switch"),
-            Some(refreshed)
+            Some(refreshed.clone())
+        );
+        assert_eq!(
+            client.qa_history().await.expect("retained Inbox exchanges"),
+            vec![refreshed, explanation.clone(), answered],
+            "History preserves canonical exchanges, newest first, across generator changes",
         );
         assert_eq!(
             client
@@ -1712,6 +1724,11 @@ async fn run_shared_flow(
             off.decision.unwrap().preference,
             QaDecisionPreference::VllmD3EdgeQ8
         );
+        assert!(client
+            .qa_history()
+            .await
+            .expect("history after Off")
+            .is_empty());
     } else {
         let missing = ClientError::Status(404);
         assert_eq!(client.qa_settings().await.unwrap_err(), missing);
@@ -1720,6 +1737,7 @@ async fn run_shared_flow(
             missing
         );
         assert_eq!(client.latest_qa_turn().await.unwrap_err(), missing);
+        assert_eq!(client.qa_history().await.unwrap_err(), missing);
         assert_eq!(
             client
                 .update_qa_settings(&QaSettingsUpdate::new(qa_context.clone(), 0, true))
@@ -1753,6 +1771,7 @@ async fn run_shared_flow(
         "qa_turn_submit",
         "qa_related_activity",
         "qa_latest",
+        "qa_history",
         "qa_events",
         "qa_cancel",
     ] {
@@ -2067,6 +2086,7 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
             "qa_turn_submit",
             "qa_related_activity",
             "qa_latest",
+            "qa_history",
             "qa_events",
             "qa_cancel",
         ]

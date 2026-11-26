@@ -24,6 +24,8 @@ SUMMARY_QUESTION = "What is the current workstation readiness?"
 MEMORY_QUESTION = "What is the current memory usage ?"
 SOURCES_TOGGLE = "inbox-qa-sources-toggle"
 SOURCES_CONTENT = "inbox-qa-sources"
+PREVIOUS_EXCHANGE = "inbox-qa-history-previous"
+NEXT_EXCHANGE = "inbox-qa-history-next"
 DRAWER = "inbox-layer"
 COMPOSER = "inbox-qa-composer"
 COMPOSER_LABEL = "Question for the Inbox assistant"
@@ -465,6 +467,28 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
                       "grounded memory reading and its original timestamp", timeout=4)
     subprocess.run(["scrot", "--overwrite", str(output / "grounded-memory.png")], check=True, timeout=5)
 
+    def transcript_shows(question, *, disabled_arrow):
+        message = find("chat-message-inbox-qa-question")
+        arrow = find(disabled_arrow)
+        if message is None or arrow is None or arrow.getState().contains(atspi.STATE_ENABLED):
+            return None
+        return next((node for node in descendants(message)
+                     if node.name == question and screen_bounds(node, atspi) is not None), None)
+
+    button(PREVIOUS_EXCHANGE, "Previous exchange", timeout=12)
+    wait_for(lambda: transcript_shows(SUMMARY_QUESTION, disabled_arrow=PREVIOUS_EXCHANGE),
+             app, "previous readiness exchange and disabled older boundary", timeout=8)
+    button(SOURCES_TOGGLE, timeout=8)
+    previous_source = wait_for(lambda: sources_ready(final["turn_id"], expanded=True),
+                               app, "previous exchange with its original source", timeout=8)
+    require(previous_source.name == citation_name, "history replaced the previous exchange's original citation")
+    subprocess.run(["scrot", "--overwrite", str(output / "previous-exchange.png")], check=True, timeout=5)
+    button(NEXT_EXCHANGE, "Next exchange", timeout=8)
+    wait_for(lambda: transcript_shows(MEMORY_QUESTION, disabled_arrow=NEXT_EXCHANGE),
+             app, "latest memory exchange and disabled newer boundary", timeout=8)
+    require(len([row for row in read_journal(journal) if row.get("op") == "qa_turn_submit"]) == 2,
+            "browsing the transcript submitted another turn")
+
     submit(SUMMARY_QUESTION)
     wait_for(lambda: first_frame(3, expanded=False), app,
              "a separate Running turn with collapsed Sources", timeout=16)
@@ -513,6 +537,7 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         "typed_question_verification": "x11_clipboard",
         "sources_default_collapsed": True, "sources_retained_after_completion": True,
         "sources_retained_after_cancel": True,
+        "transcript_previous_and_next": True,
         "stop_enabled_before_release": True, "same_turn": True,
         "terminal_state": final["state"], "terminal_events": final["terminal_events"],
         "stop_while_running": True, "cancelled_terminal_state": canceled["state"],

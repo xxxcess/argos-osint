@@ -114,6 +114,13 @@ pub static TRASH: Icon = Icon {
     body: r#"<path d="M3 4.5h10M6.2 4.5V3h3.6v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#,
 };
 
+/// Previous-page chevron.
+pub static CHEVRON_LEFT: Icon = Icon {
+    name: "fw-chevron-left",
+    view: 16.0,
+    body: r#"<path d="M10 3.5 5.5 8 10 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#,
+};
+
 /// Chevron right indicator for drilldown cards.
 pub static CHEVRON_RIGHT: Icon = Icon {
     name: "fw-chevron-right",

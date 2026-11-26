@@ -255,7 +255,7 @@ fn advice_constraints(question: &str, features: &Features) -> (Vec<Span>, Vec<Co
         if !constraints.contains(&constraint) {
             constraints.push(constraint);
         }
-        spans.push(span.clone());
+        spans.push(*span);
     }
     (spans, constraints)
 }
@@ -295,7 +295,7 @@ fn extract_time(question: &str, features: &Features) -> (Option<Span>, TimeReque
         TemporalScope::Historical(interval) => TimeRequest::Historical(interval.clone()),
         TemporalScope::Ambiguous => TimeRequest::Ambiguous,
     };
-    (Some(candidate.span.clone()), scope)
+    (Some(candidate.span), scope)
 }
 
 fn apply_time(mut focus: Focus, time: &TimeRequest, reused: bool) -> Resolution {

@@ -19,6 +19,9 @@ import time
 import fleetworks_qa_pack as pack
 
 ROOT = Path(__file__).resolve().parents[1]
+FLAN_INPUT_WINDOW = 512
+GPT2_INPUT_WINDOW = 1024 - 128
+GPT2_MODELS = {"gpt2-small", "gpt2-medium"}
 LINUX_SYSTEM = {"libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2", "librt.so.1",
                 "libgcc_s.so.1", "libstdc++.so.6", "libutil.so.1", "libresolv.so.2"}
 DARWIN_WHEELS = {
@@ -167,7 +170,10 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
                  "RAYON_NUM_THREADS": "1", "FLEETWORKS_QA_DIALOGUE": "1",
                  "FLEETWORKS_QA_CONTEXT_USAGE": "1", "FLEETWORKS_QA_STREAMING": "1",
                  "FLEETWORKS_QA_MODEL_TARGET": chat_model}
-    window = 512
+    extended_context = chat_model in GPT2_MODELS
+    if extended_context:
+        model_env["FLEETWORKS_QA_MODEL_CONTEXT"] = "1"
+    window = GPT2_INPUT_WINDOW if extended_context else FLAN_INPUT_WINDOW
     started = time.monotonic()
     worker = root / pack.WORKER
     model = model_directory or root / "model"
@@ -278,11 +284,46 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
                    "generator did not report its bounded input window")
         return usage, reply
 
+    def probe_operational(turn_id, question):
+        nonlocal deadline
+        facts = [
+            {"source_id": "actor-search", "text": "Actor search is ready."},
+            {"source_id": "gateway", "text": "Gateway reported “ready” for local requests."},
+        ]
+        request = {
+            "turn_id": turn_id, "snapshot_id": turn_id, "question": question, "passages": facts,
+            "dialogue": {"kind": "operational", "history": []},
+        }
+        turn_started = time.monotonic()
+        deadline = turn_started + 25
+        send({"command": "ask", "request": request})
+        event, first_finding, draft, _ = read_drafts(request)
+        for sequence, fact in enumerate(facts, first_finding):
+            pack.check(event == {"kind": "finding", "turn_id": turn_id, "sequence": sequence,
+                                 "start": 0, "end": len(fact["text"]), **fact},
+                       "operational turn did not cite an exact frozen fact in order")
+            event = receive_event(request, sequence + 1)
+        context, reply = complete_turn(event)
+        body = " ".join(fact["text"] for fact in facts)
+        pack.check(reply in (body, f"Here is the current status. {body}", f"Here are the current checks. {body}"),
+                   "operational reply did not preserve all approved facts")
+        pack.check(draft == reply, "operational turn did not stream its verified reply before completion")
+        turn_finished = time.monotonic()
+        sample_rss()
+        return {"context": context, "delta_events": first_finding - 1, "composed": bool(reply),
+                "reply_ms": round((turn_finished - turn_started) * 1000, 1)}
+
     try:
         ready = {"reply": "ready_with_streaming", "protocol": 1,
                  "model_revision": pack.CHAT_MODELS[chat_model]["revision"]}
+        if extended_context:
+            ready.update(reply="ready_with_streaming_context", window_tokens=window)
         pack.check(receive() == ready, "chat checkpoint did not become ready with streaming")
         warm = time.monotonic()
+        if extended_context:
+            deadline = warm + 5
+            send({"command": "ping"})
+            pack.check(receive() == ready, "chat checkpoint changed its advertised input window")
         sample_rss()
         greeting = {
             "turn_id": "pack-dialogue-probe", "snapshot_id": "pack-dialogue-probe",
@@ -305,33 +346,18 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
         greeted = time.monotonic()
         sample_rss()
 
-        facts = [
-            {"source_id": "actor-search", "text": "Actor search is ready."},
-            {"source_id": "gateway", "text": "Gateway reported “ready” for local requests."},
-        ]
-        operational = {
-            "turn_id": "pack-operational-probe", "snapshot_id": "pack-operational-probe",
-            "question": "How are actor search and the gateway doing?", "passages": facts,
-            "dialogue": {"kind": "operational", "history": []},
-        }
-        operational_started = time.monotonic()
-        deadline = operational_started + 25
-        send({"command": "ask", "request": operational})
-        event, first_finding, operational_draft, _ = read_drafts(operational)
-        for sequence, fact in enumerate(facts, first_finding):
-            pack.check(event == {"kind": "finding", "turn_id": operational["turn_id"], "sequence": sequence,
-                                 "start": 0, "end": len(fact["text"]), **fact},
-                       "operational turn did not cite an exact frozen fact in order")
-            event = receive_event(operational, sequence + 1)
-        operational_context, operational_reply = complete_turn(event)
-        body = " ".join(fact["text"] for fact in facts)
-        pack.check(operational_reply in (body, f"Here is the current status. {body}",
-                                         f"Here are the current checks. {body}"),
-                   "operational reply did not preserve all approved facts")
-        pack.check(operational_draft == operational_reply,
-                   "operational turn did not stream its verified reply before completion")
-        operational_finished = time.monotonic()
-        sample_rss()
+        question = "How are actor search and the gateway doing?"
+        operational = probe_operational("pack-operational-probe", question)
+        extended = {}
+        if extended_context:
+            # Each " test" is one token in the pinned GPT-2 vocabulary. The
+            # question stays under the 4096-byte wire limit with room for the menu.
+            long_question = "Fixture labels:" + " test" * 600 + ". " + question
+            long_operational = probe_operational("pack-long-operational-probe", long_question)
+            pack.check(long_operational["context"]["peak_input_tokens"] > FLAN_INPUT_WINDOW,
+                       "GPT-2 did not exercise an input above the FLAN window")
+            extended = {"long_operational_context": long_operational["context"],
+                        "long_operational_reply_ms": long_operational["reply_ms"]}
 
         send({"command": "shutdown"})
         pack.check(process.wait(timeout=10) == 0, "QA checkpoint worker did not shut down")
@@ -339,11 +365,11 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
                 "first_delta_ms": round((first_delta - greeting_started) * 1000, 1),
                 "first_reply_ms": round((greeted - greeting_started) * 1000, 1),
                 "dialogue_delta_events": greeting_sequence - 1,
-                "operational_delta_events": first_finding - 1,
-                "operational_reply_ms": round((operational_finished - operational_started) * 1000, 1),
-                "dialogue_context": greeting_context, "operational_context": operational_context,
-                "operational_composed": bool(operational_reply), "peak_sampled_rss_bytes": peak_rss,
-                "rss_samples": rss_samples}
+                "operational_delta_events": operational["delta_events"],
+                "operational_reply_ms": operational["reply_ms"],
+                "dialogue_context": greeting_context, "operational_context": operational["context"],
+                "operational_composed": operational["composed"], "peak_sampled_rss_bytes": peak_rss,
+                "rss_samples": rss_samples, **extended}
     except Exception:
         error_log.seek(0)
         diagnostic = error_log.read(16 * 1024)

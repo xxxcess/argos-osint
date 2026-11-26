@@ -32,7 +32,7 @@ use fleetworks_contracts::context::{CredentialPurpose, MutationContext, Permissi
 use fleetworks_contracts::qa_worker::{
     QaDialogueKind, QaPassage, QaWorkerDialogue, QaWorkerEvent, QaWorkerRequest,
 };
-use fleetworks_contracts::readiness::{ReadinessCheckId, ReadinessState};
+use fleetworks_contracts::readiness::ReadinessCheckId;
 use futures_util::StreamExt;
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::time::Instant;
@@ -1084,8 +1084,11 @@ async fn snapshot(
     }
 
     let readiness_source = source.filter(|source| source.kind == ChatSourceKind::Readiness);
+    let registration = readiness_source
+        .filter(|source| source.id == ReadinessCheckId::Registration.as_str())
+        .map(|_| readiness::verified_registration());
     let health_probe = async {
-        if readiness_source.is_none()
+        if (readiness_source.is_none() || registration.is_some())
             && !matches!(
                 intent,
                 Question::Readiness(_)
@@ -1123,12 +1126,26 @@ async fn snapshot(
         ),
     );
     let health = health.ok().flatten();
-    if let Some(source) = readiness_source {
-        let sample = health.as_ref().ok_or_else(current_health_unavailable)?;
-        if !sample.facts.iter().any(|fact| fact.id == source.id) {
-            return Err(crate::missing());
+    let selected_readiness = match (readiness_source, registration.as_ref()) {
+        (Some(source), Some(fact)) => {
+            // Registration belongs to this caller, outside the shared health sample.
+            let observed_at = observation_start(boundary).await;
+            context.revalidate(&state.repo).await?;
+            Some((source, fact, observed_at))
         }
-    }
+        (Some(source), None) => {
+            let sample = health.as_ref().ok_or_else(current_health_unavailable)?;
+            let fact = sample
+                .facts
+                .iter()
+                .find(|fact| fact.id == source.id)
+                .ok_or_else(crate::missing)?;
+            let observed_at = chrono::DateTime::from_timestamp_millis(sample.sampled_at_ms)
+                .ok_or_else(current_health_unavailable)?;
+            Some((source, fact, observed_at))
+        }
+        (None, _) => None,
+    };
 
     let mut passages = Vec::new();
     let mut sources = Vec::new();
@@ -1191,13 +1208,7 @@ async fn snapshot(
         }
         Question::StatusChecks(selection) => {
             // This observation belongs to the validated caller, not the shared health sample.
-            let registration = store::HealthFact {
-                id: ReadinessCheckId::Registration.as_str().to_owned(),
-                label: "Registration".into(),
-                status: ReadinessState::Ready.as_str().to_owned(),
-                reason: None,
-                explanation: String::new(),
-            };
+            let registration = readiness::verified_registration();
             if let Some((sample, report)) = health.as_ref().and_then(|sample| {
                 readiness::status_check_summary(
                     sample.facts.iter().chain([&registration]),
@@ -1374,57 +1385,44 @@ async fn snapshot(
             );
         }
         Question::ExplainSelected => {
-            if let Some(source) = source {
-                if source.kind == ChatSourceKind::Readiness {
-                    if let Some((sample, fact)) = health.as_ref().and_then(|sample| {
-                        sample
-                            .facts
-                            .iter()
-                            .find(|fact| fact.id == source.id)
-                            .map(|fact| (sample, fact))
-                    }) {
-                        let observed_at =
-                            chrono::DateTime::from_timestamp_millis(sample.sampled_at_ms)
-                                .ok_or_else(current_health_unavailable)?;
-                        observed_state = readiness::comparison_state(fact);
-                        push(
-                            source.clone(),
-                            readiness::label(fact).to_owned(),
-                            readiness::explanation(fact),
-                            observed_at,
-                            None,
-                            true,
-                        );
-                    }
-                } else if let Some((activity, at)) = &selected_activity {
-                    if activity.status != "unknown" && at.timestamp_millis() > boundary {
-                        observed_state = Some(activity.status);
-                        push(
-                            source.clone(),
-                            activity.label.into(),
-                            activity.explanation(),
-                            *at,
-                            None,
-                            false,
-                        );
-                    }
-                    if context.permits(Permission::ReadBackend) {
-                        if let Some(check) = activity.check {
-                            related_activity = triage::current_status(
-                                target,
-                                state,
-                                runtime.generation,
-                                check.as_str(),
-                                deadline,
-                            )
-                            .await;
-                        }
+            if let Some((source, fact, observed_at)) = selected_readiness {
+                observed_state = readiness::comparison_state(fact);
+                push(
+                    source.clone(),
+                    readiness::label(fact).to_owned(),
+                    readiness::explanation(fact),
+                    observed_at,
+                    None,
+                    true,
+                );
+            } else if let Some((source, (activity, at))) = source.zip(selected_activity.as_ref()) {
+                if activity.status != "unknown" && at.timestamp_millis() > boundary {
+                    observed_state = Some(activity.status);
+                    push(
+                        source.clone(),
+                        activity.label.into(),
+                        activity.explanation(),
+                        *at,
+                        None,
+                        false,
+                    );
+                }
+                if context.permits(Permission::ReadBackend) {
+                    if let Some(check) = activity.check {
+                        related_activity = triage::current_status(
+                            target,
+                            state,
+                            runtime.generation,
+                            check.as_str(),
+                            deadline,
+                        )
+                        .await;
                     }
                 }
             }
         }
         Question::Summary => {
-            if let Some(sample) = health.filter(|sample| !sample.facts.is_empty()) {
+            if let Some(sample) = health.as_ref().filter(|sample| !sample.facts.is_empty()) {
                 let at = chrono::DateTime::from_timestamp_millis(sample.sampled_at_ms)
                     .ok_or_else(current_health_unavailable)?;
                 let mut facts = sample

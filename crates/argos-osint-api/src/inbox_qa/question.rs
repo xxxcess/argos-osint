@@ -43,6 +43,7 @@ impl Question {
 pub(super) enum StatusChecks {
     All,
     Passed,
+    NotPassed,
     Unresolved,
     Failed,
 }
@@ -217,6 +218,7 @@ fn classify_simple(question: &str) -> Question {
         query,
         "what happened with this job"
             | "what happened with this indexing job"
+            | "what happened with this readiness check"
             | "what happened to this job"
             | "why did this job fail"
             | "why did this indexing job fail"
@@ -352,6 +354,7 @@ fn status_checks(query: &str) -> Option<StatusChecks> {
             "summarise ",
             "explain ",
             "which ",
+            "what ",
             "why are ",
             "how many ",
             "are there any ",
@@ -392,6 +395,7 @@ fn status_check_group(group: &str) -> Option<StatusChecks> {
     let group = group.strip_prefix("still ").unwrap_or(group);
     Some(match group {
         "green" | "passed" | "passing" | "ready" => StatusChecks::Passed,
+        "not passed" => StatusChecks::NotPassed,
         "red" | "failed" | "failing" => StatusChecks::Failed,
         "unresolved" | "need attention" | "needs attention" => StatusChecks::Unresolved,
         _ => return None,
@@ -865,6 +869,10 @@ mod tests {
             ("Thanks, has that changed?", Question::FollowUp),
             ("Could you check again?", Question::FollowUp),
             ("What does this mean?", Question::ExplainSelected),
+            (
+                "What happened with this readiness check?",
+                Question::ExplainSelected,
+            ),
             ("Explain this, please.", Question::ExplainSelected),
             ("What is happening here?", Question::ExplainSelected),
             ("Tell me about this.", Question::ExplainSelected),
@@ -1224,6 +1232,10 @@ mod tests {
             ("Show me the workstation status checks.", StatusChecks::All),
             ("what are tthe green status check?", StatusChecks::Passed),
             ("Which status checks have passed?", StatusChecks::Passed),
+            (
+                "What status checks have not passed?",
+                StatusChecks::NotPassed,
+            ),
             ("How many green checks are there?", StatusChecks::Passed),
             ("Which backend status checks are red?", StatusChecks::Failed),
         ] {

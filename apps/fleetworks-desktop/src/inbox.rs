@@ -59,14 +59,6 @@ impl Topic {
             Self::Readiness(check) => format!("inbox-group-readiness-{}", readiness_name(*check)),
         }
     }
-
-    fn action(&self) -> Option<&'static str> {
-        match self {
-            Self::Connection => None,
-            Self::Job(_) => Some("Open job"),
-            Self::Readiness(_) => Some("View status"),
-        }
-    }
 }
 
 struct Group<'a> {
@@ -150,6 +142,7 @@ pub struct Inbox {
     seen_job_events: VecDeque<String>,
     pub(crate) open: bool,
     pub(crate) at_bottom: bool,
+    pub(crate) generator_picker_open: bool,
     focus_return: Option<&'static str>,
     query: TextEdit,
     expanded: BTreeSet<Topic>,
@@ -157,10 +150,6 @@ pub struct Inbox {
 }
 
 impl Inbox {
-    pub(crate) fn selected_notice_id(&self) -> Option<u64> {
-        self.selected
-    }
-
     #[cfg(test)]
     pub(crate) fn items(&self) -> impl Iterator<Item = &Item> {
         self.items.iter().rev()
@@ -262,6 +251,7 @@ impl Inbox {
 
     pub(crate) fn close(&mut self) {
         self.open = false;
+        self.generator_picker_open = false;
         self.query = TextEdit::new("");
         self.selected = None;
         self.focus_return = None;
@@ -277,6 +267,7 @@ impl Inbox {
 
     fn reset(&mut self) {
         self.items.clear();
+        self.generator_picker_open = false;
         self.query = TextEdit::new("");
         self.link = Link::Unknown;
         self.known_jobs.clear();
@@ -596,12 +587,7 @@ impl State {
     }
 
     fn inbox_focus_return(&self) -> &'static str {
-        self.inbox
-            .focus_return
-            .filter(|&trigger| {
-                trigger != crate::views::WORKSTATION_ASSISTANT || self.inbox_qa_visible()
-            })
-            .unwrap_or("inbox-toggle")
+        self.inbox.focus_return.unwrap_or("inbox-toggle")
     }
 
     pub(crate) fn close_inbox(&mut self, tx: &mut Tx) {
@@ -701,11 +687,14 @@ impl State {
         }
     }
 
-    pub(crate) fn selected_notice_source(&self, notice_id: u64) -> Option<ChatSourceReference> {
-        if !self.inbox.open || self.inbox.selected != Some(notice_id) {
+    pub(crate) fn notification_source(&self, notice_id: u64) -> Option<ChatSourceReference> {
+        if !self.inbox.open {
             return None;
         }
         let item = self.inbox.items.iter().find(|item| item.id == notice_id)?;
+        if !self.inbox.expanded.contains(&item.topic) {
+            return None;
+        }
         let (kind, id) = match &item.topic {
             Topic::Readiness(id) => (ChatSourceKind::Readiness, id.as_str().to_owned()),
             Topic::Job(id) if item.private_job && !self.triage_job_is_shared(id) => {
@@ -852,7 +841,8 @@ pub(crate) fn drawer(
         return None;
     }
     let window_width = cx.layout_size("app-shell").map_or(640.0, |size| size[0]);
-    let mut panel = body(state, kit, preferences)
+    let mut menus = Vec::new();
+    let mut panel = body(state, kit, preferences, &mut menus)
         .w(DRAWER_WIDTH)
         .max_w(DRAWER_WIDTH)
         .h_full()
@@ -891,7 +881,8 @@ pub(crate) fn drawer(
                     .h_full()
                     .child(dismiss_area("inbox-backdrop-left").grow(1.0).h_full())
                     .child(panel),
-            ),
+            )
+            .children(menus),
     )
 }
 
@@ -923,7 +914,7 @@ fn enter(el: El, preferences: ViewPreferences, transition: rune::Transition) -> 
         .transition(transition)
 }
 
-fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
+fn body(state: &State, kit: &Kit, preferences: ViewPreferences, menus: &mut Vec<El>) -> El {
     let inbox = &state.inbox;
     let close = rune_kit::Button::new("Close")
         .variant(rune_kit::ButtonVariant::Ghost)
@@ -1044,7 +1035,7 @@ fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
                 .on_at_bottom(|state: &mut State, at_bottom| state.inbox.at_bottom = at_bottom)
                 .child(list),
         )
-        .children(crate::inbox_qa::footer(state, kit, preferences))
+        .children(crate::inbox_qa::footer(state, kit, preferences, menus))
 }
 
 fn group_view(group: &Group<'_>, state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
@@ -1205,6 +1196,20 @@ fn status_dot(tone: StatusTone) -> El {
         .a11y_hidden()
 }
 
+fn view_status_button(notice_id: u64, check: ReadinessCheckId, kit: &Kit) -> El {
+    IconButton::new(&icons::SHIELD_CHECK)
+        .variant(IconButtonVariant::Ghost)
+        .control_size(ControlSize::Large)
+        .label("View status")
+        .help("View this readiness check")
+        .on_press_tx(move |state: &mut State, tx| {
+            state.close_inbox(tx);
+            state.open_readiness_notice(check, tx);
+        })
+        .build(kit)
+        .key(format!("inbox-item-{notice_id}-action"))
+}
+
 fn row(item: &Item, state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
     let id = item.id;
     let expanded = state.inbox.selected == Some(id);
@@ -1216,95 +1221,103 @@ fn row(item: &Item, state: &State, kit: &Kit, preferences: ViewPreferences) -> E
         .w_full()
         .px(10.0)
         .border_sides([1.0, 0.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE));
+    let status = match item.topic {
+        Topic::Readiness(check) => Some(view_status_button(id, check, kit)),
+        _ => None,
+    };
+    let trigger = rune::row()
+        .key(row_key)
+        .role("button")
+        .focusable(true)
+        .label(format!(
+            "{}, {}, {}",
+            if item.read { "Read" } else { "Unread" },
+            item.title,
+            age
+        ))
+        .expanded(expanded)
+        .grow(1.0)
+        .min_w(0.0)
+        .min_h(34.0)
+        .px(8.0)
+        .py(5.0)
+        .gap(8.0)
+        .center_y()
+        .radius(5.0)
+        .hover(theme::hex(theme::SURFACE_ELEVATED))
+        .on_press_tx(move |state: &mut State, tx| {
+            state.inbox.select(id);
+            state.poll_activity_triage();
+            tx.keep_on_screen(toggle_key.clone());
+        })
+        .child(
+            rune::el()
+                .size(6.0, 6.0)
+                .a11y_hidden()
+                .children((!item.read).then(|| {
+                    status_dot(StatusTone::Accent).key(format!("inbox-item-{id}-unread"))
+                })),
+        )
+        .child(
+            rune::text(item.title.clone())
+                .font(if item.read {
+                    kit.ty.small
+                } else {
+                    kit.ty.small_medium
+                })
+                .color(theme::hex(theme::TEXT_PRIMARY))
+                .min_w(0.0)
+                .grow(1.0)
+                .wrap()
+                .a11y_hidden(),
+        )
+        .child(
+            rune::text(age)
+                .font(kit.ty.small)
+                .color(theme::hex(theme::TEXT_MUTED))
+                .a11y_hidden(),
+        );
     let mut content = rune::col()
         .w_full()
         .instant_changes()
         .transition(rune::Transition::none())
         .child(
             rune::row()
-                .key(row_key)
-                .role("button")
-                .focusable(true)
-                .label(format!(
-                    "{}, {}, {}",
-                    if item.read { "Read" } else { "Unread" },
-                    item.title,
-                    age
-                ))
-                .expanded(expanded)
                 .w_full()
-                .min_h(34.0)
-                .px(8.0)
-                .py(5.0)
-                .gap(8.0)
                 .center_y()
-                .radius(5.0)
-                .hover(theme::hex(theme::SURFACE_ELEVATED))
-                .on_press_tx(move |state: &mut State, tx| {
-                    state.inbox.select(id);
-                    state.poll_activity_triage();
-                    tx.keep_on_screen(toggle_key.clone());
-                })
-                .child(
-                    rune::el()
-                        .size(6.0, 6.0)
-                        .a11y_hidden()
-                        .children((!item.read).then(|| {
-                            status_dot(StatusTone::Accent).key(format!("inbox-item-{id}-unread"))
-                        })),
-                )
-                .child(
-                    rune::text(item.title.clone())
-                        .font(if item.read {
-                            kit.ty.small
-                        } else {
-                            kit.ty.small_medium
-                        })
-                        .color(theme::hex(theme::TEXT_PRIMARY))
-                        .min_w(0.0)
-                        .grow(1.0)
-                        .wrap()
-                        .a11y_hidden(),
-                )
-                .child(
-                    rune::text(age)
-                        .font(kit.ty.small)
-                        .color(theme::hex(theme::TEXT_MUTED))
-                        .a11y_hidden(),
-                ),
+                .child(trigger)
+                .children(status)
+                .children(crate::activity_triage::explain_notice_button(
+                    state, id, kit,
+                )),
         );
     if !expanded {
         return enter_from_below(entry.child(content), preferences);
     }
-    let action = item.topic.action().filter(|_| {
-        !matches!(item.topic, Topic::Job(_))
-            || (state.connected() && state.registration.context.is_some())
-    });
-    let action = action.map(|label| {
-        let topic = item.topic.clone();
-        rune::row().child(
-            rune_kit::Button::new(label)
-                .variant(rune_kit::ButtonVariant::Ghost)
-                .label_with(move |font, _| {
-                    rune::text(label)
-                        .font(font)
-                        .color(theme::hex(theme::MOLTEN_ACCENT))
-                })
-                .on_press_tx(move |state: &mut State, tx| {
-                    state.close_inbox(tx);
-                    match &topic {
-                        Topic::Job(id) => {
+    let open_job = match &item.topic {
+        Topic::Job(job) if state.connected() && state.registration.context.is_some() => {
+            let job = job.clone();
+            Some(
+                rune::row().child(
+                    rune_kit::Button::new("Open job")
+                        .variant(rune_kit::ButtonVariant::Ghost)
+                        .label_with(|font, _| {
+                            rune::text("Open job")
+                                .font(font)
+                                .color(theme::hex(theme::MOLTEN_ACCENT))
+                        })
+                        .on_press_tx(move |state: &mut State, tx| {
+                            state.close_inbox(tx);
                             state.setup_gateway = false;
-                            state.open_job(id);
-                        }
-                        Topic::Readiness(id) => state.open_readiness_notice(*id, tx),
-                        Topic::Connection => {}
-                    }
-                })
-                .build(kit)
-                .key(format!("inbox-item-{id}-action")),
-        )
-    });
+                            state.open_job(&job);
+                        })
+                        .build(kit)
+                        .key(format!("inbox-item-{id}-action")),
+                ),
+            )
+        }
+        _ => None,
+    };
     content = content.child(
         rune::col()
             .key(format!("inbox-item-{id}-detail"))
@@ -1317,13 +1330,7 @@ fn row(item: &Item, state: &State, kit: &Kit, preferences: ViewPreferences) -> E
                     .color(theme::hex(theme::TEXT_SECONDARY))
                     .wrap(),
             )
-            .children(action)
-            .children(crate::activity_triage::actions(
-                state,
-                crate::activity_triage::Anchor::Notice(id),
-                kit,
-                preferences,
-            )),
+            .children(open_job),
     );
     enter_from_below(entry.child(content), preferences)
 }
@@ -1554,7 +1561,6 @@ mod tests {
             } else {
                 let item = inbox.items().next().expect("actor readiness item");
                 assert_eq!(item.topic, Topic::Readiness(ReadinessCheckId::ActorSearch));
-                assert_eq!(item.topic.action(), Some("View status"));
                 assert_eq!(item.title, crate::readiness_cards::ACTOR_INDEX_CATCH_UP);
             }
         }

@@ -1023,8 +1023,6 @@ fn workstation_registration_tag(state: &State, kit: &Kit) -> El {
         )
 }
 
-pub(crate) const WORKSTATION_ASSISTANT: &str = "workstation-open-assistant";
-
 fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -> El {
     let preferences = state
         .accessibility
@@ -1079,17 +1077,6 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                         let (health, tone) = crate::readiness_cards::workstation_health(state);
                         ui_components::status_pill(health, None, tone, kit)
                             .key("workstation-health")
-                    }))
-                    .children(state.inbox_qa_visible().then(|| {
-                        ActionButton::new("Open Assistant")
-                            .key(WORKSTATION_ASSISTANT)
-                            .finish(MetalFinish::Gunmetal)
-                            .on_press(|state: &mut State| {
-                                if state.inbox_qa_visible() && !state.has_active_confirmation() {
-                                    state.open_inbox_from(WORKSTATION_ASSISTANT);
-                                }
-                            })
-                            .build(kit, preferences, pointer_ref)
                     })),
             ),
     );

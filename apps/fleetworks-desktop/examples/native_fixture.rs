@@ -732,15 +732,30 @@ mod native {
         });
     }
 
-    fn inbox_related_activity(state: &mut State) {
+    fn inbox_notice_actions(state: &mut State, phase: QaPhase) {
         readiness_scenes::observed(state);
-        triage_connection(state, QaPhase::Starting);
+        triage_connection(state, phase);
+        if let Some(capabilities) = &mut state.connection.capabilities {
+            capabilities.features.extend([
+                QA_MODEL_SETTINGS_FEATURE.into(),
+                QA_GPT2_GENERATORS_FEATURE.into(),
+            ]);
+        }
+        let mut settings = QaSettings::new(true, phase, 2, 1, true);
+        settings.generator = Some(QaGeneratorSettings::new(
+            QaGeneratorPreference::Automatic,
+            Some(settings.model_target),
+            phase,
+            None,
+        ));
+        settings.decision = Some(QaDecisionSettings::new(
+            QaDecisionPreference::RulesOnly,
+            QaDecisionPreference::RulesOnly,
+            QaPhase::Off,
+            None,
+        ));
+        state.seed_inbox_qa_fixture(settings, None);
         state.fixture_show_triage_notice();
-        state.seed_activity_triage_fixture(QaRelatedActivity::Found {
-            target: ChatSourceReference::new(ChatSourceKind::Readiness, "actor_search".into())
-                .expect("synthetic current readiness"),
-            reason: QaRelationshipReason::CurrentStatus,
-        });
     }
 
     fn workstation_status(state: &mut State) {
@@ -1174,7 +1189,12 @@ mod native {
                 ("jobs-offline", |state| state.page = Page::Jobs),
                 ("jobs-ready", jobs_ready),
                 ("jobs-related-activity", jobs_related_activity),
-                ("inbox-related-activity-limited", inbox_related_activity),
+                ("inbox-related-activity-limited", |state| {
+                    inbox_notice_actions(state, QaPhase::Starting);
+                }),
+                ("inbox-notice-actions", |state| {
+                    inbox_notice_actions(state, QaPhase::Ready);
+                }),
                 ("jobs-filters-ready", jobs_scenes::filters_ready),
                 ("jobs-page-two", jobs_scenes::page_two),
                 ("jobs-no-matches", jobs_scenes::no_matches),

@@ -4,8 +4,20 @@ use fleetworks_contracts::chat::QA_MAX_FINDINGS;
 use fleetworks_contracts::chat::QA_MAX_WORDS;
 use fleetworks_contracts::qa_worker::exact_span;
 use fleetworks_contracts::readiness::ReadinessCheckId;
+use fleetworks_contracts::readiness::ReadinessState;
 
 use super::question::StatusChecks;
+
+/// Project a verified caller registration without including private registration data.
+pub(super) fn verified_registration() -> HealthFact {
+    HealthFact {
+        id: ReadinessCheckId::Registration.as_str().into(),
+        label: "Registration".into(),
+        status: ReadinessState::Ready.as_str().into(),
+        reason: Some("The workstation registration was verified for this request.".into()),
+        explanation: String::new(),
+    }
+}
 
 pub(super) fn label(fact: &HealthFact) -> &str {
     crate::workstation::qa_readiness_label(&fact.id).unwrap_or(&fact.label)
@@ -159,12 +171,28 @@ pub(super) fn status_check_summary<'a>(
     let (group, mut details) = match selection {
         StatusChecks::All => (None, failed.into_iter().chain(unresolved).collect()),
         StatusChecks::Passed => (Some("passed"), passed),
+        StatusChecks::NotPassed => (
+            Some("not passed"),
+            failed.into_iter().chain(unresolved).collect(),
+        ),
         StatusChecks::Failed => (Some("failed"), failed),
         StatusChecks::Unresolved => (Some("unresolved"), unresolved),
     };
     details.sort_by_key(|fact| priority(fact));
     let mut summary = match (group, details.as_slice()) {
         (None, _) => all_summary,
+        (Some("not passed"), []) => "No non-passing status checks were observed.".into(),
+        (Some("not passed"), [fact]) => {
+            format!("One status check has not passed: {}.", label(fact))
+        }
+        (Some("not passed"), _) => {
+            let names = details.iter().map(|fact| label(fact)).collect::<Vec<_>>();
+            format!(
+                "{} status checks have not passed: {}.",
+                names.len(),
+                names.join(", ")
+            )
+        }
         (Some(group), []) => format!("No {group} status checks were observed."),
         (Some(group), [fact]) => format!("One {group} status check covers {}.", label(fact)),
         (Some(group), _) => {
@@ -240,6 +268,7 @@ mod tests {
     use super::retained_status_check_tally;
     use super::status_check_summary;
     use super::validated_summary_finding;
+    use super::verified_registration;
     use super::StatusCheckFollowUp;
     use super::StatusChecks;
     use argos_osint_core::storage::inbox_qa::HealthFact;
@@ -339,10 +368,20 @@ mod tests {
         let report =
             status_check_summary(facts[..2].iter(), StatusChecks::Unresolved, None).unwrap();
         assert_eq!(report.summary, "No unresolved status checks were observed.");
-        let registration = HealthFact {
-            label: "Registration".into(),
-            ..fact("registration", "ready", None)
-        };
+        let report = status_check_summary(facts.iter(), StatusChecks::NotPassed, None).unwrap();
+        assert_eq!(
+            report.summary,
+            "3 status checks have not passed: Jobs service, Actor catalog, Actor search."
+        );
+        assert_eq!(
+            report
+                .details
+                .iter()
+                .map(|fact| fact.id.as_str())
+                .collect::<Vec<_>>(),
+            ["jobs", "actor_catalog", "actor_search"]
+        );
+        let registration = verified_registration();
         let report = status_check_summary(
             facts.iter().chain([&registration]),
             StatusChecks::Passed,

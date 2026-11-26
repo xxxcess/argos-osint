@@ -57,9 +57,11 @@ use protocol::QaWorkerSequence;
 use protocol::QA_CONTEXT_USAGE_ENV;
 use protocol::QA_CONTEXT_WINDOW_TOKENS;
 use protocol::QA_DIALOGUE_ENV;
+use protocol::QA_LEGACY_STREAMING_WINDOW_TOKENS;
 use protocol::QA_MAX_FINDINGS;
 use protocol::QA_MAX_FRAME_BYTES;
 use protocol::QA_MAX_VISIBLE_WORDS;
+use protocol::QA_MODEL_CONTEXT_ENV;
 use protocol::QA_MODEL_FILES;
 use protocol::QA_MODEL_REVISION;
 use protocol::QA_MODEL_TARGET_ENV;
@@ -257,14 +259,7 @@ impl ResidentModel {
         stopping: &AtomicBool,
         draft: &mut impl FnMut(&str) -> Result<()>,
     ) -> (Option<String>, Option<QaContextUsage>) {
-        let skipped = (
-            None,
-            Some(QaContextUsage::new(
-                dialogue::input_limit(request.target, request.streaming),
-                0,
-                0,
-            )),
-        );
+        let skipped = (None, Some(QaContextUsage::new(request.window_tokens, 0, 0)));
         let Some(dir) = dir else {
             return skipped;
         };
@@ -629,23 +624,31 @@ fn receive_commands(stopping: Arc<AtomicBool>) -> io::Result<mpsc::Receiver<QaWo
     Ok(receiver)
 }
 
-fn ready(dialogue: bool, streaming: bool, model_revision: &str) -> QaWorkerReply {
+fn ready(
+    dialogue: bool,
+    streaming: bool,
+    model_revision: &str,
+    window_tokens: u16,
+) -> QaWorkerReply {
     let model_revision = model_revision.into();
-    if dialogue && streaming {
-        QaWorkerReply::ReadyWithStreaming {
+    match (dialogue, streaming, window_tokens) {
+        (true, true, QA_LEGACY_STREAMING_WINDOW_TOKENS) => QaWorkerReply::ReadyWithStreaming {
             protocol: QA_WORKER_PROTOCOL,
             model_revision,
-        }
-    } else if dialogue {
-        QaWorkerReply::ReadyWithDialogue {
+        },
+        (true, true, window_tokens) => QaWorkerReply::ReadyWithStreamingContext {
             protocol: QA_WORKER_PROTOCOL,
             model_revision,
-        }
-    } else {
-        QaWorkerReply::Ready {
+            window_tokens,
+        },
+        (true, false, _) => QaWorkerReply::ReadyWithDialogue {
             protocol: QA_WORKER_PROTOCOL,
             model_revision,
-        }
+        },
+        (false, _, _) => QaWorkerReply::Ready {
+            protocol: QA_WORKER_PROTOCOL,
+            model_revision,
+        },
     }
 }
 
@@ -676,6 +679,12 @@ pub(crate) fn run(
             .and_then(QaModelTarget::from_slug)
             .ok_or_else(|| anyhow!("invalid QA model target"))?,
     };
+    let model_context = env::var_os(QA_MODEL_CONTEXT_ENV).as_deref() == Some("1".as_ref());
+    let window_tokens = match (streaming, model_context) {
+        (true, true) => target.input_tokens(),
+        (true, false) => QA_LEGACY_STREAMING_WINDOW_TOKENS,
+        (false, _) => QA_CONTEXT_WINDOW_TOKENS,
+    };
     let stopping = Arc::new(AtomicBool::new(false));
     let commands = receive_commands(stopping.clone())?;
     let (mut model, generator_dir, model_revision) = match panic::catch_unwind(|| {
@@ -701,7 +710,12 @@ pub(crate) fn run(
         }
     };
     send(
-        ready(generator_dir.is_some(), streaming, model_revision),
+        ready(
+            generator_dir.is_some(),
+            streaming,
+            model_revision,
+            window_tokens,
+        ),
         None,
     )?;
     for command in commands {
@@ -710,7 +724,12 @@ pub(crate) fn run(
         }
         match command {
             QaWorkerCommand::Ping => send(
-                ready(generator_dir.is_some(), streaming, model_revision),
+                ready(
+                    generator_dir.is_some(),
+                    streaming,
+                    model_revision,
+                    window_tokens,
+                ),
                 None,
             )?,
             QaWorkerCommand::Ask { request } => {
@@ -725,6 +744,7 @@ pub(crate) fn run(
                         dialogue::DecodeRequest {
                             target,
                             streaming,
+                            window_tokens,
                             question: &request.question,
                             dialogue,
                             passages: &request.passages,

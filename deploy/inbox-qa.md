@@ -22,6 +22,8 @@ Use the Embedded companion’s state directory for the selected installation. Th
 
 The default pack carries the verified worker, its runtime libraries and FLAN-T5 Small. With Automatic selected, the companion prefers FLAN-T5 Base when measured memory headroom allows it. When Base assets cannot be provisioned, the verified Small checkpoint in the offline pack is available as a fallback. With a GPT-2 choice, a compatible worker uses a verified named pack or provisions the pinned checkpoint and BPE files into the private profile. Downloads are used to obtain model files. Response generation runs inside the existing offline worker sandbox. The companion loads one model at a time. The [news classifier](../docs/wiki/code/classifier.md) uses its own model and configuration.
 
+Current workers reserve 128 of GPT-2’s 1,024 positions for generation and accept up to 896 input tokens on both GPT-2 checkpoints. That budget includes the question, recent exchanges, and any attached evidence. Older worker packs retain their 512-token streaming budget. The context meter uses the budget reported for each turn.
+
 ## Host requirements
 
 The worker requires Linux Landlock ABI 3 or newer, or macOS Seatbelt. The companion starts it with read access to the verified pack, selected model assets, and system loader. Workstation Settings and Inbox show whether the pack is missing or invalid, the sandbox is unavailable, or the worker has insufficient resources or cannot start.

@@ -48,7 +48,7 @@ impl Model {
         ensure!(
             (config.n_layer, config.n_head, config.n_embd) == dimensions
                 && config.vocab_size == 50_257
-                && config.n_ctx == 1024
+                && config.n_ctx == i64::from(target.input_tokens() + target.output_tokens())
                 && config.n_positions == config.n_ctx,
             "unexpected GPT-2 checkpoint dimensions"
         );

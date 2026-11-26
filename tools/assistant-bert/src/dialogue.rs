@@ -33,7 +33,6 @@ use super::protocol::QaDialogueKind;
 use super::protocol::QaModelTarget;
 use super::protocol::QaPassage;
 use super::protocol::QaWorkerDialogue;
-use super::protocol::QA_CONTEXT_WINDOW_TOKENS;
 use super::protocol::QA_MAX_DIALOGUE_HISTORY;
 use super::protocol::QA_MAX_DIALOGUE_MESSAGE_BYTES;
 use super::protocol::QA_MAX_FINDINGS;
@@ -448,18 +447,10 @@ pub(super) struct Generation {
 pub(super) struct DecodeRequest<'a> {
     pub(super) target: QaModelTarget,
     pub(super) streaming: bool,
+    pub(super) window_tokens: u16,
     pub(super) question: &'a str,
     pub(super) dialogue: &'a QaWorkerDialogue,
     pub(super) passages: &'a [QaPassage],
-}
-
-pub(super) fn input_limit(target: QaModelTarget, streaming: bool) -> u16 {
-    if streaming {
-        target.input_tokens()
-    } else {
-        // A dialogue-only legacy supervisor only accepts the original receipt limit.
-        QA_CONTEXT_WINDOW_TOKENS
-    }
 }
 
 fn conversational_prefix(text: &str) -> &str {
@@ -545,7 +536,7 @@ fn decode_flan<G: LanguageGenerator>(
     draft: &mut impl FnMut(&str) -> Result<()>,
 ) -> Result<Option<Generation>> {
     let tokenizer = generator.get_tokenizer();
-    let window_tokens = input_limit(request.target, request.streaming);
+    let window_tokens = request.window_tokens;
     let started = Instant::now();
     let operational = request.dialogue.kind == QaDialogueKind::Operational;
     let Some((ids, options)) = prepare_input(tokenizer, option_labels, &request, window_tokens)?
@@ -623,7 +614,7 @@ fn decode_gpt2(
     draft: &mut impl FnMut(&str) -> Result<()>,
 ) -> Result<Option<Generation>> {
     let tokenizer = &model.tokenizer;
-    let window_tokens = input_limit(request.target, request.streaming);
+    let window_tokens = request.window_tokens;
     let started = Instant::now();
     let operational = request.dialogue.kind == QaDialogueKind::Operational;
     let Some((ids, options)) = prepare_input(tokenizer, option_labels, &request, window_tokens)?

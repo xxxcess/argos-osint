@@ -71,9 +71,11 @@ The [V2 wire contract](../../../crates/fleetworks-contracts/src/chat/qa.rs) is a
 
 ### Jobs and Inbox triage
 
-Use **Find related activity** on a selected private job or expanded readiness notice. The companion resolves a typed job or readiness reference in the current registration. An explicit stage/check relation can open the associated diagnostic. A historical readiness notice links to **Current status**. A current check alone provides no evidence of the earlier cause. Missing relations, ambiguous choices and unavailable inference have distinct outcomes.
+Use **Find related activity** on a selected private job. The companion resolves the job in the current registration. An explicit stage/check relation can open the associated diagnostic. Missing relations, ambiguous choices and unavailable inference have distinct outcomes.
 
-The inline lookup returns one compact result and creates no Assistant exchange or job. **Explain in Assistant** fills the composer with the selected subject for the operator to submit. Both flows use scoped activity and fresh readiness. Navigation is a typed native action that runs after operator input and uses the ordinary destination authorization.
+The inline lookup returns one compact result. In Inbox, the **View status** icon opens the current check and the **Explain in Assistant** icon attaches the notification’s subject to the composer for the operator to submit. A readiness notice grounds the explanation in a fresh observation. Registration status comes from the caller’s verified registration. Navigation uses the ordinary destination authorization.
+
+Workstation managers can choose the **Generator model** below the composer. This updates the same preference as Assistant settings and preserves the draft while the generator changes.
 
 ### Models and lifecycle
 
@@ -81,8 +83,10 @@ The inline lookup returns one compact result and creates no Assistant exchange o
 | --- | ---: | ---: | ---: |
 | FLAN-T5 Base (preferred) | ~990 MB | 512 | 128 |
 | FLAN-T5 Small (fallback) | ~308 MB | 512 | 128 |
-| GPT-2 Small | ~548 MB | 512 | 128 |
-| GPT-2 Medium | ~1.52 GB | 512 | 128 |
+| GPT-2 Small | ~548 MB | 896 | 128 |
+| GPT-2 Medium | ~1.52 GB | 896 | 128 |
+
+Both GPT-2 checkpoints share 1,024 positions across the prompt and reply. The meter shows peak input usage against the worker’s negotiated input budget. Existing packs can continue to report their 512-token input limit, and retained turns keep their original measurements.
 
 **Generator** defaults to **Automatic**. It selects FLAN-T5 Base when fresh memory headroom allows it and can fall back to FLAN-T5 Small when Base assets are unavailable. Each explicit choice, including GPT-2 Small and Medium, stays selected if memory or verified assets are unavailable. The panel shows the effective model once a verified worker is ready. All choices use the same resource admission and sandbox checks. The warm worker stays idle between turns and runs without network access. [Pack provisioning and resource limits](../../../deploy/inbox-qa.md)
 

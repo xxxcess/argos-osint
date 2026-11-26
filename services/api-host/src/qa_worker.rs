@@ -50,6 +50,8 @@ use fleetworks_contracts::qa_worker::QaWorkerRequest;
 use fleetworks_contracts::qa_worker::QaWorkerSequence;
 use fleetworks_contracts::qa_worker::QA_CONTEXT_USAGE_ENV;
 use fleetworks_contracts::qa_worker::QA_DIALOGUE_ENV;
+use fleetworks_contracts::qa_worker::QA_LEGACY_STREAMING_WINDOW_TOKENS;
+use fleetworks_contracts::qa_worker::QA_MODEL_CONTEXT_ENV;
 use fleetworks_contracts::qa_worker::QA_MODEL_FILES;
 use fleetworks_contracts::qa_worker::QA_MODEL_REVISION;
 use fleetworks_contracts::qa_worker::QA_MODEL_TARGET_ENV;
@@ -506,7 +508,7 @@ struct WorkerSession {
     input: Box<dyn AsyncWrite + Send + Unpin>,
     output: Box<dyn AsyncRead + Send + Unpin>,
     child: Option<Child>,
-    streaming: bool,
+    streaming_window: Option<u16>,
     model_target: QaModelTarget,
     resident_limit: u64,
 }
@@ -524,6 +526,7 @@ impl WorkerSession {
             .env(QA_CONTEXT_USAGE_ENV, "1")
             .env(QA_DIALOGUE_ENV, "1")
             .env(QA_STREAMING_ENV, "1")
+            .env(QA_MODEL_CONTEXT_ENV, "1")
             .env(QA_MODEL_TARGET_ENV, target.slug())
             .env("OMP_NUM_THREADS", &threads)
             .env("MKL_NUM_THREADS", &threads)
@@ -550,7 +553,7 @@ impl WorkerSession {
             input: Box::new(input),
             output: Box::new(output),
             child: Some(child),
-            streaming: false,
+            streaming_window: None,
             model_target: target,
             resident_limit: limits.resident_bytes,
         })
@@ -589,15 +592,14 @@ impl WorkerSession {
     }
 
     fn validate_ready(&mut self, reply: QaWorkerReply) -> Result<()> {
-        match reply {
+        let streaming_window = match reply {
             QaWorkerReply::ReadyWithDialogue {
                 protocol,
                 model_revision,
             } if protocol == QA_WORKER_PROTOCOL
                 && model_revision == self.model_target.revision() =>
             {
-                self.streaming = false;
-                Ok(())
+                None
             }
             QaWorkerReply::ReadyWithStreaming {
                 protocol,
@@ -605,8 +607,18 @@ impl WorkerSession {
             } if protocol == QA_WORKER_PROTOCOL
                 && model_revision == self.model_target.revision() =>
             {
-                self.streaming = true;
-                Ok(())
+                Some(QA_LEGACY_STREAMING_WINDOW_TOKENS)
+            }
+            QaWorkerReply::ReadyWithStreamingContext {
+                protocol,
+                model_revision,
+                window_tokens,
+            } if protocol == QA_WORKER_PROTOCOL
+                && model_revision == self.model_target.revision()
+                && window_tokens == self.model_target.input_tokens()
+                && window_tokens > QA_LEGACY_STREAMING_WINDOW_TOKENS =>
+            {
+                Some(window_tokens)
             }
             QaWorkerReply::StartupFailed {
                 source,
@@ -620,12 +632,20 @@ impl WorkerSession {
                     worker_panic_cause = cause.code(),
                     "Inbox QA worker reported a startup panic"
                 );
-                Err(anyhow!("QA model process panicked during startup"))
+                return Err(anyhow!("QA model process panicked during startup"));
             }
-            _ => Err(anyhow!(
-                "QA worker could not confirm the expected checkpoint"
-            )),
-        }
+            _ => {
+                return Err(anyhow!(
+                    "QA worker could not confirm the expected checkpoint"
+                ))
+            }
+        };
+        ensure!(
+            self.lifecycle != WorkerLifecycle::Ready || self.streaming_window == streaming_window,
+            "QA worker changed its negotiated context"
+        );
+        self.streaming_window = streaming_window;
+        Ok(())
     }
 
     async fn ping(&mut self) -> Result<()> {
@@ -649,15 +669,18 @@ impl WorkerSession {
             };
             let terminal = validation.accept(&request, &event)?;
             match &event {
-                QaWorkerEvent::Delta { .. } => ensure!(self.streaming, "unexpected QA stream"),
+                QaWorkerEvent::Delta { .. } => {
+                    ensure!(self.streaming_window.is_some(), "unexpected QA stream");
+                }
                 QaWorkerEvent::Complete {
                     context: Some(context),
                     ..
-                } if self.streaming => {
-                    ensure!(
-                        context.window_tokens == self.model_target.input_tokens(),
-                        "unexpected QA context window"
-                    );
+                } => {
+                    let window_matches = match self.streaming_window {
+                        Some(window) => context.window_tokens == window,
+                        None => context.window_tokens <= QA_LEGACY_STREAMING_WINDOW_TOKENS,
+                    };
+                    ensure!(window_matches, "unexpected QA context window");
                 }
                 _ => {}
             }
@@ -1331,7 +1354,7 @@ mod tests {
             input: Box::new(writer),
             output: Box::new(reader),
             child: Some(child),
-            streaming: true,
+            streaming_window: Some(QA_LEGACY_STREAMING_WINDOW_TOKENS),
             model_target: target,
             resident_limit: WorkerLimits::for_target(target).resident_bytes,
         });
@@ -1365,6 +1388,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gpt2_streaming_receipts_use_the_negotiated_window() {
+        let legacy = QA_LEGACY_STREAMING_WINDOW_TOKENS;
+        for target in [QaModelTarget::Gpt2Small, QaModelTarget::Gpt2Medium] {
+            let extended = target.input_tokens();
+            let legacy_ready = || QaWorkerReply::ReadyWithStreaming {
+                protocol: QA_WORKER_PROTOCOL,
+                model_revision: target.revision().into(),
+            };
+            let model_ready = |window_tokens| QaWorkerReply::ReadyWithStreamingContext {
+                protocol: QA_WORKER_PROTOCOL,
+                model_revision: target.revision().into(),
+                window_tokens,
+            };
+            for (advertised, received) in [
+                (legacy, legacy),
+                (legacy, extended),
+                (extended, extended),
+                (extended, legacy),
+            ] {
+                let (io, mut peer) = UnixStream::pair().unwrap();
+                let (reader, writer) = io.into_split();
+                let mut session = WorkerSession {
+                    lifecycle: WorkerLifecycle::Starting,
+                    input: Box::new(writer),
+                    output: Box::new(reader),
+                    child: None,
+                    streaming_window: None,
+                    model_target: target,
+                    resident_limit: WorkerLimits::for_target(target).resident_bytes,
+                };
+                assert!(session.validate_ready(model_ready(legacy)).is_err());
+
+                let usage = QaContextUsage::new(received, 82, 1);
+                let child = async {
+                    let ready = if advertised == legacy {
+                        legacy_ready()
+                    } else {
+                        model_ready(advertised)
+                    };
+                    write_reply(&mut peer, ready).await;
+                    let QaWorkerCommand::Ask { request } = read_command(&mut peer).await else {
+                        panic!("missing inference request");
+                    };
+                    write_reply(
+                        &mut peer,
+                        QaWorkerReply::Event {
+                            event: QaWorkerEvent::Complete {
+                                turn_id: request.turn_id,
+                                sequence: 1,
+                                outcome: QaWorkerOutcome::Answered,
+                                context: Some(usage),
+                                reply: Some("Hello!".into()),
+                            },
+                        },
+                    )
+                    .await;
+                };
+                let executor = async {
+                    session.ready().await.unwrap();
+                    session.lifecycle = WorkerLifecycle::Ready;
+                    assert_eq!(session.streaming_window, Some(advertised));
+                    let other_ready = if advertised == legacy {
+                        model_ready(extended)
+                    } else {
+                        legacy_ready()
+                    };
+                    assert!(session.validate_ready(other_ready).is_err());
+
+                    let mut request = QaWorkerRequest::new(
+                        "turn-a".into(),
+                        "snapshot-a".into(),
+                        "Hi!".into(),
+                        Vec::new(),
+                    );
+                    request.dialogue = Some(QaWorkerDialogue {
+                        kind: QaDialogueKind::Greeting,
+                        history: Vec::new(),
+                    });
+                    let (events, mut stream) = mpsc::channel(1);
+                    let result = session.ask(request, events).await;
+                    if advertised == received {
+                        result.unwrap();
+                        assert!(matches!(
+                            stream.recv().await,
+                            Some(QaWorkerEvent::Complete { context: Some(context), .. }) if context == usage
+                        ));
+                    } else {
+                        assert_eq!(
+                            result.unwrap_err().to_string(),
+                            "unexpected QA context window"
+                        );
+                        assert!(stream.recv().await.is_none());
+                    }
+                };
+                timeout(PING_LIMIT, async { tokio::join!(child, executor) })
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn streaming_draft_arrives_before_the_canonical_completion() {
         let (io, mut peer) = UnixStream::pair().unwrap();
         let (input, output) = io.into_split();
@@ -1375,7 +1500,7 @@ mod tests {
             input: Box::new(output),
             output: Box::new(input),
             child: None,
-            streaming: false,
+            streaming_window: None,
             model_target: target,
             resident_limit: WorkerLimits::for_target(target).resident_bytes,
         };

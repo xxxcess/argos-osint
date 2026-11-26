@@ -47,6 +47,7 @@ use protocol::QaWorkerReply;
 use protocol::QA_CONTEXT_USAGE_ENV;
 use protocol::QA_DIALOGUE_ENV;
 use protocol::QA_MAX_FRAME_BYTES;
+use protocol::QA_MODEL_CONTEXT_ENV;
 use protocol::QA_MODEL_REVISION;
 use protocol::QA_MODEL_TARGET_ENV;
 use protocol::QA_STREAMING_ENV;
@@ -357,6 +358,11 @@ fn relay(
                         | QaWorkerReply::ReadyWithStreaming {
                             protocol,
                             model_revision,
+                        }
+                        | QaWorkerReply::ReadyWithStreamingContext {
+                            protocol,
+                            model_revision,
+                            ..
                         },
                         Phase::Starting | Phase::Pinging,
                     ) if protocol == QA_WORKER_PROTOCOL
@@ -474,6 +480,9 @@ fn serve(stream: UnixStream, worker: &Path, model: &Path, libraries: &Path) -> R
     }
     if streaming {
         command.env(QA_STREAMING_ENV, "1");
+        if env::var_os(QA_MODEL_CONTEXT_ENV).as_deref() == Some("1".as_ref()) {
+            command.env(QA_MODEL_CONTEXT_ENV, "1");
+        }
     }
     if let Some(target) = env::var_os(QA_MODEL_TARGET_ENV) {
         command.env(QA_MODEL_TARGET_ENV, target);

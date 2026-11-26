@@ -457,17 +457,17 @@ def exercise(request, registration, model, readiness, running_jobs):
                     f"{group} status checks lacked fresh, valid readiness evidence")
         return findings
 
-    gateway = settled_turn(
-        request, context, "gateway", "What does this mean?",
-        source={"kind": "readiness", "id": "gateway"},
+    registration_turn = settled_turn(
+        request, context, "registration-notice", "What happened with this readiness check?",
+        source={"kind": "readiness", "id": "registration"},
     )
-    gateway_finding = cited_finding(gateway, "readiness", "gateway")
-    require(gateway_finding["text"]
-            == "Gateway is ready. An authenticated gateway request succeeded.",
-            "gateway answer did not report the observed ready state")
+    registration_finding = cited_finding(registration_turn, "readiness", "registration")
+    require(registration_finding["text"]
+            == "Registration is ready. The workstation registration was verified for this request.",
+            "selected registration answer did not cite the verified caller")
 
     unresolved = check_status_group(
-        "what are the current unresolved status checks about?", "unresolved", observed(gateway_finding),
+        "what are the current unresolved status checks about?", "unresolved", observed(registration_finding),
     )
     catalog_finding = next((finding for finding in unresolved[1:]
                             if finding["source"]["id"] == "actor_catalog"), None)

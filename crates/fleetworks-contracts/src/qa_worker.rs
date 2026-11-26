@@ -11,8 +11,10 @@ use serde::Serialize;
 
 pub const QA_WORKER_PROTOCOL: u16 = 1;
 pub const QA_CONTEXT_WINDOW_TOKENS: u16 = 256;
+pub const QA_LEGACY_STREAMING_WINDOW_TOKENS: u16 = 512;
 pub const QA_CONTEXT_USAGE_ENV: &str = "FLEETWORKS_QA_CONTEXT_USAGE";
 pub const QA_STREAMING_ENV: &str = "FLEETWORKS_QA_STREAMING";
+pub const QA_MODEL_CONTEXT_ENV: &str = "FLEETWORKS_QA_MODEL_CONTEXT";
 pub const QA_MODEL_PINS: &str = include_str!("qa_models.json");
 pub const QA_MODEL_TARGET_ENV: &str = "FLEETWORKS_QA_MODEL_TARGET";
 pub const QA_DIALOGUE_ENV: &str = "FLEETWORKS_QA_DIALOGUE";
@@ -111,8 +113,12 @@ impl QaModelTarget {
         }
     }
 
+    /// Prompt budget with space reserved for the reply on decoder-only checkpoints.
     pub const fn input_tokens(self) -> u16 {
-        512
+        match self {
+            Self::FlanT5Small | Self::FlanT5Base => QA_LEGACY_STREAMING_WINDOW_TOKENS,
+            Self::Gpt2Small | Self::Gpt2Medium => 1024 - self.output_tokens(),
+        }
     }
 
     pub const fn output_tokens(self) -> u16 {
@@ -432,6 +438,11 @@ pub enum QaWorkerReply {
     ReadyWithStreaming {
         protocol: u16,
         model_revision: String,
+    },
+    ReadyWithStreamingContext {
+        protocol: u16,
+        model_revision: String,
+        window_tokens: u16,
     },
     StartupFailed {
         source: QaWorkerPanicSource,
@@ -841,6 +852,13 @@ mod tests {
         assert!(QaWorkerSequence::default()
             .accept(&request, &event)
             .unwrap());
+        for target in [QaModelTarget::Gpt2Small, QaModelTarget::Gpt2Medium] {
+            let budget = target.input_tokens();
+            assert_eq!(budget, 896);
+            assert_eq!(budget + target.output_tokens(), 1024);
+            assert!(QaContextUsage::new(budget, budget, 1).is_valid_for(&request));
+            assert!(!QaContextUsage::new(budget, budget + 1, 1).is_valid_for(&request));
+        }
         request.dialogue.as_mut().unwrap().history.push(earlier);
         assert!(request.validate().is_err());
     }

@@ -1395,8 +1395,14 @@ def exercise_contextual_status(request, context):
         require(f"The earlier count of {match[2]} was for unresolved checks." in summary["text"],
                 "The follow-up omitted the difference between failed and unresolved checks")
     recap = settled_turn(request, context, "recap-last-answer", "What was your last answer?", mode="dialogue")
-    require(recap["state"] == "answered" and recap.get("used_previous_exchange") is True
-            and any(word in recap["reply"].casefold() for word in ("unresolved", "status", "checks")),
+    used_history = recap.get("used_previous_exchange") is True
+    recalled_status = any(word in recap["reply"].casefold()
+                          for word in ("unresolved", "status", "checks"))
+    if not used_history or not recalled_status:
+        print(json.dumps({"qa_smoke_stage": "retained_recall", "used_history": used_history,
+                          "recalled_status": recalled_status,
+                          "reply_words": len(recap["reply"].split())}), file=sys.stderr)
+    require(used_history and recalled_status,
             "The generator could not report the previous answer from retained context")
 
 

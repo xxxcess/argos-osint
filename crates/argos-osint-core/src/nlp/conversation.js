@@ -29,7 +29,7 @@ globalThis.argosConversation = function(text) {
     references: spans(/\b(?:it|this|that|those|them|ones?|former|latter)\b/gi),
     corrections: spans(/^\s*(?:actually|rather|i meant|i mean|no|not)\b/gi),
     negations: spans(/\b(?:not|never|without|do not|don['’]t|no|can['’]t|isn['’]t)\b/gi),
-    exclusions: spans(/(?:[,;. ]+)(?:please )?(?:no (?:advice|suggestions|recommendations)|without (?:advice|suggestions|recommendations)|(?:do not|don['’]t) (?:suggest (?:anything|a restart)|recommend (?:anything|a restart)|(?:restart|stop|start|cancel|retry|change) (?:it|anything|(?:the )?(?:backend|job|index|service))))(?=$|[.?!;])/gi),
+    exclusions: spans(/(?:^|[,;.!?:]\s*|\s+and\s+|\s+)(?:please\s+)?(?:(?:no|without)\s+(?:advice|suggestions|recommendations)|(?:do not|don['’]t|never)\s+(?:(?:suggest|recommend)\s+(?:anything|a restart|(?:any )?(?:actions?|changes?))|(?:restart|stop|start|cancel|retry|change)\s+(?:it|anything|(?:the )?(?:backend|job|index|service))))(?=\s*(?:$|[.?!;,:]))/gi),
     temporal: spans(/\b(?:between \d{4}-\d{2}-\d{2} and \d{4}-\d{2}-\d{2}|(?:(?:since|on|before|after|until)\s+)?\d{4}-\d{2}-\d{2}|(?:since|before|after|until)\s+(?:yesterday|today|last\s+(?:week|month)|\S+)|(?:in\s+the\s+)?(?:last|past)\s+\d+\s+(?:minutes?|hours?|days?)|(?:right\s+now|currently|now|today|yesterday|last\s+(?:week|month)|recently|historically))\b/gi),
   });
 };

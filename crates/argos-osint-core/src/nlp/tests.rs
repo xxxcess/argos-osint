@@ -296,7 +296,7 @@ async fn conversation_worker_preserves_original_spans_and_local_calendar_interva
 
     let parse_instant = chrono::DateTime::parse_from_rfc3339("2026-11-26T16:30:00Z").unwrap();
     let mut context = Context::utc(parse_instant.timestamp_millis());
-    context.timezone_offset_minutes = -300;
+    context.timezone_offset_minutes = Some(-300);
     let service = Service::start();
     let text = "Actually, what happened to the 😀 index since yesterday, no suggestions?";
     let parsed = service
@@ -325,6 +325,28 @@ async fn conversation_worker_preserves_original_spans_and_local_calendar_interva
     assert_eq!(interval.reference_ms, parse_instant.timestamp_millis());
     assert_eq!(interval.end_ms, interval.reference_ms + 1);
     assert_eq!(interval.timezone, "-05:00");
+
+    for (text, exclusion) in [
+        (
+            "Do not suggest a restart; what happened to the index since yesterday?",
+            "Do not suggest a restart",
+        ),
+        (
+            "What happened to the index, never restart it, since yesterday?",
+            ", never restart it",
+        ),
+    ] {
+        let parsed = service
+            .parse_on_worker(
+                text,
+                context.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .await;
+        assert_eq!(parsed.status, Status::Complete);
+        assert_eq!(parsed.exclusions[0].slice(text), Some(exclusion));
+        assert_eq!(parsed.temporal[0].span.slice(text), Some("since yesterday"));
+    }
 
     context.language_hint = Some("fr-CA".into());
     let unsupported = service

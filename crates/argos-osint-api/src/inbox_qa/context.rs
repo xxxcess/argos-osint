@@ -602,6 +602,7 @@ impl Observer {
                             .await
                             .ok()
                             .flatten()
+                            .filter(|job| job.private_details_available)
                             .map(|_| id)
                     }
                     .boxed()

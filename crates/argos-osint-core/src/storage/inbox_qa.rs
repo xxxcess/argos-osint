@@ -1463,8 +1463,8 @@ pub async fn last_answered_prompt(
     .value)
 }
 
-/// Recover only a verified open clarification from this registration's latest
-/// completed turn and the current conversation generation.
+/// Recover an open clarification from the latest verified reply in this
+/// registration and conversation generation.
 pub async fn pending_clarification(
     repo: &Repository,
     actor: &Actor,
@@ -1478,26 +1478,33 @@ pub async fn pending_clarification(
             if !setting.enabled {
                 return Ok(None);
             }
-            let Some(row) = recent_completed_in(&tx, key, setting.history_generation, now_ms(), 1)
-                .await?
-                .into_iter()
-                .next()
-            else {
-                return Ok(None);
-            };
-            let exchange = row.decode()?;
-            if exchange.turn.state != QaTurnState::Answered
-                || exchange.turn.reply.is_none()
-                || !private_subjects_visible_in(
+            let completed = recent_completed_in(
+                &tx,
+                key,
+                setting.history_generation,
+                now_ms(),
+                MAX_PER_REGISTRATION,
+            )
+            .await?;
+            for row in completed {
+                let exchange = row.decode()?;
+                if exchange.turn.state != QaTurnState::Answered || exchange.turn.reply.is_none() {
+                    continue;
+                }
+                if !private_subjects_visible_in(
                     &tx,
                     actor,
                     exchange.conversation.private_source_ids(),
                 )
                 .await?
-            {
-                return Ok(None);
+                {
+                    return Ok(None);
+                }
+                // A verified reply supersedes the previous question even when
+                // it did not open another clarification.
+                return Ok(exchange.conversation.pending);
             }
-            Ok(exchange.conversation.pending)
+            Ok(None)
         }
     })
     .await?

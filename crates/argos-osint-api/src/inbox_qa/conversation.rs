@@ -9,6 +9,7 @@ use argos_osint_core::nlp::conversation::Interval;
 use argos_osint_core::nlp::conversation::Metric as FocusMetric;
 use argos_osint_core::nlp::conversation::PendingClarification;
 use argos_osint_core::nlp::conversation::TemporalScope;
+use argos_osint_core::nlp::Span;
 use argos_osint_core::nlp::Status;
 use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::readiness::ReadinessCheckId;
@@ -83,9 +84,15 @@ pub(super) fn resolve(
     if features.status != Status::Complete {
         return Resolution::original(original, selected);
     }
-    let (question, constraints) = exclude_advice(question, features);
-    let (base, time) = extract_time(question, features);
-    let normalized = normalize(base);
+    let (mut ignored, constraints) = advice_constraints(question, features);
+    let (temporal, time) = extract_time(question, features);
+    ignored.extend(temporal);
+    let has_reference = features.references.iter().any(|reference| {
+        !ignored.iter().any(|span| {
+            span.start_byte <= reference.start_byte && reference.end_byte <= span.end_byte
+        })
+    });
+    let normalized = normalize(&remove_phrases(question, ignored));
     let corrected = !features.corrections.is_empty();
     let base = if corrected {
         correct_subject(&normalized)
@@ -144,14 +151,13 @@ pub(super) fn resolve(
         || base == "what about" && time != TimeRequest::Unspecified
         || base == "what changed"
         || base.is_empty() && matches!(time, TimeRequest::Historical(_));
+    let anaphora = has_reference
+        && (reference_request(base)
+            || routed == Question::FollowUp
+            || original == Question::FollowUp
+            || matches!(routed, Question::StatusChecksFollowUp(..)));
     if let Some(previous) = previous {
-        if safe_follow_up {
-            let focus = with_constraints(previous.clone(), &constraints);
-            return apply_time(focus, &time, true);
-        }
-        if !features.references.is_empty()
-            && (reference_request(base) || matches!(routed, Question::StatusChecksFollowUp(..)))
-        {
+        if anaphora {
             if matches!(previous.intent, Intent::StatusChecks(_))
                 && matches!(routed, Question::StatusChecksFollowUp(..))
             {
@@ -164,10 +170,10 @@ pub(super) fn resolve(
             if matches!(base, "what about them" | "what about those") {
                 return Resolution::clarify(ClarificationReason::Subject, vec![], &time, false);
             }
-            if reference_request(base) {
-                let focus = with_constraints(previous.clone(), &constraints);
-                return apply_time(focus, &time, true);
-            }
+        }
+        if safe_follow_up || anaphora && reference_request(base) {
+            let focus = with_constraints(previous.clone(), &constraints);
+            return apply_time(focus, &time, true);
         }
     }
     if time == TimeRequest::Ambiguous {
@@ -176,7 +182,7 @@ pub(super) fn resolve(
     if matches!(time, TimeRequest::Historical(_)) {
         return Resolution::clarify(ClarificationReason::Subject, vec![], &time, false);
     }
-    if previous.is_none() && reference_request(base) && original != Question::ExplainSelected {
+    if previous.is_none() && anaphora && original != Question::ExplainSelected {
         return Resolution::clarify(ClarificationReason::Subject, vec![], &time, false);
     }
     Resolution::original(original, selected)
@@ -197,7 +203,7 @@ fn normalize(question: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-        .trim_matches(['?', '!', '.', ',', ';', ' '])
+        .trim_matches(['?', '!', '.', ',', ';', ':', ' '])
         .to_owned()
 }
 
@@ -225,25 +231,23 @@ fn correct_subject(text: &str) -> &str {
     corrected
 }
 
-fn exclude_advice<'a>(question: &'a str, features: &Features) -> (&'a str, Vec<Constraint>) {
-    let mut end = question.len();
+fn advice_constraints(question: &str, features: &Features) -> (Vec<Span>, Vec<Constraint>) {
+    let mut spans = Vec::new();
     let mut constraints = Vec::new();
-    for span in features.exclusions.iter().rev() {
+    for span in &features.exclusions {
         let Some(exclusion) = span.slice(question) else {
             continue;
         };
-        if !is_tail(question, span.end_byte, end) {
-            continue;
-        }
         let exclusion = normalize(exclusion);
-        let constraint = if [
-            "restart ", "stop ", "start ", "cancel ", "retry ", "change ",
-        ]
-        .into_iter()
-        .any(|verb| {
-            exclusion.contains(&format!("do not {verb}"))
-                || exclusion.contains(&format!("don't {verb}"))
-        }) {
+        let directive = exclusion.strip_prefix("please ").unwrap_or(&exclusion);
+        let action = ["do not ", "don't ", "never "]
+            .into_iter()
+            .find_map(|prefix| directive.strip_prefix(prefix))
+            .and_then(|text| text.split_whitespace().next());
+        let constraint = if matches!(
+            action,
+            Some("restart" | "stop" | "start" | "cancel" | "retry" | "change")
+        ) {
             Constraint::NoActions
         } else {
             Constraint::NoSuggestions
@@ -251,41 +255,47 @@ fn exclude_advice<'a>(question: &'a str, features: &Features) -> (&'a str, Vec<C
         if !constraints.contains(&constraint) {
             constraints.push(constraint);
         }
-        end = span.start_byte;
+        spans.push(span.clone());
     }
-    (&question[..end], constraints)
+    (spans, constraints)
 }
 
-fn is_tail(question: &str, start: usize, end: usize) -> bool {
-    question.get(start..end).is_some_and(|suffix| {
-        suffix
-            .chars()
-            .all(|ch| ch.is_whitespace() || "?!.,;".contains(ch))
-    })
+fn remove_phrases(question: &str, mut spans: Vec<Span>) -> String {
+    spans.sort_unstable_by_key(|span| span.start_byte);
+    let mut parts = Vec::new();
+    let mut offset = 0;
+    for span in spans {
+        if let Some(text) = question.get(offset..span.start_byte) {
+            parts.push(text);
+        }
+        offset = offset.max(span.end_byte);
+    }
+    parts.push(&question[offset..]);
+    parts
+        .into_iter()
+        .map(|part| part.trim_matches(|ch: char| ch.is_whitespace() || ",;:.!?".contains(ch)))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-fn extract_time<'a>(question: &'a str, features: &Features) -> (&'a str, TimeRequest) {
+fn extract_time(question: &str, features: &Features) -> (Option<Span>, TimeRequest) {
     let mut candidates = features
         .temporal
         .iter()
         .filter(|candidate| candidate.span.slice(question).is_some());
     let Some(candidate) = candidates.next() else {
-        return (question, TimeRequest::Unspecified);
+        return (None, TimeRequest::Unspecified);
     };
     if candidates.next().is_some() {
-        return (question, TimeRequest::Ambiguous);
+        return (None, TimeRequest::Ambiguous);
     }
     let scope = match &candidate.scope {
         TemporalScope::Current => TimeRequest::Current,
         TemporalScope::Historical(interval) => TimeRequest::Historical(interval.clone()),
         TemporalScope::Ambiguous => TimeRequest::Ambiguous,
     };
-    let base = if is_tail(question, candidate.span.end_byte, question.len()) {
-        &question[..candidate.span.start_byte]
-    } else {
-        question
-    };
-    (base, scope)
+    (Some(candidate.span.clone()), scope)
 }
 
 fn apply_time(mut focus: Focus, time: &TimeRequest, reused: bool) -> Resolution {
@@ -717,33 +727,38 @@ mod tests {
             None,
             None,
         );
-        let prompt = "What about it?";
-        let mut features = complete();
-        features.references.push(span(prompt, "it"));
-        let ambiguous = resolve(
-            prompt,
-            None,
-            Question::Unsupported,
-            &features,
-            initial.focus.as_ref(),
-            None,
-        );
-        assert_eq!(ambiguous.intent, Question::ChooseSubject);
-        assert_eq!(
-            ambiguous.pending.as_ref().unwrap().reason,
-            ClarificationReason::Subject
-        );
+        for (prompt, reference) in [
+            ("What about it?", "it"),
+            ("Has that changed?", "that"),
+            ("Is it still the same?", "it"),
+        ] {
+            let mut features = complete();
+            features.references.push(span(prompt, reference));
+            let ambiguous = resolve(
+                prompt,
+                None,
+                question::classify(prompt),
+                &features,
+                initial.focus.as_ref(),
+                None,
+            );
+            assert_eq!(ambiguous.intent, Question::ChooseSubject, "{prompt}");
+            assert_eq!(
+                ambiguous.pending.as_ref().unwrap().reason,
+                ClarificationReason::Subject
+            );
 
-        let selected = resolve(
-            "the second one",
-            None,
-            Question::Unsupported,
-            &complete(),
-            None,
-            ambiguous.pending.as_ref(),
-        );
-        assert_eq!(selected.intent, Question::Metric(Metric::Memory));
-        assert!(selected.used_previous_exchange);
+            let selected = resolve(
+                "the second one",
+                None,
+                Question::Unsupported,
+                &complete(),
+                None,
+                ambiguous.pending.as_ref(),
+            );
+            assert_eq!(selected.intent, Question::Metric(Metric::Memory));
+            assert!(selected.used_previous_exchange);
+        }
         let expired = resolve(
             "the second one",
             None,
@@ -892,6 +907,47 @@ mod tests {
         assert_eq!(recheck.intent, Question::ExplainSelected);
         assert_eq!(recheck.source, Some(selected));
         assert!(!recheck.used_previous_exchange);
+    }
+
+    #[test]
+    fn leading_and_embedded_advice_constraints_keep_the_historical_request() {
+        for (prompt, exclusion, constraint) in [
+            (
+                "Do not suggest a restart; what happened to the index since yesterday?",
+                "Do not suggest a restart",
+                Constraint::NoSuggestions,
+            ),
+            (
+                "What happened to the index, never restart it, since yesterday?",
+                ", never restart it",
+                Constraint::NoActions,
+            ),
+        ] {
+            let mut features = complete();
+            features.subjects.push(span(prompt, "index"));
+            features.exclusions.push(span(prompt, exclusion));
+            features.temporal.push(TemporalCandidate {
+                span: span(prompt, "since yesterday"),
+                scope: TemporalScope::Historical(interval()),
+            });
+            let answer = resolve(
+                prompt,
+                None,
+                question::classify(prompt),
+                &features,
+                None,
+                None,
+            );
+            assert_eq!(
+                answer.intent,
+                Question::ReadinessExplanation(ReadinessCheckId::ActorSearch),
+                "{prompt}"
+            );
+            let focus = answer.focus.unwrap();
+            assert_eq!(focus.constraints, vec![constraint]);
+            assert_eq!(focus.temporal, Some(interval()));
+            assert!(!focus.allows_suggestions());
+        }
     }
 
     #[test]

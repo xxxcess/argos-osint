@@ -42,6 +42,7 @@ use tch::Device;
 
 use protocol::valid_draft_delta;
 use protocol::valid_operational_draft;
+use protocol::valid_uncited_reply;
 use protocol::verified_operational_sources;
 use protocol::QaContextUsage;
 use protocol::QaDialogueKind;
@@ -581,7 +582,10 @@ fn answer_dialogue(
     let (reply, findings) = if operational {
         operational_answer(request, reply)?
     } else {
-        (reply, Vec::new())
+        (
+            reply.filter(|text| valid_uncited_reply(request, text)),
+            Vec::new(),
+        )
     };
     let answered = reply.is_some() || !findings.is_empty();
     for mut event in findings {

@@ -132,7 +132,13 @@ pub fn response_plan(evidence: &FrozenEvidence, context: &PlanContext) -> Respon
             "Explain that the requested local history is unavailable."
         }
         (ResponseMode::Clarification, _) => "Ask for the missing focus before answering.",
-        (ResponseMode::Conversation, _) => "Respond briefly to the current conversational request.",
+        (ResponseMode::Conversation, _) => match dialogue_kind {
+            Some(QaDialogueKind::Greeting) => "Greet the operator briefly.",
+            Some(QaDialogueKind::Acknowledgement) => "Acknowledge the operator briefly.",
+            Some(QaDialogueKind::Help) => "Explain the supported workstation checks.",
+            Some(QaDialogueKind::Recall) => "Answer from the authorized earlier exchanges.",
+            _ => "Respond briefly to the current conversational request.",
+        },
     }
     .to_owned();
     let ordered_passages = evidence
@@ -156,6 +162,10 @@ pub fn response_plan(evidence: &FrozenEvidence, context: &PlanContext) -> Respon
         .focus
         .as_ref()
         .is_some_and(|focus| !focus.constraints.is_empty());
+    let needs_time_clarification = clarify
+        && context.pending.as_ref().is_some_and(|pending| {
+            pending.reason == ClarificationReason::Time || pending.temporal.is_some()
+        });
     let clarification = clarify.then(|| {
         if historical {
             QaClarification::HistoryUnavailable
@@ -166,7 +176,7 @@ pub fn response_plan(evidence: &FrozenEvidence, context: &PlanContext) -> Respon
             }
         }
     });
-    let worker = (operational || clarification.is_some()).then(|| {
+    let worker = dialogue_kind.map(|_| {
         let mut worker = QaWorkerPlan::new(
             focus,
             note.clone(),
@@ -186,7 +196,9 @@ pub fn response_plan(evidence: &FrozenEvidence, context: &PlanContext) -> Respon
         clarification: context.pending.clone(),
         ordered_passages,
         worker,
-        requires_worker_support: historical || operational && constrained,
+        requires_worker_support: historical
+            || needs_time_clarification
+            || operational && constrained,
         negotiated: false,
         note,
     }
@@ -246,4 +258,58 @@ pub async fn select_response_plan(
         None,
     ));
     plan
+}
+
+#[cfg(test)]
+mod tests {
+    use argos_osint_core::nlp::conversation::PendingClarification;
+    use fleetworks_contracts::qa_worker::QaWorkerDialogue;
+    use fleetworks_contracts::qa_worker::QaWorkerRequest;
+
+    use super::*;
+
+    #[test]
+    fn ambiguous_time_requires_a_worker_that_understands_time_clarification() {
+        let mut request = QaWorkerRequest::new(
+            "turn".into(),
+            "snapshot".into(),
+            "What happened recently?".into(),
+            Vec::new(),
+        );
+        request.dialogue = Some(QaWorkerDialogue {
+            kind: QaDialogueKind::Clarification,
+            history: Vec::new(),
+        });
+        let evidence = FrozenEvidence {
+            request,
+            sources: Vec::new(),
+            sampled_at_ms: 1,
+        };
+        let mut context = PlanContext {
+            focus: None,
+            pending: Some(PendingClarification {
+                reason: ClarificationReason::Time,
+                choices: Vec::new(),
+                temporal: None,
+            }),
+            guidance: None,
+            history_requested: false,
+            decision_preference: QaDecisionPreference::RulesOnly,
+            decision_generation: 1,
+        };
+        let plan = response_plan(&evidence, &context);
+        assert!(plan.requires_worker_support);
+        assert_eq!(
+            plan.worker.unwrap().clarification,
+            Some(QaClarification::Time)
+        );
+
+        context.pending.as_mut().unwrap().reason = ClarificationReason::Subject;
+        let plan = response_plan(&evidence, &context);
+        assert!(!plan.requires_worker_support);
+        assert_eq!(
+            plan.worker.unwrap().clarification,
+            Some(QaClarification::Subject)
+        );
+    }
 }

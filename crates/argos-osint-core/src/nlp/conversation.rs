@@ -13,7 +13,8 @@ const MAX_FEATURES: usize = 12;
 #[derive(Clone, Debug)]
 pub struct Context {
     pub reference_ms: i64,
-    pub timezone_offset_minutes: i32,
+    /// Minutes east of UTC, or the workstation calendar when absent.
+    pub timezone_offset_minutes: Option<i32>,
     pub language_hint: Option<String>,
 }
 
@@ -23,8 +24,17 @@ impl Context {
     pub fn utc(reference_ms: i64) -> Self {
         Self {
             reference_ms,
-            timezone_offset_minutes: 0,
+            timezone_offset_minutes: Some(0),
             language_hint: None,
+        }
+    }
+
+    /// Resolve calendar dates in the Embedded workstation's local timezone.
+    #[must_use]
+    pub fn workstation(reference_ms: i64) -> Self {
+        Self {
+            timezone_offset_minutes: None,
+            ..Self::utc(reference_ms)
         }
     }
 
@@ -304,7 +314,7 @@ pub struct PendingClarification {
 
 #[cfg(feature = "nlp")]
 mod decode {
-    use chrono::{DateTime, Days, FixedOffset, NaiveDate, TimeDelta, TimeZone, Utc};
+    use chrono::{DateTime, Days, FixedOffset, Local, NaiveDate, Offset, TimeDelta, TimeZone, Utc};
 
     use crate::nlp::spans;
 
@@ -409,19 +419,29 @@ mod decode {
     }
 
     fn interval(phrase: &str, context: &Context) -> Option<Interval> {
-        let offset = FixedOffset::east_opt(context.timezone_offset_minutes.checked_mul(60)?)?;
         let reference: DateTime<Utc> = DateTime::from_timestamp_millis(context.reference_ms)?;
-        let reference = reference.with_timezone(&offset);
+        match context.timezone_offset_minutes {
+            Some(minutes) => {
+                let offset = FixedOffset::east_opt(minutes.checked_mul(60)?)?;
+                calendar_interval(phrase, reference.with_timezone(&offset))
+            }
+            None => calendar_interval(phrase, reference.with_timezone(&Local)),
+        }
+    }
+
+    fn calendar_interval<Tz: TimeZone>(phrase: &str, reference: DateTime<Tz>) -> Option<Interval> {
+        let timezone = reference.timezone();
+        let reference_ms = reference.timestamp_millis();
         let today = reference.date_naive();
         let yesterday = today.checked_sub_days(Days::new(1))?;
         let midnight = |date: NaiveDate| {
-            offset
+            timezone
                 .from_local_datetime(&date.and_hms_opt(0, 0, 0)?)
-                .single()
+                .earliest()
                 .map(|time| time.timestamp_millis())
         };
         let date = |text| NaiveDate::parse_from_str(text, "%Y-%m-%d").ok();
-        let now = context.reference_ms.checked_add(1)?;
+        let now = reference_ms.checked_add(1)?;
         let (start_ms, end_ms) = match phrase {
             "today" | "since today" => (midnight(today)?, now),
             "yesterday" => (midnight(yesterday)?, midnight(today)?),
@@ -470,16 +490,32 @@ mod decode {
         if start_ms >= end_ms {
             return None;
         }
+        let offset = reference.offset().fix();
         Some(Interval {
             start_ms,
             end_ms,
-            reference_ms: context.reference_ms,
-            timezone: if context.timezone_offset_minutes == 0 {
+            reference_ms,
+            timezone: if offset.local_minus_utc() == 0 {
                 "UTC".into()
             } else {
                 offset.to_string()
             },
         })
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn workstation_calendar_uses_local_midnight() {
+        let reference = DateTime::parse_from_rfc3339("2026-11-26T12:00:00Z").unwrap();
+        let context = Context::workstation(reference.timestamp_millis());
+        let local_reference = reference.with_timezone(&Local);
+        let yesterday = local_reference.date_naive().pred_opt().unwrap();
+        let midnight = yesterday.and_hms_opt(0, 0, 0).unwrap();
+        let expected = Local.from_local_datetime(&midnight).earliest().unwrap();
+
+        let range = interval("since yesterday", &context).unwrap();
+        assert_eq!(range.start_ms, expected.timestamp_millis());
+        assert_eq!(range.end_ms, context.reference_ms + 1);
     }
 }
 

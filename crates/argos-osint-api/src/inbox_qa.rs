@@ -861,7 +861,7 @@ pub(crate) async fn submit_request(
     let deadline = Instant::now() + Duration::from_secs(4);
     let features = nlp::Service::parse_conversation(
         &request.question,
-        ConversationContext::utc(response_started_at_ms),
+        ConversationContext::workstation(response_started_at_ms),
         deadline,
     )
     .await;
@@ -1769,9 +1769,10 @@ async fn historical_snapshot(
                     measurement: None,
                     whole_passage: false,
                 });
-            }
-            if history.entries.iter().any(|entry| index_pause(&entry)) {
-                guidance = Some(fleetworks_contracts::qa_worker::QaGuidance::CheckResourceUsage);
+                if index_pause(&entry) {
+                    guidance =
+                        Some(fleetworks_contracts::qa_worker::QaGuidance::CheckResourceUsage);
+                }
             }
             // A since/until-now request can include a single fresh reading when
             // one is independently available for the same authorized subject.

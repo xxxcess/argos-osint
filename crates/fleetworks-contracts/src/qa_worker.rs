@@ -315,10 +315,17 @@ impl QaWorkerPlan {
                     && self.guidance.is_none()
                     && self.clarification.is_some()
             }
-            _ => false,
+            QaDialogueKind::Greeting
+            | QaDialogueKind::Acknowledgement
+            | QaDialogueKind::Help
+            | QaDialogueKind::Recall => {
+                self.required_passages.is_empty()
+                    && self.guidance.is_none()
+                    && self.clarification.is_none()
+            }
         };
         valid_mode
-            && dialogue.history.is_empty()
+            && (dialogue.kind == QaDialogueKind::Recall || dialogue.history.is_empty())
             && request.passages.len() <= QA_MAX_FINDINGS
             && self.matches_passages(&request.passages)
             && self.focus.len() <= MAX_PLAN_FOCUS_BYTES
@@ -834,14 +841,17 @@ impl QaWorkerSequence {
     }
 }
 
-/// A planned clarification must match its approved, uncited sentence.
+/// Clarification replies must match approved wording. The plan note stays private.
 pub fn valid_uncited_reply(request: &QaWorkerRequest, text: &str) -> bool {
     valid_dialogue_reply(text)
-        && request
-            .plan
-            .as_ref()
-            .and_then(|plan| plan.clarification)
-            .is_none_or(|clarification| text == clarification.text())
+        && request.plan.as_ref().is_none_or(|plan| {
+            if let Some(clarification) = plan.clarification {
+                return text == clarification.text();
+            }
+            let note = plan.note.to_ascii_lowercase();
+            let text = text.trim().to_ascii_lowercase();
+            !text.contains(&note) && !note.starts_with(&text)
+        })
 }
 
 pub fn exact_span(passage: &str, start: u32, end: u32, text: &str) -> bool {
@@ -991,6 +1001,51 @@ mod tests {
         assert!(sequence
             .accept(&request, &result(QaClarification::Time.text()))
             .unwrap());
+    }
+
+    #[test]
+    fn conversational_plans_keep_notes_private_and_only_recall_can_read_history() {
+        let mut request = QaWorkerRequest::new(
+            "turn".into(),
+            "snapshot".into(),
+            "What did I ask?".into(),
+            Vec::new(),
+        );
+        let exchange = QaDialogueExchange {
+            question: "What is the workstation status?".into(),
+            reply: "The gateway is ready.".into(),
+        };
+        request.dialogue = Some(QaWorkerDialogue {
+            kind: QaDialogueKind::Recall,
+            history: vec![exchange.clone(); QA_MAX_DIALOGUE_HISTORY],
+        });
+        let note = "Answer from the authorized earlier exchanges.";
+        request.plan = Some(QaWorkerPlan::new(
+            String::new(),
+            note.into(),
+            Vec::new(),
+            None,
+        ));
+        request.validate().unwrap();
+        assert!(valid_uncited_reply(
+            &request,
+            "You asked about workstation status."
+        ));
+        assert!(!valid_uncited_reply(&request, "Answer from"));
+        assert!(!valid_uncited_reply(
+            &request,
+            &format!("Hello. {}", note.to_ascii_uppercase())
+        ));
+
+        let dialogue = request.dialogue.as_mut().unwrap();
+        dialogue.history.push(exchange);
+        assert!(request.validate().is_err());
+        let dialogue = request.dialogue.as_mut().unwrap();
+        dialogue.history.pop();
+        dialogue.kind = QaDialogueKind::Help;
+        assert!(request.validate().is_err());
+        request.dialogue.as_mut().unwrap().history.clear();
+        request.validate().unwrap();
     }
 
     #[test]

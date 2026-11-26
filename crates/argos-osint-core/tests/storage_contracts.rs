@@ -859,3 +859,213 @@ async fn qa_selected_generator_seals_all_findings_atomically_under_the_live_leas
         .unwrap();
     assert!(qa::history(&repo, &actor).await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn qa_verified_clarification_survives_unanswered_attempts_until_superseded() {
+    use argos_osint_core::nlp::conversation::{
+        ClarificationReason, Focus, Goal, Intent, Metric, PendingClarification,
+    };
+    use argos_osint_core::storage::job_dispatch;
+    use chrono::Utc;
+    use fleetworks_contracts::chat::QaTurnRequest;
+    use fleetworks_contracts::context::MutationContext;
+    use fleetworks_contracts::qa_worker::{
+        QaClarification, QaDialogueKind, QaWorkerDialogue, QaWorkerPlan, QaWorkerRequest,
+    };
+    use workstation::{ready_qa_replica, start_qa_delivery, QA_PLACEMENT, QA_WORKER};
+
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "assistant_open_clarification").await;
+    let context = register(&repo, "node-a", "research").await;
+    let actor = qa::Actor::new(
+        "scope-a".into(),
+        "fixture-native".into(),
+        "fixture-access".into(),
+        context.clone(),
+    );
+    let enabled = qa::set(
+        &repo,
+        &actor,
+        qa::setting(&repo).await.unwrap().revision,
+        true,
+    )
+    .await
+    .unwrap();
+    ready_qa_replica(&repo, enabled.generation).await;
+    let pending = PendingClarification {
+        reason: ClarificationReason::Subject,
+        choices: [Metric::Cpu, Metric::Memory]
+            .into_iter()
+            .map(|metric| Focus {
+                intent: Intent::Metric(metric),
+                source: None,
+                goal: Goal::Measurement,
+                temporal: None,
+                constraints: Vec::new(),
+            })
+            .collect(),
+        temporal: None,
+    };
+    for (id, question, outcome, expected_open) in [
+        ("clarify", "CPU or memory?", QaTurnState::Answered, true),
+        ("stop", "Check again.", QaTurnState::Canceled, true),
+        ("failed", "Check again.", QaTurnState::Failed, true),
+        ("replace", "Thanks.", QaTurnState::Answered, false),
+        (
+            "failed-after-replace",
+            "Check again.",
+            QaTurnState::Failed,
+            false,
+        ),
+    ] {
+        assert!(
+            qa::beat(&repo, QA_PLACEMENT, QA_WORKER, enabled.generation, true)
+                .await
+                .unwrap()
+        );
+        let request = QaTurnRequest::new(
+            id.into(),
+            MutationContext::new(&context),
+            question.into(),
+            None,
+        )
+        .unwrap();
+        let turn_id = qa::accepted_turn_id(&actor, &request, enabled.history_generation).unwrap();
+        let clarification = (id == "clarify").then(|| pending.clone());
+        let mut worker_request =
+            QaWorkerRequest::new(turn_id.clone(), turn_id, question.into(), Vec::new());
+        worker_request.dialogue = Some(QaWorkerDialogue {
+            kind: if clarification.is_some() {
+                QaDialogueKind::Clarification
+            } else {
+                QaDialogueKind::Acknowledgement
+            },
+            history: Vec::new(),
+        });
+        let boundary = qa::freshness_boundary(&repo, &actor).await.unwrap();
+        let sampled_at_ms = Utc::now().timestamp_millis();
+        let sampled_at_ms = if sampled_at_ms > boundary {
+            sampled_at_ms
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            Utc::now().timestamp_millis()
+        };
+        let evidence = qa::FrozenEvidence {
+            request: worker_request,
+            sources: Vec::new(),
+            sampled_at_ms,
+        };
+        let turn = qa::admit(
+            &repo,
+            &actor,
+            &request,
+            evidence.clone(),
+            qa::AdmissionMetadata {
+                subject: None,
+                observation: None,
+                related_activity: None,
+                status_check_tally: None,
+                used_previous_exchange: false,
+                response_started_at_ms: None,
+                conversation: qa::ConversationState {
+                    pending: clarification.clone(),
+                    ..qa::ConversationState::default()
+                },
+            },
+            enabled.generation,
+        )
+        .await
+        .unwrap();
+        if outcome == QaTurnState::Canceled {
+            assert_eq!(
+                qa::cancel(&repo, &actor, &turn.turn_id)
+                    .await
+                    .unwrap()
+                    .state,
+                outcome
+            );
+        } else {
+            let lease = start_qa_delivery(&repo).await;
+            if let Some(clarification) = clarification {
+                let planning = qa::begin_planning(&repo, &lease).await.unwrap().unwrap();
+                let note = "Ask which monitored resource to check.".to_owned();
+                let mut worker = QaWorkerPlan::new(String::new(), note.clone(), Vec::new(), None);
+                worker.clarification = Some(QaClarification::Subject);
+                assert!(qa::accept_plan(
+                    &repo,
+                    &lease,
+                    &qa::ResponsePlan {
+                        task: qa::ResponseTask::ResponsePlan,
+                        version: 1,
+                        snapshot: evidence.binding().unwrap(),
+                        decision_generation: planning.decision_generation,
+                        mode: qa::ResponseMode::Clarification,
+                        focus: None,
+                        clarification: Some(clarification),
+                        ordered_passages: Vec::new(),
+                        worker: Some(worker),
+                        requires_worker_support: true,
+                        negotiated: true,
+                        note,
+                    }
+                )
+                .await
+                .unwrap());
+            }
+            let target = QaModelTarget::default();
+            let result = if outcome == QaTurnState::Answered {
+                qa::ModelResult {
+                    context: Some(QaContextUsage::new(target.input_tokens(), 48, 1)),
+                    reply: Some(
+                        if id == "clarify" {
+                            QaClarification::Subject.text()
+                        } else {
+                            "You are welcome."
+                        }
+                        .into(),
+                    ),
+                    model_target: Some(target),
+                }
+            } else {
+                qa::ModelResult::default()
+            };
+            assert!(
+                qa::publish_with_model_result(&repo, &lease, outcome, None, result)
+                    .await
+                    .unwrap()
+            );
+            let delivery = if outcome == QaTurnState::Answered {
+                job_dispatch::DeliveryOutcome::Complete {
+                    result_ref: "assistant-reply",
+                }
+            } else {
+                job_dispatch::DeliveryOutcome::Failed {
+                    reason: "assistant_failed",
+                }
+            };
+            job_dispatch::finish_delivery(repo.db(), &lease, delivery, Utc::now())
+                .await
+                .unwrap();
+        }
+        let retained = qa::pending_clarification(&repo, &actor).await.unwrap();
+        assert_eq!(retained.as_ref(), expected_open.then_some(&pending), "{id}");
+        if id == "clarify" {
+            let other = qa::Actor::new(
+                "scope-a".into(),
+                "fixture-native".into(),
+                "fixture-access".into(),
+                register(&repo, "node-b", "research").await,
+            );
+            assert!(qa::pending_clarification(&repo, &other)
+                .await
+                .unwrap()
+                .is_none());
+            assert!(qa::last_answered_prompt(&repo, &actor)
+                .await
+                .unwrap()
+                .is_none());
+        }
+    }
+}

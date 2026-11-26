@@ -41,7 +41,7 @@ Turn states are `queued`, `running`, `retrying`, `final` and `failed`. V1 is a s
 
 ## Inbox QA V2
 
-The [V2 wire contract](../../../crates/fleetworks-contracts/src/chat/qa.rs) is available through the Embedded companion's inherited Unix socket. Distributed retains Inbox notifications. In Embedded, Workstation Settings shows Generator and Decision preferences, effective engines, provisioning, and context usage for a registered Embedded connection while Backend inference is on. Workstation Status provides an Assistant shortcut and keeps deterministic diagnostics accessible independently. The Inbox prompts the operator to enable inference when it is off. The composer requires a ready generator. The separate related-activity lookup remains available under its own capability and permissions. An empty transcript shows the Assistant greeting when questions can be submitted.
+The [V2 wire contract](../../../crates/fleetworks-contracts/src/chat/qa.rs) is available through the Embedded companion's inherited Unix socket. Distributed retains Inbox notifications. In Embedded, Workstation Settings shows Generator and Decision preferences, effective engines, provisioning, and context usage for a registered Embedded connection while Backend inference is on. Open the Assistant composer from the toolbar bell. Workstation Status keeps deterministic diagnostics accessible independently. The Inbox prompts the operator to enable inference when it is off. The composer requires a ready generator. The separate related-activity lookup remains available under its own capability and permissions. An empty transcript shows the Assistant greeting when questions can be submitted.
 
 ### Prompt flow
 

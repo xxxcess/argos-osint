@@ -28,7 +28,7 @@ NEXT_EXCHANGE = "inbox-qa-history-next"
 DRAWER = "inbox-layer"
 COMPOSER = "inbox-qa-composer"
 COMPOSER_LABEL = "Question for the Inbox assistant"
-WORKSTATION_ASSISTANT = "workstation-open-assistant"
+INBOX_TOOLBAR = "inbox-toggle"
 TERMINAL = {"answered", "insufficient_context", "failed", "canceled"}
 BUNDLED_ACTOR_ROWS = 94_987
 
@@ -325,12 +325,12 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         require(len(fields) <= 1, "Inbox exposed more than one editable question field")
         return fields[0] if fields else None
 
-    button("inbox-toggle")
+    button(INBOX_TOOLBAR)
     wait_for(shown_drawer, app, "Inbox drawer opened from toolbar", timeout=4)
     button("inbox-close", timeout=4)
     wait_for(lambda: True if shown_drawer() is None else None, app, "Inbox drawer closed", timeout=4)
-    button(WORKSTATION_ASSISTANT, "Open Assistant", timeout=4)
-    wait_for(shown_drawer, app, "Inbox drawer opened from Workstation Status", timeout=4)
+    button(INBOX_TOOLBAR, timeout=4)
+    wait_for(shown_drawer, app, "Inbox drawer reopened from toolbar", timeout=4)
 
     def submit(question, *, timeout=20):
         # A bare Xvfb display has no window manager to grant keyboard focus.
@@ -562,7 +562,7 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         "runtime": receipts[0]["transport"], "transport_attestation": receipts[0],
         "target": digests["target"], "source_sha": digests["source_sha"],
         "graphical": "x11", "first_citation_while_running": True,
-        "assistant_open_paths": ["inbox_toolbar", "workstation_status"],
+        "assistant_open_paths": ["inbox_toolbar"], "inbox_closed_and_reopened": True,
         "focused_editable_and_exact_typed_text": True,
         "typed_question_verification": "x11_clipboard",
         "sources_default_collapsed": True, "sources_retained_after_completion": True,

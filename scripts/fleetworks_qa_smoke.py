@@ -538,9 +538,6 @@ def exercise(request, registration, model, readiness, running_jobs):
     help_turn = ask("help", "What can you help with?", mode="dialogue")
     require(help_turn.get("conversation") == "help" and not help_turn["findings"],
             "the assistant did not explain how to start a task")
-    when = ask("time-clarification", "Is actor search ready since last week?", mode="dialogue")
-    require(when["reply"].endswith("?") and "time" in when["reply"].casefold(),
-            "the generator did not ask for the ambiguous time range")
     unsupported = ask("general-context", "What is the capital of Japan?", mode="dialogue")
     require(not unsupported["findings"] and "tokyo" not in unsupported["reply"].casefold(),
             "the generator did not keep the out-of-scope response within Assistant's scope")
@@ -553,12 +550,24 @@ def exercise(request, registration, model, readiness, running_jobs):
     require(model() == active, "Ordinary turns replaced or unloaded the resident model")
     started = time.monotonic()
     stop_model(request, registration, model, current)
+    unload_ms = round((time.monotonic() - started) * 1000, 1)
     require(request("latest") is None, "Off retained latest question and answer")
     require(request("history") == [], "Off retained earlier questions or answers")
     query = {"turn_id": unsupported["turn_id"], "after": 0, "wait_seconds": 0}
     request("events", query=query, expected=404)
+
+    # The preceding conversation reaches the retained-turn limit. Check a typed
+    # clarification after Off clears those turns and opens a fresh generation.
+    reset = request("settings", {"context": context, "expected_revision": request("settings")["revision"],
+                                 "enabled": True})
+    ready = ready_model(request, "flan-t5-small", updated=reset)
+    when = ask("time-clarification", "Is actor search ready since last week?", mode="dialogue")
+    require(when["reply"].endswith("?") and "time" in when["reply"].casefold(),
+            "the generator did not ask for the ambiguous time range")
+    stop_model(request, registration, model, ready)
+
     return {"model_warm_ms": ready_ms, "admission_ms": admission_ms, "first_cited_finding_ms": first_finding_ms,
-            "completion_ms": completed_ms, "unload_ms": round((time.monotonic() - started) * 1000, 1),
+            "completion_ms": completed_ms, "unload_ms": unload_ms,
             "model_pid_count": len(active), "warm_model_rss_bytes": worker_rss_bytes,
             "model_context": model_context,
             "fresh_observation": True, "terminal_events": terminal_events, "terminal_state": snapshot["state"],

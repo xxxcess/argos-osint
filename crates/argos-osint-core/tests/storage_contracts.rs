@@ -695,6 +695,7 @@ async fn qa_fallback_seals_all_findings_atomically_under_the_live_lease() {
     assert!(running.accepted_at.is_some());
     assert_eq!(running.accepted_at, before.accepted_at);
     assert!(running.completed_at.is_none());
+    assert!(running.response_time_ms.is_none());
     assert!(running.findings.is_empty());
     assert!(
         qa::history(&repo, &actor).await.unwrap().is_empty(),
@@ -743,11 +744,16 @@ async fn qa_fallback_seals_all_findings_atomically_under_the_live_lease() {
     assert_eq!(answered.accepted_at, Some(accepted_at.div_euclid(1_000)));
     assert_eq!(answered.accepted_at, running.accepted_at);
     assert_eq!(answered.completed_at, Some(completed_at.div_euclid(1_000)));
+    assert_eq!(
+        answered.response_time_ms,
+        Some(u64::try_from(completed_at - accepted_at).unwrap()),
+    );
     let payload = stored.take::<Option<String>>(2).unwrap().unwrap();
     let mut legacy: serde_json::Value = serde_json::from_str(&payload).unwrap();
     let legacy_turn = legacy["turn"].as_object_mut().unwrap();
     legacy_turn.remove("accepted_at");
     legacy_turn.remove("completed_at");
+    legacy_turn.remove("response_time_ms");
     repo.db()
         .query("UPDATE $turn SET payload=$legacy RETURN NONE")
         .bind(("turn", turn.clone()))

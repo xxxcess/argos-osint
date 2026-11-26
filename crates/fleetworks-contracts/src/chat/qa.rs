@@ -595,6 +595,12 @@ pub struct QaTurn {
     /// The terminal transition time in UTC Unix seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<i64>,
+    /// Elapsed milliseconds from backend request receipt through the terminal transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_time_ms: Option<u64>,
+    /// The backend resolved this turn using a previous exchange.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub used_previous_exchange: bool,
     pub state: QaTurnState,
     pub findings: Vec<QaFinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -637,6 +643,8 @@ impl QaTurn {
             question,
             accepted_at: None,
             completed_at: None,
+            response_time_ms: None,
+            used_previous_exchange: false,
             state: QaTurnState::Queued,
             findings: Vec::new(),
             notice: None,

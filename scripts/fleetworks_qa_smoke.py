@@ -199,6 +199,8 @@ def settled_turn(request, context, case, question, *, source=None, mode="direct"
                     f"{case} did not produce a grounded explanation")
     else:
         require(accepted["state"] in TERMINAL, f"{case} did not finish within admission")
+    require(type(accepted.get("response_time_ms")) is int and accepted["response_time_ms"] >= 0,
+            f"{case} terminal turn omitted its response duration")
     # Generation-preferred operational turns may finish with the same typed
     # facts if generation cannot produce a verifiable reply.
     used_model = inferred and (mode != "preferred" or bool((accepted.get("context") or {}).get("model_windows")))
@@ -1370,6 +1372,39 @@ def select_generator(request, context, preference, *, enable=False):
     return request("settings", update)
 
 
+def exercise_context_without_model(request, context):
+    jobs = settled_turn(request, context, "running-jobs-list", "what jobs are running?")
+    require(jobs["state"] == "answered"
+            and any(finding["source"]["kind"] == "job_count" for finding in jobs["findings"]),
+            "The running-jobs list did not cite the active workstation's job count")
+
+    status = settled_turn(request, context, "status-check-shorthand", "status check?")
+    require(status["state"] == "answered" and status["findings"],
+            "The status shorthand did not return a readiness finding")
+    finding = status["findings"][0]
+    match = re.search(r"\b(\d+) failed, and ([1-9]\d*) unresolved\b", finding["text"])
+    require(match is not None
+            and finding["source"] == {"kind": "readiness", "id": "workstation_status_checks"},
+            "The status fixture did not report any unresolved checks")
+    followed_group = "failed" if match[1] != match[2] else "unresolved"
+    follow_up = settled_turn(request, context, "status-check-referent",
+                             f"what are the {match[2]} {followed_group} one?")
+    require(follow_up["state"] == "answered" and follow_up.get("used_previous_exchange") is True,
+            "The shorthand follow-up did not use the preceding status exchange")
+    summary = follow_up["findings"][0]
+    require(summary["source"] == finding["source"]
+            and "unresolved" in summary["text"].casefold()
+            and "actor catalog" in summary["text"].casefold(),
+            "The follow-up did not identify the unresolved checks from current evidence")
+    if followed_group == "failed":
+        require(f"The earlier count of {match[2]} was for unresolved checks." in summary["text"],
+                "The follow-up omitted the difference between failed and unresolved checks")
+    recap = settled_turn(request, context, "recap-last-answer", "What was your last answer?")
+    require(recap["state"] == "answered" and recap.get("used_previous_exchange") is True
+            and "unresolved" in (recap.get("reply") or "").casefold(),
+            "The rules path could not report the previous answer from retained context")
+
+
 def verify_explicit_base_unavailable(request, registration, model, reason, *, enable=False):
     context = authorize(registration)
     updated = select_generator(request, context, "flan_t5_base", enable=enable)
@@ -1385,6 +1420,8 @@ def verify_explicit_base_unavailable(request, registration, model, reason, *, en
     cited_metric(facts, "memory", "memory usage")
     require(facts.get("model_target") is None and facts.get("model_generation") is None,
             "Direct facts acquired generator provenance while Explicit Base was unavailable")
+    if reason == "insufficient_resources":
+        exercise_context_without_model(request, context)
     stop_model(request, registration, model, unavailable)
 
 
@@ -1500,6 +1537,7 @@ def run_embedded(args):
             if linux:
                 verify_explicit_base_unavailable(request, registration, model, "insufficient_resources", enable=True)
                 result["explicit_base_memory_admission"] = "insufficient_resources"
+                result["contextual_status_without_model"] = True
             result["installer_stages"] = ["downloading_pack", "verifying_pack"]
             attestation = session.transport_attestation
 

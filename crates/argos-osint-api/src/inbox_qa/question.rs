@@ -13,9 +13,11 @@ pub(super) enum Question {
     Readiness(ReadinessCheckId),
     ReadinessExplanation(ReadinessCheckId),
     StatusChecks(StatusChecks),
+    StatusChecksFollowUp(StatusChecks, Option<usize>),
     Metric(Metric),
     HostResources,
     JobsSummary,
+    RunningJobList,
     ContextStatus(ChatSourceKind),
     ContextLogs(ChatSourceKind),
     Configuration,
@@ -133,6 +135,7 @@ fn is_operational(intent: Question) -> bool {
             | Question::Metric(_)
             | Question::HostResources
             | Question::JobsSummary
+            | Question::RunningJobList
             | Question::ContextStatus(_)
             | Question::ContextLogs(_)
             | Question::Configuration
@@ -209,11 +212,28 @@ fn classify_simple(question: &str) -> Question {
     if jobs_summary(current_query) {
         return Question::JobsSummary;
     }
+    if matches!(
+        workstation_jobs_query(current_query),
+        "what jobs are running"
+            | "which jobs are running"
+            | "what jobs are currently running"
+            | "which jobs are currently running"
+            | "running jobs"
+            | "list running jobs"
+            | "list current running jobs"
+            | "list currently running jobs"
+            | "jobs that are running"
+    ) {
+        return Question::RunningJobList;
+    }
     if let Some(metric) = metric(current_query) {
         return Question::Metric(metric);
     }
     if let Some(checks) = status_checks(current_query) {
         return Question::StatusChecks(checks);
+    }
+    if let Some(intent) = status_checks_follow_up(current_query) {
+        return intent;
     }
     if let Some(check) = readiness(question, query) {
         return Question::Readiness(check);
@@ -325,6 +345,10 @@ fn conversational_intent(question: &str) -> Option<Question> {
         "what did i just ask"
         | "what did i ask you"
         | "what did i just say"
+        | "what was my last question"
+        | "what did you just say"
+        | "what was your last answer"
+        | "recap the last exchange"
         | "what were we talking about"
         | "what were we just talking about"
         | "recap our conversation" => Question::Recall,
@@ -403,6 +427,36 @@ fn status_check_group(group: &str) -> Option<StatusChecks> {
         "unresolved" | "need attention" | "needs attention" => StatusChecks::Unresolved,
         _ => return None,
     })
+}
+
+fn status_checks_follow_up(query: &str) -> Option<Question> {
+    let query = strip_any_prefix(
+        query,
+        &[
+            "can you ",
+            "could you ",
+            "would you ",
+            "what about ",
+            "list ",
+            "name ",
+            "which ",
+        ],
+    )
+    .unwrap_or(query);
+    let query = strip_any_prefix(query, &["list ", "name ", "the "]).unwrap_or(query);
+    if matches!(query, "ones" | "those" | "them" | "of those") {
+        return Some(Question::StatusChecksFollowUp(StatusChecks::All, None));
+    }
+    let (count, group) = query
+        .split_once(' ')
+        .and_then(|(first, rest)| Some((first.parse::<usize>().ok()?, rest)))
+        .map_or((None, query), |(count, rest)| (Some(count), rest));
+    let group = strip_any_suffix(group, &[" one", " ones"])
+        .or_else(|| strip_any_prefix(group, &["ones ", "of those ", "those ", "that "]))?;
+    Some(Question::StatusChecksFollowUp(
+        status_check_group(group)?,
+        count,
+    ))
 }
 
 fn metric(query: &str) -> Option<Metric> {
@@ -1060,6 +1114,25 @@ mod tests {
     }
 
     #[test]
+    fn distinguishes_running_job_names_from_running_job_counts() {
+        for prompt in [
+            "What jobs are running?",
+            "Which jobs are currently running on this workstation?",
+            "Show me running jobs.",
+            "List current running jobs.",
+        ] {
+            assert_eq!(classify(prompt), Question::RunningJobList, "{prompt}");
+        }
+        for prompt in ["How many jobs are running?", "Any jobs running?"] {
+            assert_eq!(
+                classify(prompt),
+                Question::Metric(Metric::RunningJobs),
+                "{prompt}"
+            );
+        }
+    }
+
+    #[test]
     fn routes_only_scoped_log_and_configuration_questions() {
         for (prompt, expected) in [
             (
@@ -1137,6 +1210,37 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_contextual_status_check_fragments_without_reclassifying_explicit_questions() {
+        let cases = [
+            ("what are the 7 failed one?", StatusChecks::Failed, Some(7)),
+            (
+                "What about the 7 unresolved ones?",
+                StatusChecks::Unresolved,
+                Some(7),
+            ),
+            ("Which ones failed?", StatusChecks::Failed, None),
+            ("Which of those passed?", StatusChecks::Passed, None),
+            ("Could you list them?", StatusChecks::All, None),
+            ("Which ones?", StatusChecks::All, None),
+        ];
+        for (text, selection, count) in cases {
+            assert_eq!(
+                classify(text),
+                Question::StatusChecksFollowUp(selection, count),
+                "{text}",
+            );
+        }
+        assert_eq!(
+            classify("Which status checks failed?"),
+            Question::StatusChecks(StatusChecks::Failed),
+        );
+        for unrelated in ["Which of those jobs failed?", "What are the 7 recipes?"] {
+            assert_eq!(classify(unrelated), Question::Unsupported);
+        }
+        assert_eq!(classify("What was your last answer?"), Question::Recall);
+    }
+
+    #[test]
     fn routes_workstation_status_checks_to_a_scoped_direct_answer() {
         for (prompt, selection) in [
             (
@@ -1193,8 +1297,9 @@ mod tests {
             "Which backend am I connected to and what's its token?",
             "Job counts across all workstations.",
             "How are my jobs doing?",
-            "What jobs are running?",
-            "Show me running jobs.",
+            "Which jobs are running across all workstations?",
+            "List running jobs on someone else's workstation.",
+            "Show me running jobs and stop them.",
             "What is the CPU temperature?",
             "What is the one-minute CPU load?",
             "How much memory is free?",

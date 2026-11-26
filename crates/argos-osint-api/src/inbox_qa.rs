@@ -21,6 +21,8 @@ use argos_osint_core::storage::inbox_qa as store;
 use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::tx::TxError;
 use axum::http::StatusCode;
+use fleetworks_contracts::chat::QaMeasurement;
+use fleetworks_contracts::chat::QaMeasurementUnit;
 use fleetworks_contracts::chat::{
     ChatSourceKind, ChatSourceReference, QaAvailabilityReason, QaCancelRequest,
     QaConversationReply, QaEventPage, QaEventQuery, QaGeneratorSettings, QaModelTarget, QaPhase,
@@ -751,6 +753,7 @@ pub(crate) async fn submit_request(
     availability: &QaRuntimeAvailability,
     request: QaTurnRequest,
 ) -> Result<QaTurn, ApiError> {
+    let response_started_at_ms = chrono::Utc::now().timestamp_millis();
     let actor = require(
         context,
         Permission::SubmitInteractive,
@@ -776,10 +779,11 @@ pub(crate) async fn submit_request(
         ));
     }
     let deadline = Instant::now() + Duration::from_secs(4);
-    let follow_up = if classified.intent == Question::FollowUp {
-        resolve_follow_up(state, &actor, &request, deadline).await?
-    } else {
-        None
+    let follow_up = match classified.intent {
+        Question::FollowUp | Question::StatusChecksFollowUp(..) => {
+            resolve_follow_up(state, &actor, &request, classified.intent, deadline).await?
+        }
+        _ => None,
     };
     let (evidence_request, classified) = if let Some(follow_up) = &follow_up {
         require_evidence_permission(
@@ -796,7 +800,14 @@ pub(crate) async fn submit_request(
         generation: setting.generation,
         history_generation: setting.history_generation,
         availability,
+        response_started_at_ms,
         is_follow_up: follow_up.is_some(),
+        used_previous_exchange: follow_up
+            .as_ref()
+            .is_some_and(|turn| turn.used_previous_exchange),
+        status_check_follow_up: follow_up
+            .as_ref()
+            .and_then(|turn| turn.status_check_follow_up),
         previous_observation: follow_up
             .as_ref()
             .and_then(|turn| turn.observation.as_ref()),
@@ -853,7 +864,10 @@ fn require_evidence_permission(
     let activity = context.permits(Permission::ReadWorkstationActivity);
     let backend = context.permits(Permission::ReadBackend);
     let allowed = match intent {
-        Question::JobsSummary | Question::ContextStatus(_) | Question::ContextLogs(_) => activity,
+        Question::JobsSummary
+        | Question::RunningJobList
+        | Question::ContextStatus(_)
+        | Question::ContextLogs(_) => activity,
         Question::Metric(metric) => match metric {
             question::Metric::Cpu | question::Metric::Memory | question::Metric::Disk => backend,
             _ => activity,
@@ -861,6 +875,7 @@ fn require_evidence_permission(
         Question::Readiness(_)
         | Question::ReadinessExplanation(_)
         | Question::StatusChecks(_)
+        | Question::StatusChecksFollowUp(..)
         | Question::HostResources
         | Question::Configuration
         | Question::Summary => backend,
@@ -902,15 +917,21 @@ async fn resolve_follow_up(
     state: &ApiState,
     actor: &store::Actor,
     request: &QaTurnRequest,
+    intent: Question,
     deadline: Instant,
 ) -> Result<Option<ResolvedFollowUp>, ApiError> {
     let mut resolved = request.clone();
     if resolved.source.is_some() {
+        if intent != Question::FollowUp {
+            return Ok(None);
+        }
         resolved.question = "What happened?".into();
         return Ok(Some(ResolvedFollowUp {
             classified: question::classify(&resolved.question),
             request: resolved,
             observation: None,
+            used_previous_exchange: false,
+            status_check_follow_up: None,
         }));
     }
     let previous =
@@ -921,6 +942,30 @@ async fn resolve_follow_up(
     let Some(previous) = previous else {
         return Ok(None);
     };
+    if let Question::StatusChecksFollowUp(selection, hinted_count) = intent {
+        let Some(summary) = previous
+            .status_check_summary
+            .filter(|_| !previous.intervening_turn)
+        else {
+            return Ok(None);
+        };
+        resolved.question = previous.question;
+        return Ok(Some(ResolvedFollowUp {
+            classified: question::Classified {
+                intent: Question::StatusChecks(selection),
+                exact_fact: true,
+            },
+            request: resolved,
+            observation: None,
+            used_previous_exchange: true,
+            status_check_follow_up: Some(readiness::StatusCheckFollowUp {
+                hinted_count,
+                previous_tally: previous
+                    .status_check_tally
+                    .or_else(|| readiness::retained_status_check_tally(&summary)),
+            }),
+        }));
+    }
     let classified = question::classify(&previous.question);
     let supported = match classified.intent {
         Question::ContextStatus(_) | Question::ContextLogs(_) | Question::ExplainSelected => {
@@ -932,6 +977,7 @@ async fn resolve_follow_up(
         | Question::Metric(_)
         | Question::HostResources
         | Question::JobsSummary
+        | Question::RunningJobList
         | Question::Configuration
         | Question::Summary => true,
         _ => false,
@@ -945,6 +991,8 @@ async fn resolve_follow_up(
         classified,
         request: resolved,
         observation: previous.observation,
+        used_previous_exchange: true,
+        status_check_follow_up: None,
     }))
 }
 
@@ -952,6 +1000,8 @@ struct ResolvedFollowUp {
     classified: question::Classified,
     request: QaTurnRequest,
     observation: Option<store::Observation>,
+    used_previous_exchange: bool,
+    status_check_follow_up: Option<readiness::StatusCheckFollowUp>,
 }
 
 struct Snapshot {
@@ -964,7 +1014,10 @@ struct SnapshotRuntime<'a> {
     generation: i64,
     history_generation: i64,
     availability: &'a QaRuntimeAvailability,
+    response_started_at_ms: i64,
     is_follow_up: bool,
+    used_previous_exchange: bool,
+    status_check_follow_up: Option<readiness::StatusCheckFollowUp>,
     previous_observation: Option<&'a store::Observation>,
 }
 
@@ -979,6 +1032,7 @@ fn dialogue_kind(
         Question::Acknowledgement if may_read_backend => Some(QaDialogueKind::Acknowledgement),
         Question::Help if may_read_backend => Some(QaDialogueKind::Help),
         Question::Recall if may_read_backend => Some(QaDialogueKind::Recall),
+        Question::RunningJobList => None,
         _ if may_read_backend && has_evidence && (is_follow_up || !classified.exact_fact) => {
             Some(QaDialogueKind::Operational)
         }
@@ -1098,6 +1152,7 @@ async fn snapshot(
     let mut conversation = None;
     let mut related_activity = None;
     let mut observed_state = None;
+    let mut status_check_tally = None;
     match intent {
         Question::Readiness(check) | Question::ReadinessExplanation(check) => {
             let explanation = matches!(intent, Question::ReadinessExplanation(_));
@@ -1142,31 +1197,33 @@ async fn snapshot(
                 reason: None,
                 explanation: String::new(),
             };
-            if let Some((sample, (summary, details))) = health.as_ref().and_then(|sample| {
+            if let Some((sample, report)) = health.as_ref().and_then(|sample| {
                 readiness::status_check_summary(
                     sample.facts.iter().chain([&registration]),
                     selection,
+                    runtime.status_check_follow_up,
                 )
                 .map(|report| (sample, report))
             }) {
+                status_check_tally = Some(report.tally);
                 let at = chrono::DateTime::from_timestamp_millis(sample.sampled_at_ms)
                     .ok_or_else(current_health_unavailable)?;
                 let reference = ChatSourceReference::new(
                     ChatSourceKind::Readiness,
-                    "workstation_status_checks".to_owned(),
+                    store::STATUS_CHECKS_SOURCE_ID.to_owned(),
                 )
                 .map_err(|_| crate::bad())?;
                 let mut remaining_words =
-                    QA_MAX_WORDS.saturating_sub(summary.split_whitespace().count());
+                    QA_MAX_WORDS.saturating_sub(report.summary.split_whitespace().count());
                 push(
                     reference,
                     "Workstation status checks".to_owned(),
-                    summary,
+                    report.summary,
                     at,
                     None,
                     false,
                 );
-                for fact in details.into_iter().take(QA_MAX_FINDINGS - 1) {
+                for fact in report.details.into_iter().take(QA_MAX_FINDINGS - 1) {
                     let text = readiness::answer(fact);
                     let words = text.split_whitespace().count();
                     if words > remaining_words {
@@ -1199,6 +1256,41 @@ async fn snapshot(
                     Some(fact.measurement),
                     false,
                 );
+            }
+        }
+        Question::RunningJobList => {
+            if let Some(running) = metrics::running_jobs(state, context, boundary, deadline).await {
+                let count = running.count;
+                let named = running.names.len();
+                let noun = if count == 1 { "job" } else { "jobs" };
+                let mut text = format!("This workstation has {count} running {noun}.");
+                if count > named as u64 {
+                    if named == 0 {
+                        text.push_str(" Job names are unavailable.");
+                    } else {
+                        text.push_str(&format!(" Showing {named} with names."));
+                    }
+                }
+                let label = "Running workstation jobs";
+                let reference =
+                    ChatSourceReference::new(ChatSourceKind::JobCount, "running".into())
+                        .map_err(|_| crate::bad())?;
+                push(
+                    reference,
+                    label.to_owned(),
+                    text,
+                    running.observed_at,
+                    Some(QaMeasurement::new(
+                        count,
+                        QaMeasurementUnit::Jobs,
+                        label.to_owned(),
+                    )),
+                    false,
+                );
+                for (reference, name) in running.names {
+                    let text = format!("“{name}” is running.");
+                    push(reference, name, text, running.observed_at, None, false);
+                }
             }
         }
         Question::ContextStatus(kind) => {
@@ -1372,7 +1464,7 @@ async fn snapshot(
             notice = Some(QaTurnNotice::Greeting);
             conversation = Some(QaConversationReply::Help);
         }
-        Question::FollowUp => {
+        Question::FollowUp | Question::StatusChecksFollowUp(..) => {
             notice = Some(QaTurnNotice::OutOfScope);
             conversation = Some(QaConversationReply::FollowUpNeedsTopic);
         }
@@ -1389,7 +1481,11 @@ async fn snapshot(
             conversation = Some(QaConversationReply::ContextNeeded);
         }
     }
-    let observation = comparison::single_observation(&sources, observed_state);
+    let observation = if intent == Question::RunningJobList {
+        None
+    } else {
+        comparison::single_observation(&sources, observed_state)
+    };
     if let Some((previous, current)) = runtime.previous_observation.zip(observation.as_ref()) {
         comparison::append(previous, current, &mut passages, &mut sources);
     }
@@ -1400,12 +1496,16 @@ async fn snapshot(
     .timestamp_millis();
     let turn_id = store::accepted_turn_id(actor, request, runtime.history_generation)
         .map_err(storage_error)?;
-    let dialogue = dialogue_kind(
-        runtime.classified,
-        !passages.is_empty(),
-        runtime.is_follow_up,
-        context.permits(Permission::ReadBackend),
-    );
+    let dialogue = if runtime.status_check_follow_up.is_some() {
+        None
+    } else {
+        dialogue_kind(
+            runtime.classified,
+            !passages.is_empty(),
+            runtime.is_follow_up,
+            context.permits(Permission::ReadBackend),
+        )
+    };
     let mut worker_request =
         QaWorkerRequest::new(turn_id.clone(), turn_id, request.question.clone(), passages);
     let answer_mode = if let Some(kind) = dialogue {
@@ -1430,6 +1530,9 @@ async fn snapshot(
             subject: source.cloned(),
             observation,
             related_activity,
+            status_check_tally,
+            response_started_at_ms: Some(runtime.response_started_at_ms),
+            used_previous_exchange: runtime.used_previous_exchange,
         },
     })
 }

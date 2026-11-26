@@ -135,6 +135,9 @@ pub(super) async fn start_qa_fixture(
             subject: None,
             observation: None,
             related_activity: None,
+            status_check_tally: None,
+            used_previous_exchange: false,
+            response_started_at_ms: None,
         },
         enabled.generation,
     )

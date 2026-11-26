@@ -1558,6 +1558,7 @@ async fn run_shared_flow(
             .accepted_at
             .zip(answered.completed_at)
             .is_some_and(|(accepted, completed)| accepted <= completed));
+        assert!(answered.response_time_ms.is_some());
         assert_eq!(answered.findings.len(), 1);
         assert_eq!(answered.findings[0].source.kind, ChatSourceKind::JobCount);
         let usage = answered.context.expect("direct answer context usage");
@@ -1603,6 +1604,7 @@ async fn run_shared_flow(
             .await
             .expect("direct job explanation");
         assert_eq!(explanation.state, QaTurnState::Answered);
+        assert!(!explanation.used_previous_exchange);
         assert_eq!(explanation.findings[0].source, job);
         assert_eq!(explanation.related_activity, Some(related_job));
         let follow_up = QaTurnRequest::new(
@@ -1617,6 +1619,7 @@ async fn run_shared_flow(
             .await
             .expect("new observation for the retained subject");
         assert_eq!(refreshed.state, QaTurnState::Answered);
+        assert!(refreshed.used_previous_exchange);
         assert_eq!(refreshed.question, follow_up.question);
         assert_eq!(refreshed.findings[0].source, job);
         assert!(refreshed.findings[0].observed_at > explanation.findings[0].observed_at);
@@ -1685,6 +1688,24 @@ async fn run_shared_flow(
             vec![refreshed, explanation.clone(), answered],
             "History preserves canonical exchanges, newest first, across generator changes",
         );
+        let list = QaTurnRequest::new(
+            format!("parity-running-job-list-{transport}"),
+            qa_context.clone(),
+            "What jobs are running?".into(),
+            None,
+        )
+        .expect("valid scoped running job question");
+        let running = client
+            .submit_qa_turn(&list)
+            .await
+            .expect("direct running jobs answer");
+        assert_eq!(running.state, QaTurnState::Answered);
+        assert_eq!(running.findings[0].source.kind, ChatSourceKind::JobCount);
+        assert_eq!(running.findings[0].source.id, "running");
+        assert_eq!(running.context.unwrap().model_windows, 0);
+        assert!(running.findings[1..].iter().all(|finding| {
+            finding.source.kind == ChatSourceKind::Job && finding.text.ends_with(" is running.")
+        }));
         assert_eq!(
             client
                 .submit_qa_turn(&explain)

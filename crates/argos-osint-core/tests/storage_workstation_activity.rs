@@ -225,6 +225,20 @@ async fn node_child_deployment_and_causal_membership_filter_before_limits_and_fa
             .expect("other authority")
             .is_empty()
     );
+    db.query("UPDATE job SET state='running', updated_at=<datetime>$updated WHERE id IN $selected RETURN NONE")
+        .bind(("updated", ordering_epoch.to_rfc3339()))
+        .bind(("selected", ["owned-a", "owned-b", "other-node"].map(|id| RecordId::new("job", id)).to_vec()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let (running, names) = view::running_activity_jobs(db, "scope-a", &node, 1)
+        .await
+        .unwrap();
+    assert_eq!(running, 2);
+    assert_eq!(names.len(), 1);
+    assert_eq!(names[0].job_id, "owned-a");
+    assert_eq!(names[0].title, "private-title-owned-a");
 }
 
 #[tokio::test]
@@ -238,6 +252,16 @@ async fn shared_reuse_preserves_creator_but_private_fields_and_search_stay_unava
     let other = register(&repo, "node-b", "analysis").await;
     associate(&repo, &first, "shared", "original", "task").await;
     let first_scope = scope(&first, true);
+    db.query("UPDATE job:shared SET state='running' RETURN NONE")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let (running, names) = view::running_activity_jobs(db, "scope-a", &first_scope, 1)
+        .await
+        .unwrap();
+    assert_eq!(running, 1);
+    assert_eq!(names[0].title, "private-title-shared");
     let before = view::get_activity_job(db, "scope-a", &first_scope, "shared")
         .await
         .expect("original job")
@@ -256,8 +280,8 @@ async fn shared_reuse_preserves_creator_but_private_fields_and_search_stay_unava
     let request = QaTurnRequest::new(
         "private-job-answer".into(),
         MutationContext::new(&first),
-        "What happened?".into(),
-        Some(source.clone()),
+        "What jobs are running?".into(),
+        None,
     )
     .unwrap();
     let id = qa::accepted_turn_id(&actor, &request, setting.history_generation).unwrap();
@@ -272,7 +296,7 @@ async fn shared_reuse_preserves_creator_but_private_fields_and_search_stay_unava
             request.question.clone(),
             vec![QaPassage::new(
                 "passage-0".into(),
-                "Selected job is queued.".into(),
+                "Private-title-shared is running.".into(),
             )],
         ),
         sources: vec![qa::Source {
@@ -286,9 +310,12 @@ async fn shared_reuse_preserves_creator_but_private_fields_and_search_stay_unava
         sampled_at_ms: at.timestamp_millis(),
     };
     let metadata = || qa::AdmissionMetadata {
-        subject: Some(source.clone()),
+        subject: None,
         observation: None,
         related_activity: None,
+        status_check_tally: None,
+        used_previous_exchange: false,
+        response_started_at_ms: None,
     };
     let answer = qa::admit(
         &repo,
@@ -337,8 +364,13 @@ async fn shared_reuse_preserves_creator_but_private_fields_and_search_stay_unava
             row.status_only && !row.private_details_available && !row.activity_actions_available
         );
         assert_eq!(row.job.id, "shared");
-        assert_eq!(row.job.state, "queued");
+        assert_eq!(row.job.state, "running");
         assert!(!row.job.cancellable);
+        let (running, names) = view::running_activity_jobs(db, "scope-a", &selected, 1)
+            .await
+            .unwrap();
+        assert_eq!(running, 1);
+        assert!(names.is_empty());
         let json = serde_json::to_string(&row).expect("row wire serialization");
         for private in [
             "private-title",

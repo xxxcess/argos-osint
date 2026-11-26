@@ -497,9 +497,9 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
             return arrow
         return None
 
-    # Exercise the focus transfer at the oldest exchange through the real keyboard path.
+    # Space activates the focused native control. Return is reserved for a default action.
     wait_for(focused_next_exchange, app, "keyboard focus on the newer exchange arrow", timeout=8)
-    subprocess.run(["xdotool", "key", "--clearmodifiers", "Return"], check=True, timeout=5)
+    subprocess.run(["xdotool", "key", "--clearmodifiers", "space"], check=True, timeout=5)
     wait_for(lambda: transcript_shows(MEMORY_QUESTION, hidden_arrow=NEXT_EXCHANGE),
              app, "latest memory exchange with the next arrow hidden", timeout=8)
     require(len([row for row in read_journal(journal) if row.get("op") == "qa_turn_submit"]) == 2,

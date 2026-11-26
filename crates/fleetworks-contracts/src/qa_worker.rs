@@ -17,6 +17,7 @@ pub const QA_CONTEXT_USAGE_ENV: &str = "FLEETWORKS_QA_CONTEXT_USAGE";
 pub const QA_STREAMING_ENV: &str = "FLEETWORKS_QA_STREAMING";
 pub const QA_MODEL_CONTEXT_ENV: &str = "FLEETWORKS_QA_MODEL_CONTEXT";
 pub const QA_RESPONSE_PLAN_ENV: &str = "FLEETWORKS_QA_RESPONSE_PLAN";
+pub const QA_DECODED_CLARIFICATION_ENV: &str = "FLEETWORKS_QA_DECODED_CLARIFICATION";
 pub const QA_MODEL_PINS: &str = include_str!("qa_models.json");
 pub const QA_MODEL_TARGET_ENV: &str = "FLEETWORKS_QA_MODEL_TARGET";
 pub const QA_DIALOGUE_ENV: &str = "FLEETWORKS_QA_DIALOGUE";
@@ -356,13 +357,26 @@ pub enum QaClarification {
 }
 
 impl QaClarification {
+    /// Canonical wording understood by packs that predate alternate replies.
     pub const fn text(self) -> &'static str {
+        self.approved_replies()[0]
+    }
+
+    /// Complete sentences authorized for this clarification.
+    pub const fn approved_replies(self) -> [&'static str; 2] {
         match self {
-            Self::Subject => "Which workstation subject should I check?",
-            Self::Time => "What time range should I check?",
-            Self::HistoryUnavailable => {
-                "I could not verify locally recorded observations for that time range."
-            }
+            Self::Subject => [
+                "Which workstation subject should I check?",
+                "What workstation subject should I check?",
+            ],
+            Self::Time => [
+                "What time range should I check?",
+                "Which time range should I check?",
+            ],
+            Self::HistoryUnavailable => [
+                "I could not verify locally recorded observations for that time range.",
+                "I could not verify recorded observations for the requested time range.",
+            ],
         }
     }
 }
@@ -644,6 +658,11 @@ pub enum QaWorkerReply {
         model_revision: String,
         window_tokens: u16,
     },
+    ReadyWithDecodedClarification {
+        protocol: u16,
+        model_revision: String,
+        window_tokens: u16,
+    },
     StartupFailed {
         source: QaWorkerPanicSource,
         line: u32,
@@ -846,7 +865,7 @@ pub fn valid_uncited_reply(request: &QaWorkerRequest, text: &str) -> bool {
     valid_dialogue_reply(text)
         && request.plan.as_ref().is_none_or(|plan| {
             if let Some(clarification) = plan.clarification {
-                return text == clarification.text();
+                return clarification.approved_replies().contains(&text);
             }
             let note = plan.note.to_ascii_lowercase();
             let text = text.trim().to_ascii_lowercase();
@@ -950,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn planned_clarification_accepts_only_its_approved_uncited_sentence() {
+    fn planned_clarification_accepts_only_its_approved_uncited_sentences() {
         let mut request = QaWorkerRequest::new(
             "turn".into(),
             "snapshot".into(),
@@ -987,7 +1006,6 @@ mod tests {
             .accept(&legacy, &overflow)
             .is_err());
 
-        let mut sequence = QaWorkerSequence::default();
         let result = |reply: &str| QaWorkerEvent::Complete {
             turn_id: "turn".into(),
             sequence: 1,
@@ -995,12 +1013,17 @@ mod tests {
             context: Some(QaContextUsage::new(512, 120, 1)),
             reply: Some(reply.to_owned()),
         };
-        assert!(sequence
+        assert!(QaWorkerSequence::default()
             .accept(&request, &result("Ask for the missing time range."))
             .is_err());
-        assert!(sequence
-            .accept(&request, &result(QaClarification::Time.text()))
-            .unwrap());
+        assert!(QaWorkerSequence::default()
+            .accept(&request, &result(QaClarification::Subject.text()))
+            .is_err());
+        for reply in QaClarification::Time.approved_replies() {
+            assert!(QaWorkerSequence::default()
+                .accept(&request, &result(reply))
+                .unwrap());
+        }
     }
 
     #[test]

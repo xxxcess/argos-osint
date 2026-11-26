@@ -30,10 +30,10 @@ and the command overlay in their glass and opaque forms, and `catalog` and
 Linux lane captures the glass ones. They send nothing and use no
 backend.
 
-The `inbox-qa-ready` scene renders the initial greeting with an empty
-production Inbox transcript and enough synthetic notifications to overflow
-the compact drawer. Capture it at compact and wide sizes to check that the
-Assistant message remains visible above the composer.
+The `inbox-qa-ready` scene renders the empty production Inbox transcript
+and enough synthetic notifications to overflow the compact drawer. Capture
+it at compact and wide sizes to check that the composer remains visible
+and the transcript stays empty until the generator returns reply text.
 
 A selected baseline capture:
 

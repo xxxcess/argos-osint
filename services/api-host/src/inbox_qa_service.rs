@@ -739,7 +739,14 @@ impl Executor {
             let mut plan =
                 decision::select_response_plan(Some(self.decision.as_ref()), evidence, &context)
                     .await;
-            plan.negotiated = self.model.response_plan_supported().await;
+            let needs_decoded_clarification = plan
+                .worker
+                .as_ref()
+                .is_some_and(|request| request.clarification.is_some());
+            plan.negotiated = self
+                .model
+                .response_plan_supported(needs_decoded_clarification)
+                .await;
             if plan.requires_worker_support && !plan.negotiated {
                 return Ok(
                     if store::publish_unavailable(

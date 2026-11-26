@@ -694,6 +694,7 @@ mod native {
             turn.cursor = 3;
         }
         if stage == QaTurnState::Answered {
+            turn.reply = Some("Actor search is ready.".into());
             turn.used_previous_exchange = true;
             turn.context = Some(QaContextUsage::new(
                 QaModelTarget::FlanT5Small.input_tokens(),

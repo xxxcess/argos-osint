@@ -166,6 +166,8 @@ The Assistant pane has the parts for a conversation but no way to fill one yet. 
 | History | The newest 50 messages scroll and stick to the bottom. A note says how many older messages are not shown. With no messages, the plain status line shows instead. |
 | Authority change | A new connection authority clears the messages with the draft and the pin. |
 
+The Embedded Inbox uses these components for its live Assistant transcript. It opens with notifications and the composer. A submitted turn shows the generator draft or verified reply in the message body. Pending, stopped, and unavailable turns use status chips. Expanded Sources can show exact authorized evidence when a turn has citations and the message body is empty.
+
 ### Component catalog (fixtures)
 
 Scenes `catalog` and `catalog-opaque` draw production components together: the seven control finishes (`gold`, `gunmetal`, `danger`, `pill`, `fractured`, `fractured-confirm`, `fractured-danger`) in default, busy, disabled and with-status states, every status tone, selected and unselected tiles, an opaque reading panel and a section header. The catalog has no route and no menu entry; only a fixture scene turns it on (`State::fixture_show_catalog`). Hover, focus and pressed need input and are covered by scripted scenes. The web side has a state matrix over the production Button in `packages/ui/__tests__/component-catalog.test.tsx`.

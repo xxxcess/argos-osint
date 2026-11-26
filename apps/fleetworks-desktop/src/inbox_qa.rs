@@ -11,12 +11,12 @@ use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::chat::QaAvailabilityReason;
 use fleetworks_contracts::chat::QaCancelRequest;
-use fleetworks_contracts::chat::QaConversationReply;
 use fleetworks_contracts::chat::QaDecisionAvailabilityReason;
 use fleetworks_contracts::chat::QaDecisionPreference;
 use fleetworks_contracts::chat::QaDecisionSettings;
 use fleetworks_contracts::chat::QaEventPage;
 use fleetworks_contracts::chat::QaEventQuery;
+use fleetworks_contracts::chat::QaFinding;
 use fleetworks_contracts::chat::QaGeneratorPreference;
 use fleetworks_contracts::chat::QaGeneratorSettings;
 use fleetworks_contracts::chat::QaModelTarget;
@@ -27,7 +27,6 @@ use fleetworks_contracts::chat::QaSettingsUpdate;
 use fleetworks_contracts::chat::QaStartupStage;
 use fleetworks_contracts::chat::QaTurn;
 use fleetworks_contracts::chat::QaTurnLimitation;
-use fleetworks_contracts::chat::QaTurnNotice;
 use fleetworks_contracts::chat::QaTurnRequest;
 use fleetworks_contracts::chat::QaTurnStage;
 use fleetworks_contracts::chat::QaTurnState;
@@ -78,8 +77,6 @@ const SETTINGS_REFRESH: f64 = 5.0;
 const HISTORY_REFRESH: f64 = 15.0;
 const STARTUP_REFRESH: f64 = 1.0;
 const MIN_EVENT_INTERVAL: f64 = 0.2;
-const GREETING: &str = "inbox-qa-greeting";
-const WELCOME_ROW: &str = "inbox-qa-welcome";
 const QUESTION_ROW: &str = "inbox-qa-question-row";
 const ANSWER_ROW: &str = "inbox-qa-live-answer";
 const COMPOSER: &str = "inbox-qa-composer";
@@ -1838,69 +1835,43 @@ fn citation_kind(kind: ChatSourceKind) -> &'static str {
     }
 }
 
-fn answer_state(turn: &QaTurn) -> (chat_ui::TurnState, &'static str) {
+fn answer_state(turn: &QaTurn, has_text: bool) -> chat_ui::TurnState {
     use chat_ui::TurnState;
-    let (stage, fallback) = match turn.state {
-        QaTurnState::Queued => (TurnState::Queued, ""),
-        QaTurnState::Running => (
-            match turn.stage {
-                Some(QaTurnStage::Thinking) => TurnState::Thinking,
-                Some(QaTurnStage::Writing) => TurnState::Writing,
-                _ => TurnState::Running,
-            },
-            "",
-        ),
-        QaTurnState::Answered => (TurnState::Final, ""),
-        QaTurnState::InsufficientContext => (
-            TurnState::Final,
-            "The backend could not verify an answer from current evidence.",
-        ),
-        QaTurnState::Canceled => (TurnState::Final, "Stopped"),
-        _ => (
-            TurnState::Failed {
-                reason: "Backend inference could not finish".into(),
-            },
-            "",
-        ),
-    };
-    let context_needed = "What would you like to work through? Point me to a source, or select a related job, news cycle, or status check.";
-    let detail = match turn.conversation {
-        Some(QaConversationReply::Acknowledgement) => "Of course. What else can I help with?",
-        Some(QaConversationReply::Help) => {
-            "Try “Is actor search ready?” or “How much memory is in use?” Select a job to ask about its status."
-        }
-        Some(QaConversationReply::ContextNeeded) => context_needed,
-        Some(QaConversationReply::FollowUpNeedsTopic) => {
-            "What would you like me to check again? Try “What’s the current memory usage?” or select the job you mean."
-        }
-        Some(QaConversationReply::ChooseSubject) => {
-            "Which should I check first? Select a job or ask about one subject."
-        }
-        Some(QaConversationReply::RecallNeedsHistory) => "Ask me a question first, then I can recap our recent exchange.",
-        _ => match turn.notice {
-            Some(QaTurnNotice::Greeting) => {
-                "Hi! How can I help? You can ask about actor search, memory usage, or running jobs."
-            }
-            Some(QaTurnNotice::OutOfScope) => context_needed,
-            Some(QaTurnNotice::ObservationUnavailable) => {
-                "I couldn’t get a current reading for that. Try again in a moment."
-            }
-            _ => fallback,
+    match turn.state {
+        QaTurnState::Queued => TurnState::Queued,
+        QaTurnState::Running if has_text => TurnState::Streaming,
+        QaTurnState::Running => match turn.stage {
+            Some(QaTurnStage::Thinking) => TurnState::Thinking,
+            Some(QaTurnStage::Writing) => TurnState::Writing,
+            _ => TurnState::Running,
         },
-    };
-    let detail = match turn.limitation {
-        Some(QaTurnLimitation::CapabilityUnavailable) => {
-            "The current backend and model cannot answer this kind of question."
-        }
-        Some(QaTurnLimitation::QuestionTooLong) => {
-            "Shorten the question or ask about one subject at a time."
-        }
-        _ => detail,
-    };
-    (stage, detail)
+        QaTurnState::Answered if has_text => TurnState::Final,
+        QaTurnState::Answered => TurnState::Unavailable {
+            reason: "Reply unavailable",
+        },
+        QaTurnState::InsufficientContext => TurnState::Unavailable {
+            reason: match turn.limitation {
+                Some(QaTurnLimitation::CapabilityUnavailable) => "Model capability unavailable",
+                Some(QaTurnLimitation::QuestionTooLong) => {
+                    "Question exceeds the model context window"
+                }
+                _ => "Verified answer unavailable",
+            },
+        },
+        QaTurnState::Canceled => TurnState::Stopped,
+        _ => TurnState::Failed {
+            reason: "Backend inference could not finish".into(),
+        },
+    }
 }
 
-fn answer_sources(turn_id: &str, citations: &[chat_ui::Citation], expanded: bool, kit: &Kit) -> El {
+fn answer_sources(
+    turn_id: &str,
+    citations: &[chat_ui::Citation],
+    evidence: Option<&[QaFinding]>,
+    expanded: bool,
+    kit: &Kit,
+) -> El {
     let active_turn_id = turn_id.to_owned();
     let label = format!("Sources ({})", citations.len());
     let font = kit.ty.small;
@@ -1938,8 +1909,27 @@ fn answer_sources(turn_id: &str, citations: &[chat_ui::Citation], expanded: bool
         .gap(4.0)
         .child(rune::row().child(trigger))
         .children(expanded.then(|| {
-            chat_ui::citation_rows(turn_id, citations, kit)
-                .key(SOURCES_CONTENT)
+            let rows = if let Some(findings) = evidence {
+                rune::col().w_full().gap(6.0).children(
+                    citations.iter().zip(findings).enumerate().map(
+                        |(index, (citation, finding))| {
+                            rune::col()
+                                .gap(2.0)
+                                .child(chat_ui::citation_row(turn_id, index, citation, kit))
+                                .child(
+                                    rune::text(finding.text.as_str())
+                                        .key(format!("inbox-qa-source-finding-{turn_id}-{index}"))
+                                        .font(kit.ty.small)
+                                        .color(kit.c.std_text)
+                                        .wrap_anywhere(),
+                                )
+                        },
+                    ),
+                )
+            } else {
+                chat_ui::citation_rows(turn_id, citations, kit)
+            };
+            rows.key(SOURCES_CONTENT)
                 .role("region")
                 .label("Source citations")
         }))
@@ -2019,20 +2009,6 @@ fn message_row(message: El, key: &str) -> El {
             .instant_changes()
             .transition(rune::Transition::none()),
     )
-}
-
-pub(crate) fn greeting(state: &State, kit: &Kit, preferences: ViewPreferences) -> Option<El> {
-    state.can_send_inbox_qa().then(|| {
-        let text = if state.permission(Permission::ReadWorkstationActivity) {
-            "Hi! Ask me about workstation readiness, memory usage, or running jobs."
-        } else {
-            "Hi! Ask me about workstation readiness or memory usage."
-        };
-        crate::inbox::fade_in(
-            message_row(chat_ui::greeting(GREETING, text, kit), WELCOME_ROW),
-            preferences,
-        )
-    })
 }
 
 fn history_arrow_slot(
@@ -2119,39 +2095,16 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
             [Some(pending.sent_at), None],
         )
     } else if let Some(turn) = displayed_turn {
-        let (stage, detail) = answer_state(turn);
-        let draft = turn
-            .provisional_reply
-            .as_deref()
-            .filter(|draft| turn.state == QaTurnState::Running && !draft.trim().is_empty());
-        let stage = if draft.is_some() {
-            chat_ui::TurnState::Streaming
-        } else {
-            stage
-        };
         let reply = match turn.state {
-            QaTurnState::Answered | QaTurnState::InsufficientContext => turn
-                .reply
-                .as_deref()
-                .map(str::trim)
-                .filter(|reply| !reply.is_empty()),
-            _ => draft,
-        };
-        let answer = reply.map_or_else(
-            || {
-                turn.findings
-                    .iter()
-                    .map(|finding| finding.text.as_str())
-                    .chain((!detail.is_empty()).then_some(detail))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            },
-            str::to_owned,
-        );
+            QaTurnState::Answered => turn.reply.as_deref(),
+            QaTurnState::Running => turn.provisional_reply.as_deref(),
+            _ => None,
+        }
+        .filter(|reply| !reply.trim().is_empty());
         (
             turn.question.as_str(),
-            stage,
-            answer,
+            answer_state(turn, reply.is_some()),
+            reply.unwrap_or_default().to_owned(),
             turn.findings.as_slice(),
             turn.request_id.as_str(),
             Some(turn.turn_id.as_str()),
@@ -2190,7 +2143,10 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
     };
     let sources = turn_id
         .filter(|_| !answer.citations.is_empty())
-        .map(|turn_id| answer_sources(turn_id, &answer.citations, sources_open, kit));
+        .map(|turn_id| {
+            let evidence = answer.text.is_empty().then_some(findings);
+            answer_sources(turn_id, &answer.citations, evidence, sources_open, kit)
+        });
     let live_region = if answer.state == chat_ui::TurnState::Streaming {
         LiveRegion::Off
     } else {
@@ -2583,7 +2539,8 @@ fn footer_layer(content: El, preferences: ViewPreferences) -> El {
 #[cfg(test)]
 mod tests {
     use fleetworks_contracts::chat::ChatSourceReference;
-    use fleetworks_contracts::chat::QaFinding;
+    use fleetworks_contracts::chat::QaConversationReply;
+    use fleetworks_contracts::chat::QaTurnNotice;
     use rune::Env;
     use rune::Ime;
     use rune::Mods;
@@ -2602,6 +2559,9 @@ mod tests {
         );
         turn.state = state;
         turn.cursor = cursor;
+        if state == QaTurnState::Answered && cursor >= 2 {
+            turn.reply = Some(FINDING.into());
+        }
         if cursor >= 2 {
             turn.findings.push(QaFinding::new(
                 ChatSourceReference::new(ChatSourceKind::Readiness, "actor-search".into()).unwrap(),
@@ -2682,45 +2642,19 @@ mod tests {
     }
 
     #[test]
-    fn empty_transcript_keeps_the_assistant_greeting_visible_with_notification_history() {
+    fn empty_transcript_keeps_notifications_and_composer_without_an_assistant_message() {
         for size in [(640.0, 480.0), (1280.0, 800.0)] {
             let mut runtime = qa_drawer(size, None);
-            let tree = runtime.accessibility_json();
-            assert_eq!(accessibility_nodes_with_key(&tree, GREETING), 1);
-            let rendered = tree.to_string();
-            assert!(rendered.contains("Assistant message"));
-            assert!(!rendered.contains(r#""name":"Assistant""#));
-            assert!(runtime.find("inbox-qa-greeting-header").is_none());
-            assert!(rendered.contains("workstation readiness, memory usage, or running jobs"));
+            let rendered = runtime.accessibility_json().to_string();
+            assert!(!rendered.contains("Assistant message"));
+            assert!(runtime.find("inbox-group-connection-toggle").is_some());
+            assert!(runtime.find("inbox-chat-divider").is_none());
+            assert!(runtime.find(REPLY).is_none());
             assert!(runtime.find(COMPOSER).is_some());
             assert!(runtime.find(SOURCES_TOGGLE).is_none());
             assert!(runtime.find(CONTEXT_DIAL).is_none());
             assert!(runtime.state.inbox_qa.latest.is_none());
             assert!(runtime.state.inbox_qa.pending.is_none());
-            let (greeting, _) = runtime.presented(GREETING).unwrap();
-            let (scroll, _) = runtime.presented(crate::inbox::SCROLL).unwrap();
-            assert!(greeting[1] >= scroll[1] - 0.5);
-            assert!(greeting[1] + greeting[3] <= scroll[1] + scroll[3] + 0.5);
-            if size.1 == 480.0 {
-                let (first_card, _) = runtime.presented("inbox-group-connection-toggle").unwrap();
-                assert!(first_card[1] < scroll[1]);
-            }
-
-            runtime.update(|state, _| {
-                let capabilities = state.connection.capabilities.as_mut().unwrap();
-                capabilities.features.push(QA_TRIAGE_FEATURE.into());
-                capabilities
-                    .permissions
-                    .retain(|permission| *permission != Permission::ReadWorkstationActivity);
-            });
-            runtime.frame(0.625);
-            let limited_prompt = runtime.accessibility_json().to_string();
-            assert!(limited_prompt.contains("workstation readiness or memory usage"));
-            assert!(!limited_prompt.contains("or running jobs"));
-
-            runtime.update(|state, _| state.inbox_qa.request_resume());
-            runtime.frame(0.75);
-            assert!(runtime.find(GREETING).is_none());
 
             runtime.update(|state, tx| {
                 let context = MutationContext::new(state.registration.context.as_ref().unwrap());
@@ -2731,13 +2665,15 @@ mod tests {
                     None,
                 )
                 .unwrap();
-                state.inbox_qa.resume = false;
                 state.inbox_qa.pending = Some(Pending::new(request));
                 tx.scroll_to_bottom_instant(crate::inbox::SCROLL);
             });
             runtime.frame(1.0);
-            assert!(runtime.find(GREETING).is_none());
             assert!(runtime.find(REPLY).is_some());
+            assert!(!runtime
+                .accessibility_json()
+                .to_string()
+                .contains("Assistant message"));
             assert_eq!(runtime.scroll_at_bottom(crate::inbox::SCROLL), Some(true));
 
             runtime.update(|state, _| {
@@ -2745,8 +2681,8 @@ mod tests {
                 state.inbox_qa.adopt(Some(turn(QaTurnState::Answered, 3)));
             });
             runtime.frame(1.25);
-            assert!(runtime.find(GREETING).is_none());
-            assert!(runtime.accessibility_json().to_string().contains(FINDING));
+            let rendered = runtime.accessibility_json().to_string();
+            assert!(rendered.contains("Assistant message") && rendered.contains(FINDING));
         }
     }
 
@@ -3536,6 +3472,7 @@ mod tests {
 
         runtime.update(|state, _| {
             let mut direct = turn(QaTurnState::Answered, 2);
+            direct.reply = None;
             direct.turn_id = "fixture-direct".into();
             direct.request_id = "fixture-direct-request".into();
             direct.context = Some(QaContextUsage::new(
@@ -3597,7 +3534,7 @@ mod tests {
             assert_eq!(toggle.role, "button");
             assert_eq!(toggle.label.as_deref(), Some("Sources (1)"));
             assert_eq!(toggle.expanded, Some(false));
-            assert!(runtime.accessibility_json().to_string().contains(FINDING));
+            assert!(!runtime.accessibility_json().to_string().contains(FINDING));
             let (exchange, _) = runtime.presented("inbox-qa-exchange").unwrap();
             assert!((scroll[1] + scroll[3] - exchange[1] - exchange[3] - 12.0).abs() < 0.5);
 
@@ -3619,6 +3556,10 @@ mod tests {
             );
             assert!(citation.rect[1] >= scroll[1] - 0.5);
             assert!(citation.rect[1] + citation.rect[3] <= scroll[1] + scroll[3] + 0.5);
+            assert!(elements.iter().any(|element| {
+                element.key.as_deref() == Some("inbox-qa-source-finding-fixture-turn-0")
+                    && element.text.as_deref() == Some(FINDING)
+            }));
 
             runtime.update(|state, _| {
                 state.inbox_qa.adopt(Some(turn(QaTurnState::Canceled, 3)));
@@ -3629,7 +3570,8 @@ mod tests {
             let tree = runtime.accessibility_json();
             assert_eq!(accessibility_nodes_with_key(&tree, REPLY), 1);
             let rendered = tree.to_string();
-            assert_eq!(rendered.matches("Assistant message").count(), 1);
+            assert!(!rendered.contains("Assistant message"));
+            assert!(rendered.contains("Assistant status"));
             assert!(rendered.contains("live-polite"));
             assert!(rendered.contains(FINDING) && rendered.contains("Stopped"));
             assert_eq!(runtime.state.inbox.unread(), unread);
@@ -3640,6 +3582,7 @@ mod tests {
             assert!(runtime.find(FIXTURE_CITATION).is_some());
             runtime.update(|state, _| {
                 let mut next = turn(QaTurnState::Answered, 2);
+                next.reply = None;
                 next.turn_id = "fixture-next-turn".into();
                 next.request_id = "fixture-next-request".into();
                 state.inbox_qa.adopt(Some(next));
@@ -3651,6 +3594,9 @@ mod tests {
             press_disclosure(&mut runtime, SOURCES_TOGGLE, 3.1);
             assert!(runtime.find(next_citation).is_some());
             assert!(runtime.find(FIXTURE_CITATION).is_none());
+            let rendered = runtime.accessibility_json().to_string();
+            assert!(rendered.contains(FINDING));
+            assert!(!rendered.contains("Assistant message"));
 
             runtime.update(|state, _| {
                 state
@@ -3831,7 +3777,7 @@ mod tests {
     }
 
     #[test]
-    fn informational_notices_keep_the_answer_and_composer_available() {
+    fn legacy_notice_flags_do_not_supply_assistant_message_text() {
         let mut runtime = active_drawer((640.0, 480.0));
         for (index, (notice, conversation, copy)) in [
             (QaTurnNotice::Greeting, None, "How can I help?"),
@@ -3866,6 +3812,11 @@ mod tests {
                 "Which should I check first?",
             ),
             (
+                QaTurnNotice::OutOfScope,
+                Some(QaConversationReply::RecallNeedsHistory),
+                "then I can recap our recent exchange",
+            ),
+            (
                 QaTurnNotice::ObservationUnavailable,
                 None,
                 "Try again in a moment.",
@@ -3880,7 +3831,7 @@ mod tests {
         .enumerate()
         {
             runtime.update(move |state, _| {
-                let mut reply = turn(QaTurnState::InsufficientContext, 1);
+                let mut reply = turn(QaTurnState::Answered, 1);
                 reply.turn_id = format!("fixture-notice-{index}");
                 reply.notice = Some(notice);
                 reply.conversation = conversation;
@@ -3889,13 +3840,60 @@ mod tests {
             runtime.frame(1.0 + index as f64 / 4.0);
             let tree = runtime.accessibility_json().to_string();
             assert!(
-                tree.contains(copy),
-                "missing reply for {notice:?} {conversation:?}"
+                !tree.contains(copy),
+                "legacy notice became a reply for {notice:?} {conversation:?}"
             );
-            assert!(!tree.contains("could not verify an answer"));
+            assert!(!tree.contains("Assistant message"));
+            assert!(tree.contains("Reply unavailable"));
             assert!(runtime.find(REPLY).is_some());
             assert!(runtime.find(COMPOSER).is_some());
             assert!(runtime.find(SOURCES_TOGGLE).is_none());
+        }
+    }
+
+    #[test]
+    fn terminal_states_remain_visible_without_supplying_assistant_text() {
+        let mut runtime = active_drawer((640.0, 480.0));
+        for (index, (state, limitation, status)) in [
+            (QaTurnState::Canceled, None, "Stopped"),
+            (
+                QaTurnState::Failed,
+                None,
+                "Backend inference could not finish",
+            ),
+            (
+                QaTurnState::InsufficientContext,
+                None,
+                "Verified answer unavailable",
+            ),
+            (
+                QaTurnState::InsufficientContext,
+                Some(QaTurnLimitation::CapabilityUnavailable),
+                "Model capability unavailable",
+            ),
+            (
+                QaTurnState::InsufficientContext,
+                Some(QaTurnLimitation::QuestionTooLong),
+                "Question exceeds the model context window",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            runtime.update(move |app, _| {
+                let mut terminal = turn(state, 1);
+                terminal.turn_id = format!("fixture-terminal-{index}");
+                terminal.limitation = limitation;
+                terminal.provisional_reply = Some("Superseded draft".into());
+                app.inbox_qa.adopt(Some(terminal));
+            });
+            runtime.frame(1.0 + index as f64 / 4.0);
+            let tree = runtime.accessibility_json().to_string();
+            assert!(tree.contains(status), "{status}");
+            assert!(!tree.contains("Assistant message"));
+            assert!(!tree.contains("Superseded draft"));
+            assert!(runtime.find("inbox-qa-stop").is_none());
+            assert!(runtime.find(COMPOSER).is_some());
         }
     }
 
@@ -3980,37 +3978,6 @@ mod tests {
     }
 
     #[test]
-    fn welcome_fades_in_place_with_a_static_reduced_motion_fallback() {
-        for reduced_motion in [false, true] {
-            let mut runtime = qa_drawer((1280.0, 800.0), None);
-            runtime.update(move |state, _| {
-                state
-                    .accessibility
-                    .fixture_override
-                    .as_mut()
-                    .unwrap()
-                    .reduced_motion = reduced_motion;
-                state.inbox_qa.resume = true;
-            });
-            runtime.frame(0.5);
-            assert!(runtime.find(GREETING).is_none());
-
-            runtime.update(|state, _| state.inbox_qa.resume = false);
-            runtime.frame(0.0);
-            let (entering, enter_opacity) = runtime.presented(GREETING).unwrap();
-            runtime.frame(0.5);
-            let (settled, settled_opacity) = runtime.presented(GREETING).unwrap();
-            assert_eq!(entering, settled);
-            assert_eq!(settled_opacity, 1.0);
-            if reduced_motion {
-                assert_eq!(enter_opacity, settled_opacity);
-            } else {
-                assert!(enter_opacity < settled_opacity);
-            }
-        }
-    }
-
-    #[test]
     fn qa_updates_preserve_earlier_scroll_position_and_draft() {
         let mut runtime = active_drawer((640.0, 480.0));
         let mut running = turn(QaTurnState::Running, 2);
@@ -4020,6 +3987,7 @@ mod tests {
         completed.state = QaTurnState::Canceled;
         runtime.update(move |state, _| {
             state.inbox_qa.adopt(Some(running));
+            state.inbox_qa.sources_open = true;
             state.inbox_qa.draft = TextEdit::new("An unsent follow-up");
         });
         runtime.frame(0.75);

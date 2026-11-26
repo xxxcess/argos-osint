@@ -58,6 +58,7 @@ use protocol::QaWorkerRequest;
 use protocol::QaWorkerSequence;
 use protocol::QA_CONTEXT_USAGE_ENV;
 use protocol::QA_CONTEXT_WINDOW_TOKENS;
+use protocol::QA_DECODED_CLARIFICATION_ENV;
 use protocol::QA_DIALOGUE_ENV;
 use protocol::QA_LEGACY_STREAMING_WINDOW_TOKENS;
 use protocol::QA_MAX_FINDINGS;
@@ -653,11 +654,19 @@ fn ready(
     dialogue: bool,
     streaming: bool,
     response_plan: bool,
+    decoded_clarification: bool,
     model_revision: &str,
     window_tokens: u16,
 ) -> QaWorkerReply {
     let model_revision = model_revision.into();
     if dialogue && streaming && response_plan {
+        if decoded_clarification {
+            return QaWorkerReply::ReadyWithDecodedClarification {
+                protocol: QA_WORKER_PROTOCOL,
+                model_revision,
+                window_tokens,
+            };
+        }
         return QaWorkerReply::ReadyWithResponsePlan {
             protocol: QA_WORKER_PROTOCOL,
             model_revision,
@@ -709,6 +718,8 @@ pub(crate) fn run(
         && enable_dialogue
         && streaming
         && env::var_os(QA_RESPONSE_PLAN_ENV).as_deref() == Some("1".as_ref());
+    let decoded_clarification =
+        response_plan && env::var_os(QA_DECODED_CLARIFICATION_ENV).as_deref() == Some("1".as_ref());
     let target = match env::var_os(QA_MODEL_TARGET_ENV) {
         None => QaModelTarget::default(),
         Some(value) => value
@@ -751,6 +762,7 @@ pub(crate) fn run(
             generator_dir.is_some(),
             streaming,
             response_plan,
+            decoded_clarification,
             model_revision,
             window_tokens,
         ),
@@ -766,6 +778,7 @@ pub(crate) fn run(
                     generator_dir.is_some(),
                     streaming,
                     response_plan,
+                    decoded_clarification,
                     model_revision,
                     window_tokens,
                 ),
@@ -793,6 +806,7 @@ pub(crate) fn run(
                             dialogue,
                             passages: &request.passages,
                             plan: request.plan.as_ref(),
+                            decoded_clarification,
                         },
                         report_context,
                         &mut output,

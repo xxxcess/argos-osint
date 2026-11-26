@@ -45,6 +45,7 @@ use protocol::QaWorkerCommand;
 use protocol::QaWorkerEvent;
 use protocol::QaWorkerReply;
 use protocol::QA_CONTEXT_USAGE_ENV;
+use protocol::QA_DECODED_CLARIFICATION_ENV;
 use protocol::QA_DIALOGUE_ENV;
 use protocol::QA_MAX_FRAME_BYTES;
 use protocol::QA_MODEL_CONTEXT_ENV;
@@ -369,6 +370,11 @@ fn relay(
                             protocol,
                             model_revision,
                             ..
+                        }
+                        | QaWorkerReply::ReadyWithDecodedClarification {
+                            protocol,
+                            model_revision,
+                            ..
                         },
                         Phase::Starting | Phase::Pinging,
                     ) if protocol == QA_WORKER_PROTOCOL
@@ -491,6 +497,9 @@ fn serve(stream: UnixStream, worker: &Path, model: &Path, libraries: &Path) -> R
         }
         if env::var_os(QA_RESPONSE_PLAN_ENV).as_deref() == Some("1".as_ref()) {
             command.env(QA_RESPONSE_PLAN_ENV, "1");
+            if env::var_os(QA_DECODED_CLARIFICATION_ENV).as_deref() == Some("1".as_ref()) {
+                command.env(QA_DECODED_CLARIFICATION_ENV, "1");
+            }
         }
     }
     if let Some(target) = env::var_os(QA_MODEL_TARGET_ENV) {

@@ -1125,6 +1125,23 @@ async fn recent_completed_in(
     jobs::take(&mut reply, 0)
 }
 
+fn retained_generated_reply(turn: &QaTurn) -> Option<&str> {
+    // Earlier verified workers recorded usage before model metadata was added.
+    let model_used = turn.context.is_some_and(|usage| {
+        usage.model_windows > 0
+            && (1..=usage.window_tokens).contains(&usage.peak_input_tokens)
+            && QaModelTarget::ALL
+                .iter()
+                .any(|target| usage.window_tokens == target.input_tokens())
+    });
+    if turn.state != QaTurnState::Answered || !model_used {
+        return None;
+    }
+    turn.reply
+        .as_deref()
+        .filter(|reply| valid_dialogue_reply(reply))
+}
+
 async fn recent_dialogue_in(
     tx: &Tx,
     owner: &str,
@@ -1143,32 +1160,12 @@ async fn recent_dialogue_in(
         {
             continue;
         }
-        let turn = exchange.turn;
-        let answer = if let Some(reply) = turn.reply {
-            reply
-        } else if turn.state == QaTurnState::Answered && !turn.findings.is_empty() {
-            turn.findings
-                .into_iter()
-                .map(|finding| finding.text)
-                .collect::<Vec<_>>()
-                .join(" ")
-        } else if turn.notice == Some(QaTurnNotice::Greeting) {
-            match turn.conversation {
-                Some(QaConversationReply::Acknowledgement) => {
-                    "Of course. What else can I help with?"
-                }
-                Some(QaConversationReply::Help) => {
-                    "I can answer questions about workstation status and resources."
-                }
-                _ => "Hi! How can I help?",
-            }
-            .to_owned()
-        } else {
+        let Some(reply) = retained_generated_reply(&exchange.turn) else {
             continue;
         };
         history.push(QaDialogueExchange {
-            question: dialogue_line(&turn.question).to_owned(),
-            reply: dialogue_line(&answer).to_owned(),
+            question: dialogue_line(&exchange.turn.question).to_owned(),
+            reply: reply.to_owned(),
         });
         if history.len() == QA_MAX_DIALOGUE_HISTORY {
             break;
@@ -2373,4 +2370,54 @@ pub async fn cleanup(repo: &Repository) -> Result<(), TxError> {
         Ok(())
     }).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{retained_generated_reply, ChatSourceKind, ChatSourceReference};
+    use super::{QaContextUsage, QaFinding, QaTurn, QaTurnNotice, QaTurnState};
+
+    #[test]
+    fn recall_requires_a_stored_answer_with_verified_generator_usage() {
+        let mut turn = QaTurn::queued("turn".into(), "request".into(), "Check the gateway.".into());
+        turn.state = QaTurnState::Answered;
+        turn.context = Some(QaContextUsage::new(512, 72, 1));
+
+        turn.notice = Some(QaTurnNotice::Greeting);
+        assert_eq!(retained_generated_reply(&turn), None);
+        turn.notice = None;
+        turn.findings.push(QaFinding::new(
+            ChatSourceReference::new(ChatSourceKind::Readiness, "gateway".into()).unwrap(),
+            "Gateway".into(),
+            "Gateway is ready.".into(),
+            0,
+            17,
+            "2026-11-26T00:00:00Z".into(),
+        ));
+        assert_eq!(retained_generated_reply(&turn), None);
+
+        turn.reply = Some("Gateway is ready.".into());
+        assert!(turn.model_target.is_none());
+        assert!(turn.model_generation.is_none());
+        assert_eq!(retained_generated_reply(&turn), Some("Gateway is ready."));
+
+        turn.state = QaTurnState::InsufficientContext;
+        assert_eq!(retained_generated_reply(&turn), None);
+        turn.state = QaTurnState::Answered;
+        for usage in [
+            None,
+            Some(QaContextUsage::new(512, 0, 0)),
+            Some(QaContextUsage::new(512, 0, 1)),
+            Some(QaContextUsage::new(512, 513, 1)),
+        ] {
+            turn.context = usage;
+            assert_eq!(retained_generated_reply(&turn), None);
+        }
+        turn.context = Some(QaContextUsage::new(896, 724, 1));
+        assert_eq!(retained_generated_reply(&turn), Some("Gateway is ready."));
+        for reply in ["", "  ", "Current user: Check the gateway."] {
+            turn.reply = Some(reply.into());
+            assert_eq!(retained_generated_reply(&turn), None);
+        }
+    }
 }

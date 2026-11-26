@@ -49,6 +49,7 @@ use fleetworks_contracts::qa_worker::QaWorkerReply;
 use fleetworks_contracts::qa_worker::QaWorkerRequest;
 use fleetworks_contracts::qa_worker::QaWorkerSequence;
 use fleetworks_contracts::qa_worker::QA_CONTEXT_USAGE_ENV;
+use fleetworks_contracts::qa_worker::QA_DECODED_CLARIFICATION_ENV;
 use fleetworks_contracts::qa_worker::QA_DIALOGUE_ENV;
 use fleetworks_contracts::qa_worker::QA_LEGACY_STREAMING_WINDOW_TOKENS;
 use fleetworks_contracts::qa_worker::QA_MODEL_CONTEXT_ENV;
@@ -408,9 +409,10 @@ impl QaWorkerSupervisor {
             .map(|session| session.model_target)
     }
 
-    pub(crate) async fn response_plan_supported(&self) -> bool {
+    pub(crate) async fn response_plan_supported(&self, needs_decoded_clarification: bool) -> bool {
         self.session.lock().await.as_ref().is_some_and(|session| {
-            session.lifecycle == WorkerLifecycle::Ready && session.response_plan
+            session.lifecycle == WorkerLifecycle::Ready
+                && session.response_plan.supports(needs_decoded_clarification)
         })
     }
 
@@ -445,7 +447,9 @@ impl QaInference for QaWorkerSupervisor {
                 .filter(|session| session.lifecycle == WorkerLifecycle::Ready)
                 .ok_or_else(|| anyhow!("QA worker unavailable"))?;
             ensure!(
-                request.plan.is_none() || session.response_plan,
+                request.plan.as_ref().is_none_or(|plan| session
+                    .response_plan
+                    .supports(plan.clarification.is_some())),
                 "QA response plan support was not negotiated"
             );
             let child_pid = session.child_id();
@@ -514,13 +518,30 @@ enum WorkerLifecycle {
     Stopping,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ResponsePlanSupport {
+    Unavailable,
+    Legacy,
+    DecodedClarification,
+}
+
+impl ResponsePlanSupport {
+    fn supports(self, needs_decoded_clarification: bool) -> bool {
+        match self {
+            Self::Unavailable => false,
+            Self::Legacy => !needs_decoded_clarification,
+            Self::DecodedClarification => true,
+        }
+    }
+}
+
 struct WorkerSession {
     lifecycle: WorkerLifecycle,
     input: Box<dyn AsyncWrite + Send + Unpin>,
     output: Box<dyn AsyncRead + Send + Unpin>,
     child: Option<Child>,
     streaming_window: Option<u16>,
-    response_plan: bool,
+    response_plan: ResponsePlanSupport,
     model_target: QaModelTarget,
     resident_limit: u64,
 }
@@ -540,6 +561,7 @@ impl WorkerSession {
             .env(QA_STREAMING_ENV, "1")
             .env(QA_MODEL_CONTEXT_ENV, "1")
             .env(QA_RESPONSE_PLAN_ENV, "1")
+            .env(QA_DECODED_CLARIFICATION_ENV, "1")
             .env(QA_MODEL_TARGET_ENV, target.slug())
             .env("OMP_NUM_THREADS", &threads)
             .env("MKL_NUM_THREADS", &threads)
@@ -567,7 +589,7 @@ impl WorkerSession {
             output: Box::new(output),
             child: Some(child),
             streaming_window: None,
-            response_plan: false,
+            response_plan: ResponsePlanSupport::Unavailable,
             model_target: target,
             resident_limit: limits.resident_bytes,
         })
@@ -613,7 +635,7 @@ impl WorkerSession {
             } if protocol == QA_WORKER_PROTOCOL
                 && model_revision == self.model_target.revision() =>
             {
-                (None, false)
+                (None, ResponsePlanSupport::Unavailable)
             }
             QaWorkerReply::ReadyWithStreaming {
                 protocol,
@@ -621,7 +643,10 @@ impl WorkerSession {
             } if protocol == QA_WORKER_PROTOCOL
                 && model_revision == self.model_target.revision() =>
             {
-                (Some(QA_LEGACY_STREAMING_WINDOW_TOKENS), false)
+                (
+                    Some(QA_LEGACY_STREAMING_WINDOW_TOKENS),
+                    ResponsePlanSupport::Unavailable,
+                )
             }
             QaWorkerReply::ReadyWithStreamingContext {
                 protocol,
@@ -632,7 +657,7 @@ impl WorkerSession {
                 && window_tokens == self.model_target.input_tokens()
                 && window_tokens > QA_LEGACY_STREAMING_WINDOW_TOKENS =>
             {
-                (Some(window_tokens), false)
+                (Some(window_tokens), ResponsePlanSupport::Unavailable)
             }
             QaWorkerReply::ReadyWithResponsePlan {
                 protocol,
@@ -643,7 +668,21 @@ impl WorkerSession {
                 && (window_tokens == self.model_target.input_tokens()
                     || window_tokens == QA_LEGACY_STREAMING_WINDOW_TOKENS) =>
             {
-                (Some(window_tokens), true)
+                (Some(window_tokens), ResponsePlanSupport::Legacy)
+            }
+            QaWorkerReply::ReadyWithDecodedClarification {
+                protocol,
+                model_revision,
+                window_tokens,
+            } if protocol == QA_WORKER_PROTOCOL
+                && model_revision == self.model_target.revision()
+                && (window_tokens == self.model_target.input_tokens()
+                    || window_tokens == QA_LEGACY_STREAMING_WINDOW_TOKENS) =>
+            {
+                (
+                    Some(window_tokens),
+                    ResponsePlanSupport::DecodedClarification,
+                )
             }
             QaWorkerReply::StartupFailed {
                 source,
@@ -1383,7 +1422,7 @@ mod tests {
             output: Box::new(reader),
             child: Some(child),
             streaming_window: Some(QA_LEGACY_STREAMING_WINDOW_TOKENS),
-            response_plan: false,
+            response_plan: ResponsePlanSupport::Unavailable,
             model_target: target,
             resident_limit: WorkerLimits::for_target(target).resident_bytes,
         });
@@ -1444,7 +1483,7 @@ mod tests {
                     output: Box::new(reader),
                     child: None,
                     streaming_window: None,
-                    response_plan: false,
+                    response_plan: ResponsePlanSupport::Unavailable,
                     model_target: target,
                     resident_limit: WorkerLimits::for_target(target).resident_bytes,
                 };
@@ -1530,7 +1569,7 @@ mod tests {
                 output: Box::new(reader),
                 child: None,
                 streaming_window: None,
-                response_plan: false,
+                response_plan: ResponsePlanSupport::Unavailable,
                 model_target: target,
                 resident_limit: WorkerLimits::for_target(target).resident_bytes,
             };
@@ -1539,17 +1578,37 @@ mod tests {
                 model_revision: target.revision().into(),
                 window_tokens,
             };
+            let decoded = |window_tokens| QaWorkerReply::ReadyWithDecodedClarification {
+                protocol: QA_WORKER_PROTOCOL,
+                model_revision: target.revision().into(),
+                window_tokens,
+            };
             assert!(session.validate_ready(plan(256)).is_err());
             session.validate_ready(plan(target.input_tokens())).unwrap();
             session.lifecycle = WorkerLifecycle::Ready;
             session.validate_ready(plan(target.input_tokens())).unwrap();
-            assert!(session.response_plan);
+            assert!(session.response_plan.supports(false));
+            assert!(!session.response_plan.supports(true));
+            assert!(session
+                .validate_ready(decoded(target.input_tokens()))
+                .is_err());
             assert!(session
                 .validate_ready(QaWorkerReply::ReadyWithStreaming {
                     protocol: QA_WORKER_PROTOCOL,
                     model_revision: target.revision().into(),
                 })
                 .is_err());
+            session.lifecycle = WorkerLifecycle::Starting;
+            assert!(session.validate_ready(decoded(256)).is_err());
+            session
+                .validate_ready(decoded(target.input_tokens()))
+                .unwrap();
+            session.lifecycle = WorkerLifecycle::Ready;
+            session
+                .validate_ready(decoded(target.input_tokens()))
+                .unwrap();
+            assert!(session.response_plan.supports(true));
+            assert!(session.validate_ready(plan(target.input_tokens())).is_err());
         }
     }
 
@@ -1565,7 +1624,7 @@ mod tests {
             output: Box::new(input),
             child: None,
             streaming_window: None,
-            response_plan: false,
+            response_plan: ResponsePlanSupport::Unavailable,
             model_target: target,
             resident_limit: WorkerLimits::for_target(target).resident_bytes,
         };

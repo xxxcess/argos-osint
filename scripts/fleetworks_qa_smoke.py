@@ -538,6 +538,9 @@ def exercise(request, registration, model, readiness, running_jobs):
     help_turn = ask("help", "What can you help with?", mode="dialogue")
     require(help_turn.get("conversation") == "help" and not help_turn["findings"],
             "the assistant did not explain how to start a task")
+    when = ask("time-clarification", "Is actor search ready since last week?", mode="dialogue")
+    require(when["reply"].endswith("?") and "time" in when["reply"].casefold(),
+            "the generator did not ask for the ambiguous time range")
     unsupported = ask("general-context", "What is the capital of Japan?", mode="dialogue")
     require(not unsupported["findings"] and "tokyo" not in unsupported["reply"].casefold(),
             "the generator did not keep the out-of-scope response within Assistant's scope")
@@ -563,6 +566,7 @@ def exercise(request, registration, model, readiness, running_jobs):
             "live_metrics": True, "unsupported_context": True,
             "resource_snapshot": True, "greeting": True, "conversational_follow_ups": True,
             "local_observation_history": True, "ordered_turn_stages": True,
+            "generated_time_clarification": True,
             "generated_dialogue": True, "startup_stages": sorted(stages),
             "automatic_model_target": current["model_target"], "worker_reused": True,
             "local_dialogue_rss_bytes": dialogue_rss_bytes,

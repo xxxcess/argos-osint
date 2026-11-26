@@ -36,7 +36,7 @@ At startup, the companion reserves 1 GiB of available memory for the workstation
 
 With normal macOS memory pressure, Assistant admission counts free, file-backed and purgeable pages as RAM headroom. Under elevated pressure or if the kernel sample is unavailable, it uses the conservative system estimate.
 
-The offline package smoke uses a 1,536 MiB ceiling and verifies Small without network access. The Linux pack job exercises Base separately. Turning inference off cancels active work, unloads workers, and leaves the preferences and Inbox notifications available.
+The offline package smoke uses a 1,536 MiB ceiling and verifies Small without network access, including generated greetings and time-range clarification. The Linux pack job exercises Base separately. Turning inference off cancels active work, unloads workers, and leaves the preferences and Inbox notifications available.
 
 ## Local operational context
 

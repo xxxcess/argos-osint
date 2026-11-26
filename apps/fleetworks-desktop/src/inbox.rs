@@ -898,10 +898,6 @@ pub(crate) fn enter_from_below(el: El, preferences: ViewPreferences) -> El {
     enter(el, preferences, rune::Transition::offset(0.0, 6.0))
 }
 
-pub(crate) fn fade_in(el: El, preferences: ViewPreferences) -> El {
-    enter(el, preferences, rune::Transition::opacity())
-}
-
 fn enter(el: El, preferences: ViewPreferences, transition: rune::Transition) -> El {
     if preferences.reduced_motion {
         return el;
@@ -966,8 +962,7 @@ fn body(state: &State, kit: &Kit, preferences: ViewPreferences, menus: &mut Vec<
         }
         rows = rows.child(group_view(&group, state, kit, preferences));
     }
-    let chat = crate::inbox_qa::exchange(state, kit, preferences)
-        .or_else(|| crate::inbox_qa::greeting(state, kit, preferences));
+    let chat = crate::inbox_qa::exchange(state, kit, preferences);
     let show_chat = chat.is_some();
     let list = rune::col()
         .key("inbox-content")

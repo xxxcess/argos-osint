@@ -46,6 +46,8 @@ pub(crate) enum TurnState {
     Streaming,
     Retrying { attempt: u32 },
     Final,
+    Stopped,
+    Unavailable { reason: &'static str },
     Failed { reason: String },
 }
 
@@ -62,6 +64,8 @@ impl TurnState {
                 Some((format!("Retrying, attempt {attempt}"), StatusTone::Warn))
             }
             Self::Final => None,
+            Self::Stopped => Some(("Stopped".to_owned(), StatusTone::Neutral)),
+            Self::Unavailable { reason } => Some(((*reason).to_owned(), StatusTone::Warn)),
             Self::Failed { reason } => Some((format!("Failed: {reason}"), StatusTone::Err)),
         }
     }
@@ -79,8 +83,7 @@ impl TurnState {
     }
 }
 
-/// A source the answer rests on. Only a short label and kind ever reach the view, never raw
-/// evidence text.
+/// The short label and kind displayed for a source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Citation {
     pub kind: &'static str,
@@ -122,18 +125,20 @@ fn chip(label: String, tone: StatusTone, kit: &Kit) -> El {
         .child(rune::text(label).font(kit.ty.small).color(tone.fg()).wrap())
 }
 
+pub(crate) fn citation_row(message_id: &str, index: usize, citation: &Citation, kit: &Kit) -> El {
+    rune::text(format!("{}: {}", citation.kind, citation.label))
+        .key(format!("chat-citation-{message_id}-{index}"))
+        .font(kit.ty.small)
+        .color(theme::hex(theme::TEXT_SECONDARY))
+        .wrap_anywhere()
+}
+
 pub(crate) fn citation_rows(message_id: &str, list: &[Citation], kit: &Kit) -> El {
-    let mut column = rune::col().w_full().gap(3.0);
-    for (index, citation) in list.iter().enumerate() {
-        column = column.child(
-            rune::text(format!("{}: {}", citation.kind, citation.label))
-                .key(format!("chat-citation-{message_id}-{index}"))
-                .font(kit.ty.small)
-                .color(theme::hex(theme::TEXT_SECONDARY))
-                .wrap_anywhere(),
-        );
-    }
-    column
+    rune::col().w_full().gap(3.0).children(
+        list.iter()
+            .enumerate()
+            .map(|(index, citation)| citation_row(message_id, index, citation, kit)),
+    )
 }
 
 /// One message. The operator's sit on the right in an accent tint; the Assistant's sit on the
@@ -179,10 +184,6 @@ fn bubble_with_sources(
         sources,
         kit,
     )
-}
-
-pub(crate) fn greeting(key: &str, text: &str, kit: &Kit) -> El {
-    message_bubble(key.to_owned(), Role::Assistant, text, None, None, None, kit)
 }
 
 fn message_header(
@@ -235,9 +236,14 @@ fn message_bubble(
                 .wrap_anywhere(),
         );
     }
+    let label = if text.is_empty() && role == Role::Assistant {
+        "Assistant status".to_owned()
+    } else {
+        format!("{} message", role.label())
+    };
     let surface = rune::col()
         .key(key)
-        .label(format!("{} message", role.label()))
+        .label(label)
         .max_w(BUBBLE_MAX)
         .padding(10.0)
         .radius(10.0)

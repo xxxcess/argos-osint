@@ -83,6 +83,7 @@ const HISTORY_PREVIOUS: &str = "inbox-qa-history-previous";
 const HISTORY_NEXT: &str = "inbox-qa-history-next";
 const HISTORY_ARROW_SIZE: f32 = 28.0;
 const CONTEXT_DIAL: &str = "inbox-qa-context";
+const TRANSCRIPT_HEADER: &str = "inbox-qa-transcript-header";
 const TRANSCRIPT_FOOTER: &str = "inbox-qa-transcript-footer";
 const RESPONSE_TIME: &str = "inbox-qa-response-time";
 const PREVIOUS_EXCHANGE_USED: &str = "inbox-qa-previous-exchange-used";
@@ -2067,15 +2068,6 @@ pub(crate) fn exchange(
         .children(
             show_arrows.then(|| history_arrow_slot(qa, HistoryDirection::Next, kit, preferences)),
         );
-    let terminal_turn = displayed_turn.filter(|turn| turn.state.is_terminal());
-    let timing = terminal_turn
-        .and_then(|turn| turn.response_time_ms)
-        .map(|milliseconds| {
-            rune::row()
-                .w_full()
-                .center()
-                .child(response_time(milliseconds, kit))
-        });
     Some(
         rune::col()
             .key("inbox-qa-exchange")
@@ -2083,28 +2075,23 @@ pub(crate) fn exchange(
             .min_w(0.0)
             .min_h(min_height)
             .justify_center()
-            .gap(5.0)
-            .children(timing)
             .child(transcript),
     )
 }
 
-pub(crate) fn transcript_footer(
-    state: &State,
-    kit: &Kit,
-    preferences: ViewPreferences,
-) -> Option<El> {
+pub(crate) fn transcript_header(state: &State, kit: &Kit) -> Option<El> {
     let displayed_turn = state.displayed_inbox_qa_turn();
-    let has_exchange = displayed_turn.is_some() || state.inbox_qa.pending.is_some();
-    let attachment = source_control(state, kit, preferences);
-    if !has_exchange && attachment.is_none() {
+    if displayed_turn.is_none() && state.inbox_qa.pending.is_none() {
         return None;
     }
-    let context = has_exchange.then(|| {
+    Some(
         rune::row()
+            .key(TRANSCRIPT_HEADER)
+            .w_full()
+            .h(22.0)
+            .px(12.0)
             .gap(6.0)
-            .center_y()
-            .shrink()
+            .center()
             .child(context_dial(
                 displayed_turn.and_then(|turn| turn.context),
                 kit,
@@ -2120,8 +2107,25 @@ pub(crate) fn transcript_footer(
                             .shrink()
                             .truncate()
                     }),
-            )
-    });
+            ),
+    )
+}
+
+pub(crate) fn transcript_footer(
+    state: &State,
+    kit: &Kit,
+    preferences: ViewPreferences,
+) -> Option<El> {
+    let displayed_turn = state.displayed_inbox_qa_turn();
+    let has_exchange = displayed_turn.is_some() || state.inbox_qa.pending.is_some();
+    let attachment = source_control(state, kit, preferences);
+    if !has_exchange && attachment.is_none() {
+        return None;
+    }
+    let timing = displayed_turn
+        .filter(|turn| turn.state.is_terminal())
+        .and_then(|turn| turn.response_time_ms)
+        .map(|milliseconds| response_time(milliseconds, kit));
     let sources = displayed_turn
         .filter(|turn| !turn.findings.is_empty() && !state.displayed_sources_open())
         .map(|turn| sources_button(turn, kit));
@@ -2133,7 +2137,7 @@ pub(crate) fn transcript_footer(
             .px(12.0)
             .gap(6.0)
             .center_y()
-            .children(context)
+            .children(timing)
             .child(rune::spacer())
             .children(attachment)
             .children(sources),
@@ -2557,6 +2561,7 @@ mod tests {
         for (size, expect_spare_room) in [((640.0, 480.0), false), ((1280.0, 800.0), true)] {
             let mut runtime = active_drawer(size);
             let (viewport, _) = runtime.presented(crate::inbox::SCROLL).unwrap();
+            let (context, _) = runtime.presented(CONTEXT_DIAL).unwrap();
             let (pair, _) = runtime.presented("inbox-qa-turn-fixture-request").unwrap();
             let fits = pair[3] + 24.0 <= viewport[3];
             if expect_spare_room {
@@ -2582,6 +2587,7 @@ mod tests {
             let (question, _) = runtime.presented(QUESTION_ROW).unwrap();
             assert!((question[1] - viewport[1] - 12.0).abs() < 0.5);
             assert_eq!(runtime.scroll_at_bottom(crate::inbox::SCROLL), Some(false));
+            assert_eq!(runtime.presented(CONTEXT_DIAL).unwrap().0, context);
         }
     }
 
@@ -3260,7 +3266,9 @@ mod tests {
                 && element.rect[1] >= header[1]
                 && element.rect[1] < header[1] + header[3]
         }));
-        let (pair, _) = runtime.presented("inbox-qa-turn-fixture-request").unwrap();
+        let (transcript_header, _) = runtime.presented(TRANSCRIPT_HEADER).unwrap();
+        let (scroll, _) = runtime.presented(crate::inbox::SCROLL).unwrap();
+        let (divider, _) = runtime.presented("inbox-chat-divider").unwrap();
         let (duration, _) = runtime.presented(RESPONSE_TIME).unwrap();
         let (context, _) = runtime.presented(CONTEXT_DIAL).unwrap();
         let (previous, _) = runtime.presented(PREVIOUS_EXCHANGE_USED).unwrap();
@@ -3269,17 +3277,24 @@ mod tests {
             .find(|element| !element.exiting && element.text.as_deref() == Some("88%"))
             .expect("context percentage is visible");
         assert!((percentage.rect[0] - context[0]).abs() < 1.0);
-        let pair_center = pair[0] + pair[2] * 0.5;
-        assert!(duration[1] + duration[3] <= pair[1] + 0.5);
-        assert!((duration[0] + duration[2] * 0.5 - pair_center).abs() < 1.0);
+        let header_center = transcript_header[0] + transcript_header[2] * 0.5;
+        let context_center = (context[0] + previous[0] + previous[2]) * 0.5;
+        assert!((context_center - header_center).abs() < 1.0);
+        assert!(previous[0] >= context[0] + context[2]);
+        assert!(transcript_header[1] >= divider[1] + divider[3] - 0.5);
+        assert!(transcript_header[1] + transcript_header[3] <= scroll[1] + 0.5);
+        for rect in [context, previous] {
+            assert!(
+                rect[1] >= transcript_header[1]
+                    && rect[1] + rect[3] <= transcript_header[1] + transcript_header[3]
+            );
+        }
         let (toolbar, _) = runtime.presented(TRANSCRIPT_FOOTER).unwrap();
         let (composer, _) = runtime.presented("inbox-qa-footer").unwrap();
-        assert!((context[0] - toolbar[0] - 12.0).abs() < 0.5);
-        assert!(previous[0] >= context[0] + context[2]);
+        assert!((duration[0] - toolbar[0] - 12.0).abs() < 0.5);
+        assert!(duration[1] >= toolbar[1] && duration[1] + duration[3] <= toolbar[1] + toolbar[3]);
+        assert!(toolbar[1] >= scroll[1] + scroll[3] - 0.5);
         assert!(toolbar[1] + toolbar[3] <= composer[1] + 0.5);
-        for rect in [context, previous] {
-            assert!(rect[1] >= toolbar[1] && rect[1] + rect[3] <= toolbar[1] + toolbar[3]);
-        }
 
         runtime.update(|state, _| {
             state.inbox_qa.latest.as_mut().unwrap().context = Some(QaContextUsage::new(

@@ -1052,6 +1052,7 @@ fn body(
                     .w_full()
                     .a11y_hidden()
             }))
+            .children(crate::inbox_qa::transcript_header(state, kit))
             .child(
                 rune::col()
                     .key(SCROLL)

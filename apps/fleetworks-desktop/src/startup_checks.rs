@@ -32,9 +32,13 @@ pub(crate) fn content(state: &State, kit: &Kit) -> El {
             "Atlas BERT inference",
         ),
     ] {
-        let current = checks
-            .and_then(|checks| checks.iter().find(|check| check.id == id))
-            .filter(|check| state.readiness_check_fresh(check));
+        let check = checks.and_then(|checks| checks.iter().find(|check| check.id == id));
+        match check {
+            Some(check) if !state.readiness_check_applies(check) => continue,
+            None if state.is_local_backend() && id.requires_distributed_backend() => continue,
+            _ => {}
+        }
+        let current = check.filter(|check| state.readiness_check_fresh(check));
         let (caption, glyph, tone) = status(current);
         list = list.child(
             rune::row()
@@ -74,7 +78,6 @@ fn status(check: Option<&ReadinessCheck>) -> (&'static str, &'static rune::Icon,
         }
         ReadinessState::Running => ("Checking", &glyphs::DASH, StatusTone::Neutral),
         ReadinessState::Unavailable => ("Unavailable", &glyphs::DASH, StatusTone::Neutral),
-        ReadinessState::NotApplicable => ("N/A", &glyphs::DASH, StatusTone::Neutral),
         _ => ("Pending", &glyphs::DASH, StatusTone::Neutral),
     }
 }

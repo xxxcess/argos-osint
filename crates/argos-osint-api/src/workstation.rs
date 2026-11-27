@@ -297,14 +297,14 @@ pub struct ReadinessOwners {
     deployment_id: String,
     platform_display_name: Option<String>,
     probes: Vec<ReadinessProbe>,
-    local_nlp: Option<bool>,
+    embedded_nlp: Option<bool>,
     local_classifier: Option<ClassifierHome>,
     configured_inputs: Vec<fleetworks_contracts::readiness::ConfiguredMaintenanceInput>,
     cache: Arc<Mutex<Option<Observations>>>,
 }
 
 impl ReadinessOwners {
-    /// Startup obtains the persisted deployment ID before constructing this map.
+    /// Use the persisted deployment ID and the configured Distributed service probes.
     pub fn new(deployment_id: String, probes: Vec<ReadinessProbe>) -> anyhow::Result<Self> {
         anyhow::ensure!(
             !deployment_id.is_empty()
@@ -323,18 +323,20 @@ impl ReadinessOwners {
             deployment_id,
             platform_display_name: None,
             probes,
-            local_nlp: None,
+            embedded_nlp: None,
             local_classifier: None,
             configured_inputs: Vec::new(),
             cache: Arc::new(Mutex::new(None)),
         })
     }
 
-    /// Record the in-process Compromise startup probe, not an HTTP service or model inference.
-    pub fn with_local_nlp(mut self, ready: bool) -> Self {
-        self.local_nlp = Some(ready);
-        self
+    /// Use the Embedded companion's in-process Compromise startup result.
+    pub fn embedded(deployment_id: String, nlp_ready: bool) -> anyhow::Result<Self> {
+        let mut owners = Self::new(deployment_id, Vec::new())?;
+        owners.embedded_nlp = Some(nlp_ready);
+        Ok(owners)
     }
+
     /// Read the Embedded workspace's declared BERT candidate without starting inference.
     #[must_use]
     pub fn with_local_classifier(mut self, home: ClassifierHome) -> Self {
@@ -732,7 +734,7 @@ async fn collect(
     if owners.local_classifier.is_some() {
         atlas_checkpoint.declared_candidate = local_candidate;
     }
-    if let Some(ready) = owners.local_nlp {
+    if let Some(ready) = owners.embedded_nlp {
         checks.retain(|check| check.id != ReadinessCheckId::Nlp);
         checks.push(check(
             ReadinessCheckId::Nlp,
@@ -760,16 +762,23 @@ async fn collect(
         ReadinessCheckId::Jobs,
         ReadinessCheckId::Nlp,
         ReadinessCheckId::Classifier,
+        ReadinessCheckId::ClassifierInference,
     ] {
         if !checks.iter().any(|check| check.id == id) {
-            checks.push(unavailable(id, &at));
+            checks.push(
+                if owners.embedded_nlp.is_some() && id.requires_distributed_backend() {
+                    check(
+                        id,
+                        ReadinessState::NotApplicable,
+                        "distributed_service_only",
+                        "This status check applies to a Distributed backend",
+                        &at,
+                    )
+                } else {
+                    unavailable(id, &at)
+                },
+            );
         }
-    }
-    if !checks
-        .iter()
-        .any(|check| check.id == ReadinessCheckId::ClassifierInference)
-    {
-        checks.push(unavailable(ReadinessCheckId::ClassifierInference, &at));
     }
     checks.push(search);
     checks.push(check(
@@ -1005,6 +1014,9 @@ fn qa_readiness_reason(check: &ReadinessCheck) -> &'static str {
             "Service reachability alone does not verify inference."
         }
         (ReadinessState::Ready, "model_verified") => "The active model was verified.",
+        (ReadinessState::NotApplicable, "distributed_service_only") => {
+            "This status check applies to a Distributed backend."
+        }
         (ReadinessState::NotApplicable, "legacy_classifier_retired") => {
             "Legacy Natural training has been retired."
         }

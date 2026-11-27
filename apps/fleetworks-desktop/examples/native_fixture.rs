@@ -606,9 +606,9 @@ mod native {
     }
 
     fn setup_connected_embedded(state: &mut State) {
-        setup_connected_distributed(state);
-        state.backend_kind = BackendKind::Local;
-        state.connection.origin = TextEdit::new("local://embedded");
+        readiness_scenes::embedded_status_checks(state);
+        state.setup_gateway = true;
+        state.setup_advanced_open = true;
     }
 
     fn setup_connected_distributed(state: &mut State) {
@@ -802,9 +802,7 @@ mod native {
     }
 
     fn workstation_status(state: &mut State) {
-        readiness_scenes::mixed_status_checks(state);
-        state.backend_kind = BackendKind::Local;
-        state.connection.origin = TextEdit::new("local://embedded");
+        readiness_scenes::embedded_status_checks(state);
         state.host_metrics = Load::Ready(fleetworks_desktop::workstation_dashboard::HostMetrics {
             cpu_percent: Some(18.0),
             memory_percent: Some(0.0),

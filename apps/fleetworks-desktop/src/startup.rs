@@ -1564,6 +1564,41 @@ mod tests {
     }
 
     #[test]
+    fn embedded_setup_omits_inapplicable_checks_from_workstation_review() {
+        let (mut runtime, _) = data_setup_runtime([
+            ReadinessState::Ready,
+            ReadinessState::Ready,
+            ReadinessState::NotApplicable,
+        ]);
+        runtime.state.backend_kind = BackendKind::Local;
+        runtime.state.connection.origin = rune::TextEdit::new("local://embedded");
+        let app::Load::Ready(readiness) = &mut runtime.state.readiness else {
+            panic!("expected scoped fixture readiness");
+        };
+        for check in &mut readiness.checks {
+            match check.id {
+                ReadinessCheckId::Jobs => check.state = ReadinessState::NotApplicable,
+                ReadinessCheckId::ClassifierInference => {
+                    check.state = ReadinessState::Unknown;
+                    check.reason_code = "owner_not_configured".into();
+                }
+                _ => {}
+            }
+        }
+        runtime.frame(0.0);
+        click(&mut runtime, "gateway-setup-done");
+        runtime.frame(0.02);
+        assert!(runtime.find("startup-data-checklist").is_some());
+        assert!(runtime.find("startup-data-check-jobs").is_none());
+        assert!(runtime
+            .find("startup-data-check-classifier_inference")
+            .is_none());
+        let tree = runtime.accessibility_json().to_string();
+        assert!(tree.contains("Gateway: Passed"));
+        assert!(tree.contains("Datastore: Pending"));
+    }
+
+    #[test]
     fn ready_steps_can_reset_their_own_drafts_without_changing_backend_data() {
         use ReadinessState::{NotApplicable, Ready};
         let (mut runtime, _) = data_setup_runtime([Ready, Ready, NotApplicable]);

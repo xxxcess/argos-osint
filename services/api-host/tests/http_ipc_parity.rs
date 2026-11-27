@@ -1270,6 +1270,25 @@ async fn run_shared_flow(
     if local {
         assert!(readiness.atlas_preflight.is_none());
     }
+    for id in [
+        ReadinessCheckId::Jobs,
+        ReadinessCheckId::Brain,
+        ReadinessCheckId::Control,
+        ReadinessCheckId::Classifier,
+        ReadinessCheckId::ClassifierInference,
+    ] {
+        let check = readiness
+            .checks
+            .iter()
+            .find(|check| check.id == id)
+            .expect("backend-specific readiness check");
+        if local {
+            assert_eq!(check.state, ReadinessState::NotApplicable, "{id}");
+            assert_eq!(check.reason_code, "distributed_service_only", "{id}");
+        } else {
+            assert_ne!(check.state, ReadinessState::NotApplicable, "{id}");
+        }
+    }
 
     assert!(readiness
         .checks

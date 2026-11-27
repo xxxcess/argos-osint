@@ -8,6 +8,7 @@ use fleetworks_contracts::readiness::ReadinessActionId;
 use fleetworks_contracts::readiness::ReadinessCheck;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
+use fleetworks_contracts::readiness::WorkstationReadiness;
 use rune::El;
 use rune::Tx;
 use rune_kit::glyphs;
@@ -28,6 +29,15 @@ use crate::views::unsynced_glyph;
 pub(crate) const ACTOR_INDEX_CATCH_UP: &str = "Actor index catching up in the background";
 
 impl State {
+    pub(crate) fn readiness_check_applies(&self, check: &ReadinessCheck) -> bool {
+        // Older Embedded companions used Unknown for absent standalone probes.
+        check.state != ReadinessState::NotApplicable
+            && !(self.is_local_backend()
+                && check.id.requires_distributed_backend()
+                && check.state == ReadinessState::Unknown
+                && check.reason_code == "owner_not_configured")
+    }
+
     pub(crate) fn readiness_check_fresh(&self, check: &ReadinessCheck) -> bool {
         self.readiness_check_fresh_at(check, self.clock)
     }
@@ -38,6 +48,15 @@ impl State {
                 now >= received && (now - received) * 1000.0 <= check.fresh_for_ms as f64
             })
     }
+}
+
+fn status_checks<'a>(
+    state: &'a State,
+    readiness: &'a WorkstationReadiness,
+) -> impl Iterator<Item = &'a ReadinessCheck> {
+    readiness.checks.iter().filter(move |check| {
+        check.id != ReadinessCheckId::ClassifierTraining && state.readiness_check_applies(check)
+    })
 }
 
 pub(crate) fn workstation_health(state: &State) -> (&'static str, StatusTone) {
@@ -52,14 +71,10 @@ pub(crate) fn workstation_health(state: &State) -> (&'static str, StatusTone) {
         Load::Pending | Load::Loading => ("Checking health", StatusTone::Info),
         Load::Failed(_) => ("Health checks unavailable", StatusTone::Warn),
         Load::Ready(readiness) => {
-            let checks = readiness.checks.iter().filter(|check| {
-                check.id != ReadinessCheckId::ClassifierTraining
-                    && check.state != ReadinessState::NotApplicable
-            });
             let mut observed = false;
             let mut unresolved = false;
             let mut attention = false;
-            for check in checks {
+            for check in status_checks(state, readiness) {
                 observed = true;
                 if !state.readiness_check_fresh(check) {
                     unresolved = true;
@@ -170,14 +185,9 @@ fn summary_label(state: &State) -> String {
         return "Status checks · no observations".to_owned();
     }
     let (mut passed, mut failed, mut unresolved) = (0, 0, 0);
-    for check in readiness
-        .checks
-        .iter()
-        .filter(|check| check.id != ReadinessCheckId::ClassifierTraining)
-    {
+    for check in status_checks(state, readiness) {
         let fresh = state.readiness_check_fresh(check);
         match CheckStatus::of(check, fresh) {
-            CheckStatus::NotApplicable => (),
             CheckStatus::Ready => passed += 1,
             CheckStatus::Failed if fresh => failed += 1,
             _ => unresolved += 1,
@@ -260,10 +270,7 @@ fn checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
         rect[2] < COMPACT_TABLE_WIDTH
     })
     .unwrap_or(true);
-    let mut rows: Vec<_> = readiness
-        .checks
-        .iter()
-        .filter(|check| check.id != ReadinessCheckId::ClassifierTraining)
+    let mut rows: Vec<_> = status_checks(state, readiness)
         .map(|check| {
             let fresh = state.readiness_check_fresh(check);
             let status = if crate::views::actor_search_is_background_indexing(state, check) {
@@ -283,6 +290,9 @@ fn checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
             }
         })
         .collect();
+    if rows.is_empty() {
+        return body.child(quiet("No applicable status checks", kit));
+    }
     rows.sort_by_key(|row| {
         (
             row.status != CheckStatus::Failed,
@@ -366,7 +376,7 @@ fn check_row(
             .actions
             .iter()
             .any(|action| Some(action.id) != primary && maintenance_action(action.id).is_some());
-    let stale_reason = (!fresh && check.state != ReadinessState::NotApplicable).then(|| {
+    let stale_reason = (!fresh).then(|| {
         let mut reason = format!("{name} observation unsynced.");
         if has_details {
             reason.push_str(" Open details for the last observation.");
@@ -591,12 +601,9 @@ pub(crate) fn primary_issue(
     let Load::Ready(readiness) = &state.readiness else {
         return None;
     };
-    let (check, status) = readiness
-        .checks
-        .iter()
+    let (check, status) = status_checks(state, readiness)
         .filter(|check| {
             check.id != ReadinessCheckId::Registration
-                && check.id != ReadinessCheckId::ClassifierTraining
                 && (setup
                     || !matches!(
                         check.id,
@@ -701,7 +708,6 @@ enum CheckStatus {
     Unknown,
     RememberedReady,
     Ready,
-    NotApplicable,
 }
 
 impl CheckStatus {
@@ -717,7 +723,6 @@ impl CheckStatus {
             ReadinessState::Degraded => Self::Degraded,
             ReadinessState::Running => Self::Checking,
             ReadinessState::Unavailable => Self::Unavailable,
-            ReadinessState::NotApplicable => Self::NotApplicable,
             _ => Self::Unknown,
         }
     }
@@ -741,7 +746,6 @@ impl CheckStatus {
             Self::Unknown => "Unknown",
             Self::RememberedReady => "Last ready",
             Self::Ready => "Ready",
-            Self::NotApplicable => "N/A",
         }
     }
 
@@ -753,7 +757,6 @@ impl CheckStatus {
             Self::Checking | Self::BackgroundIndexing => 3,
             Self::Unknown | Self::RememberedReady => 4,
             Self::Ready => 5,
-            Self::NotApplicable => 6,
         }
     }
 
@@ -763,9 +766,7 @@ impl CheckStatus {
             Self::NeedsData | Self::NotReady | Self::Degraded => StatusTone::Warn,
             Self::Checking | Self::BackgroundIndexing => StatusTone::Neutral,
             Self::Ready => StatusTone::Ok,
-            Self::Unavailable | Self::Unknown | Self::RememberedReady | Self::NotApplicable => {
-                StatusTone::Neutral
-            }
+            Self::Unavailable | Self::Unknown | Self::RememberedReady => StatusTone::Neutral,
         }
     }
     fn glyph(self) -> &'static rune::Icon {
@@ -774,9 +775,7 @@ impl CheckStatus {
             Self::NeedsData | Self::NotReady | Self::Degraded => &icons::ALERT,
             Self::Checking | Self::BackgroundIndexing => &icons::JOBS,
             Self::Ready => &glyphs::CHECK,
-            Self::Unavailable | Self::Unknown | Self::RememberedReady | Self::NotApplicable => {
-                &glyphs::DASH
-            }
+            Self::Unavailable | Self::Unknown | Self::RememberedReady => &glyphs::DASH,
         }
     }
 }

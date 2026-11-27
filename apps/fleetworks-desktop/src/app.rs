@@ -999,7 +999,9 @@ impl State {
         }
         match &self.readiness {
             Load::Ready(readiness) => readiness.checks.iter().any(|check| {
-                check.state == ReadinessState::Running || !self.readiness_check_fresh_at(check, now)
+                self.readiness_check_applies(check)
+                    && (check.state == ReadinessState::Running
+                        || !self.readiness_check_fresh_at(check, now))
             }),
             Load::Idle | Load::Failed(_) => matches!(self.page, Page::Seed | Page::Workstation),
             Load::Pending | Load::Loading => false,

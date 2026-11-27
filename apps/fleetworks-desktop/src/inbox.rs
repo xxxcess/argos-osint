@@ -738,7 +738,11 @@ impl State {
     pub(crate) fn open_readiness_notice(&mut self, id: ReadinessCheckId, tx: &mut Tx) {
         self.navigate(crate::app::Page::Workstation);
         if let crate::app::Load::Ready(readiness) = &self.readiness {
-            if readiness.checks.iter().any(|check| check.id == id) {
+            if readiness
+                .checks
+                .iter()
+                .any(|check| check.id == id && self.readiness_check_applies(check))
+            {
                 self.reveal_readiness_check(id, tx);
             }
         }
@@ -810,6 +814,7 @@ impl State {
             Load::Ready(readiness) => readiness
                 .checks
                 .iter()
+                .filter(|check| self.readiness_check_applies(check))
                 .map(|check| (check.id, check.state))
                 .collect(),
             _ => Vec::new(),

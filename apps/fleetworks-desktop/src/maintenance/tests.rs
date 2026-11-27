@@ -261,6 +261,19 @@ fn keyboard_dismissal_restores_each_maintenance_opener_without_admitting_work() 
         for dismiss in [rune::Key::Escape, rune::Key::Text(" ".into())] {
             let mut state = state(true);
             state.page = page;
+            if page == Page::Workstation {
+                let Load::Ready(readiness) = &mut state.readiness else {
+                    panic!("expected readiness fixture");
+                };
+                let search = readiness
+                    .checks
+                    .iter_mut()
+                    .find(|check| check.id == ReadinessCheckId::ActorSearch)
+                    .expect("actor search observation");
+                search.state = ReadinessState::NotReady;
+                search.reason_code = "not_built".into();
+                search.explanation = "Actor search index has not been built yet.".into();
+            }
             let mut runtime = Runtime::new(
                 state,
                 app::view,
@@ -296,8 +309,15 @@ fn keyboard_dismissal_restores_each_maintenance_opener_without_admitting_work() 
                 });
                 runtime.frame(1.0 / 60.0);
             } else {
-                runtime.update(|_, tx| tx.focus(opener, true));
+                runtime.update(|_, tx| {
+                    tx.scroll_into_view(opener);
+                    tx.focus(opener, true);
+                });
                 runtime.frame(1.0 / 60.0);
+                assert!(runtime
+                    .elements()
+                    .iter()
+                    .any(|element| { element.key.as_deref() == Some(opener) && element.focused }));
                 press(&mut runtime, rune::Key::Text(" ".into()));
             }
             assert!(runtime.state.maintenance.confirmation.is_some(), "{opener}");

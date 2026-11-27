@@ -1509,7 +1509,16 @@ impl LocalGateway {
         let mut part = session.part.take().ok_or_else(|| {
             DispatchError::new(StatusCode::NOT_FOUND, "Dataset upload destination closed")
         })?;
-        part.write_chunk(&data).await.map_err(crate::internal)?;
+        part.write_chunk(&data).await.map_err(|error| {
+            if error.kind() == std::io::ErrorKind::StorageFull {
+                DispatchError::new(
+                    StatusCode::INSUFFICIENT_STORAGE,
+                    "Insufficient space within the Embedded disk allowance; start a new upload when space is available",
+                )
+            } else {
+                crate::internal(error).into()
+            }
+        })?;
         check_upload_live(&entry)?;
         session.digest.update(&data);
         session.written_bytes = next_offset;

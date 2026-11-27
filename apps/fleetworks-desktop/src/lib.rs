@@ -40,6 +40,7 @@ mod platform_trash;
 mod readiness_cards;
 pub mod rebind;
 pub mod registration;
+mod resource_settings;
 mod rock;
 pub mod search_articles;
 mod search_catalog;

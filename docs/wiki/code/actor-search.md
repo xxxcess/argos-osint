@@ -153,7 +153,8 @@ retirement paths preserve this shared corpus and index.
 ## Shared bounds and pressure
 
 The validated [ActorIndexLimits](../../../crates/fleetworks-contracts/src/actor_index.rs)
-policy applies to one backend resource, not once per native workstation.
+policy applies to one backend resource. The following defaults apply to Distributed.
+Embedded derives its writer, RSS, and disk limits from [Resources in native Settings](native-connections.md#embedded-resource-settings) at companion startup.
 
 | Control | Current starting policy |
 | --- | --- |
@@ -173,6 +174,13 @@ fail closed; stale service observations pause bulk source work. Retry-After is
 persisted without shortening a valid server delay to the local backoff cap.
 Transient failures back off and cool down; authentication, identity, schema or
 oversize conflicts preserve intent for correction.
+
+Embedded sizes the writer from memory headroom and CPU worker capacity, within
+the existing two-writer-thread and 256 MiB bounds. The source seed keeps one
+ordered transaction stream so canonical rows, index events, and checkpoint
+progress commit together. Raising the presets can reduce pressure pauses and
+let independent validation and index workers do more work. Transaction ordering,
+index start pacing, merge bounds, and foreground query latency still govern throughput.
 
 [NativeWorker local pressure](../../../services/api-host/src/native_bulk_pressure.rs)
 also gates bulk admission using its own RSS and workspace free disk. Its

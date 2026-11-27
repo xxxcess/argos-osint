@@ -2,6 +2,8 @@
 //! setup_jobs after its compiling checkpoint; Tools never calls this gate.
 
 use std::fs::File;
+use std::io::BufReader;
+use std::io::BufWriter;
 use std::io::Read;
 use std::io::Seek;
 use std::io::Write;
@@ -15,11 +17,13 @@ use anyhow::ensure;
 use anyhow::Result;
 use argos_osint_core::actor_catalog::Actor;
 use argos_osint_core::actor_catalog::ActorReadLimits;
+use argos_osint_core::hardware::process_resident_bytes;
 use argos_osint_core::storage::actor_search_outbox;
 use argos_osint_core::storage::jobs::ClaimedTask;
 use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::setup_jobs;
 use fleetworks_contracts::actor_index::ActorIndexLimits;
+use fleetworks_contracts::embedded_resources::ResourceAllocation;
 use fleetworks_contracts::readiness::DatasetRef;
 use fleetworks_search_index::pressure::release_unused_heap;
 
@@ -35,6 +39,7 @@ struct Admission {
     disk_paused: bool,
     cooldown_until: Option<Instant>,
     reclaim_unused_memory: bool,
+    spool_budget_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -42,6 +47,7 @@ pub(super) struct ParserBudget {
     limits: ActorIndexLimits,
     retained_bytes: u64,
     reclaim_unused_memory: bool,
+    spool_budget_bytes: Option<u64>,
 }
 
 enum Decision {
@@ -130,6 +136,7 @@ impl Admission {
             limits: limits.clone(),
             retained_bytes,
             reclaim_unused_memory: self.reclaim_unused_memory,
+            spool_budget_bytes: self.spool_budget_bytes,
         }))
     }
 }
@@ -149,6 +156,37 @@ impl ParserBudget {
         match physical_reason(&self.limits, sample, false, false) {
             Some(reason) => Err(anyhow::anyhow!(reason)),
             None => Ok(()),
+        }
+    }
+
+    fn spool_headroom(&self, path: &Path) -> Result<Option<u64>> {
+        if self.spool_budget_bytes.is_none() {
+            return Ok(None);
+        }
+        let directory = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("actor_spool_parent"))?;
+        let free = argos_osint_core::hardware::filesystem_available_bytes(directory)
+            .ok_or_else(|| anyhow::anyhow!("worker_pressure_unknown"))?;
+        let remaining = free.saturating_sub(self.limits.disk_pause_free_bytes);
+        ensure!(remaining > 0, "worker_workspace_disk_pressure");
+        Ok(Some(remaining))
+    }
+
+    fn spool_capacity(&self) -> u64 {
+        self.spool_budget_bytes
+            .map_or(MAX_ACTOR_SPOOL_BYTES, |bytes| {
+                bytes.min(MAX_ACTOR_SPOOL_BYTES)
+            })
+    }
+
+    fn spool_buffer_bytes(&self) -> usize {
+        // Two small buffers replace per-record system calls locally. The
+        // staged CSV, validation limits and write ordering stay identical.
+        if self.spool_budget_bytes.is_some() {
+            64 * 1024
+        } else {
+            0
         }
     }
 
@@ -179,14 +217,19 @@ pub(super) async fn await_admission(
     workspace: &Path,
     cancel: &AtomicBool,
     reclaim_unused_memory: bool,
+    allocation: Option<ResourceAllocation>,
 ) -> Result<ParserBudget> {
     let mut policy = Admission {
         reclaim_unused_memory,
+        spool_budget_bytes: allocation.map(|allocation| allocation.disk_budget_bytes),
         ..Admission::default()
     };
     loop {
         ensure!(!cancel.load(Ordering::Acquire), "worker_bulk_cancelled");
-        let limits = actor_search_outbox::resource_limits(repo).await?;
+        let limits = match allocation {
+            Some(allocation) => allocation.actor_index_limits(),
+            None => actor_search_outbox::resource_limits(repo).await?,
+        };
         let reclaim_from = reclaim_unused_memory.then_some(limits.memory_resume_bytes);
         let sample = tokio::task::spawn_blocking({
             let workspace = workspace.to_owned();
@@ -224,7 +267,7 @@ const MAX_ACTOR_SPOOL_BYTES: u64 = 512 * 1024 * 1024;
 /// Private validated records: no original CSV is read after source writes begin.
 pub(super) struct ValidatedActors {
     pub(super) total: usize,
-    spool: File,
+    spool: BufReader<File>,
 }
 
 struct ActorFrame(Vec<u8>);
@@ -294,7 +337,10 @@ fn scan_actors_with_probe(
 ) -> Result<ValidatedActors> {
     probe()?;
     let mut reader = super::verified_reader(path, dataset)?;
-    let mut spool = private_actor_spool(path)?;
+    let available_bytes = budget.spool_headroom(path)?;
+    let spool_capacity = budget.spool_capacity();
+    let buffer_bytes = budget.spool_buffer_bytes();
+    let mut spool = BufWriter::with_capacity(buffer_bytes, private_actor_spool(path)?);
     let mut spool_bytes = 0_u64;
     let summary = argos_osint_core::actor_catalog::scan_bounded(
         &mut reader,
@@ -308,9 +354,10 @@ fn scan_actors_with_probe(
             spool_bytes = spool_bytes
                 .checked_add(frame.0.len() as u64 + 4)
                 .ok_or_else(|| anyhow::anyhow!("actor_spool_byte_budget"))?;
+            ensure!(spool_bytes <= spool_capacity, "actor_spool_byte_budget");
             ensure!(
-                spool_bytes <= MAX_ACTOR_SPOOL_BYTES,
-                "actor_spool_byte_budget"
+                available_bytes.is_none_or(|available| spool_bytes < available),
+                "worker_workspace_disk_pressure"
             );
             // Verify the later writer can represent this whole actor before any writes.
             ensure!(
@@ -331,12 +378,13 @@ fn scan_actors_with_probe(
     super::verify_complete(reader, dataset)?;
     ensure!(!cancel.load(Ordering::Acquire), "worker_bulk_cancelled");
     probe()?;
-    spool.flush()?;
+    let mut spool = spool.into_inner().map_err(|error| error.into_error())?;
     spool.sync_data()?;
+    budget.spool_headroom(path)?;
     spool.rewind()?;
     Ok(ValidatedActors {
         total: summary.rows,
-        spool,
+        spool: BufReader::with_capacity(buffer_bytes, spool),
     })
 }
 
@@ -430,12 +478,12 @@ fn produce_actor_batches_with_probe(
 }
 
 fn measure(workspace: &Path, reclaim_from: Option<u64>) -> Measurement {
-    let resident = resident_bytes();
+    let resident = process_resident_bytes();
     let reclaim = resident
         .zip(reclaim_from)
         .is_some_and(|(resident, threshold)| resident >= threshold);
     let resident = if reclaim && release_unused_heap() {
-        resident_bytes()
+        process_resident_bytes()
     } else {
         resident
     };
@@ -443,59 +491,6 @@ fn measure(workspace: &Path, reclaim_from: Option<u64>) -> Measurement {
         resident_bytes: resident,
         workspace_free_bytes: argos_osint_core::hardware::filesystem_available_bytes(workspace),
     }
-}
-
-fn resident_bytes() -> Option<u64> {
-    #[cfg(target_os = "linux")]
-    {
-        let mut bytes = Vec::new();
-        File::open("/proc/self/statm")
-            .ok()?
-            .take(513)
-            .read_to_end(&mut bytes)
-            .ok()?;
-        if bytes.len() > 512 {
-            return None;
-        }
-        let pages = std::str::from_utf8(&bytes)
-            .ok()?
-            .split_whitespace()
-            .nth(1)?
-            .parse::<u64>()
-            .ok()?;
-        // SAFETY: sysconf has no pointer arguments. Invalid/unknown results fail closed.
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        if page_size <= 0 {
-            return None;
-        }
-        pages
-            .checked_mul(page_size as u64)
-            .filter(|value| *value > 0)
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let mut info = std::mem::MaybeUninit::<libc::mach_task_basic_info_data_t>::uninit();
-        let mut count: libc::mach_msg_type_number_t = libc::MACH_TASK_BASIC_INFO_COUNT;
-        // `mach_task_self()` yields the current task port; `task_info` initializes `info`
-        // and writes `count` only when it returns `KERN_SUCCESS`.
-        #[allow(deprecated)]
-        let status = unsafe {
-            libc::task_info(
-                libc::mach_task_self(),
-                libc::MACH_TASK_BASIC_INFO as libc::task_flavor_t,
-                info.as_mut_ptr().cast::<libc::integer_t>(),
-                &mut count,
-            )
-        };
-        if status != libc::KERN_SUCCESS || count < libc::MACH_TASK_BASIC_INFO_COUNT {
-            return None;
-        }
-        let info = unsafe { info.assume_init() };
-        let resident: u64 = info.resident_size;
-        (resident > 0).then_some(resident)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    None
 }
 
 #[cfg(test)]
@@ -514,6 +509,7 @@ mod tests {
             limits: ActorIndexLimits::default(),
             retained_bytes: 32 * 1024 * 1024,
             reclaim_unused_memory: false,
+            spool_budget_bytes: None,
         }
     }
 
@@ -580,6 +576,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn embedded_spool_budget_rejects_validation_that_cannot_fit() {
+        let (root, path, dataset) = spool_fixture(1);
+        let budget = ParserBudget {
+            limits: ActorIndexLimits {
+                // This fixture tests the configured limit independently of physical free space.
+                disk_pause_free_bytes: 0,
+                ..ActorIndexLimits::default()
+            },
+            spool_budget_bytes: Some(32),
+            ..fixture_budget()
+        };
+        let cancel = AtomicBool::new(false);
+        let error = scan_actors_with_probe(&path, &dataset, &budget, &cancel, || Ok(()))
+            .err()
+            .expect("the serialized actor cannot fit in the selected allowance");
+        assert_eq!(error.to_string(), "actor_spool_byte_budget");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+
+        let budget = ParserBudget {
+            spool_budget_bytes: Some(4096),
+            ..budget
+        };
+        let validated = scan_actors_with_probe(&path, &dataset, &budget, &cancel, || Ok(()))
+            .expect("the same CSV fits when given a larger allowance");
+        assert_eq!(validated.total, 1);
+        assert_eq!(validated.spool.capacity(), 64 * 1024);
+    }
+
     #[tokio::test]
     async fn closed_consumer_joins_blocked_producer_and_corrupt_frame_never_allocates_past_bound() {
         let (_root, path, dataset) = spool_fixture(260);
@@ -615,7 +640,10 @@ mod tests {
         let (send, mut receive) = tokio::sync::mpsc::channel(1);
         let producer = tokio::task::spawn_blocking(move || {
             produce_actor_batches_with_probe(
-                ValidatedActors { total: 1, spool },
+                ValidatedActors {
+                    total: 1,
+                    spool: BufReader::with_capacity(0, spool),
+                },
                 &AtomicBool::new(false),
                 send,
                 || Ok(()),
@@ -802,7 +830,7 @@ mod tests {
     #[test]
     fn resident_bytes_reports_positive_process_rss() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let rss = resident_bytes().expect("resident bytes reported on host OS");
+        let rss = process_resident_bytes().expect("resident bytes reported on host OS");
         assert!(rss > 0);
         let measured = measure(dir.path(), None);
         assert!(measured.resident_bytes.is_some_and(|value| value > 0));

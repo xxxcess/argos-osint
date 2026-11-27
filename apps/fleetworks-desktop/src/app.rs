@@ -268,6 +268,7 @@ pub struct State {
     pub local_backend: LocalBackendState,
     pub(crate) settings_open: bool,
     pub(crate) settings_section: crate::workstation_settings::SettingsSection,
+    pub(crate) resource_settings: crate::resource_settings::ResourceSettings,
     pub tool_key_dialog: bool,
     pub setup_advanced_open: bool,
     pub(crate) workstation_diagnostics_open: bool,
@@ -352,6 +353,7 @@ impl Default for State {
             local_backend: LocalBackendState::default(),
             settings_open: false,
             settings_section: Default::default(),
+            resource_settings: Default::default(),
             tool_key_dialog: false,
             setup_advanced_open: false,
             workstation_diagnostics_open: false,
@@ -715,6 +717,9 @@ impl State {
 
     /// Start or attach to the supervised local embedded companion backend over the private Unix socket.
     pub fn connect_local(&mut self) {
+        if self.resource_save_pending() {
+            return;
+        }
         self.backend_kind = BackendKind::Local;
         self.connection_profiles.initial_selection_applied = true;
         self.disconnect();
@@ -1309,6 +1314,7 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
     changed |= state.drive_startup_dataset();
     changed |= state.observe_inbox();
     changed |= state.poll_inbox_qa(now, tx);
+    changed |= state.poll_resource_settings();
     changed |= state.sync_assistant();
     changed |= state.poll_scoped_logs();
     changed |= state.sync_jobs_binding();
@@ -1550,9 +1556,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                 Button::new("Settings")
                     .variant(ButtonVariant::Ghost)
                     .icon(&icons::WORKSTATION)
-                    .on_press(|state: &mut State| {
-                        state.settings_open = true;
-                    })
+                    .on_press(State::open_workstation_settings)
                     .build(&kit)
                     .key("open-workstation-settings"),
             )
@@ -2054,7 +2058,7 @@ fn compact_icon_rail(
     }
     rail.child(rune::spacer()).child(
         nav_icon(&icons::WORKSTATION, "Settings", state.settings_open)
-            .on_press(|state: &mut State| state.settings_open = true)
+            .on_press(State::open_workstation_settings)
             .key("open-workstation-settings"),
     )
 }

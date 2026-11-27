@@ -43,6 +43,18 @@ Open **Diagnostics** below **Status checks** to see connection mode, health, tra
 
 The [HTTP/IPC parity test](../../../services/api-host/tests/http_ipc_parity.rs) uses a real HTTP gateway and the Embedded companion with disposable storage. It verifies shared actor maintenance behavior and records transport-specific authority and shutdown behavior. Distributed Compose and installed GUI evidence are tracked as separate journeys. The [Linux CI guide](ci.md#nightly-gsd-order) describes how parity and visual evidence fit into the first pass.
 
+## Embedded resource settings
+
+Open **Settings → Resources** with Embedded selected. Choose 40%, 60%, or 80% independently for CPU, memory, and disk. Settings belong to the selected Embedded state directory and apply on its next start. The Distributed operator manages capacity on the server. System accessibility preferences continue to control motion and transparency.
+
+| Setting | What the companion budgets |
+| --- | --- |
+| CPU | A share of the logical CPU capacity available to the companion, rounded down to whole workers with a minimum of one. The index writer and dataset validation use the allowance up to their own concurrency bounds. |
+| Memory | A share of memory available at startup, added to the companion's resident footprint at that point. It sets a resident-memory watermark for seed, indexing, and validation. Available headroom also sizes the index writer and the seed parser. |
+| Disk | A share of free bytes on the Embedded state volume at startup. Upload and setup work check available space against the remaining reserve. Embedded keeps at least a 256 MiB reserve. |
+
+These are cooperative budgets for bulk work. The companion checks them at bounded work boundaries, so a transaction may finish before pressure stops more work. A restart measures the current machine and state volume again. Model inference uses its own runtime admission. [Seed and index limits](actor-search.md#shared-bounds-and-pressure)
+
 ## Inbox and Assistant dock
 
 The toolbar **Inbox** bell shows the unread count and opens a full-height drawer on the right. The current page, scroll position, and Assistant stay in place behind a dimmed backdrop. Reduced Transparency uses an opaque panel with the same bounds. The bell, **Close**, Escape, and the backdrop dismiss the drawer. Focus stays in the drawer while it is open and returns to the bell on dismissal. Reduced Motion opens it immediately.

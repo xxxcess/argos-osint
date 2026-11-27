@@ -501,14 +501,19 @@ fn local_backend_setup_card(
         body = body.child(actions);
     } else {
         let connecting = state.connection.status == ConnectionStatus::Connecting;
-        let start_btn = ActionButton::new("Start Embedded Backend")
-            .key("connect-local")
-            .icon(&icons::WORKSTATION)
-            .finish(MetalFinish::GoldCta)
-            .busy(connecting)
-            .disabled(connecting)
-            .on_press(|state: &mut State| state.connect_local())
-            .build(kit, preferences, pointer_ref);
+        let saving_resources = state.resource_save_pending();
+        let start_btn = ActionButton::new(if saving_resources {
+            "Saving resource preferences…"
+        } else {
+            "Start Embedded Backend"
+        })
+        .key("connect-local")
+        .icon(&icons::WORKSTATION)
+        .finish(MetalFinish::GoldCta)
+        .busy(connecting || saving_resources)
+        .disabled(connecting || saving_resources)
+        .on_press(|state: &mut State| state.connect_local())
+        .build(kit, preferences, pointer_ref);
         let actions = if narrow {
             rune::col().w_full().gap(8.0)
         } else {

@@ -145,15 +145,17 @@ mod embedded {
     use argos_osint_api::AuthenticatedPrincipal;
     use argos_osint_api::PrivateServices;
     use argos_osint_api::SearchClient;
+    use argos_osint_core::hardware;
     use argos_osint_core::storage::bootstrap;
     use argos_osint_core::storage::connect_registry;
     use argos_osint_core::storage::jobs_client;
     use argos_osint_core::storage::open::Target;
     use argos_osint_core::storage::repo::Repository;
     use argos_osint_core::storage::server;
-    use fleetworks_contracts::actor_index::ActorIndexLimits;
     use fleetworks_contracts::context::Permission;
     use fleetworks_contracts::context::RegisteredContext;
+    use fleetworks_contracts::embedded_resources::read_preferences;
+    use fleetworks_contracts::embedded_resources::ResourceAllocation;
     use fleetworks_contracts::ipc::read_frame;
     use fleetworks_contracts::ipc::write_frame;
     use fleetworks_contracts::ipc::IpcEnvelope;
@@ -225,6 +227,32 @@ mod embedded {
         search: PathBuf,
         staged_datasets: PathBuf,
         context: Option<PathBuf>,
+    }
+
+    fn allocate_resources(root: &Path) -> ResourceAllocation {
+        let preferences = read_preferences(root).unwrap_or_else(|error| {
+            tracing::warn!(
+                code = "embedded_resource_preferences_unavailable",
+                kind = ?error.kind(),
+                "Using default Embedded resource preferences"
+            );
+            Default::default()
+        });
+        let resources = ResourceAllocation::from_available(
+            preferences,
+            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
+            hardware::process_resident_bytes().unwrap_or(0),
+            hardware::available_memory_bytes(),
+            hardware::filesystem_available_bytes(root).unwrap_or(0),
+        );
+        tracing::info!(
+            code = "embedded_resource_allocation",
+            cpu_workers = resources.cpu_threads,
+            memory_headroom_bytes = resources.memory_headroom_bytes,
+            disk_budget_bytes = resources.disk_budget_bytes,
+            "Provisioned Embedded bulk work"
+        );
+        resources
     }
 
     pub(super) async fn run_embedded(
@@ -312,10 +340,12 @@ mod embedded {
             })
             .await??;
 
-            let limits = ActorIndexLimits {
-                writer_memory_bytes: 32 * 1024 * 1024,
-                ..ActorIndexLimits::default()
-            };
+            let resources = tokio::task::spawn_blocking({
+                let root = layout.root.clone();
+                move || allocate_resources(&root)
+            })
+            .await?;
+            let limits = resources.actor_index_limits();
             let meter = Arc::new(
                 Meter::new(layout.search.clone(), limits.clone())?.with_unused_memory_reclaim(),
             );
@@ -342,7 +372,9 @@ mod embedded {
 
             let dataset_store = tokio::task::spawn_blocking({
                 let staged = layout.staged_datasets.clone();
-                move || DatasetStore::open(staged)
+                move || {
+                    DatasetStore::open(staged).map(|store| store.with_embedded_resources(resources))
+                }
             })
             .await??;
             let activation = tokio::task::spawn_blocking({
@@ -1172,6 +1204,39 @@ mod embedded {
             );
             // Second concurrent lock on the exact same state directory must fail closed.
             assert!(prepare_state_layout(&valid).is_err());
+        }
+
+        #[test]
+        fn embedded_preferences_load_only_from_private_regular_files() {
+            use fleetworks_contracts::embedded_resources::EmbeddedResourcePreferences;
+            use fleetworks_contracts::embedded_resources::ResourcePreset;
+            use fleetworks_contracts::embedded_resources::FILE_NAME;
+
+            let directory = tempfile::tempdir().expect("temporary root");
+            let state = directory.path().join("state");
+            let (layout, _lock) = prepare_state_layout(&state).expect("private state");
+            assert_eq!(
+                read_preferences(&layout.root).unwrap(),
+                EmbeddedResourcePreferences::default()
+            );
+            let file = layout.root.join(FILE_NAME);
+            let outside = directory.path().join("outside.json");
+            fs::write(&outside, br#"{"cpu":"80","memory":"60","disk":"40"}"#).unwrap();
+            fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
+            std::os::unix::fs::symlink(&outside, &file).unwrap();
+            assert!(read_preferences(&layout.root).is_err());
+            fs::remove_file(&file).unwrap();
+            fs::rename(&outside, &file).unwrap();
+            assert_eq!(
+                read_preferences(&layout.root).unwrap(),
+                EmbeddedResourcePreferences {
+                    cpu: ResourcePreset::Eighty,
+                    memory: ResourcePreset::Sixty,
+                    disk: ResourcePreset::Forty,
+                }
+            );
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(read_preferences(&layout.root).is_err());
         }
 
         #[test]

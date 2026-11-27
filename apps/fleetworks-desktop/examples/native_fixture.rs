@@ -1061,6 +1061,10 @@ mod native {
                     state.workstation_status_checks_open = false;
                 }),
                 ("workstation-settings", workstation_settings),
+                ("workstation-resources", |state| {
+                    registered(state);
+                    state.fixture_show_resource_settings();
+                }),
                 ("workstation-settings-assistant", |state| {
                     assistant_settings(state, false);
                 }),

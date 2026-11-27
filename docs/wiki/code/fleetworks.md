@@ -26,6 +26,8 @@ The helper prints the complete `.app` (macOS) or bundle directory (Linux) and ma
 
 Protected settings initialize without creating a default child. The opaque backend workstation ID is the Connect ID; optional mutable IP metadata does not define identity. New contexts and activity queries contain no workspace narrowing. Existing folders and immutable historical origins remain preserved. [Identity ownership](native-workspaces.md)
 
+**Settings → Resources** sets independent CPU, memory, and disk shares for the Embedded companion. Each starts at 40% and can be changed to 60% or 80%. The saved shares take effect the next time Embedded starts. [How Embedded applies the shares](native-connections.md#embedded-resource-settings)
+
 <a id="launch-the-compose-stack"></a>
 
 ## Launch a Distributed backend with Compose

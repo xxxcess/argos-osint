@@ -1,17 +1,21 @@
 //! Workstation settings presented over the current native destination.
 
+use fleetworks_contracts::embedded_resources::ResourcePreset;
 use fleetworks_workstation::native::BackendKind;
 use rune::Cx;
 use rune::El;
 use rune::ScrollSpec;
 use rune::Tx;
 use rune_kit::Kit;
+use rune_kit::SegmentedControl;
 
 use crate::accessibility::ViewPreferences;
+use crate::app::Load;
 use crate::app::Page;
 use crate::app::State;
 use crate::material;
 use crate::material::MetalFinish;
+use crate::resource_settings::Resource;
 use crate::theme;
 use crate::theme::StatusTone;
 use crate::ui_components;
@@ -24,7 +28,7 @@ pub(crate) const PRODUCT_NAME: &str = "Fleetworks";
 pub(crate) enum SettingsSection {
     #[default]
     General,
-    Appearance,
+    Resources,
     Connection,
     Assistant,
     Models,
@@ -35,14 +39,14 @@ impl SettingsSection {
         Self::General,
         Self::Connection,
         Self::Assistant,
-        Self::Appearance,
+        Self::Resources,
         Self::Models,
     ];
 
     fn title(self) -> &'static str {
         match self {
             Self::General => "General",
-            Self::Appearance => "Appearance",
+            Self::Resources => "Resources",
             Self::Connection => "Connection",
             Self::Assistant => "Assistant",
             Self::Models => "Models",
@@ -52,7 +56,7 @@ impl SettingsSection {
     fn summary(self) -> &'static str {
         match self {
             Self::General => "About and workstation readiness",
-            Self::Appearance => "Display and motion preferences",
+            Self::Resources => "Backend resource limits",
             Self::Connection => "Backend setup and pairing",
             Self::Assistant => "Decision models",
             Self::Models => "Model routes and provider accounts",
@@ -61,6 +65,18 @@ impl SettingsSection {
 }
 
 impl State {
+    pub(crate) fn open_workstation_settings(&mut self) {
+        self.settings_open = true;
+        self.select_settings_section(self.settings_section);
+    }
+
+    fn select_settings_section(&mut self, section: SettingsSection) {
+        self.settings_section = section;
+        if section == SettingsSection::Resources && !self.resource_settings.saving {
+            self.read_resource_settings();
+        }
+    }
+
     pub(crate) fn open_connection_settings(&mut self) {
         self.setup_gateway = false;
         self.settings_section = SettingsSection::Connection;
@@ -92,6 +108,16 @@ impl State {
     pub fn fixture_show_assistant_settings(&mut self) {
         if self.fixture {
             self.settings_section = SettingsSection::Assistant;
+            self.settings_open = true;
+        }
+    }
+
+    /// Open the Resources section in the synthetic review session.
+    #[doc(hidden)]
+    pub fn fixture_show_resource_settings(&mut self) {
+        if self.fixture {
+            self.backend_kind = BackendKind::Local;
+            self.settings_section = SettingsSection::Resources;
             self.settings_open = true;
         }
     }
@@ -169,6 +195,102 @@ fn destination_action(
             state.navigate(destination);
         })
         .build(kit, preferences, pointer)
+}
+
+fn resource_settings(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    let text = |value: &str| {
+        rune::text(value)
+            .font(kit.ty.small)
+            .color(theme::hex(theme::TEXT_MUTED))
+            .wrap()
+    };
+    if !state.is_local_backend() {
+        return text("Your operator manages resource limits for the Distributed backend.");
+    }
+    let settings = &state.resource_settings;
+    let saved = settings.displayed(state.fixture);
+    let mut controls = rune::col().w_full();
+    let labels = ResourcePreset::ALL.map(|preset| format!("{}%", preset.percent()));
+    for (index, resource) in Resource::ALL.into_iter().enumerate() {
+        if index != 0 {
+            controls = controls.child(setting_divider());
+        }
+        let selected = saved.and_then(|saved| {
+            ResourcePreset::ALL
+                .iter()
+                .position(|&preset| preset == resource.selected(saved))
+        });
+        let mut options = SegmentedControl::new(&labels, selected)
+            .label(resource.label())
+            .fit()
+            .on_pick(move |state: &mut State, index, _| {
+                if let Some(&preset) = ResourcePreset::ALL.get(index) {
+                    state.save_resource_setting(resource, preset);
+                }
+            });
+        if saved.is_none() || settings.saving {
+            for index in 0..ResourcePreset::ALL.len() {
+                options = options.segment_state(index, rune_kit::State::Disabled);
+            }
+        }
+        controls = controls.child(
+            rune::row()
+                .w_full()
+                .min_h(54.0)
+                .px(12.0)
+                .py(8.0)
+                .gap(8.0)
+                .center_y()
+                .child(
+                    rune::text(resource.label())
+                        .font(kit.ty.ui_medium)
+                        .color(theme::hex(theme::TEXT_PRIMARY))
+                        .grow(1.0)
+                        .a11y_hidden(),
+                )
+                .child(options.build(kit).key(resource.key())),
+        );
+    }
+    let mut body = rune::col()
+        .w_full()
+        .gap(12.0)
+        .child(
+            rune::col()
+                .gap(4.0)
+                .child(text("Saved limits take effect the next time Embedded starts."))
+                .child(text(
+                    "CPU sets how many available cores workers can use. Memory and disk apply to available memory and free storage at startup.",
+                )),
+        )
+        .child(material::glass_panel(
+            controls.radius(8.0).clip_rounded(8.0),
+            preferences,
+        ));
+    let pending = if settings.saving {
+        Some("Saving resource preferences…")
+    } else if saved.is_none() && !matches!(settings.preferences, Load::Failed(_)) {
+        Some("Loading saved resource preferences…")
+    } else {
+        None
+    };
+    if let Some(label) = pending {
+        body = body.child(
+            ui_components::skeleton_text_value(label, 180.0, StatusTone::Info, preferences)
+                .key("settings-resources-progress"),
+        );
+    } else if settings.save_failed {
+        body =
+            body.child(text("Could not save the change. Select a limit to retry.").role("alert"));
+    } else if let Load::Failed(error) = &settings.preferences {
+        body = body.child(text(error).role("alert")).child(
+            ActionButton::new("Retry")
+                .key("settings-resources-retry")
+                .finish(MetalFinish::Gunmetal)
+                .on_press(State::read_resource_settings)
+                .build(kit, preferences, None),
+        );
+    }
+    body
 }
 
 fn section_content(
@@ -262,43 +384,7 @@ fn section_content(
                 preferences,
                 kit,
             )),
-        SettingsSection::Appearance => rune::col().w_full().gap(22.0).child(setting_group(
-            "Display",
-            rune::col()
-                .child(setting_row(
-                    "Surfaces",
-                    surface_preference_description(cfg!(target_os = "macos")),
-                    Some(ui_components::status_pill(
-                        if preferences.matte() {
-                            "Opaque"
-                        } else {
-                            "Transparent"
-                        },
-                        None,
-                        StatusTone::Accent,
-                        kit,
-                    )),
-                    kit,
-                ))
-                .child(setting_divider())
-                .child(setting_row(
-                    "Reduced motion",
-                    motion_preference_description(cfg!(target_os = "macos")),
-                    Some(ui_components::status_pill(
-                        if preferences.reduced_motion {
-                            "Reduced"
-                        } else {
-                            "Standard"
-                        },
-                        None,
-                        StatusTone::Neutral,
-                        kit,
-                    )),
-                    kit,
-                )),
-            preferences,
-            kit,
-        )),
+        SettingsSection::Resources => resource_settings(state, preferences, kit),
         SettingsSection::Connection => rune::col()
             .w_full()
             .gap(22.0)
@@ -422,7 +508,7 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
                         }))
                         .a11y_hidden(),
                 )
-                .on_press(move |state: &mut State| state.settings_section = section),
+                .on_press(move |state: &mut State| state.select_settings_section(section)),
         );
     }
     rail = rail.child(rune::spacer()).child(
@@ -487,24 +573,11 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
         .child(content)
 }
 
-fn surface_preference_description(is_macos: bool) -> &'static str {
-    if is_macos {
-        "Follows macOS Reduce Transparency and FLEETWORKS_OPAQUE_MATERIALS."
-    } else {
-        "Uses transparent surfaces by default, or opaque surfaces when FLEETWORKS_OPAQUE_MATERIALS is set."
-    }
-}
-
-fn motion_preference_description(is_macos: bool) -> &'static str {
-    if is_macos {
-        "Follows macOS Reduce Motion."
-    } else {
-        "Follows your desktop reduced-motion accessibility preference."
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use fleetworks_contracts::embedded_resources::EmbeddedResourcePreferences;
+    use fleetworks_contracts::embedded_resources::ResourcePreset;
+    use fleetworks_workstation::native::BackendKind;
     use rune::Env;
     use rune::Runtime;
 
@@ -512,23 +585,64 @@ mod tests {
     use crate::app::Page;
     use crate::app::State;
 
-    use super::motion_preference_description;
-    use super::surface_preference_description;
     use super::SettingsSection;
 
     #[test]
-    fn appearance_copy_omits_macos_wording_on_linux() {
-        let linux_surfaces = surface_preference_description(false);
-        let linux_motion = motion_preference_description(false);
-        assert!(!linux_surfaces.contains("macOS"));
-        assert!(!linux_motion.contains("macOS"));
-        assert!(linux_surfaces.contains("FLEETWORKS_OPAQUE_MATERIALS"));
-        assert!(linux_motion.to_ascii_lowercase().contains("reduced-motion"));
-
-        let mac_surfaces = surface_preference_description(true);
-        let mac_motion = motion_preference_description(true);
-        assert!(mac_surfaces.contains("macOS Reduce Transparency"));
-        assert!(mac_motion.contains("macOS Reduce Motion"));
+    fn resources_are_independent_and_only_editable_for_embedded() {
+        let mut state = State::fixture();
+        state.fixture_show_resource_settings();
+        let mut runtime = Runtime::new(
+            state,
+            app::view,
+            (640.0, 480.0),
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.frame(0.0);
+        runtime.frame(1.0 / 60.0);
+        assert!(runtime.find("settings-category-resources").is_some());
+        assert!(runtime.find("settings-category-appearance").is_none());
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("Saved limits take effect the next time Embedded starts."));
+        let scroll = runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("settings-scroll"))
+            .expect("Settings scroll area")
+            .rect;
+        for (index, key) in [
+            "settings-resource-cpu/segment1",
+            "settings-resource-memory/segment2",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (x, y) = runtime.find(key).expect("editable preset in Resources");
+            assert!((scroll[0]..scroll[0] + scroll[2]).contains(&x));
+            assert!((scroll[1]..scroll[1] + scroll[3]).contains(&y));
+            runtime.pointer_down(x, y);
+            runtime.pointer_up(x, y);
+            runtime.frame((2 + index) as f64 / 60.0);
+        }
+        assert_eq!(
+            runtime.state.resource_settings.displayed(true),
+            Some(EmbeddedResourcePreferences {
+                cpu: ResourcePreset::Sixty,
+                memory: ResourcePreset::Eighty,
+                ..EmbeddedResourcePreferences::default()
+            })
+        );
+        runtime.update(|state, _| state.backend_kind = BackendKind::Remote);
+        runtime.frame(4.0 / 60.0);
+        assert!(runtime.find("settings-resource-cpu").is_none());
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("Your operator manages resource limits for the Distributed backend."));
     }
 
     #[test]
@@ -572,8 +686,6 @@ mod tests {
 
     #[test]
     fn connection_settings_exposes_the_existing_backend_stepper_on_a_compact_window() {
-        use fleetworks_workstation::native::BackendKind;
-
         let mut state = State::fixture();
         state.fixture_show_workstation_settings();
         let mut runtime = Runtime::new(

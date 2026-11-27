@@ -278,6 +278,53 @@ pub fn filesystem_available_bytes(path: &std::path::Path) -> Option<u64> {
     }
 }
 
+/// Current resident bytes of the process on supported Embedded hosts.
+#[must_use]
+pub fn process_resident_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::Read;
+
+        let mut bytes = String::new();
+        std::fs::File::open("/proc/self/statm")
+            .ok()?
+            .take(513)
+            .read_to_string(&mut bytes)
+            .ok()?;
+        if bytes.len() > 512 {
+            return None;
+        }
+        let pages = bytes.split_whitespace().nth(1)?.parse::<u64>().ok()?;
+        // SAFETY: sysconf has no pointer arguments and reports the page size.
+        let page_size = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).ok()?;
+        pages.checked_mul(page_size).filter(|bytes| *bytes > 0)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::mach_task_basic_info_data_t>::uninit();
+        let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
+        // SAFETY: The task port belongs to this process. Successful task_info
+        // initializes the buffer and reports the number of integers written.
+        #[allow(deprecated)]
+        let status = unsafe {
+            libc::task_info(
+                libc::mach_task_self(),
+                libc::MACH_TASK_BASIC_INFO as libc::task_flavor_t,
+                info.as_mut_ptr().cast::<libc::integer_t>(),
+                &mut count,
+            )
+        };
+        if status != libc::KERN_SUCCESS || count < libc::MACH_TASK_BASIC_INFO_COUNT {
+            return None;
+        }
+        // SAFETY: task_info reported success and the complete result size.
+        let bytes = unsafe { info.assume_init() }.resident_size;
+        (bytes > 0).then_some(bytes)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    None
+}
+
 fn disk_totals() -> (f64, f64) {
     let disks = Disks::new_with_refreshed_list();
     let mut total = 0u64;

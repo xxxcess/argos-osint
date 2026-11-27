@@ -86,6 +86,7 @@ const ANSWER_ROW: &str = "inbox-qa-live-answer";
 const COMPOSER: &str = "inbox-qa-composer";
 const SOURCES_TOGGLE: &str = "inbox-qa-sources-toggle";
 const SOURCES_CONTENT: &str = "inbox-qa-sources";
+const SOURCES_BACK: &str = "inbox-qa-sources-back";
 const HISTORY_PREVIOUS: &str = "inbox-qa-history-previous";
 const HISTORY_NEXT: &str = "inbox-qa-history-next";
 const HISTORY_ARROW_SIZE: f32 = 28.0;
@@ -324,6 +325,7 @@ impl InboxQa {
             source.origin = SourceOrigin::Selection;
         }
         self.history.select(None);
+        self.reset_sources_view();
         self.status = None;
     }
 
@@ -343,6 +345,11 @@ impl InboxQa {
         self.pending = None;
         self.draft = TextEdit::new("");
         self.source = None;
+    }
+
+    pub(crate) fn reset_sources_view(&mut self) {
+        self.sources_open = false;
+        self.history.sources_open = false;
     }
 
     pub(crate) fn request_resume(&mut self) {
@@ -660,6 +667,48 @@ impl State {
         } else {
             qa.latest.as_ref()
         }
+    }
+
+    fn displayed_sources_open(&self) -> bool {
+        if self.browsed_inbox_qa_turn().is_some() {
+            self.inbox_qa.history.sources_open
+        } else {
+            self.inbox_qa.sources_open
+        }
+    }
+
+    fn show_inbox_qa_sources(&mut self, turn_id: &str, tx: &mut Tx) {
+        if !self.inbox.open
+            || !self.inbox_qa_visible()
+            || self
+                .displayed_inbox_qa_turn()
+                .is_none_or(|turn| turn.turn_id != turn_id || turn.findings.is_empty())
+        {
+            return;
+        }
+        if self.browsed_inbox_qa_turn().is_some() {
+            self.inbox_qa.history.sources_open = true;
+        } else {
+            self.inbox_qa.sources_open = true;
+        }
+        tx.focus(SOURCES_BACK, tx.focus_visible());
+        tx.scroll_into_view(SOURCES_BACK);
+    }
+
+    pub(crate) fn dismiss_inbox_qa_sources(&mut self, tx: &mut Tx) -> bool {
+        if !self.inbox.open
+            || !self.inbox_qa_visible()
+            || !self.displayed_sources_open()
+            || self
+                .displayed_inbox_qa_turn()
+                .is_none_or(|turn| turn.findings.is_empty())
+        {
+            return false;
+        }
+        self.inbox_qa.reset_sources_view();
+        tx.focus(SOURCES_TOGGLE, tx.focus_visible());
+        tx.scroll_into_view(SOURCES_TOGGLE);
+        true
     }
 
     pub(crate) fn supports_workstation_triage(&self) -> bool {
@@ -1886,6 +1935,7 @@ pub(crate) fn continue_setup(state: &mut State, tx: &mut Tx) {
 
 fn citation_kind(kind: ChatSourceKind) -> &'static str {
     match kind {
+        ChatSourceKind::Actor => "Actor",
         ChatSourceKind::Job => "Job",
         ChatSourceKind::Cycle => "Cycle",
         ChatSourceKind::Readiness => "Readiness",
@@ -1925,50 +1975,27 @@ fn answer_state(turn: &QaTurn, has_text: bool) -> chat_ui::TurnState {
     }
 }
 
-fn answer_sources(
-    turn_id: &str,
-    citations: &[chat_ui::Citation],
-    evidence: Option<&[QaFinding]>,
-    show_observations: bool,
-    expanded: bool,
-    kit: &Kit,
-) -> El {
+fn answer_annotations(turn_id: &str, findings: &[QaFinding], reply: &str, kit: &Kit) -> El {
     let active_turn_id = turn_id.to_owned();
-    let label = format!("Sources ({})", citations.len());
-    let font = kit.ty.small;
-    let trigger = rune_kit::Button::new(label.clone())
-        .label_with(move |_, ink| rune::text(label).font(font).color(ink))
-        .variant(rune_kit::ButtonVariant::Ghost)
-        .icon(if expanded {
-            kit.glyph.triangle_down
-        } else {
-            kit.glyph.triangle_right
-        })
+    let trigger = IconButton::new(&icons::SOURCES)
+        .variant(IconButtonVariant::Ghost)
+        .control_size(ControlSize::Large)
+        .label(format!("Sources ({})", findings.len()))
+        .help("View sources for this reply")
         .on_press_tx(move |state: &mut State, tx| {
-            if state.inbox_qa_visible()
-                && state
-                    .displayed_inbox_qa_turn()
-                    .is_some_and(|turn| turn.turn_id == active_turn_id)
-            {
-                let expanded = if state.browsed_inbox_qa_turn().is_some() {
-                    &mut state.inbox_qa.history.sources_open
-                } else {
-                    &mut state.inbox_qa.sources_open
-                };
-                *expanded = !*expanded;
-                if !state.inbox.at_bottom {
-                    tx.keep_on_screen(SOURCES_TOGGLE);
-                }
-            }
+            state.show_inbox_qa_sources(&active_turn_id, tx);
         })
         .build(kit)
-        .key(SOURCES_TOGGLE)
-        .expanded(expanded);
+        .key(SOURCES_TOGGLE);
+    let show_observations = !reply.is_empty()
+        && findings
+            .iter()
+            .any(|finding| !reply.contains(finding.text.as_str()));
     rune::col()
         .w_full()
         .min_w(0.0)
         .gap(4.0)
-        .children(evidence.filter(|_| show_observations).map(|findings| {
+        .children(show_observations.then(|| {
             rune::col()
                 .gap(3.0)
                 .label("Workstation observations")
@@ -1984,15 +2011,77 @@ fn answer_sources(
                         .wrap_anywhere()
                 }))
         }))
-        .child(rune::row().child(trigger))
-        .children(expanded.then(|| {
-            let rows = if let Some(findings) = evidence.filter(|_| !show_observations) {
-                rune::col().w_full().gap(6.0).children(
-                    citations.iter().zip(findings).enumerate().map(
-                        |(index, (citation, finding))| {
+        .child(rune::row().w_full().justify_end().child(trigger))
+}
+
+fn sources_view(turn: &QaTurn, kit: &Kit, preferences: ViewPreferences) -> El {
+    let back = rune_kit::Button::new("Back to reply")
+        .variant(rune_kit::ButtonVariant::Ghost)
+        .icon(&icons::CHEVRON_LEFT)
+        .on_press_tx(|state: &mut State, tx| {
+            state.dismiss_inbox_qa_sources(tx);
+        })
+        .build(kit)
+        .key(SOURCES_BACK);
+    let header = rune::row()
+        .w_full()
+        .min_w(0.0)
+        .gap(6.0)
+        .center_y()
+        .py(4.0)
+        .fill(theme::hex(theme::SURFACE_RAISED))
+        .radius(6.0)
+        .sticky_top(0.0)
+        .child(back)
+        .child(rune::spacer())
+        .child(
+            rune::text("Sources")
+                .role("heading")
+                .font(kit.ty.small_medium)
+                .color(kit.c.std_text)
+                .pr(8.0),
+        );
+    let mut kinds = Vec::new();
+    for finding in &turn.findings {
+        if !kinds.contains(&finding.source.kind) {
+            kinds.push(finding.source.kind);
+        }
+    }
+    let turn_id = &turn.turn_id;
+    let view = rune::col()
+        .key(SOURCES_CONTENT)
+        .role("region")
+        .label("Source citations")
+        .w_full()
+        .min_w(0.0)
+        .gap(8.0)
+        .child(header)
+        .children(kinds.into_iter().map(|kind| {
+            let label = citation_kind(kind);
+            let findings = rune::col()
+                .w_full()
+                .min_w(0.0)
+                .role("list")
+                .label(format!("{label} sources"))
+                .gap(8.0)
+                .children(
+                    turn.findings
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, finding)| finding.source.kind == kind)
+                        .map(|(index, finding)| {
                             rune::col()
-                                .gap(2.0)
-                                .child(chat_ui::citation_row(turn_id, index, citation, kit))
+                                .key(format!("chat-citation-{turn_id}-{index}"))
+                                .role("listitem")
+                                .w_full()
+                                .min_w(0.0)
+                                .gap(3.0)
+                                .child(
+                                    rune::text(finding.label.as_str())
+                                        .font(kit.ty.small_medium)
+                                        .color(kit.c.std_text)
+                                        .wrap_anywhere(),
+                                )
                                 .child(
                                     rune::text(finding.text.as_str())
                                         .key(format!("inbox-qa-source-finding-{turn_id}-{index}"))
@@ -2000,16 +2089,40 @@ fn answer_sources(
                                         .color(kit.c.std_text)
                                         .wrap_anywhere(),
                                 )
-                        },
-                    ),
-                )
-            } else {
-                chat_ui::citation_rows(turn_id, citations, kit)
-            };
-            rows.key(SOURCES_CONTENT)
-                .role("region")
-                .label("Source citations")
-        }))
+                                .child(
+                                    rune::text(format!("Observed {}", finding.observed_at))
+                                        .font(kit.ty.text_xsmall)
+                                        .color(kit.c.text_muted)
+                                        .wrap_anywhere(),
+                                )
+                        }),
+                );
+            material::glass_panel(
+                rune::col()
+                    .key(format!("inbox-qa-sources-group-{label}"))
+                    .w_full()
+                    .min_w(0.0)
+                    .gap(8.0)
+                    .padding(10.0)
+                    .radius(8.0)
+                    .child(
+                        rune::text(label)
+                            .role("heading")
+                            .font(kit.ty.small_medium)
+                            .color(kit.c.text_muted),
+                    )
+                    .child(findings),
+                preferences,
+            )
+        }));
+    if preferences.reduced_motion {
+        return view;
+    }
+    let mut transition = crate::app::surface_transition(false, rune::Transition::offset(24.0, 0.0));
+    transition.springs.exit = rune::Spring::NONE;
+    view.animated_changes()
+        .motion(rune::Spring::NONE)
+        .transition(transition)
 }
 
 fn context_dial(usage: Option<QaContextUsage>, kit: &Kit) -> El {
@@ -2151,6 +2264,17 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
     let displayed_turn = state
         .displayed_inbox_qa_turn()
         .filter(|_| pending.is_none());
+    if let Some(turn) =
+        displayed_turn.filter(|turn| state.displayed_sources_open() && !turn.findings.is_empty())
+    {
+        return Some(
+            rune::col()
+                .key("inbox-qa-exchange")
+                .w_full()
+                .min_w(0.0)
+                .child(sources_view(turn, kit, preferences)),
+        );
+    }
     let (
         question,
         stage,
@@ -2205,35 +2329,11 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
         timestamp: local_message_time(completed_at),
         state: stage,
         text: answer,
-        citations: findings
-            .iter()
-            .map(|finding| chat_ui::Citation {
-                kind: citation_kind(finding.source.kind),
-                label: format!("{} · {}", finding.label, finding.observed_at),
-            })
-            .collect(),
-    };
-    let sources_open = if browsing {
-        qa.history.sources_open
-    } else {
-        qa.sources_open
+        citations: Vec::new(),
     };
     let sources = turn_id
-        .filter(|_| !answer.citations.is_empty())
-        .map(|turn_id| {
-            let evidence = findings
-                .iter()
-                .any(|finding| !answer.text.contains(finding.text.as_str()))
-                .then_some(findings);
-            answer_sources(
-                turn_id,
-                &answer.citations,
-                evidence,
-                !answer.text.is_empty(),
-                sources_open,
-                kit,
-            )
-        });
+        .filter(|_| !findings.is_empty())
+        .map(|turn_id| answer_annotations(turn_id, findings, &answer.text, kit));
     let live_region = if answer.state == chat_ui::TurnState::Streaming {
         LiveRegion::Off
     } else {
@@ -3660,7 +3760,17 @@ mod tests {
             let unread = runtime.state.inbox.unread();
 
             runtime.update(|state, _| {
-                state.inbox_qa.adopt(Some(turn(QaTurnState::Running, 2)));
+                let mut running = turn(QaTurnState::Running, 2);
+                let memory = "Workstation memory usage is 42%.";
+                running.findings.push(QaFinding::new(
+                    ChatSourceReference::new(ChatSourceKind::HostMetric, "memory".into()).unwrap(),
+                    "Memory usage".into(),
+                    memory.into(),
+                    0,
+                    memory.len() as u32,
+                    "2026-01-01T00:00:01Z".into(),
+                ));
+                state.inbox_qa.adopt(Some(running));
             });
             runtime.frame(1.0);
             assert!(runtime.find(FIXTURE_CITATION).is_none());
@@ -3668,36 +3778,40 @@ mod tests {
             let toggle = elements
                 .iter()
                 .find(|el| el.key.as_deref() == Some(SOURCES_TOGGLE))
-                .expect("Sources disclosure for the cited finding");
+                .expect("Sources button for the cited findings");
             assert_eq!(toggle.role, "button");
-            assert_eq!(toggle.label.as_deref(), Some("Sources (1)"));
-            assert_eq!(toggle.expanded, Some(false));
+            assert_eq!(toggle.label.as_deref(), Some("Sources (2)"));
+            assert_eq!(toggle.expanded, None);
+            let (bubble, _) = runtime.presented(REPLY).unwrap();
+            assert!((bubble[0] + bubble[2] - toggle.rect[0] - toggle.rect[2] - 10.0).abs() < 2.0);
             assert!(!runtime.accessibility_json().to_string().contains(FINDING));
             let (exchange, _) = runtime.presented("inbox-qa-exchange").unwrap();
             assert!((scroll[1] + scroll[3] - exchange[1] - exchange[3] - 12.0).abs() < 0.5);
 
             press_disclosure(&mut runtime, SOURCES_TOGGLE, 1.25);
             let elements = runtime.elements();
-            let toggle = elements
+            assert!(runtime.find(SOURCES_TOGGLE).is_none());
+            let back = elements
                 .iter()
-                .find(|el| el.key.as_deref() == Some(SOURCES_TOGGLE))
-                .unwrap();
-            assert_eq!(toggle.expanded, Some(true));
-            assert!(toggle.focused);
-            let citation = elements
-                .iter()
-                .find(|el| el.key.as_deref() == Some(FIXTURE_CITATION))
-                .expect("expanded citation");
-            assert_eq!(
-                citation.text.as_deref(),
-                Some("Readiness: Actor search · 2026-01-01T00:00:00Z")
-            );
-            assert!(citation.rect[1] >= scroll[1] - 0.5);
-            assert!(citation.rect[1] + citation.rect[3] <= scroll[1] + scroll[3] + 0.5);
+                .find(|el| el.key.as_deref() == Some(SOURCES_BACK))
+                .expect("Back to reply button");
+            assert!(back.focused && back.visible == back.rect);
+            assert!(runtime.find(FIXTURE_CITATION).is_some());
+            let (sources, _) = runtime.presented(SOURCES_CONTENT).unwrap();
+            assert!((sources[0] - exchange[0]).abs() < 0.5);
+            assert!((sources[2] - exchange[2]).abs() < 0.5);
             assert!(elements.iter().any(|element| {
                 element.key.as_deref() == Some("inbox-qa-source-finding-fixture-turn-0")
                     && element.text.as_deref() == Some(FINDING)
             }));
+            for group in ["Readiness", "Host metric"] {
+                assert!(runtime
+                    .find(&format!("inbox-qa-sources-group-{group}"))
+                    .is_some());
+            }
+            let rendered = runtime.accessibility_json().to_string();
+            assert!(rendered.contains("Observed 2026-01-01T00:00:00Z"));
+            assert!(rendered.contains("Workstation memory usage is 42%."));
 
             runtime.update(|state, _| {
                 state.inbox_qa.adopt(Some(turn(QaTurnState::Canceled, 3)));
@@ -3705,17 +3819,28 @@ mod tests {
             runtime.frame(1.75);
             assert!(runtime.find("inbox-qa-stop").is_none());
             assert!(runtime.find(FIXTURE_CITATION).is_some());
+            assert!(runtime.find(REPLY).is_none());
+            assert_eq!(runtime.state.inbox.unread(), unread);
+
+            runtime.key(KeyEvent {
+                key: Key::Escape,
+                mods: Mods::default(),
+            });
+            runtime.frame(2.0);
+            assert!(runtime.state.inbox.open);
+            assert!(runtime.find(FIXTURE_CITATION).is_none());
+            assert!(runtime.elements().iter().any(|element| {
+                element.key.as_deref() == Some(SOURCES_TOGGLE) && element.focused
+            }));
             let tree = runtime.accessibility_json();
             assert_eq!(accessibility_nodes_with_key(&tree, REPLY), 1);
             let rendered = tree.to_string();
             assert!(!rendered.contains("Assistant message"));
             assert!(rendered.contains("Assistant status"));
             assert!(rendered.contains("live-polite"));
-            assert!(rendered.contains(FINDING) && rendered.contains("Stopped"));
+            assert!(rendered.contains("Stopped"));
             assert_eq!(runtime.state.inbox.unread(), unread);
 
-            press_disclosure(&mut runtime, SOURCES_TOGGLE, 2.0);
-            assert!(runtime.find(FIXTURE_CITATION).is_none());
             press_disclosure(&mut runtime, SOURCES_TOGGLE, 2.5);
             assert!(runtime.find(FIXTURE_CITATION).is_some());
             runtime.update(|state, _| {
@@ -3860,13 +3985,14 @@ mod tests {
                 state.inbox_qa.adopt(Some(turn(QaTurnState::Answered, 3)));
             });
             runtime.frame(2.5);
+            assert!(runtime.find(OLDER_CITATION).is_some());
+            assert!(runtime.find("inbox-qa-stop").is_none());
+            press_disclosure(&mut runtime, SOURCES_BACK, 2.75);
             assert!(runtime
                 .accessibility_json()
                 .to_string()
                 .contains(OLDER_QUESTION));
-            assert!(runtime.find(OLDER_CITATION).is_some());
-            assert!(runtime.find("inbox-qa-stop").is_none());
-            press_disclosure(&mut runtime, HISTORY_NEXT, 2.75);
+            press_disclosure(&mut runtime, HISTORY_NEXT, 3.1);
             let tree = runtime.accessibility_json();
             assert!(!tree.to_string().contains(OLDER_QUESTION));
             assert!(runtime.find(OLDER_CITATION).is_none());

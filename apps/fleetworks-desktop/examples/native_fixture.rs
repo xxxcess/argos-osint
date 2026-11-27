@@ -653,12 +653,19 @@ mod native {
         triage_connection(state, QaPhase::Ready);
     }
 
-    fn inbox_qa_turn(state: &mut State, stage: QaTurnState, work: Option<QaTurnStage>) {
+    fn inbox_qa_turn(
+        state: &mut State,
+        stage: QaTurnState,
+        work: Option<QaTurnStage>,
+        additional_finding: Option<QaFinding>,
+    ) {
         registered(state);
         state.seed_inbox_qa_drawer_fixture();
         state.backend_kind = BackendKind::Local;
         state.connection.origin = TextEdit::new("local://embedded");
-        let question = if stage == QaTurnState::Answered {
+        let question = if additional_finding.is_some() {
+            "Is actor search ready, and how much memory is in use?"
+        } else if stage == QaTurnState::Answered {
             "Is actor search ready now, and what is a search index?"
         } else {
             "Is actor search ready?"
@@ -694,9 +701,14 @@ mod native {
             turn.cursor = 3;
         }
         if stage == QaTurnState::Answered {
-            turn.reply = Some(
-                "A search index organizes data so matching records can be found quickly.".into(),
-            );
+            turn.reply = Some(if let Some(finding) = additional_finding {
+                let reply = format!("Actor search is ready. {}", finding.text);
+                turn.findings.push(finding);
+                turn.cursor += 1;
+                reply
+            } else {
+                "A search index organizes data so matching records can be found quickly.".into()
+            });
             turn.context = Some(QaContextUsage::new(
                 QaModelTarget::FlanT5Small.input_tokens(),
                 448,
@@ -719,6 +731,20 @@ mod native {
             QaSettings::new(true, QaPhase::Ready, 2, 1, true),
             Some(turn),
         );
+    }
+
+    fn inbox_qa_sources(state: &mut State) {
+        let text = "Workstation memory usage is 42%.";
+        let metric = QaFinding::new(
+            ChatSourceReference::new(ChatSourceKind::HostMetric, "memory".into())
+                .expect("fixture memory source"),
+            "Memory usage".into(),
+            text.into(),
+            0,
+            text.len() as u32,
+            "2026-01-01T00:00:01Z".into(),
+        );
+        inbox_qa_turn(state, QaTurnState::Answered, None, Some(metric));
     }
 
     fn triage_connection(state: &mut State, phase: QaPhase) {
@@ -1006,25 +1032,41 @@ mod native {
                 }),
                 ("inbox-qa-ready", inbox_qa_ready),
                 ("inbox-qa-pending", |state| {
-                    inbox_qa_turn(state, QaTurnState::Running, None);
+                    inbox_qa_turn(state, QaTurnState::Running, None, None);
                 }),
                 ("inbox-qa-working", |state| {
-                    inbox_qa_turn(state, QaTurnState::Running, Some(QaTurnStage::Working));
+                    inbox_qa_turn(
+                        state,
+                        QaTurnState::Running,
+                        Some(QaTurnStage::Working),
+                        None,
+                    );
                 }),
                 ("inbox-qa-thinking", |state| {
-                    inbox_qa_turn(state, QaTurnState::Running, Some(QaTurnStage::Thinking));
+                    inbox_qa_turn(
+                        state,
+                        QaTurnState::Running,
+                        Some(QaTurnStage::Thinking),
+                        None,
+                    );
                 }),
                 ("inbox-qa-writing", |state| {
-                    inbox_qa_turn(state, QaTurnState::Running, Some(QaTurnStage::Writing));
+                    inbox_qa_turn(
+                        state,
+                        QaTurnState::Running,
+                        Some(QaTurnStage::Writing),
+                        None,
+                    );
                 }),
                 ("inbox-qa-history-unavailable", |state| {
-                    inbox_qa_turn(state, QaTurnState::InsufficientContext, None);
+                    inbox_qa_turn(state, QaTurnState::InsufficientContext, None, None);
                 }),
                 ("inbox-qa-answered", |state| {
-                    inbox_qa_turn(state, QaTurnState::Answered, None);
+                    inbox_qa_turn(state, QaTurnState::Answered, None, None);
                 }),
+                ("inbox-qa-sources", inbox_qa_sources),
                 ("inbox-qa-stopped", |state| {
-                    inbox_qa_turn(state, QaTurnState::Canceled, None);
+                    inbox_qa_turn(state, QaTurnState::Canceled, None, None);
                 }),
                 ("inbox-qa-pack-missing", |state| {
                     inbox_qa_unavailable(state, QaAvailabilityReason::PackMissing);

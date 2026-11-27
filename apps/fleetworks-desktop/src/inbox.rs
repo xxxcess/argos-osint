@@ -625,6 +625,7 @@ impl State {
     }
 
     pub(crate) fn open_inbox_from(&mut self, trigger: &'static str) {
+        self.inbox_qa.reset_sources_view();
         self.inbox.open = true;
         self.inbox.focus_return = Some(trigger);
         self.inbox_qa.request_resume();
@@ -637,8 +638,15 @@ impl State {
     pub(crate) fn close_inbox(&mut self, tx: &mut Tx) {
         let trigger = self.inbox_focus_return();
         self.inbox.close();
+        self.inbox_qa.reset_sources_view();
         self.poll_activity_triage();
         tx.focus(trigger, tx.focus_visible());
+    }
+
+    pub(crate) fn dismiss_inbox(&mut self, tx: &mut Tx) {
+        if !self.dismiss_inbox_qa_sources(tx) {
+            self.close_inbox(tx);
+        }
     }
 
     /// Populate the Inbox with a compact synthetic notification and room for a QA exchange.
@@ -932,7 +940,7 @@ pub(crate) fn drawer(
             .role("dialog")
             .label("Inbox")
             .focus_return(state.inbox_focus_return())
-            .modal_tx(false, State::close_inbox)
+            .modal_tx(false, State::dismiss_inbox)
             .child(scrim)
             .child(
                 rune::row()

@@ -1423,7 +1423,7 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
     }
     if state.inbox.open {
         if event.key == Key::Escape {
-            state.close_inbox(tx);
+            state.dismiss_inbox(tx);
             return true;
         }
         return false;

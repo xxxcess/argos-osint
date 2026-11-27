@@ -156,6 +156,13 @@ pub static ASSISTANT_EXPLAIN: Icon = Icon {
     body: r#"<path d="M4.1 3.1h7.8A2.1 2.1 0 0 1 14 5.2v4.2a2.1 2.1 0 0 1-2.1 2.1H8l-3.1 2v-2h-.8A2.1 2.1 0 0 1 2 9.4V5.2a2.1 2.1 0 0 1 2.1-2.1Z" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/><path d="M8 4.75 8.65 6.55 10.45 7.2 8.65 7.85 8 9.65 7.35 7.85 5.55 7.2 7.35 6.55Z" fill="currentColor"/>"#,
 };
 
+/// Stacked references cited by an Assistant reply.
+pub static SOURCES: Icon = Icon {
+    name: "fw-sources",
+    view: 16.0,
+    body: r#"<path d="M11 4.6h1.1c.8 0 1.4.6 1.4 1.4v6.1c0 .8-.6 1.4-1.4 1.4H7.5" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/><rect x="2.5" y="2.5" width="8.5" height="9.2" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.35"/><path d="M5 5.5h3.5M5 8.4h2.4" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>"#,
+};
+
 /// Expanded record disclosure.
 pub static CHEVRON_DOWN: Icon = Icon {
     name: "fw-chevron-down",

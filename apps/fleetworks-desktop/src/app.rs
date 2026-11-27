@@ -87,7 +87,6 @@ use fleetworks_contracts::readiness::MaintenanceOperation;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Page {
     Seed,
-    Atlas,
     Brain,
     Tools,
     Models,
@@ -99,9 +98,8 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 5] = [
         Self::Seed,
-        Self::Atlas,
         Self::Brain,
         Self::Tools,
         Self::Models,
@@ -111,7 +109,6 @@ impl Page {
     pub fn title(self) -> &'static str {
         match self {
             Self::Seed => "Actor Maintenance",
-            Self::Atlas => "News Cycles",
             Self::Brain => "Brain Search",
             Self::Tools => "Tool Box",
             Self::Models => "Model Assignments",
@@ -125,7 +122,6 @@ impl Page {
     pub fn key(self) -> &'static str {
         match self {
             Self::Seed => "seed",
-            Self::Atlas => "atlas",
             Self::Brain => "brain",
             Self::Tools => "tools",
             Self::Models => "models",
@@ -140,7 +136,6 @@ impl Page {
     pub fn icon(self) -> &'static rune::Icon {
         match self {
             Self::Seed => &icons::SEED,
-            Self::Atlas => &icons::ATLAS,
             Self::Brain => &icons::BRAIN,
             Self::Tools => &icons::TOOLS,
             Self::Models => &icons::MODELS,
@@ -153,7 +148,6 @@ impl Page {
     pub fn summary_hint(self) -> &'static str {
         match self {
             Self::Seed => "Stage seeds, classifier runs & maintenance",
-            Self::Atlas => "Inspect news collection cycles & trigger runs",
             Self::Brain => "Search actors and inspect intelligence dossiers",
             Self::Tools => "Configure API tool providers & credentials",
             Self::Models => "Assign routing models & verify accounts",
@@ -167,7 +161,7 @@ impl Page {
     pub fn is_backend(self) -> bool {
         matches!(
             self,
-            Self::Seed | Self::Atlas | Self::Brain | Self::Tools | Self::Models | Self::Profile
+            Self::Seed | Self::Brain | Self::Tools | Self::Models | Self::Profile
         )
     }
 }
@@ -283,12 +277,9 @@ pub struct State {
     pub brain_facet: DossierFacet,
     pub selected_readiness: Option<String>,
     pub(crate) expanded_readiness: BTreeSet<ReadinessCheckId>,
-    pub selected_cycle_id: Option<String>,
-    pub confirm_cycle_delete: bool,
     pub confirm_maintenance_dialog: bool,
     pub pointer_offset: Live<[f32; 2]>,
     pub shadow_offset: Live<[f32; 2]>,
-    pub cycles: crate::workstation_dashboard::Cycles,
     pub host_metrics: Load<crate::workstation_dashboard::HostMetrics>,
     pub(crate) host_metrics_request: Option<RequestTask>,
     /// UI clock reading when `host_metrics` last succeeded.
@@ -338,7 +329,6 @@ pub struct State {
     pub(crate) jobs_discovery_at: f64,
     pub(crate) host_metrics_revision: u64,
     pub(crate) host_metrics_refresh_at: f64,
-    pub(crate) atlas_refresh_at: f64,
 }
 
 impl Default for State {
@@ -368,12 +358,9 @@ impl Default for State {
             brain_facet: DossierFacet::Overview,
             selected_readiness: None,
             expanded_readiness: BTreeSet::new(),
-            selected_cycle_id: None,
-            confirm_cycle_delete: false,
             confirm_maintenance_dialog: false,
             pointer_offset: Live::new([0.0, 0.0]),
             shadow_offset: Live::new([0.0, 0.0]),
-            cycles: crate::workstation_dashboard::Cycles::default(),
             host_metrics: Load::Idle,
             host_metrics_request: None,
             host_metrics_observed_at: None,
@@ -420,7 +407,6 @@ impl Default for State {
             jobs_discovery_at: 0.0,
             host_metrics_revision: 0,
             host_metrics_refresh_at: 0.0,
-            atlas_refresh_at: 0.0,
         }
     }
 }
@@ -459,13 +445,10 @@ impl State {
     }
 
     pub fn with_services(services: Arc<GatewayEffects>) -> Self {
-        let mut state = Self {
+        Self {
             services: Some(services),
             ..Self::default()
-        };
-        state.backend.article_day =
-            rune::TextEdit::new(chrono::Utc::now().format("%Y-%m-%d").to_string());
-        state
+        }
     }
 
     pub fn navigate(&mut self, page: Page) {
@@ -482,8 +465,6 @@ impl State {
         self.models_provider_dialog = false;
         self.models_role_dialog = false;
         self.selected_readiness = None;
-        self.selected_cycle_id = None;
-        self.confirm_cycle_delete = false;
         self.confirm_maintenance_dialog = false;
         self.page = if self.connected() || page == Page::Workstation {
             page
@@ -507,7 +488,6 @@ impl State {
         self.connection_request = None;
         self.host_metrics_request = None;
         self.host_metrics_revision = self.host_metrics_revision.wrapping_add(1);
-        self.cycles.invalidate();
         self.connection_profiles.cancel_tests();
         self.readiness_request = None;
         self.search_request = None;
@@ -680,11 +660,8 @@ impl State {
         self.host_metrics_observed_at = None;
         self.host_metrics_error = None;
         self.host_metrics_refresh_at = 0.0;
-        self.atlas_refresh_at = 0.0;
         self.brain = Brain::default();
         self.backend = Backend::default();
-        self.backend.article_day =
-            rune::TextEdit::new(chrono::Utc::now().format("%Y-%m-%d").to_string());
         self.maintenance = Maintenance::default();
         self.configuration = Configuration::default();
         self.transfer = Transfer::default();
@@ -966,20 +943,13 @@ impl State {
 
     pub(crate) fn has_active_confirmation(&self) -> bool {
         self.confirm_maintenance_dialog
-            || self.confirm_cycle_delete
             || self.maintenance.confirmation.is_some()
-            || self.cycles.confirmation.is_some()
             || self.configuration.confirmation.is_some()
             || self.job_actions.confirmation.is_some()
             || self.transfer.confirmation.is_some()
             || self.rebind.confirmation.is_some()
             || self.connection_profiles.confirmation.is_some()
             || self.workspaces.confirmation.is_some()
-            || self
-                .submissions
-                .lane(SubmissionKind::Atlas)
-                .confirmation
-                .is_some()
             || self
                 .submissions
                 .lane(SubmissionKind::Tool)
@@ -1073,23 +1043,6 @@ impl State {
             self.request_jobs(crate::jobs_query::JobsEvent::Poll);
         }
         self.sync_operational_logs_with_selected_job(false);
-    }
-
-    pub(crate) fn atlas_poll_active(&self) -> bool {
-        let lane = self
-            .submissions
-            .lane(crate::submission::SubmissionKind::Atlas);
-        if lane.busy() || lane.receipt.is_some() {
-            return true;
-        }
-        matches!(
-            &self.cycles.history,
-            Load::Ready(history)
-                if history
-                    .rows
-                    .iter()
-                    .any(|row| crate::backend::job_is_active(&row.state))
-        )
     }
 
     pub fn search_available(&self) -> bool {
@@ -1358,30 +1311,6 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
             changed = true;
         }
         tx.wake_after(Duration::from_secs(2));
-    }
-    if state.page == Page::Atlas
-        && !state.fixture
-        && state.connected()
-        && state.scoped_logs.window_focused
-        && state.registration.context.is_some()
-    {
-        if !state.setup_gateway && state.atlas_preflight_due() {
-            state.refresh_readiness();
-            changed = true;
-        }
-        // Active work is read quickly. Otherwise a slower, bounded read still discovers cycles
-        // admitted after this page loaded, including from an empty or finished-only page.
-        let interval = if state.atlas_poll_active() { 3.0 } else { 10.0 };
-        if now >= state.atlas_refresh_at && !state.cycles.busy() {
-            state.atlas_refresh_at = now + interval;
-            if matches!(state.cycles.history, Load::Ready(_)) {
-                state.poll_cycles();
-            } else {
-                state.refresh_cycles();
-            }
-            changed = true;
-        }
-        tx.wake_after(Duration::from_secs(1));
     }
     if let Some(key) = state.reveal.take() {
         tx.scroll_into_view(key);
@@ -2199,7 +2128,6 @@ fn context_rail(state: &State, kit: &rune_kit::Kit, connection_tone: StatusTone)
 fn sidebar_row_status(state: &State, page: Page) -> Option<RowStatus> {
     let busy = match page {
         Page::Seed => state.maintenance.busy(),
-        Page::Atlas => state.cycles.busy(),
         Page::Brain => state.brain.in_flight,
         Page::Tools => state.backend.busy(),
         Page::Models => state.configuration.request.is_some(),
@@ -2220,12 +2148,6 @@ pub(crate) fn sidebar_row_badge(state: &State, page: Page) -> Option<String> {
             .in_progress_count()
             .filter(|&count| count > 0)
             .map(|count| count.to_string()),
-        Page::Atlas => match &state.cycles.history {
-            Load::Ready(history) if !history.rows.is_empty() => {
-                Some(history.rows.len().to_string())
-            }
-            _ => None,
-        },
         _ => None,
     }
 }

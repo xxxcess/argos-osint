@@ -642,7 +642,7 @@ fn production_navigation_origin_and_disconnect_hooks_fence_log_reads_without_can
     );
     state.scoped_logs.set_following(true);
     let old = state.scoped_logs.follow().expect("visible follow");
-    state.navigate(crate::app::Page::Atlas);
+    state.navigate(crate::app::Page::Brain);
     assert!(!state.scoped_logs.following && !state.scoped_logs.busy());
     state.complete_scoped_logs(
         old,

@@ -11,21 +11,12 @@ use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::OriginSource;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::context::RegisteredContext;
-use fleetworks_contracts::readiness::AtlasCyclePreflight;
-use fleetworks_contracts::readiness::AtlasKeyPresence;
-use fleetworks_contracts::readiness::ReadinessState;
-use fleetworks_contracts::AtlasCycleReceipt;
-use fleetworks_contracts::AtlasCycleRequest;
 use fleetworks_contracts::Client;
 use fleetworks_contracts::ClientError;
 use fleetworks_contracts::ToolRunRequest;
-use fleetworks_contracts::ATLAS_CYCLES_PATH;
-use fleetworks_contracts::ATLAS_CYCLE_OPERATION;
 use fleetworks_contracts::JOB_DETAIL_PATH;
 use fleetworks_contracts::TOOL_RESULT_PATH;
 use fleetworks_contracts::TOOL_RUN_PATH;
-use fleetworks_workstation::native::BackendKind;
-use rune::Tx;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -40,31 +31,25 @@ use crate::platform;
 const MAX_INPUT_BYTES: usize = 12 * 1024;
 const MAX_RESULT_TEXT: usize = 16 * 1024;
 const TOOLS_OPERATION: &str = "manual_tool";
-pub(crate) const ATLAS_DISTRIBUTED_REQUIREMENT: &str =
-    "News cycles require a Distributed gateway with Atlas enabled.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SubmissionKind {
-    Atlas,
     Tool,
 }
 
 impl SubmissionKind {
     pub fn feature(self) -> &'static str {
         match self {
-            Self::Atlas => "atlas-cycles",
             Self::Tool => "tool-execution",
         }
     }
     pub fn operation(self) -> &'static str {
         match self {
-            Self::Atlas => ATLAS_CYCLE_OPERATION,
             Self::Tool => TOOLS_OPERATION,
         }
     }
     pub fn label(self) -> &'static str {
         match self {
-            Self::Atlas => "Atlas collection cycle",
             Self::Tool => "Tool execution",
         }
     }
@@ -74,22 +59,16 @@ impl SubmissionKind {
 /// or put it into fixture intents, traces or diagnostics.
 #[derive(Clone, PartialEq)]
 pub enum SubmissionInput {
-    Atlas,
     Tool { tool_id: String, inputs: Value },
 }
 
 impl SubmissionInput {
     pub fn kind(&self) -> SubmissionKind {
-        match self {
-            Self::Atlas => SubmissionKind::Atlas,
-            Self::Tool { .. } => SubmissionKind::Tool,
-        }
+        SubmissionKind::Tool
     }
-    pub fn tool_id(&self) -> Option<&str> {
-        match self {
-            Self::Tool { tool_id, .. } => Some(tool_id),
-            Self::Atlas => None,
-        }
+    pub fn tool_id(&self) -> &str {
+        let Self::Tool { tool_id, .. } = self;
+        tool_id
     }
 }
 
@@ -138,30 +117,23 @@ pub struct ToolReceipt {
 
 #[derive(Clone, Debug)]
 pub enum AcceptedReceipt {
-    Atlas(AtlasCycleReceipt),
     Tool(ToolReceipt),
 }
 
 impl AcceptedReceipt {
     pub fn kind(&self) -> SubmissionKind {
-        match self {
-            Self::Atlas(_) => SubmissionKind::Atlas,
-            Self::Tool(_) => SubmissionKind::Tool,
-        }
+        SubmissionKind::Tool
     }
     /// A missing optional Tools job reference is not a job claim. Its reported
     /// call identity is only a candidate for an exact authorized Jobs lookup.
     pub fn job_candidate(&self) -> &str {
-        match self {
-            Self::Atlas(receipt) => &receipt.job_id,
-            Self::Tool(receipt) => receipt.job_id.as_deref().unwrap_or(&receipt.call_id),
-        }
+        let Self::Tool(receipt) = self;
+        receipt.job_id.as_deref().unwrap_or(&receipt.call_id)
     }
     fn validate(&self) -> Result<(), String> {
         let opaque =
             |id: &str| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control);
         match self {
-            Self::Atlas(receipt) if opaque(&receipt.job_id) && opaque(&receipt.run_id) => Ok(()),
             Self::Tool(receipt)
                 if opaque(&receipt.call_id) && receipt.job_id.as_deref().is_none_or(opaque) =>
             {
@@ -408,110 +380,32 @@ impl SubmissionLane {
 
 #[derive(Default)]
 pub struct Submissions {
-    pub atlas: SubmissionLane,
     pub tools: SubmissionLane,
 }
 
 impl Submissions {
     pub fn lane(&self, kind: SubmissionKind) -> &SubmissionLane {
         match kind {
-            SubmissionKind::Atlas => &self.atlas,
             SubmissionKind::Tool => &self.tools,
         }
     }
     pub fn lane_mut(&mut self, kind: SubmissionKind) -> &mut SubmissionLane {
         match kind {
-            SubmissionKind::Atlas => &mut self.atlas,
             SubmissionKind::Tool => &mut self.tools,
         }
     }
     pub(crate) fn cancel_requests(&mut self) {
-        self.atlas.cancel_requests();
         self.tools.cancel_requests();
     }
     pub(crate) fn invalidate_origin(&mut self) {
-        self.atlas.invalidate_origin();
         self.tools.invalidate_origin();
     }
     pub(crate) fn invalidate_confirmations(&mut self) {
-        self.atlas.confirmation = None;
         self.tools.confirmation = None;
     }
 }
 
 impl State {
-    pub(crate) fn atlas_advertised(&self) -> bool {
-        !self.is_local_backend() && self.submission_feature_enabled(SubmissionKind::Atlas)
-    }
-
-    pub(crate) fn open_atlas_distributed_setup(&mut self, tx: &mut Tx) {
-        self.set_backend_kind(BackendKind::Remote);
-        if self.startup.active() {
-            self.setup_gateway = true;
-        } else {
-            self.open_connection_settings();
-        }
-        self.prefill_startup_distributed_url();
-        tx.scroll_into_view("gateway-origin");
-        tx.focus("gateway-origin", tx.by_keys());
-    }
-
-    fn reported_atlas_preflight(&self) -> Option<&AtlasCyclePreflight> {
-        crate::startup_data::scoped_readiness(self)?
-            .atlas_preflight
-            .as_ref()
-    }
-
-    pub(crate) fn atlas_preflight(&self) -> Option<&AtlasCyclePreflight> {
-        let received = self.readiness_received_at?;
-        let preflight = self.reported_atlas_preflight()?;
-        (self.clock >= received && (self.clock - received) * 1000.0 < preflight.fresh_for_ms as f64)
-            .then_some(preflight)
-    }
-
-    pub(crate) fn atlas_key_states(&self) -> [(&'static str, &'static str, AtlasKeyPresence); 4] {
-        use AtlasKeyPresence::Unchecked;
-
-        let current = self.atlas_preflight().filter(|preflight| {
-            preflight.configuration_revision.is_some()
-                && preflight.configuration_revision == self.configuration_revision()
-        });
-        [
-            (
-                "gnews",
-                "GNews",
-                current.map_or(Unchecked, |value| value.gnews),
-            ),
-            (
-                "newsdata",
-                "NewsData.io",
-                current.map_or(Unchecked, |value| value.newsdata),
-            ),
-            (
-                "newsapi",
-                "NewsAPI",
-                current.map_or(Unchecked, |value| value.newsapi),
-            ),
-            (
-                "currents",
-                "Currents",
-                current.map_or(Unchecked, |value| value.currents),
-            ),
-        ]
-    }
-
-    pub(crate) fn atlas_preflight_due(&self) -> bool {
-        self.atlas_advertised()
-            && self.permission(Permission::ReadBackend)
-            && !self.readiness_pending()
-            && self.clock >= self.readiness_refresh_at
-            && self.atlas_preflight().is_none()
-            && (self.reported_atlas_preflight().is_some()
-                || self
-                    .readiness_received_at
-                    .is_none_or(|at| self.clock >= at + 10.0))
-    }
-
     fn submission_feature_enabled(&self, kind: SubmissionKind) -> bool {
         self.connection
             .capabilities
@@ -524,41 +418,10 @@ impl State {
             })
     }
 
-    fn atlas_prerequisite_blocker(&self) -> Option<String> {
-        let Some(preflight) = self.atlas_preflight() else {
-            return Some("Refresh the Atlas prerequisite checks before creating a cycle".into());
-        };
-        if preflight.atlas_worker != ReadinessState::Ready {
-            return Some("Ask the gateway operator to check the Atlas worker".into());
-        }
-        if preflight.rust_bert != ReadinessState::Ready {
-            return Some(
-                "Ask the gateway operator to check the Rust-BERT worker and checkpoint".into(),
-            );
-        }
-        for (_, provider, status) in self.atlas_key_states() {
-            match status {
-                AtlasKeyPresence::Missing => {
-                    return Some(if self.permission(Permission::ManageConfiguration) {
-                        format!("Add a {provider} API key using Configure API keys")
-                    } else {
-                        format!("Ask the gateway operator to add a {provider} API key in Tool Box")
-                    })
-                }
-                AtlasKeyPresence::Saved => {}
-                _ => return Some(format!("Refresh the saved key check for {provider}")),
-            }
-        }
-        None
-    }
-
     pub fn interactive_draft_edited(&mut self, kind: SubmissionKind) {
         self.submissions.lane_mut(kind).confirmation = None;
     }
     pub fn submission_disabled_reason(&self, kind: SubmissionKind) -> Option<String> {
-        if kind == SubmissionKind::Atlas && self.is_local_backend() {
-            return Some(ATLAS_DISTRIBUTED_REQUIREMENT.into());
-        }
         if !self.permission(Permission::SubmitInteractive) {
             return Some("Interactive submission permission required".into());
         }
@@ -571,15 +434,7 @@ impl State {
             );
         }
         if !self.submission_feature_enabled(kind) {
-            return Some(
-                match kind {
-                    SubmissionKind::Atlas => "Ask the Distributed gateway operator to enable Atlas",
-                    SubmissionKind::Tool => {
-                        "This gateway has not enabled the required durable worker"
-                    }
-                }
-                .into(),
-            );
+            return Some("This gateway has not enabled the required durable worker".into());
         }
         let lane = self.submissions.lane(kind);
         if lane.busy() {
@@ -588,27 +443,18 @@ impl State {
         if lane.delivery_uncertain {
             return Some("Resolve the current uncertain outcome or retry its exact request before starting another".into());
         }
-        if kind == SubmissionKind::Atlas {
-            return self.atlas_prerequisite_blocker();
-        }
-        if kind == SubmissionKind::Tool {
-            let Load::Ready(catalog) = &self.backend.tools else {
-                return Some("Refresh the tool catalog before reviewing a run".into());
-            };
-            if self
-                .backend
-                .selected_tool
-                .as_ref()
-                .is_none_or(|selected| !catalog.tools.iter().any(|tool| &tool.id == selected))
-            {
-                return Some("Select a catalog tool before reviewing a run".into());
-            }
+        let Load::Ready(catalog) = &self.backend.tools else {
+            return Some("Refresh the tool catalog before reviewing a run".into());
+        };
+        if self
+            .backend
+            .selected_tool
+            .as_ref()
+            .is_none_or(|selected| !catalog.tools.iter().any(|tool| &tool.id == selected))
+        {
+            return Some("Select a catalog tool before reviewing a run".into());
         }
         None
-    }
-
-    pub fn preview_atlas_cycle(&mut self) {
-        self.preview_submission(SubmissionInput::Atlas);
     }
 
     pub fn preview_tool_run(&mut self) {
@@ -656,10 +502,7 @@ impl State {
             origin_revision: self.origin_revision,
             input,
         });
-        self.reveal_control(match kind {
-            SubmissionKind::Atlas => "atlas-submit-confirmation",
-            SubmissionKind::Tool => "tool-submit-confirmation",
-        });
+        self.reveal_control("tool-submit-confirmation");
     }
 
     fn submission_snapshot_current(&self, snapshot: &SubmissionSnapshot) -> bool {
@@ -914,9 +757,6 @@ impl State {
             lane.message = Some(error);
         }
         if self.submissions.lane(kind).receipt.is_some() {
-            if !self.fixture && kind == SubmissionKind::Atlas {
-                self.refresh_cycles();
-            }
             self.verify_submission(kind);
         }
     }
@@ -1008,7 +848,7 @@ impl State {
         let Some(context) = self.registration.context.clone() else {
             return;
         };
-        let tool_id = attempt.snapshot.input.tool_id().map(str::to_owned);
+        let tool_id = Some(attempt.snapshot.input.tool_id().to_owned());
         let (call_id, job_id) = match &lane.receipt {
             Some(AcceptedReceipt::Tool(receipt)) => {
                 (receipt.call_id.clone(), receipt.job_id.clone())
@@ -1233,32 +1073,16 @@ async fn post(
 ) -> Result<AcceptedReceipt, SubmissionFailure> {
     // The gateway must enforce these client preconditions while capturing the
     // actual configuration, before admission. They never assign server origin.
-    match &attempt.snapshot.input {
-        SubmissionInput::Atlas => {
-            let request = AtlasCycleRequest::new(attempt.request_id.clone())
-                .ok_or_else(|| SubmissionFailure::Rejected("Invalid request identity".into()))?;
-            client
-                .post(
-                    ATLAS_CYCLES_PATH,
-                    &request.with_context(attempt.mutation_context()),
-                )
-                .await
-                .map(AcceptedReceipt::Atlas)
-                .map_err(SubmissionFailure::from_client)
-        }
-        SubmissionInput::Tool { tool_id, inputs } => {
-            let request =
-                ToolRunRequest::new(attempt.request_id.clone(), tool_id.clone(), inputs.clone());
-            client
-                .post(
-                    TOOL_RUN_PATH,
-                    &request.with_context(attempt.mutation_context()),
-                )
-                .await
-                .map(AcceptedReceipt::Tool)
-                .map_err(SubmissionFailure::from_client)
-        }
-    }
+    let SubmissionInput::Tool { tool_id, inputs } = &attempt.snapshot.input;
+    let request = ToolRunRequest::new(attempt.request_id.clone(), tool_id.clone(), inputs.clone());
+    client
+        .post(
+            TOOL_RUN_PATH,
+            &request.with_context(attempt.mutation_context()),
+        )
+        .await
+        .map(AcceptedReceipt::Tool)
+        .map_err(SubmissionFailure::from_client)
 }
 
 fn format_tool_status(wire: ToolStatusWire) -> Result<ToolStatusView, String> {

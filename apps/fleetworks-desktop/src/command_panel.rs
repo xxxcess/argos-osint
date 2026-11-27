@@ -130,13 +130,10 @@ impl State {
     /// Whether any active page confirmation dialog is currently pending.
     /// Commands defers instead of layering over or dismissing pending confirmations.
     pub(crate) fn has_active_confirmation_dialog(&self) -> bool {
-        self.confirm_cycle_delete
-            || self.confirm_maintenance_dialog
-            || self.cycles.confirmation.is_some()
+        self.confirm_maintenance_dialog
             || self.maintenance.confirmation.is_some()
             || self.configuration.confirmation.is_some()
             || self.transfer.confirmation.is_some()
-            || self.submissions.atlas.confirmation.is_some()
             || self.submissions.tools.confirmation.is_some()
             || self.job_actions.confirmation.is_some()
             || self.workspaces.confirmation.is_some()
@@ -372,11 +369,12 @@ mod tests {
     }
 
     #[test]
-    fn connected_lists_every_destination_and_assistant_only_when_enabled() {
+    fn connected_lists_current_destinations_and_assistant_only_when_enabled() {
         let all = entries(true, false);
         for page in Page::ALL {
             assert!(all.iter().any(|entry| entry.command == Command::Go(page)));
         }
+        assert!(filter(all.clone(), "news cycles").is_empty());
         assert!(!labels(&all).contains(&"Show or hide Assistant"));
         assert!(labels(&entries(true, true)).contains(&"Show or hide Assistant"));
         assert!(!labels(&entries(false, true)).contains(&"Show or hide Assistant"));
@@ -445,18 +443,6 @@ mod tests {
         assert!(state.confirm_maintenance_dialog);
 
         state.confirm_maintenance_dialog = false;
-        state.confirm_cycle_delete = true;
-        state.open_command_panel();
-        assert!(!state.commands.open);
-        assert!(state.confirm_cycle_delete);
-
-        state.confirm_cycle_delete = false;
-        state.cycles.confirmation = Some("cycle-1".into());
-        state.open_command_panel();
-        assert!(!state.commands.open);
-        assert_eq!(state.cycles.confirmation.as_deref(), Some("cycle-1"));
-
-        state.cycles.confirmation = None;
         state.open_command_panel();
         assert!(state.commands.open);
     }

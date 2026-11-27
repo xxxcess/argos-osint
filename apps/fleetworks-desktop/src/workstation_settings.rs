@@ -1,8 +1,10 @@
 //! Workstation settings presented over the current native destination.
 
+use fleetworks_workstation::native::BackendKind;
 use rune::Cx;
 use rune::El;
 use rune::ScrollSpec;
+use rune::Tx;
 use rune_kit::Kit;
 
 use crate::accessibility::ViewPreferences;
@@ -63,6 +65,18 @@ impl State {
         self.setup_gateway = false;
         self.settings_section = SettingsSection::Connection;
         self.settings_open = true;
+    }
+
+    pub(crate) fn open_distributed_setup(&mut self, tx: &mut Tx) {
+        self.set_backend_kind(BackendKind::Remote);
+        if self.startup.active() {
+            self.setup_gateway = true;
+        } else {
+            self.open_connection_settings();
+        }
+        self.prefill_startup_distributed_url();
+        tx.scroll_into_view("gateway-origin");
+        tx.focus("gateway-origin", tx.by_keys());
     }
 
     /// Open Settings in the synthetic review session.

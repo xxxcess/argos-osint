@@ -59,8 +59,6 @@ mod native {
     use fleetworks_desktop::app::Load;
     use fleetworks_desktop::backend::AccountMetadata;
     use fleetworks_desktop::backend::ActivityJob;
-    use fleetworks_desktop::backend::Article;
-    use fleetworks_desktop::backend::ArticlePage;
     use fleetworks_desktop::backend::JobDetail;
     use fleetworks_desktop::backend::JobLogs;
     use fleetworks_desktop::backend::LogEntry;
@@ -252,25 +250,6 @@ mod native {
         .map(|role| (role, serde_json::json!({"primary":null,"fallbacks":[]})))
         .collect();
         serde_json::to_vec(&serde_json::json!({"schema_version":4,"accounts":{},"roles":roles,"tool_credentials":{}})).expect("synthetic portable fixture")
-    }
-
-    fn atlas_ready(state: &mut State) {
-        connected(state);
-        state.backend.article_day = TextEdit::new("2026-01-01");
-        state.backend.articles = Load::Ready(ArticlePage {
-            rows: vec![Article {
-                id: "synthetic-article".into(),
-                title: "Synthetic source report".into(),
-                description: "A bounded native article-list fixture.".into(),
-                source_name: "Fixture News".into(),
-                published_at: "2026-01-01T00:00:00Z".into(),
-                category: "pol".into(),
-                categories: vec!["pol".into(), "mil".into()],
-            }],
-            next_cursor: None,
-            revision: "synthetic-revision".into(),
-        });
-        state.page = Page::Atlas;
     }
 
     fn tools_ready(state: &mut State) {
@@ -581,13 +560,6 @@ mod native {
                 state.page = page;
             }
             Intent::BackendRead {
-                kind: ReadKind::Articles,
-            } => {
-                let page = state.page;
-                atlas_ready(state);
-                state.page = page;
-            }
-            Intent::BackendRead {
                 kind: ReadKind::Tools,
             } => {
                 let page = state.page;
@@ -871,6 +843,22 @@ mod native {
         });
     }
 
+    fn tool_provider_keys_matte(state: &mut State) {
+        review_appearance(
+            state,
+            redesign_scenes::tool_provider_keys,
+            ReviewAppearance::Matte,
+        );
+    }
+
+    fn tool_provider_keys_reduced_motion(state: &mut State) {
+        review_appearance(
+            state,
+            redesign_scenes::tool_provider_keys,
+            ReviewAppearance::ReducedMotion,
+        );
+    }
+
     pub fn run() {
         rune::run(AppSpec {
             init,
@@ -928,7 +916,6 @@ mod native {
                     "redesign-seed-confirmation",
                     redesign_scenes::seed_confirmation,
                 ),
-                ("redesign-cycles", redesign_scenes::cycles),
                 ("redesign-brain", redesign_scenes::brain),
                 ("redesign-tools", redesign_scenes::tools),
                 ("redesign-models", redesign_scenes::models),
@@ -1115,20 +1102,16 @@ mod native {
                         ReviewAppearance::ReducedMotion,
                     );
                 }),
-                ("atlas-provider-keys-matte", |state| {
-                    review_appearance(
-                        state,
-                        submission_scenes::atlas_provider_keys,
-                        ReviewAppearance::Matte,
-                    );
-                }),
-                ("atlas-provider-keys-reduced-motion", |state| {
-                    review_appearance(
-                        state,
-                        submission_scenes::atlas_provider_keys,
-                        ReviewAppearance::ReducedMotion,
-                    );
-                }),
+                ("tool-provider-keys-matte", tool_provider_keys_matte),
+                (
+                    "tool-provider-keys-reduced-motion",
+                    tool_provider_keys_reduced_motion,
+                ),
+                ("atlas-provider-keys-matte", tool_provider_keys_matte),
+                (
+                    "atlas-provider-keys-reduced-motion",
+                    tool_provider_keys_reduced_motion,
+                ),
                 ("workstation-settings-matte", |state| {
                     review_appearance(state, workstation_settings, ReviewAppearance::Matte);
                 }),
@@ -1164,20 +1147,15 @@ mod native {
                 ("workstation-offline", |state| {
                     state.page = Page::Workstation
                 }),
-                ("atlas-offline", |state| state.page = Page::Atlas),
-                ("atlas-articles-ready", atlas_ready),
+                // Existing workflow selectors capture supported native replacements.
+                ("atlas-offline", |state| state.page = Page::Workstation),
+                ("atlas-articles-ready", redesign_scenes::status),
                 (
                     "atlas-prerequisites",
-                    submission_scenes::atlas_prerequisites,
+                    readiness_scenes::inference_unverified,
                 ),
-                (
-                    "atlas-provider-keys",
-                    submission_scenes::atlas_provider_keys,
-                ),
-                ("atlas-submit-preview", submission_scenes::atlas_preview),
-                ("atlas-submit-accepted", submission_scenes::atlas_accepted),
-                ("atlas-submit-uncertain", submission_scenes::atlas_uncertain),
-                ("atlas-request-resolved", submission_scenes::atlas_resolved),
+                ("atlas-provider-keys", redesign_scenes::tool_provider_keys),
+                ("tool-provider-keys", redesign_scenes::tool_provider_keys),
                 ("brain-search-ready", brain_ready),
                 ("brain-dossier", brain_dossier),
                 ("brain-search-indexing", |state| {

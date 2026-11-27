@@ -14,12 +14,11 @@ Intel Web opens at `/connect`. **Bulletin** browses retained articles; **Focus B
 
 ## Native destinations
 
-[![Six destinations and the selected view](../../diagrams/native-workstation-layout.svg)](../../diagrams/native-workstation-layout.html)
+[![Five destinations and the selected view](../../diagrams/native-workstation-layout.svg)](../../diagrams/native-workstation-layout.html)
 
 | Surface | Use it for | Contract |
 | --- | --- | --- |
 | DB Seed & Train | Configured actor seed/index/Natural candidate triggers; no picker or activation | [Readiness and maintenance](../code/native-connections.md#readiness-and-maintenance) |
-| News Cycles | New Cycle, workstation history and association Delete; shared evidence/audit stays intact | [Atlas setup](../../../deploy/atlas-dispatch.md) |
 | Brain Search | One search field, bounded canonical results, selected dossier; no native graph | [Actor discovery](../code/actor-search.md) |
 | OSINT Tools | Service/provider cards and protected key modal; no manual tool execution | [Keys and choices](../code/native-connections.md#configuration-and-model-choices) |
 | Model Assignments | Configured provider keys, supported routing/variants and ordered fallbacks | [Providers](providers.md) |

@@ -22,7 +22,7 @@ The optional `native-github-dataset` build feature exposes the GitHub URL source
 
 On **Start Embedded Backend**, the embedded companion warms its bundled Compromise NLP engine when built with NLP support. That check measures the bundled engine. Atlas and Focus Brief depend on their own advertised services. The Atlas BERT inference check reflects the backend's configured and observed model. Operators manage Atlas models through the backend. The base Embedded connection remains available when an optional engine is unavailable. [Atlas classifier](classifier.md)
 
-News cycles require a Distributed gateway with Atlas enabled. Embedded Setup and News Cycles link to the Distributed connection flow. On a registered Atlas gateway, News Cycles checks the Atlas worker and Rust-BERT readiness before allowing a new cycle. Use **Configure API keys** to see the four sources and enter a primary or fallback key for each. Saved, missing, and unchecked statuses remain visible. A saved slot confirms presence. Missing keys also link to Tool Box. Jobs & Logs shows prerequisite failures returned by the worker. [Atlas deployment](../../../deploy/atlas-dispatch.md)
+News cycles run through the Distributed Atlas backend. In the desktop app, use **Tool Box** for provider keys, **Workstation Status** for reported classifier readiness, and **Jobs & Logs** for cycle jobs associated with the workstation. [Atlas deployment](../../../deploy/atlas-dispatch.md)
 
 If readiness expires while you review a validated CSV, the app keeps the dataset and review visible. Use **Refresh checks** in the review and confirm explicitly once the operation is available for the same registration and configuration revision. Changes to the backend context or configuration require a new review.
 

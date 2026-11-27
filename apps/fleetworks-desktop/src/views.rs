@@ -90,7 +90,7 @@ pub(crate) fn page(state: &State, cx: &mut Cx<State>, kit: &Kit, layers: &mut Ve
     match state.page {
         Page::Workstation | Page::Workspaces | Page::Profile => workstation(state, cx, kit, layers),
         Page::Brain => brain(state, cx, kit),
-        Page::Seed | Page::Jobs | Page::Atlas | Page::Tools | Page::Models => {
+        Page::Seed | Page::Jobs | Page::Tools | Page::Models => {
             let log_width = cx
                 .layout_size("scoped-logs-table")
                 .map(|size| size[0])
@@ -505,11 +505,7 @@ fn local_backend_setup_card(
         }
         actions = actions
             .child(stop_btn)
-            .child(crate::backend_views::switch_to_distributed(
-                state,
-                preferences,
-                kit,
-            ));
+            .child(switch_to_distributed(state, preferences, kit));
         body = body.child(actions);
     } else {
         let connecting = state.connection.status == ConnectionStatus::Connecting;
@@ -527,11 +523,7 @@ fn local_backend_setup_card(
             rune::row().w_full().gap(8.0)
         }
         .child(start_btn)
-        .child(crate::backend_views::switch_to_distributed(
-            state,
-            preferences,
-            kit,
-        ));
+        .child(switch_to_distributed(state, preferences, kit));
         body = body
             .child(actions)
             .child(binary_strip)
@@ -569,6 +561,16 @@ pub(crate) fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
     )
 }
 
+fn switch_to_distributed(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    ActionButton::new("Switch to Distributed")
+        .key("switch-remote-gateway")
+        .disabled(
+            state.connection.status == ConnectionStatus::Connecting || state.local_backend.stopping,
+        )
+        .on_press_tx(State::open_distributed_setup)
+        .build(kit, preferences, None)
+}
+
 pub(crate) fn setup_gateway_content(
     state: &State,
     kit: &Kit,
@@ -600,7 +602,7 @@ pub(crate) fn setup_gateway_content(
         &icons::KEY,
         "Setup Gateway",
         Some(if state.is_local_backend() {
-            crate::submission::ATLAS_DISTRIBUTED_REQUIREMENT
+            "Start the bundled companion to connect over a private local socket."
         } else if cfg!(target_os = "macos") {
             "Pair once via macOS Keychain. Accepted jobs persist independently."
         } else {

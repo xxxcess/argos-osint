@@ -706,55 +706,6 @@ pub(crate) fn skeleton_readiness_list(preferences: ViewPreferences, kit: &Kit) -
     list
 }
 
-/// Cycle history skeleton mirroring Atlas cycle tiles.
-pub(crate) fn skeleton_cycle_history(preferences: ViewPreferences, kit: &Kit) -> El {
-    let mut list = col()
-        .key("cycles-loading")
-        .role("status")
-        .label("Loading cycle history")
-        .w_full()
-        .gap(8.0);
-    for pill_w in [168.0, 156.0, 176.0, 162.0] {
-        let row_tile = row()
-            .w_full()
-            .padding(10.0)
-            .gap(8.0)
-            .center_y()
-            .child(material::skeleton_block(
-                None,
-                Some(7.0),
-                7.0,
-                999.0,
-                StatusTone::Info,
-                preferences,
-            ))
-            .child(material::skeleton_block(
-                None,
-                Some(pill_w),
-                28.0,
-                14.0,
-                StatusTone::Neutral,
-                preferences,
-            ))
-            .child(spacer())
-            .child(material::skeleton_block(
-                None,
-                Some(66.0),
-                22.0,
-                999.0,
-                StatusTone::Info,
-                preferences,
-            ));
-        list = list.child(skeleton_card_shell(
-            row_tile,
-            StatusTone::Neutral,
-            preferences,
-            kit,
-        ));
-    }
-    list
-}
-
 /// Actor search result list skeleton mirroring Brain hit tiles.
 pub(crate) fn skeleton_actor_results(preferences: ViewPreferences, kit: &Kit) -> El {
     let mut list = col()

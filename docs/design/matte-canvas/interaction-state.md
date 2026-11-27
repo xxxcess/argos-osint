@@ -25,7 +25,7 @@ Native paths below are under `apps/fleetworks-desktop/src/`.
 | `logs.rs::LogState::ticket` sets Loading for Follow; `backend_views::jobs` chooses a skeleton from `rows.is_empty() && busy()`. | Remember accepted empty snapshots. A successful empty log view remains settled while the next long poll runs. |
 | The Jobs view alternates keyed `logs-loading`/`logs-synced` strips; `async_status_strip` conditionally adds a progress row. | Use one stable section status slot. Do not replace keys, headings or height at each request boundary. |
 | `Brain::edited` assigns Pending, then `State::search_now` assigns Loading; `views::brain` changes debounce narration into a skeleton. | One unresolved results-shaped presentation through debounce and first fetch. New query identity still fences old results. |
-| Native `backend_views` renders Previous/Next/Page for Jobs and cycle history. `JobsQueryState` and `load_cycles_page` keep one visible page. | Continuous scrolling is the default long-list presentation; bounded cursor-backed loading appends or reconciles without replacing the reader's current window. |
+| Native `backend_views` loads Jobs through the bounded `JobsQueryState`. | Continuous scrolling is the default long-list presentation; bounded cursor-backed loading appends or reconciles without replacing the reader's current window. |
 | Web `packages/ui/src/Skeleton.tsx::Skeleton` loops opacity; `LoadingState` text owns no timer. | Replace the full-opacity pulse and correct consumer mount/state transitions. A CSS-only change cannot remove the JavaScript loop. |
 
 Preserve existing useful retention in host metrics, cycle reads, Jobs polls, matching selected-job detail and nonempty log follows. Surface the ordinary Jobs poll error retained in `scoped_jobs.message` while `JobsLoad::Ready`: the current Ready projection does not carry that stale explanation into the list. Preserve web cached refresh and generation-specific pending behavior.
@@ -77,9 +77,9 @@ Skeleton shapes are decorative and excluded from accessibility navigation. Expos
 
 ### Default and API boundary
 
-Long lists load continuously as the reader approaches their boundary. Remove **Previous**, **Next** and page-number UI from native Jobs/cycles; do not introduce those controls elsewhere. This changes client presentation, not the opaque API cursor protocol. Reuse server ordering and exact returned cursors; never decode them into offsets, invent page arithmetic on the wire or widen authorization to complete a view.
+Long lists load continuously as the reader approaches their boundary. Native Jobs uses continuous scrolling over the existing opaque API cursors. Reuse server ordering and exact returned cursors; never decode them into offsets, invent page arithmetic on the wire or widen authorization to complete a view.
 
-Current native contracts include `jobs_query::PAGE_SIZE = 50`, `HISTORY_LIMIT = 64`, a 40-row cycle read in `State::load_cycles_page`, and `logs::DISPLAY_LIMIT = 500` with 100-row pages. Preserve response validation and existing hard guards unless a separate bounded-contract change is explicitly implemented and verified. Continuous scrolling does not authorize unbounded retention or a claim to show every record.
+Current native contracts include `jobs_query::PAGE_SIZE = 50`, `HISTORY_LIMIT = 64`, and `logs::DISPLAY_LIMIT = 500` with 100-row pages. Preserve response validation and existing hard guards unless a separate bounded-contract change is explicitly implemented and verified. Continuous scrolling does not authorize unbounded retention or a claim to show every record.
 
 ### Admission, accumulation and recovery
 

@@ -1,10 +1,8 @@
 //! Allowlisted backend operation cards and workstation-scoped activity.
 
 use fleetworks_contracts::context::Permission;
-use fleetworks_contracts::readiness::AtlasKeyPresence;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::MaintenanceOperation;
-use fleetworks_contracts::readiness::ReadinessState;
 use rune::Cx;
 use rune::El;
 use rune::Key;
@@ -25,16 +23,12 @@ use crate::app::ModelsTab;
 use crate::app::Page;
 use crate::app::SeedStage;
 use crate::app::State;
-use crate::backend::ReadRequest;
 use crate::icons;
 use crate::job_actions::JobAction;
 use crate::logs::LogStatus;
 use crate::maintenance;
 use crate::material;
 use crate::material::MetalFinish;
-use crate::submission::AcceptedReceipt;
-use crate::submission::SubmissionKind;
-use crate::submission::SubmissionPhase;
 use crate::theme;
 use crate::theme::StatusTone;
 use crate::ui_components;
@@ -163,635 +157,11 @@ pub(crate) fn page(
         .for_view(state.fixture, cx.is_reduced_motion());
     match state.page {
         Page::Seed => scroll(maintenance(state, preferences, kit, layers), "seed-body"),
-        Page::Atlas => atlas(state, preferences, kit, layers),
         Page::Tools => tools(state, cx, preferences, kit, layers),
         Page::Models => models(state, cx, preferences, kit, layers),
         Page::Jobs => jobs(state, preferences, kit, log_width),
         _ => rune::col(),
     }
-}
-
-fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Vec<El>) -> El {
-    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
-    let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
-    let lane = state.submissions.lane(SubmissionKind::Atlas);
-    let reason = state.submission_disabled_reason(SubmissionKind::Atlas);
-    let unresolved = lane.attempt.is_some() && lane.receipt.is_none();
-
-    let count_badge = match &state.cycles.history {
-        Load::Ready(cycles) => Some(ui_components::status_pill(
-            format!("{} cycles", cycles.rows.len()),
-            None,
-            StatusTone::Info,
-            kit,
-        )),
-        _ => None,
-    };
-
-    let trigger = ActionButton::new(if unresolved {
-        "Resolve pending cycle"
-    } else {
-        "New Cycle"
-    })
-    .key("atlas-submit-preview")
-    .icon(if unresolved {
-        &icons::REFRESH
-    } else {
-        &icons::PLUS
-    })
-    .finish(MetalFinish::GoldCta)
-    .busy(lane.busy())
-    .disabled(if unresolved {
-        !state.permission(Permission::ReadWorkstationActivity)
-    } else {
-        reason.is_some()
-    })
-    .on_press(|state: &mut State| {
-        if state
-            .submissions
-            .lane(SubmissionKind::Atlas)
-            .attempt
-            .is_some()
-            && state
-                .submissions
-                .lane(SubmissionKind::Atlas)
-                .receipt
-                .is_none()
-        {
-            state.resolve_submission(SubmissionKind::Atlas);
-        } else {
-            state.preview_atlas_cycle();
-        }
-    })
-    .build(kit, preferences, pointer_ref);
-
-    let mut action = rune::col().gap(8.0).child(ui_components::section_header(
-        &icons::ATLAS,
-        "News Cycles",
-        None,
-        count_badge,
-        None,
-        kit,
-    ));
-
-    if state.atlas_advertised() {
-        action = action.child(atlas_prerequisites(state, preferences, kit));
-        tool_key_dialog(state, preferences, kit, layers);
-    }
-    if let Some(reason) = &reason {
-        action = action.child(quiet(reason.as_str(), kit));
-    }
-    if state.is_local_backend() {
-        action = action.child(
-            ActionButton::new("Set up Distributed")
-                .key("atlas-open-distributed-setup")
-                .on_press_tx(|state: &mut State, tx| {
-                    state.open_connection_settings();
-                    tx.scroll_into_view("switch-remote-gateway");
-                    tx.focus("switch-remote-gateway", tx.by_keys());
-                })
-                .build(kit, preferences, None),
-        );
-    }
-    action = action.child(rune::row().child(trigger));
-    if !lane.busy() {
-        if let Some(snapshot) = &lane.confirmation {
-            action = action.child(material::glass_panel(
-                rune::col()
-                    .gap(8.0)
-                    .padding(12.0)
-                    .radius(8.0)
-                    .key("atlas-submit-confirmation")
-                    .child(heading("Confirm New Cycle", kit))
-                    .child(quiet(
-                        format!("Configuration revision {}", snapshot.configuration_revision),
-                        kit,
-                    ))
-                    .child(quiet(
-                        "Queue one collection cycle. Acceptance means queued; only the gateway can report completion.",
-                        kit,
-                    ))
-                    .child(
-                        rune::row()
-                            .gap(8.0)
-                            .child(
-                                ActionButton::new("Confirm New Cycle")
-                                    .key("atlas-submit-confirm")
-                                    .icon(&icons::ATLAS)
-                                    .finish(MetalFinish::FracturedConfirm)
-                                    .disabled(reason.is_some())
-                                    .on_press(|state: &mut State| {
-                                        state.confirm_submission(SubmissionKind::Atlas)
-                                    })
-                                    .build(kit, preferences, pointer_ref),
-                            )
-                            .child(
-                                ActionButton::new("Keep current cycles")
-                                    .finish(MetalFinish::Gunmetal)
-                                    .on_press(|state: &mut State| {
-                                        state.submissions.lane_mut(SubmissionKind::Atlas).confirmation =
-                                            None
-                                    })
-                                    .build(kit, preferences, pointer_ref),
-                            ),
-                    ),
-                preferences,
-            ));
-        }
-    }
-    let status = match lane.phase {
-        SubmissionPhase::Preparing => Some("Preparing the durable cycle request…"),
-        SubmissionPhase::Posting => Some("Waiting for the gateway acceptance receipt…"),
-        SubmissionPhase::OutcomeUnknown => Some(
-            "Delivery is uncertain. The original request is retained; resolving it does not submit a replacement cycle.",
-        ),
-        _ => None,
-    };
-    if let Some(status) = status {
-        action = action.child(ui_components::async_status_strip(
-            "atlas-phase-status",
-            "Submitting cycle",
-            status,
-            true,
-            StatusTone::Accent,
-            preferences,
-            kit,
-        ));
-    }
-    if let Some(AcceptedReceipt::Atlas(receipt)) = &lane.receipt {
-        let matched_cycle = match &state.cycles.history {
-            Load::Ready(cycles) => cycles
-                .rows
-                .iter()
-                .find(|cycle| cycle.job_id == receipt.job_id || cycle.run_id == receipt.run_id),
-            _ => None,
-        };
-        let (receipt_title, receipt_detail, receipt_tone) = match matched_cycle {
-            Some(cycle) if !crate::backend::job_is_active(&cycle.state) => {
-                let detail = match (cycle.article_count, &cycle.finished_at) {
-                    (Some(count), _) => format!("Job {} · {count} articles", receipt.job_id),
-                    (None, Some(finished)) => {
-                        format!("Job {} · Finished {finished}", receipt.job_id)
-                    }
-                    (None, None) => format!("Job {} · {}", receipt.job_id, cycle.state),
-                };
-                (
-                    format!("Cycle {} · {}", receipt.run_id, cycle.state),
-                    detail,
-                    state_tone(&cycle.state),
-                )
-            }
-            Some(cycle) => (
-                format!("Cycle {} · {}", receipt.run_id, cycle.state),
-                format!("Job {} · Completion pending", receipt.job_id),
-                state_tone(&cycle.state),
-            ),
-            None => (
-                format!("Accepted cycle {}", receipt.run_id),
-                format!("Job {} · Completion pending", receipt.job_id),
-                StatusTone::Ok,
-            ),
-        };
-        action = action.child(
-            ui_components::async_status_strip(
-                "atlas-receipt",
-                receipt_title,
-                receipt_detail,
-                false,
-                receipt_tone,
-                preferences,
-                kit,
-            )
-            .role("status"),
-        );
-    }
-    if !matches!(lane.resolution, Load::Idle) {
-        if let Some(message) = load_message(&lane.resolution, "", preferences, kit) {
-            action = action.child(message);
-        }
-    }
-    if let Some(message) = &lane.message {
-        action = action.child(line(message.clone(), kit).role("status"));
-    }
-
-    let cycles_unsynced = state.cycles.read_error.as_ref().map(|error| {
-        crate::views::unsynced_glyph(
-            "cycles-unsynced",
-            format!("Cycle history unsynced · {error}"),
-            kit,
-        )
-    });
-    let cycles_retry = (state.cycles.read_error.is_some()
-        || matches!(state.cycles.history, Load::Failed(_)))
-    .then(|| {
-        ActionButton::new("Retry")
-            .key("cycles-history-retry")
-            .icon(&icons::REFRESH)
-            .finish(MetalFinish::Gunmetal)
-            .busy(state.cycles.busy())
-            .disabled(!state.connected() || state.cycles.busy())
-            .on_press(|state: &mut State| state.refresh_cycles())
-            .build(kit, preferences, pointer_ref)
-    });
-    let mut history = rune::col().child(ui_components::section_header(
-        &icons::JOBS,
-        "Cycle history",
-        Some("Select any cycle to expand run metadata or history removal"),
-        cycles_unsynced,
-        cycles_retry,
-        kit,
-    ));
-    if let Some(message) = list_load_or_skeleton(
-        &state.cycles.history,
-        "Cycle history has not been observed.",
-        ui_components::skeleton_cycle_history(preferences, kit),
-        preferences,
-        kit,
-    ) {
-        history = history.child(message);
-    }
-    if let Load::Ready(cycles) = &state.cycles.history {
-        if cycles.rows.is_empty() {
-            history = history.child(quiet(
-                "No cycles are associated with this workstation.",
-                kit,
-            ));
-        }
-        for cycle in &cycles.rows {
-            let id = cycle.job_id.clone();
-            let modal_id = cycle.job_id.clone();
-            let selected = state.cycles.selected.as_deref() == Some(cycle.job_id.as_str());
-            let tone = state_tone(&cycle.state);
-
-            let mut row_content = rune::col().padding(10.0).gap(6.0).child(
-                rune::row()
-                    .w_full()
-                    .center_y()
-                    .gap(8.0)
-                    .child(ui_components::status_dot(tone, preferences))
-                    .child(
-                        ActionButton::new(format!("{} · {}", cycle.created_at, cycle.state))
-                            .key(format!("cycle-select-{}", cycle.job_id))
-                            .finish(if selected {
-                                MetalFinish::GoldCta
-                            } else {
-                                MetalFinish::ObsidianPill
-                            })
-                            .on_press(move |state: &mut State| state.select_cycle(&id))
-                            .build(kit, preferences, pointer_ref),
-                    )
-                    .child(rune::spacer())
-                    .child(ui_components::status_pill(
-                        cycle.state.clone(),
-                        None,
-                        tone,
-                        kit,
-                    )),
-            );
-            if selected {
-                row_content = row_content
-                    .child(quiet(
-                        format!(
-                            "Run {} · articles {}",
-                            cycle.run_id,
-                            cycle
-                                .article_count
-                                .map_or("unavailable".into(), |count| count.to_string())
-                        ),
-                        kit,
-                    ))
-                    .children(
-                        cycle
-                            .finished_at
-                            .as_ref()
-                            .map(|finished| quiet(format!("Finished {finished}"), kit)),
-                    )
-                    .child(
-                        rune::row()
-                            .gap(8.0)
-                            .child(
-                                ActionButton::new("Inspect summary")
-                                    .finish(MetalFinish::Gunmetal)
-                                    .on_press(move |state: &mut State| {
-                                        state.selected_cycle_id = Some(modal_id.clone());
-                                    })
-                                    .build(kit, preferences, pointer_ref),
-                            )
-                            .child(
-                                ActionButton::new("Delete cycle history…")
-                                    .key("cycle-delete-preview")
-                                    .icon(&icons::TRASH)
-                                    .finish(MetalFinish::CrimsonDanger)
-                                    .disabled(state.cycle_deletion_disabled_reason().is_some())
-                                    .on_press(|state: &mut State| state.preview_delete_cycle())
-                                    .build(kit, preferences, pointer_ref),
-                            ),
-                    );
-                if let Some(reason) = state.cycle_deletion_disabled_reason() {
-                    row_content = row_content.child(quiet(reason, kit));
-                }
-            }
-            history = history.child(
-                material::interactive_tile(
-                    row_content,
-                    selected,
-                    tone,
-                    preferences,
-                    pointer_ref,
-                    shadow_ref,
-                )
-                .key(format!("cycle-{}", cycle.job_id)),
-            );
-        }
-        history = history.child(cycles_tail(
-            state,
-            cycles.rows.len(),
-            kit,
-            preferences,
-            pointer_ref,
-        ));
-
-        if let Some(active_id) = &state.selected_cycle_id {
-            if let Some(cycle) = cycles.rows.iter().find(|c| c.job_id == *active_id) {
-                let detail = rune::col()
-                    .gap(8.0)
-                    .child(line(format!("Run ID: {}", cycle.run_id), kit))
-                    .child(line(format!("Job ID: {}", cycle.job_id), kit))
-                    .child(quiet(format!("Created: {}", cycle.created_at), kit))
-                    .children(
-                        cycle
-                            .finished_at
-                            .as_ref()
-                            .map(|finished| quiet(format!("Finished: {finished}"), kit)),
-                    )
-                    .child(quiet(
-                        format!(
-                            "Articles collected: {}",
-                            cycle
-                                .article_count
-                                .map_or("unavailable".into(), |count| count.to_string())
-                        ),
-                        kit,
-                    ));
-                ui_components::modal_prompt(
-                    "cycle-inspector",
-                    format!("Cycle {}", cycle.run_id),
-                    format!("State: {}", cycle.state),
-                    true,
-                    460.0,
-                    |state: &mut State| state.selected_cycle_id = None,
-                    detail,
-                    Some(
-                        ActionButton::new("Close")
-                            .finish(MetalFinish::GoldCta)
-                            .on_press(|state: &mut State| state.selected_cycle_id = None)
-                            .build(kit, preferences, pointer_ref),
-                    ),
-                    kit,
-                    layers,
-                );
-            }
-        }
-    }
-    if let Some(id) = &state.cycles.confirmation {
-        history = history.child(
-            rune::col()
-                .padding(12.0)
-                .gap(8.0)
-                .radius(8.0)
-                .fill(theme::hex(theme::STATUS_ERR_BG))
-                .border(1.0, theme::hex(theme::STATUS_ERR_BORDER))
-                .key("cycle-delete-confirmation")
-                .child(heading("Delete this cycle from workstation history?", kit))
-                .child(quiet(
-                    format!(
-                        "Job {id}. Shared articles, evidence and durable job audit remain intact. This does not cancel the cycle."
-                    ),
-                    kit,
-                ))
-                .child(
-                    rune::row()
-                        .gap(8.0)
-                        .child(
-                            ActionButton::new("Delete from history")
-                                .key("cycle-delete-confirm")
-                                .icon(&icons::TRASH)
-                                .finish(MetalFinish::FracturedDanger)
-                                .busy(matches!(state.cycles.deletion, Load::Loading))
-                                .on_press(|state: &mut State| state.confirm_delete_cycle())
-                                .build(kit, preferences, pointer_ref),
-                        )
-                        .child(
-                            ActionButton::new("Keep cycle history")
-                                .finish(MetalFinish::Gunmetal)
-                                .on_press(|state: &mut State| state.cycles.confirmation = None)
-                                .build(kit, preferences, pointer_ref),
-                        ),
-                ),
-        );
-    }
-    if !matches!(state.cycles.deletion, Load::Idle) {
-        if let Some(message) = load_message(&state.cycles.deletion, "", preferences, kit) {
-            history = history.child(message);
-        }
-    }
-    if matches!(state.cycles.deletion, Load::Failed(_)) {
-        history = history.child(
-            ActionButton::new("Resolve pending deletion")
-                .key("cycle-delete-resolve")
-                .finish(MetalFinish::Gunmetal)
-                .on_press(|state: &mut State| state.confirm_delete_cycle())
-                .build(kit, preferences, pointer_ref),
-        );
-    }
-    if let Load::Ready(receipt) = &state.cycles.deletion {
-        history = history.child(quiet(
-            if receipt.hidden {
-                "Cycle hidden from this workstation's history."
-            } else {
-                "The gateway did not report the cycle as hidden."
-            },
-            kit,
-        ));
-    }
-    if let Some(message) = &state.cycles.message {
-        history = history.child(line(message.clone(), kit).role("status"));
-    }
-    scroll(
-        rune::col()
-            .gap(14.0)
-            .child(card(state, preferences, StatusTone::Accent, action))
-            .child(card(state, preferences, StatusTone::Info, history)),
-        "atlas-body",
-    )
-}
-
-pub(crate) fn switch_to_distributed(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
-    ActionButton::new("Switch to Distributed")
-        .key("switch-remote-gateway")
-        .disabled(
-            state.connection.status == crate::connection::ConnectionStatus::Connecting
-                || state.local_backend.stopping,
-        )
-        .on_press_tx(State::open_atlas_distributed_setup)
-        .build(kit, preferences, None)
-}
-
-fn atlas_prerequisites(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
-    let preflight = state.atlas_preflight();
-    let mut checks = rune::col()
-        .key("atlas-prerequisites")
-        .gap(4.0)
-        .w_full()
-        .child(ui_components::section_header(
-            &icons::SHIELD_CHECK,
-            "Cycle prerequisites",
-            None,
-            None,
-            Some(
-                rune::row()
-                    .gap(6.0)
-                    .center_y()
-                    .child(
-                        ActionButton::new("Configure API keys")
-                            .key("atlas-configure-provider-keys")
-                            .icon(&icons::KEY)
-                            .finish(MetalFinish::ObsidianPill)
-                            .disabled(!can_configure_atlas_keys(state))
-                            .on_press(|state: &mut State| {
-                                if !can_configure_atlas_keys(state) {
-                                    return;
-                                }
-                                reset_tool_key_editor(state);
-                                state.tool_key_dialog = true;
-                                state.submissions.atlas.confirmation = None;
-                                state.backend_read(ReadRequest::Profile);
-                            })
-                            .build(kit, preferences, None),
-                    )
-                    .child(
-                        ActionButton::new("Refresh checks")
-                            .key("atlas-preflight-refresh")
-                            .icon(&icons::REFRESH)
-                            .finish(MetalFinish::ObsidianPill)
-                            .disabled(
-                                !state.permission(Permission::ReadBackend)
-                                    || state.readiness_pending(),
-                            )
-                            .on_press(|state: &mut State| state.refresh_readiness())
-                            .build(kit, preferences, None),
-                    ),
-            ),
-            kit,
-        ));
-
-    for (id, label, observed, ready_label) in [
-        (
-            "atlas-worker",
-            "Atlas worker",
-            preflight.map(|report| report.atlas_worker),
-            "Available",
-        ),
-        (
-            "rust-bert",
-            "Rust-BERT worker and checkpoint",
-            preflight.map(|report| report.rust_bert),
-            if preflight.is_some_and(|report| report.rust_bert_verified) {
-                "Verified"
-            } else {
-                "Checkpoint available"
-            },
-        ),
-    ] {
-        let (status, tone) = match observed {
-            Some(ReadinessState::Ready) => (ready_label, StatusTone::Ok),
-            Some(ReadinessState::Running) => ("Checking", StatusTone::Info),
-            Some(ReadinessState::NotReady | ReadinessState::Degraded) => {
-                ("Not ready", StatusTone::Warn)
-            }
-            Some(ReadinessState::Unavailable | ReadinessState::NotApplicable) => {
-                ("Unavailable", StatusTone::Neutral)
-            }
-            _ => ("Unchecked", StatusTone::Neutral),
-        };
-        checks = checks.child(atlas_check_row(id, label, status, tone, None, kit));
-    }
-
-    let keys = state.atlas_key_states();
-    let mut have_saved_key = false;
-    for (provider, label, presence) in keys {
-        let (status, tone) = atlas_key_status(presence);
-        have_saved_key |= presence == AtlasKeyPresence::Saved;
-        let action = (presence == AtlasKeyPresence::Missing).then(|| {
-            ActionButton::new("Tool Box")
-                .key(format!("atlas-key-open-{provider}"))
-                .finish(MetalFinish::ObsidianPill)
-                .on_press(move |state: &mut State| {
-                    state.navigate(Page::Tools);
-                    open_tool_credential_editor(state, provider);
-                })
-                .build(kit, preferences, None)
-                .label(format!("Configure the {label} API key in Tool Box"))
-        });
-        checks = checks.child(atlas_check_row(provider, label, status, tone, action, kit));
-    }
-    if have_saved_key {
-        checks = checks.child(quiet("Saved keys still need provider authentication.", kit));
-    }
-    checks
-}
-
-fn atlas_key_status(presence: AtlasKeyPresence) -> (&'static str, StatusTone) {
-    match presence {
-        AtlasKeyPresence::Missing => ("Missing key", StatusTone::Warn),
-        AtlasKeyPresence::Saved => ("Key saved", StatusTone::Neutral),
-        _ => ("Unchecked", StatusTone::Neutral),
-    }
-}
-
-fn atlas_check_row(
-    id: &str,
-    name: &str,
-    status: &str,
-    tone: StatusTone,
-    action: Option<El>,
-    kit: &Kit,
-) -> El {
-    rune::row()
-        .key(format!("atlas-check-{id}"))
-        .w_full()
-        .min_w(0.0)
-        .flex_wrap()
-        .center_y()
-        .gap(6.0)
-        .child(line(name, kit).grow(1.0).min_w(0.0))
-        .child(ui_components::status_pill(status, None, tone, kit))
-        .children(action)
-}
-
-fn can_configure_atlas_keys(state: &State) -> bool {
-    state.page == Page::Atlas
-        && state.atlas_advertised()
-        && state.connected()
-        && state.registration.context.is_some()
-        && state.permission(Permission::ManageConfiguration)
-        && !matches!(state.configuration.result, Load::Loading)
-}
-
-fn current_tool_credential_slot<'a>(
-    state: &'a State,
-    provider: &str,
-) -> Option<&'a crate::backend::ToolCredentialMetadata> {
-    let Load::Ready(profile) = &state.backend.profile else {
-        return None;
-    };
-    if state.configuration_revision() != Some(profile.configuration_revision) {
-        return None;
-    }
-    profile
-        .tool_credentials
-        .iter()
-        .find(|slot| slot.provider == provider)
 }
 
 fn reset_tool_key_editor(state: &mut State) {
@@ -805,15 +175,7 @@ fn reset_tool_key_editor(state: &mut State) {
 }
 
 fn open_tool_credential_editor(state: &mut State, provider: &str) {
-    let available = match state.page {
-        Page::Tools => state.permission(Permission::ManageConfiguration),
-        Page::Atlas => {
-            can_configure_atlas_keys(state)
-                && current_tool_credential_slot(state, provider).is_some()
-        }
-        _ => false,
-    };
-    if !available {
+    if state.page != Page::Tools || !state.permission(Permission::ManageConfiguration) {
         return;
     }
     reset_tool_key_editor(state);
@@ -1035,29 +397,14 @@ fn tool_key_dialog(state: &State, preferences: ViewPreferences, kit: &Kit, layer
     if !state.tool_key_dialog {
         return;
     }
-    let atlas = state.page == Page::Atlas;
-    let provider = state.configuration.tool_provider.text.as_str();
-    let editing = !provider.is_empty();
-    let title = if atlas {
-        "Atlas provider keys".into()
-    } else {
-        format!("{provider} API keys")
-    };
-    let editor = if atlas && !editing {
-        atlas_key_sources(state, preferences, kit)
-    } else {
-        tool_key_editor(state, atlas, provider, preferences, kit)
-    };
+    let provider = &state.configuration.tool_provider.text;
+    let title = format!("{provider} API keys");
     layers.extend(ui_components::glass_dialog(
         "tool-api-key",
         &title,
         480.0,
         rune::col()
-            .key(if editing {
-                "provider-key-editor"
-            } else {
-                "atlas-key-sources"
-            })
+            .key("provider-key-editor")
             .w_full()
             .max_h(316.0)
             .min_h(0.0)
@@ -1066,7 +413,7 @@ fn tool_key_dialog(state: &State, preferences: ViewPreferences, kit: &Kit, layer
             })
             .padding(16.0)
             .gap(12.0)
-            .child(editor)
+            .child(tool_key_editor(state, preferences, kit))
             .child(configuration_status(state, preferences, kit)),
         false,
         |state: &mut State| {
@@ -1078,93 +425,9 @@ fn tool_key_dialog(state: &State, preferences: ViewPreferences, kit: &Kit, layer
     ));
 }
 
-fn atlas_key_sources(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
-    let mut body = rune::col().gap(6.0).child(quiet(
-        "Save a primary or fallback key for each source. Saved keys still need provider authentication.",
-        kit,
-    ));
-    for (provider, label, presence) in state.atlas_key_states() {
-        let (status, tone) = atlas_key_status(presence);
-        let editor = ActionButton::new("Edit key")
-            .key(format!("atlas-key-edit-{provider}"))
-            .finish(MetalFinish::ObsidianPill)
-            .disabled(
-                !can_configure_atlas_keys(state)
-                    || current_tool_credential_slot(state, provider).is_none(),
-            )
-            .on_press(move |state: &mut State| open_tool_credential_editor(state, provider))
-            .build(kit, preferences, None)
-            .label(format!("Edit {label} API keys"));
-        body = body.child(atlas_check_row(
-            &format!("source-{provider}"),
-            label,
-            status,
-            tone,
-            Some(editor),
-            kit,
-        ));
-    }
-    if let Some(message) = load_message(
-        &state.backend.profile,
-        "Saved provider slots have not been loaded.",
-        preferences,
-        kit,
-    ) {
-        body = body.child(message);
-    }
-    if !matches!(state.backend.profile, Load::Loading | Load::Pending)
-        && state
-            .atlas_key_states()
-            .iter()
-            .any(|(provider, _, _)| current_tool_credential_slot(state, provider).is_none())
-    {
-        body = body.child(
-            ActionButton::new("Refresh provider slots")
-                .key("atlas-key-refresh-slots")
-                .on_press(|state: &mut State| state.backend_read(ReadRequest::Profile))
-                .build(kit, preferences, None),
-        );
-    }
-    body
-}
-
-fn tool_key_editor(
-    state: &State,
-    atlas: bool,
-    provider: &str,
-    preferences: ViewPreferences,
-    kit: &Kit,
-) -> El {
+fn tool_key_editor(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
-    let changed = !state.configuration.tool_primary.text.is_empty()
-        || !state.configuration.tool_fallback.text.is_empty()
-        || state.configuration.clear_tool_primary
-        || state.configuration.clear_tool_fallback;
-    let mut body = rune::col().gap(12.0);
-    if atlas {
-        let provider_name = state
-            .atlas_key_states()
-            .into_iter()
-            .find_map(|(id, name, _)| (id == provider).then_some(name))
-            .unwrap_or(provider);
-        body = body.child(
-            rune::row()
-                .w_full()
-                .center_y()
-                .flex_wrap()
-                .gap(8.0)
-                .child(heading(provider_name, kit).grow(1.0))
-                .child(
-                    ActionButton::new("All providers")
-                        .key("atlas-key-back")
-                        .finish(MetalFinish::ObsidianPill)
-                        .disabled(matches!(state.configuration.result, Load::Loading))
-                        .on_press(|state: &mut State| reset_tool_key_editor(state))
-                        .build(kit, preferences, None),
-                ),
-        );
-    }
-    body.child(quiet(
+    rune::col().gap(12.0).child(quiet(
                 "Keys remain masked and are sent only after confirmation. Blank fields preserve saved keys; clearing a slot requires its explicit toggle.",
                 kit,
             ))
@@ -1213,15 +476,12 @@ fn tool_key_editor(
                 },
             ))
             .child(
-                ActionButton::new(if atlas { "Review API keys" } else { "Review key replacement" })
+                ActionButton::new("Review key replacement")
                     .key("tool-credentials-preview")
                     .icon(&icons::SHIELD_CHECK)
                     .finish(MetalFinish::GoldCta)
                     .busy(matches!(state.configuration.result, Load::Loading))
-                    .disabled(
-                        !state.permission(Permission::ManageConfiguration)
-                            || (atlas && (!changed || current_tool_credential_slot(state, provider).is_none())),
-                    )
+                    .disabled(!state.permission(Permission::ManageConfiguration))
                     .on_press(|state: &mut State| state.preview_tool_credentials())
                     .build(kit, preferences, pointer_ref),
             )
@@ -3236,71 +2496,6 @@ pub(crate) fn unresolved_actor_reindex_banner(
                     ),
             ),
     ))
-}
-
-/// The one footer under the cycle history: a count, then a single local control for continuous
-/// loading, as under the Jobs list. Rows and selection stay put while it changes.
-fn cycles_tail(
-    state: &State,
-    loaded: usize,
-    kit: &Kit,
-    preferences: ViewPreferences,
-    pointer_ref: Option<&rune::Live<[f32; 2]>>,
-) -> El {
-    let more = |label: &'static str| {
-        ActionButton::new(label)
-            .key("cycles-load-more")
-            .finish(MetalFinish::ObsidianPill)
-            .on_press(|state: &mut State| state.more_cycles())
-    };
-    let mut footer = rune::row()
-        .key("cycles-tail")
-        .w_full()
-        .gap(8.0)
-        .center_y()
-        .child(quiet(
-            format!(
-                "{loaded} {}",
-                if loaded == 1 {
-                    "cycle loaded"
-                } else {
-                    "cycles loaded"
-                }
-            ),
-            kit,
-        ));
-    if state.cycles.loading_more() {
-        footer = footer.child(
-            more("Loading more")
-                .busy(true)
-                .build(kit, preferences, pointer_ref),
-        );
-    } else if state.cycles_can_load_more() {
-        let label = if state.cycles.read_error.is_some() {
-            "Retry"
-        } else {
-            "Load more"
-        };
-        footer = footer.child(more(label).build(kit, preferences, pointer_ref));
-        if state.cycles.read_error.is_none() {
-            // A one-pixel sentinel, new for every loaded count: coming on screen loads the next
-            // segment, and a segment that leaves it on screen loads another.
-            footer = footer.child(
-                rune::el()
-                    .key(format!("cycles-near-end-{loaded}"))
-                    .size(1.0, 1.0)
-                    .a11y_hidden()
-                    .on_visible(|state: &mut State, on_screen, _| state.cycles_near_end(on_screen)),
-            );
-        }
-    } else if matches!(&state.cycles.history, Load::Ready(history) if history.next_cursor.is_some())
-    {
-        footer = footer.child(quiet(
-            "View limit reached. Newer cycles load as they arrive.",
-            kit,
-        ));
-    }
-    footer
 }
 
 /// The one footer under the Jobs list: a count, then a single local control for continuous

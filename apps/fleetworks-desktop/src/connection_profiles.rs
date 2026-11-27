@@ -144,9 +144,7 @@ impl State {
             || self.configuration.confirmation.is_some()
             || self.transfer.confirmation.is_some()
             || self.maintenance.confirmation.is_some()
-            || self.submissions.atlas.confirmation.is_some()
             || self.submissions.tools.confirmation.is_some()
-            || self.submissions.atlas.delivery_uncertain
             || self.submissions.tools.delivery_uncertain
             || self.backend.tool_inputs.text != "{}"
     }

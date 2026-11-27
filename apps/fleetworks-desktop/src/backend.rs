@@ -19,36 +19,6 @@ use crate::connection::GatewayEffects;
 use crate::connection::RequestTask;
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct Article {
-    pub id: String,
-    pub title: String,
-    pub description: String,
-    pub source_name: String,
-    pub published_at: String,
-    pub category: String,
-    #[serde(default)]
-    pub categories: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ArticlePage {
-    pub rows: Vec<Article>,
-    pub next_cursor: Option<String>,
-    pub revision: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct ArticleQuery {
-    pub day: String,
-    pub category: String,
-    pub search: String,
-    pub sort: &'static str,
-    pub limit: u16,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
 pub struct ToolDefinition {
     pub id: String,
     pub name: String,
@@ -227,7 +197,6 @@ pub struct JobLogs {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ReadKind {
-    Articles,
     Tools,
     Models,
     Profile,
@@ -244,7 +213,6 @@ impl ReadKind {
 
 #[derive(Clone, Debug)]
 pub enum ReadRequest {
-    Articles(ArticleQuery),
     Tools,
     Models,
     Profile,
@@ -256,7 +224,6 @@ pub enum ReadRequest {
 impl ReadRequest {
     pub fn kind(&self) -> ReadKind {
         match self {
-            Self::Articles(_) => ReadKind::Articles,
             Self::Tools => ReadKind::Tools,
             Self::Models => ReadKind::Models,
             Self::Profile => ReadKind::Profile,
@@ -268,7 +235,6 @@ impl ReadRequest {
 }
 
 pub(crate) enum ReadResult {
-    Articles(ArticlePage),
     Tools(ToolCatalog),
     Models(ModelDefaults),
     Profile(ProfileSnapshot),
@@ -277,10 +243,6 @@ pub(crate) enum ReadResult {
 }
 
 pub struct Backend {
-    pub article_day: TextEdit,
-    pub article_category: TextEdit,
-    pub article_search: TextEdit,
-    pub articles: Load<ArticlePage>,
     pub tools: Load<ToolCatalog>,
     pub selected_tool: Option<String>,
     pub tool_inputs: TextEdit,
@@ -300,10 +262,6 @@ pub struct Backend {
 impl Default for Backend {
     fn default() -> Self {
         Self {
-            article_day: TextEdit::new(""),
-            article_category: TextEdit::new("all"),
-            article_search: TextEdit::new(""),
-            articles: Load::Idle,
             tools: Load::Idle,
             selected_tool: None,
             tool_inputs: TextEdit::new("{}"),
@@ -365,7 +323,6 @@ impl Backend {
 
     fn loading(&mut self, kind: ReadKind) {
         match kind {
-            ReadKind::Articles => self.articles = Load::Loading,
             ReadKind::Tools if matches!(self.tools, Load::Ready(_)) => {}
             ReadKind::Tools => self.tools = Load::Loading,
             ReadKind::Models if matches!(self.models, Load::Ready(_)) => {}
@@ -387,7 +344,6 @@ impl Backend {
     pub(crate) fn failed(&mut self, kind: ReadKind, error: String) {
         self.refresh_errors.remove(&kind);
         match kind {
-            ReadKind::Articles => self.articles = Load::Failed(error),
             ReadKind::Tools => self.tools = Load::Failed(error),
             ReadKind::Models => self.models = Load::Failed(error),
             ReadKind::Profile => self.profile = Load::Failed(error),
@@ -449,16 +405,6 @@ impl State {
 
     pub fn refresh_page(&mut self) {
         match self.page {
-            Page::Atlas => {
-                self.backend_read(ReadRequest::Models);
-                self.refresh_cycles();
-                if self.atlas_advertised()
-                    && self.permission(Permission::ReadBackend)
-                    && !self.readiness_pending()
-                {
-                    self.refresh_readiness();
-                }
-            }
             Page::Seed => {
                 self.refresh_readiness();
                 self.poll_maintenance_receipt_jobs();
@@ -483,23 +429,6 @@ impl State {
             }
             _ => {}
         }
-    }
-
-    pub fn next_articles(&mut self) {
-        let Load::Ready(page) = &self.backend.articles else {
-            return;
-        };
-        let Some(cursor) = &page.next_cursor else {
-            return;
-        };
-        self.backend_read(ReadRequest::Articles(ArticleQuery {
-            day: self.backend.article_day.text.clone(),
-            category: self.backend.article_category.text.clone(),
-            search: self.backend.article_search.text.clone(),
-            sort: "latest",
-            limit: 30,
-            cursor: Some(cursor.clone()),
-        }));
     }
 
     pub fn select_job(&mut self, id: &str) {
@@ -663,7 +592,6 @@ impl State {
         self.backend.requests.remove(&kind);
         let previous_configuration_revision = self.configuration_revision();
         match result {
-            Ok(ReadResult::Articles(page)) => self.backend.articles = Load::Ready(page),
             Ok(ReadResult::Tools(catalog)) => {
                 self.backend.tools = Load::Ready(catalog);
                 self.backend.clear_refresh_error(ReadKind::Tools);
@@ -799,10 +727,6 @@ async fn read(
         limit: u16,
     }
     match request {
-        ReadRequest::Articles(query) => client
-            .get_with_query("/api/v1/articles", &query)
-            .await
-            .map(ReadResult::Articles),
         ReadRequest::Tools => client.get("/api/v1/tools").await.map(ReadResult::Tools),
         ReadRequest::Models => client
             .get("/api/v1/models/defaults")

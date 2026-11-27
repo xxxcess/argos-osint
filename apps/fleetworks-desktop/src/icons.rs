@@ -16,13 +16,6 @@ pub static SEED: Icon = Icon {
     body: r#"<ellipse cx="8" cy="4" rx="5.2" ry="2" stroke="currentColor" stroke-width="1.4" fill="none"/><path d="M2.8 4v4c0 1.1 2.3 2 5.2 2s5.2-.9 5.2-2V4" stroke="currentColor" stroke-width="1.4" fill="none"/><path d="M2.8 8v4c0 1.1 2.3 2 5.2 2s5.2-.9 5.2-2V8" stroke="currentColor" stroke-width="1.4" fill="none"/>"#,
 };
 
-/// News cycles & collection sweep radar.
-pub static ATLAS: Icon = Icon {
-    name: "fw-atlas",
-    view: 16.0,
-    body: r#"<circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.4" fill="none"/><circle cx="8" cy="8" r="2.6" stroke="currentColor" stroke-width="1.2" opacity="0.65" fill="none"/><path d="M8 8 12.2 3.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="8" cy="8" r="1.2" fill="currentColor"/>"#,
-};
-
 /// Brain intelligence node lattice.
 pub static BRAIN: Icon = Icon {
     name: "fw-brain",

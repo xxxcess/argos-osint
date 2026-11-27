@@ -69,7 +69,6 @@ impl State {
         self.scoped_logs.invalidate_origin();
         self.scoped_jobs.invalidate_origin();
         self.backend.invalidate_activity();
-        self.cycles.invalidate();
         self.maintenance.invalidate_origin();
         self.readiness_revision = self.readiness_revision.wrapping_add(1);
         if let Load::Ready(readiness) = &mut self.readiness {
@@ -150,11 +149,7 @@ impl State {
                 self.registration.context = Some(registered.context);
                 self.registration.receipt = Load::Ready(registered.receipt);
                 self.registration.message = Some("Workstation registration verified".into());
-                // The two protected-journal reads run in sequence: the catalog lock is nonblocking,
-                // so concurrent reads can fail with "catalog is busy".
-                if !self.restore_cycle_deletion() {
-                    self.restore_actor_reindex();
-                }
+                self.restore_actor_reindex();
                 self.refresh_readiness();
                 self.refresh_page();
             }

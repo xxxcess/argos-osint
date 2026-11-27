@@ -85,14 +85,14 @@ Venture, the six terminal clients and the legacy `argos` executable are retired.
 
 ### Collect articles with Atlas
 
-Provision provider credentials, the Atlas worker, private NLP and a Rust-BERT model for the container architecture. Enable the separately configured [Atlas Compose overlay](deploy/atlas-dispatch.md). Submit through native News Cycles after connecting and registering; submission requires an advertised durable worker and permission. A job receipt confirms acceptance, while Jobs reports progress and completion. The [Atlas deployment guide](deploy/atlas-dispatch.md) lists the files and settings.
+Provision provider credentials, the Atlas worker, private NLP and a Rust-BERT model for the container architecture. Enable the separately configured [Atlas Compose overlay](deploy/atlas-dispatch.md). The registered Distributed API accepts cycle submissions when the durable worker is advertised and the caller has permission. A job receipt confirms acceptance. Jobs & Logs shows scoped progress and completion. The [Atlas deployment guide](deploy/atlas-dispatch.md) lists the files and settings.
 
 ## Applications and services
 
 | Area | What you can do |
 | --- | --- |
 | DB Setup | Confirm actor seeding and search-index build. Follow the job through reader-visible completion. |
-| News Cycles and Brain Search | Queue cycles, inspect workstation cycle history, discover actors and read dossiers. |
+| Brain Search | Discover actors and read dossiers. |
 | OSINT Tools and Model Assignments | Read service/provider cards, provision keys and edit supported model routing with confirmed revisions. |
 | Workstation Status and Setup Gateway | Inspect identity, readiness and backend resources. Start Embedded or pair and reconnect to Distributed. |
 | Jobs & Logs | Read the bounded workstation queue and selected-job safe operational summaries. |

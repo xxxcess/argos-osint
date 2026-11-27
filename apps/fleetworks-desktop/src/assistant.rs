@@ -33,7 +33,7 @@ pub(crate) const MAX_INPUT_BYTES: usize = 4 * 1024;
 pub(crate) const UNAVAILABLE: &str =
     "The Assistant is unavailable: this backend does not advertise chat. Nothing was sent.";
 pub(crate) const NEEDS_SOURCE: &str =
-    "Select a job, cycle or readiness check to ask about. Nothing was sent.";
+    "Select a job or readiness check to ask about. Nothing was sent.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Context {
@@ -217,27 +217,16 @@ pub(crate) fn source_for(context: &Context) -> Option<ChatSourceReference> {
 
 /// What the Assistant is about right now, from the selection the operator already made.
 pub(crate) fn current_context(state: &State) -> Context {
-    let short = |id: &str| id.chars().take(12).collect::<String>();
-    match state.page {
-        Page::Atlas => {
-            if let Some(id) = &state.selected_cycle_id {
-                return Context {
-                    kind: "Cycle",
-                    label: format!("Cycle {}", short(id)),
-                    key: format!("cycle:{id}"),
-                };
-            }
-        }
-        Page::Workstation => {
-            if let Some(id) = &state.selected_readiness {
-                return Context {
-                    kind: "Readiness",
-                    label: format!("Readiness: {id}"),
-                    key: format!("readiness:{id}"),
-                };
-            }
-        }
-        _ => {}
+    if let Some(id) = state
+        .selected_readiness
+        .as_ref()
+        .filter(|_| state.page == Page::Workstation)
+    {
+        return Context {
+            kind: "Readiness",
+            label: format!("Readiness: {id}"),
+            key: format!("readiness:{id}"),
+        };
     }
     Context {
         kind: "Page",

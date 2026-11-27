@@ -3,8 +3,6 @@
 
 use fleetworks_contracts::connect::RegistrationReceipt;
 use fleetworks_contracts::context::RegisteredContext;
-use fleetworks_contracts::cycle_history::CycleHistory;
-use fleetworks_contracts::cycle_history::CycleSummary;
 use fleetworks_contracts::operational_logs::LogPage;
 use fleetworks_contracts::pairing::PairingChallenge;
 use fleetworks_contracts::readiness::DatasetKind;
@@ -182,29 +180,6 @@ pub fn seed_uploading(state: &mut State) {
     state.maintenance.upload = Load::Loading;
 }
 
-pub fn cycles(state: &mut State) {
-    base(state);
-    super::models_ready(state);
-    let mut finished = CycleSummary::new(
-        "synthetic-cycle-complete".into(),
-        "synthetic-run-complete".into(),
-        "completed".into(),
-        OBSERVED.into(),
-        Some("2026-11-12T12:03:00Z".into()),
-    );
-    finished.article_count = Some(128);
-    let running = CycleSummary::new(
-        "synthetic-cycle-running".into(),
-        "synthetic-run-running".into(),
-        "running".into(),
-        "2026-11-12T12:10:00Z".into(),
-        None,
-    );
-    state.cycles.history = Load::Ready(CycleHistory::new(vec![running, finished]));
-    state.cycles.selected = Some("synthetic-cycle-complete".into());
-    state.page = Page::Atlas;
-}
-
 pub fn brain(state: &mut State) {
     base(state);
     super::brain_dossier(state);
@@ -224,6 +199,12 @@ pub fn tools(state: &mut State) {
     ]))
     .expect("synthetic credential-presence metadata only");
     state.page = Page::Tools;
+}
+
+pub fn tool_provider_keys(state: &mut State) {
+    tools(state);
+    state.configuration.tool_provider = rune::TextEdit::new("newsapi");
+    state.tool_key_dialog = true;
 }
 
 pub fn models(state: &mut State) {

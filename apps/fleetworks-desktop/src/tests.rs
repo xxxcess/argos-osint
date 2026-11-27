@@ -128,7 +128,9 @@ fn real_shell_navigation_works_offline_without_boundary_effects() {
     assert!(connected.find("connection-editor").is_none());
     assert!(connected.find("connect-id").is_none());
     assert!(connected.find("workstation-registration-tag").is_some());
+    assert!(connected.find("nav-atlas").is_none());
     let connected_tree = connected.accessibility_json().to_string();
+    assert!(!connected_tree.contains("News Cycles"));
     assert!(!connected_tree.contains("Connect ID"));
     assert!(!connected_tree.contains("Gateway connected"));
     assert!(connected_tree.contains("Distributed registration ID synthetic-registration"));
@@ -161,6 +163,51 @@ fn real_shell_navigation_works_offline_without_boundary_effects() {
                     .contains("synthetic-deployment"),
                 "deployment ID stays restricted to Workstation Status Gateway Backend"
             );
+        }
+    }
+}
+
+#[test]
+fn native_destination_shortcuts_select_only_current_pages_at_both_widths() {
+    for size in [(1180.0, 780.0), (640.0, 480.0)] {
+        let mut state = registered_fixture();
+        state
+            .connection
+            .capabilities
+            .as_mut()
+            .expect("fixture capabilities")
+            .features
+            .extend(["atlas-cycles".into(), "atlas-cycle-history-v1".into()]);
+        let mut runtime = Runtime::new(
+            state,
+            app::view,
+            size,
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.on_key = app::spec().on_key;
+        runtime.frame(0.0);
+        let destinations = [
+            ('1', Page::Seed),
+            ('2', Page::Brain),
+            ('6', Page::Brain),
+            ('3', Page::Tools),
+            ('4', Page::Models),
+            ('5', Page::Jobs),
+        ];
+        for (index, (digit, page)) in destinations.into_iter().enumerate() {
+            runtime.key(rune::KeyEvent {
+                key: rune::Key::Command(digit),
+                mods: rune::Mods::default(),
+            });
+            runtime.frame((index + 1) as f64 / 60.0);
+            assert_eq!(runtime.state.page, page, "shortcut {digit} at {size:?}");
+            assert!(!runtime
+                .accessibility_json()
+                .to_string()
+                .contains("News Cycles"));
         }
     }
 }
@@ -265,12 +312,10 @@ pub(crate) fn registered_fixture() -> State {
 fn folder_only_switch_keeps_global_drafts_and_fences_future_origin() {
     let mut state = registered_fixture();
     state.brain.query = TextEdit::new("global actor draft");
-    state.backend.article_search = TextEdit::new("global article draft");
     state.backend.tool_inputs = TextEdit::new("{\"email\":\"fixture@example.test\"}");
     let old_revision = state.origin_revision;
     state.change_workspace(workspace("research"));
     assert_eq!(state.brain.query.text, "global actor draft");
-    assert_eq!(state.backend.article_search.text, "global article draft");
     assert_eq!(
         state.backend.tool_inputs.text,
         "{\"email\":\"fixture@example.test\"}"
@@ -414,14 +459,14 @@ fn provider_key_is_masked_in_real_accessibility_tree_and_confirmation() {
 }
 
 #[test]
-fn direct_cycles_navigation_observes_configuration_before_any_mutation() {
+fn direct_models_navigation_observes_configuration_before_any_mutation() {
     let mut state = registered_fixture();
     assert!(
         state.configuration_revision().is_none(),
         "fresh connection has no previous model/profile snapshot"
     );
     state.intents.clear();
-    state.navigate(Page::Atlas);
+    state.navigate(Page::Models);
     assert!(
         state.intents.iter().any(|intent| matches!(
             intent,
@@ -429,7 +474,7 @@ fn direct_cycles_navigation_observes_configuration_before_any_mutation() {
                 kind: ReadKind::Models
             }
         )),
-        "cycles must request its required configuration without a prior Models visit"
+        "Models must request its required configuration on entry"
     );
     assert!(
         !state.intents.iter().any(|intent| matches!(

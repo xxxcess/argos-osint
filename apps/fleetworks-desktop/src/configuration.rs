@@ -639,9 +639,6 @@ impl State {
                         }
                         ConfigurationAction::ToolCredentials => {
                             self.clear_tool_credential_draft();
-                            if self.page == crate::app::Page::Atlas && self.tool_key_dialog {
-                                self.configuration.tool_provider.replace_text("");
-                            }
                         }
                         _ => {}
                     }
@@ -679,14 +676,6 @@ impl State {
             return;
         }
         if conflict || matches!(self.configuration.result, Load::Ready(_)) {
-            if action == ConfigurationAction::ToolCredentials
-                && self.page == crate::app::Page::Atlas
-                && !self.setup_gateway
-                && self.atlas_advertised()
-            {
-                self.readiness_received_at = None;
-                self.refresh_readiness();
-            }
             self.backend_read(ReadRequest::Profile);
             self.backend_read(ReadRequest::Models);
         }

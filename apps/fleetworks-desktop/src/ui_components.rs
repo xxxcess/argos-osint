@@ -15,7 +15,6 @@ use rune::Shadow;
 use rune::TextStyle;
 use rune::Transition;
 use rune::Tx;
-use rune_kit::Dialog;
 use rune_kit::IconButton;
 use rune_kit::IconButtonVariant;
 use rune_kit::Kit;
@@ -562,51 +561,6 @@ pub(crate) fn section_header(
         .gap(12.0)
         .child(left)
         .children(right)
-}
-
-/// Compact modal prompt helper using `rune_kit::Dialog`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn modal_prompt<S: 'static>(
-    key: impl Into<String>,
-    title: impl Into<String>,
-    description: impl Into<String>,
-    open: bool,
-    width: f32,
-    on_close: impl Fn(&mut S) + Clone + 'static,
-    body: El,
-    footer: Option<El>,
-    kit: &Kit,
-    layer: &mut Vec<El>,
-) {
-    let description = description.into();
-    let mut content = col().w_full().px(16.0).pb(16.0).gap(12.0);
-    if !description.is_empty() {
-        content = content.child(
-            text(description)
-                .font(kit.ty.small)
-                .color(kit.c.text_muted)
-                .wrap(),
-        );
-    }
-    content = content.child(body);
-    if let Some(footer) = footer {
-        content = content.child(
-            row()
-                .w_full()
-                .gap(8.0)
-                .center_y()
-                .child(spacer())
-                .child(footer),
-        );
-    }
-    Dialog::new(key, title)
-        .open(open)
-        .width(width)
-        .fit()
-        .click_outside(true)
-        .on_close(on_close)
-        .child(content)
-        .build(kit, layer);
 }
 
 fn skeleton_card_shell(body: El, tone: StatusTone, preferences: ViewPreferences, kit: &Kit) -> El {

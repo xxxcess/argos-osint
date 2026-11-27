@@ -166,6 +166,8 @@ impl Startup {
                 // The first layout may change from the wide pane to the compact rail. Land
                 // any presence tracks from that change as the floating mark is replaced.
                 tx.settle();
+            } else {
+                tx.focus("startup-embedded-stage", tx.focus_visible());
             }
         } else {
             tx.wake_after(std::time::Duration::from_secs_f64(
@@ -261,6 +263,7 @@ pub(crate) fn view(
     }
     if state.setup_gateway {
         remember_mark(state, cx, SETUP_MARK);
+        let docking = state.startup.flying_to(Dock::Setup, preferences);
         let setup_mark_height = 47.0;
         let setup_mark = orbit::view(
             state.startup.docked_pose,
@@ -271,11 +274,7 @@ pub(crate) fn view(
         .key(SETUP_MARK)
         .transition(Transition::none())
         .instant_changes()
-        .opacity(if state.startup.flying_to(Dock::Setup, preferences) {
-            0.0
-        } else {
-            1.0
-        })
+        .opacity(if docking { 0.0 } else { 1.0 })
         .inert();
         let data_step = state
             .startup
@@ -349,7 +348,7 @@ pub(crate) fn view(
                     .center()
                     .child(setup_mark),
             )
-            .child(
+            .children((!docking).then(|| {
                 rune::col()
                     .key(stage)
                     .transition(app::surface_transition(
@@ -359,8 +358,8 @@ pub(crate) fn view(
                     .w_full()
                     .grow(1.0)
                     .min_h(0.0)
-                    .child(body),
-            );
+                    .child(body)
+            }));
         root = root.child(setup);
         if let Some(mark) = moving_mark(state, cx, Dock::Setup, preferences, cx.layout("startup")) {
             root = root.child(mark);
@@ -856,8 +855,9 @@ impl State {
         }
         if self.startup.flight.is_some() {
             tx.wake_after(std::time::Duration::from_secs_f64(1.0 / 60.0));
+        } else {
+            tx.focus("startup-embedded-stage", tx.by_keys());
         }
-        tx.focus("startup-embedded-stage", tx.by_keys());
     }
 
     /// Render the settled Embedded folder chooser with synthetic effects.
@@ -1083,6 +1083,7 @@ mod tests {
             runtime.frame(0.03);
             key(&mut runtime, rune::Key::Enter);
             runtime.frame(0.30);
+            tick(&mut runtime, 0.95);
             assert_eq!(runtime.state.backend_kind, BackendKind::Local);
             assert_eq!(
                 runtime.state.connection.status,
@@ -1148,9 +1149,11 @@ mod tests {
             click(&mut runtime, LOCAL);
             runtime.frame(0.02);
             assert_eq!(runtime.state.startup.docked_pose, 1.0);
-            assert!(runtime.find("startup-stage-starting").is_some());
             if reduced {
+                assert!(runtime.find("startup-stage-starting").is_some());
                 assert_opaque(&runtime, "startup-embedded-stage");
+            } else {
+                assert!(runtime.find("startup-stage-starting").is_none());
             }
             tick(&mut runtime, 1.11);
             let (dock, _) = runtime.presented(SETUP_MARK).expect("setup mark slot");
@@ -1165,6 +1168,7 @@ mod tests {
             }
             tick(&mut runtime, 1.24);
             assert_eq!(runtime.presented(SETUP_MARK).unwrap().1, 1.0);
+            assert!(runtime.find("startup-stage-starting").is_some());
 
             runtime.update(|state, _| {
                 state.page = app::Page::Brain;

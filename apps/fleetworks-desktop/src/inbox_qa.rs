@@ -796,7 +796,7 @@ impl State {
         };
         if !self.inbox.open && source.kind == ChatSourceKind::Job && !self.has_active_confirmation()
         {
-            self.open_inbox_from("triage-explain");
+            self.open_inbox_from(crate::activity_triage::JOB_EXPLAIN);
         }
         if !self.inbox.open {
             return;

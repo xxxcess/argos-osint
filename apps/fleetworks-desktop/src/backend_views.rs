@@ -166,7 +166,7 @@ pub(crate) fn page(
         Page::Atlas => atlas(state, preferences, kit, layers),
         Page::Tools => tools(state, cx, preferences, kit, layers),
         Page::Models => models(state, cx, preferences, kit, layers),
-        Page::Jobs => jobs(state, preferences, kit, layers, log_width),
+        Page::Jobs => jobs(state, preferences, kit, log_width),
         _ => rune::col(),
     }
 }
@@ -1599,13 +1599,7 @@ const JOBS_LIST_WIDTH: f32 = 300.0;
 const JOBS_GAP: f32 = 16.0;
 const JOBS_SIDE_BY_SIDE_WIDTH: f32 = 940.0;
 
-fn jobs(
-    state: &State,
-    preferences: ViewPreferences,
-    kit: &Kit,
-    layers: &mut Vec<El>,
-    log_width: f32,
-) -> El {
+fn jobs(state: &State, preferences: ViewPreferences, kit: &Kit, log_width: f32) -> El {
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
     let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
     let narrow = log_width < 660.0;
@@ -1803,12 +1797,11 @@ fn jobs(
             } else {
                 detail.job.title.clone()
             };
-            let detail_id = detail.job.id.clone();
             let tone = state_tone(&detail.job.state);
             let error_summary = job_error_summary(&detail.job);
             let mut details = rune::col().gap(10.0).child(ui_components::section_header(
                 &icons::JOBS,
-                detail_title.clone(),
+                detail_title,
                 Some(&format!(
                     "{} · {} · {}",
                     detail.job.id, detail.job.state, detail.job.phase
@@ -1819,14 +1812,7 @@ fn jobs(
                     tone,
                     kit,
                 )),
-                Some(
-                    ActionButton::new("Pop out summary")
-                        .finish(MetalFinish::ObsidianPill)
-                        .on_press(move |state: &mut State| {
-                            state.selected_job_id = Some(detail_id.clone());
-                        })
-                        .build(kit, preferences, pointer_ref),
-                ),
+                crate::activity_triage::explain_job_button(state, kit),
                 kit,
             ));
             if let Some((done, total)) = detail
@@ -1876,11 +1862,6 @@ fn jobs(
                 if !error_summary.is_empty() {
                     details = details.child(line(error_summary, kit).role("alert"));
                 }
-                details = details.children(crate::activity_triage::explain_job_button(
-                    state,
-                    kit,
-                    preferences,
-                ));
                 if detail.job.state == "failed" || detail.job.can_retry {
                     let retry_reason = state.job_action_disabled_reason(JobAction::Retry);
                     let retry_busy = matches!(state.job_actions.response, Load::Loading);
@@ -2170,33 +2151,6 @@ fn jobs(
                 }
             }
             detail_col = detail_col.child(card(state, preferences, tone, details));
-
-            if state.selected_job_id.as_deref() == Some(detail.job.id.as_str()) {
-                let modal_body = rune::col()
-                    .gap(8.0)
-                    .child(line(format!("State: {}", detail.job.state), kit))
-                    .child(line(format!("Phase: {}", detail.job.phase), kit))
-                    .children(
-                        (!error_summary.is_empty()).then(|| line(error_summary, kit).role("alert")),
-                    );
-                ui_components::modal_prompt(
-                    "job-operational-summary",
-                    detail_title,
-                    format!("Job {}", detail.job.id),
-                    true,
-                    460.0,
-                    |state: &mut State| state.selected_job_id = None,
-                    modal_body,
-                    Some(
-                        ActionButton::new("Close")
-                            .finish(MetalFinish::GoldCta)
-                            .on_press(|state: &mut State| state.selected_job_id = None)
-                            .build(kit, preferences, pointer_ref),
-                    ),
-                    kit,
-                    layers,
-                );
-            }
         }
     }
     body = if side_by_side && show_list && show_detail {

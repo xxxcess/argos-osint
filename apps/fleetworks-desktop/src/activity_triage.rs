@@ -9,15 +9,14 @@ use rune_kit::IconButton;
 use rune_kit::IconButtonVariant;
 use rune_kit::Kit;
 
-use crate::accessibility::ViewPreferences;
 use crate::app::Load;
 use crate::app::Page;
 use crate::icons;
 use crate::inbox_qa::SourceOrigin;
 use crate::logs::ActivityTab;
-use crate::material::MetalFinish;
-use crate::ui_components::ActionButton;
 use crate::State;
+
+pub(crate) const JOB_EXPLAIN: &str = "triage-explain";
 
 impl State {
     fn can_explain_activity(&self) -> bool {
@@ -90,12 +89,7 @@ pub(crate) fn explain_notice_button(
     let source = state.explain_notice_source(notice_id)?;
     let title = title.to_owned();
     Some(
-        IconButton::new(&icons::ASSISTANT_EXPLAIN)
-            .variant(IconButtonVariant::Ghost)
-            .control_size(ControlSize::Large)
-            .label("Explain in Assistant")
-            .help("Explain this notification in Assistant")
-            .disabled(!state.can_prefill_inbox_question())
+        explain_icon(state, "Explain this notification in Assistant")
             .on_press_tx(move |state: &mut State, tx| {
                 if state.explain_notice_source(notice_id).as_ref() == Some(&source) {
                     state.prefill_inbox_question(&source, &title, SourceOrigin::Notification, tx);
@@ -106,27 +100,31 @@ pub(crate) fn explain_notice_button(
     )
 }
 
-pub(crate) fn explain_job_button(
-    state: &State,
-    kit: &Kit,
-    preferences: ViewPreferences,
-) -> Option<El> {
+pub(crate) fn explain_job_button(state: &State, kit: &Kit) -> Option<El> {
     let source = state.triage_job_source()?;
-    let button = ActionButton::new("Explain in Assistant")
-        .key("triage-explain")
-        .finish(MetalFinish::Gunmetal)
+    Some(
+        explain_icon(state, "Explain this job in Assistant")
+            .on_press_tx(move |state: &mut State, tx| {
+                let Load::Ready(detail) = &state.backend.detail else {
+                    return;
+                };
+                if state.triage_job_source().as_ref() == Some(&source) {
+                    let title = detail.job.title.clone();
+                    state.prefill_inbox_question(&source, &title, SourceOrigin::Selection, tx);
+                }
+            })
+            .build(kit)
+            .key(JOB_EXPLAIN),
+    )
+}
+
+fn explain_icon(state: &State, help: &str) -> IconButton {
+    IconButton::new(&icons::ASSISTANT_EXPLAIN)
+        .variant(IconButtonVariant::Ghost)
+        .control_size(ControlSize::Large)
+        .label("Explain in Assistant")
+        .help(help)
         .disabled(!state.can_prefill_inbox_question())
-        .on_press_tx(move |state: &mut State, tx| {
-            let Load::Ready(detail) = &state.backend.detail else {
-                return;
-            };
-            if state.triage_job_source().as_ref() == Some(&source) {
-                let title = detail.job.title.clone();
-                state.prefill_inbox_question(&source, &title, SourceOrigin::Selection, tx);
-            }
-        })
-        .build(kit, preferences, None);
-    Some(rune::row().w_full().child(button))
 }
 
 #[cfg(test)]
@@ -270,17 +268,41 @@ mod tests {
         let mut initial = private_job_state();
         initial.seed_inbox_qa_fixture(QaSettings::new(true, QaPhase::Ready, 2, 1, true), None);
         let mut runtime = runtime(initial);
-        press(&mut runtime, "triage-explain", 0.5);
+        let buttons: Vec<_> = runtime
+            .elements()
+            .into_iter()
+            .filter(|element| {
+                !element.exiting && element.label.as_deref() == Some("Explain in Assistant")
+            })
+            .collect();
+        assert_eq!(buttons.len(), 1);
+        let button = &buttons[0];
+        assert_eq!(button.key.as_deref(), Some(JOB_EXPLAIN));
+        assert_eq!(button.role, "button");
+        assert!(button.text.is_none());
+        assert!((button.rect[2] - button.rect[3]).abs() < 0.5);
+
+        press(&mut runtime, JOB_EXPLAIN, 0.5);
         let tree = runtime.accessibility_json().to_string();
         assert!(tree.contains("What happened with this job?"));
         assert!(tree.contains("Attached evidence: Job · Actor index"));
         assert!(runtime.find("inbox-qa-exchange").is_none());
+
+        runtime.key(KeyEvent {
+            key: Key::Escape,
+            mods: Mods::default(),
+        });
+        runtime.frame(0.9);
+        assert!(!runtime.state.inbox.open);
+        assert!(runtime.elements().iter().any(|element| {
+            element.key.as_deref() == Some(JOB_EXPLAIN) && element.focused && !element.exiting
+        }));
     }
 
     #[test]
     fn shared_job_hides_explanation() {
         let mut runtime = runtime(private_job_state());
-        assert!(runtime.find("triage-explain").is_some());
+        assert!(runtime.find(JOB_EXPLAIN).is_some());
         runtime.update(|state, _| {
             if let Load::Ready(detail) = &mut state.backend.detail {
                 detail.job.status_only = true;
@@ -288,7 +310,7 @@ mod tests {
             }
         });
         runtime.frame(0.8);
-        assert!(runtime.find("triage-explain").is_none());
+        assert!(runtime.find(JOB_EXPLAIN).is_none());
         assert!(runtime
             .accessibility_json()
             .to_string()

@@ -284,7 +284,6 @@ pub struct State {
     pub selected_readiness: Option<String>,
     pub(crate) expanded_readiness: BTreeSet<ReadinessCheckId>,
     pub selected_cycle_id: Option<String>,
-    pub selected_job_id: Option<String>,
     pub confirm_cycle_delete: bool,
     pub confirm_maintenance_dialog: bool,
     pub pointer_offset: Live<[f32; 2]>,
@@ -370,7 +369,6 @@ impl Default for State {
             selected_readiness: None,
             expanded_readiness: BTreeSet::new(),
             selected_cycle_id: None,
-            selected_job_id: None,
             confirm_cycle_delete: false,
             confirm_maintenance_dialog: false,
             pointer_offset: Live::new([0.0, 0.0]),
@@ -485,7 +483,6 @@ impl State {
         self.models_role_dialog = false;
         self.selected_readiness = None;
         self.selected_cycle_id = None;
-        self.selected_job_id = None;
         self.confirm_cycle_delete = false;
         self.confirm_maintenance_dialog = false;
         self.page = if self.connected() || page == Page::Workstation {

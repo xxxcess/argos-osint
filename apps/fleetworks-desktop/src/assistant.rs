@@ -219,15 +219,6 @@ pub(crate) fn source_for(context: &Context) -> Option<ChatSourceReference> {
 pub(crate) fn current_context(state: &State) -> Context {
     let short = |id: &str| id.chars().take(12).collect::<String>();
     match state.page {
-        Page::Jobs => {
-            if let Some(id) = &state.selected_job_id {
-                return Context {
-                    kind: "Job",
-                    label: format!("Job {}", short(id)),
-                    key: format!("job:{id}"),
-                };
-            }
-        }
         Page::Atlas => {
             if let Some(id) = &state.selected_cycle_id {
                 return Context {

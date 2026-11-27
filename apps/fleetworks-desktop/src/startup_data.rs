@@ -1157,7 +1157,9 @@ fn layout(panel: El, sequence: El, dots: El) -> El {
                         .w_full()
                         .min_h(0.0)
                         .items_center()
-                        .padding(18.0)
+                        .px(18.0)
+                        .pt(6.0)
+                        .pb(18.0)
                         .child(panel)
                         .child(sequence)
                         .child(rune::row().w_full().center().pt(10.0).child(dots)),

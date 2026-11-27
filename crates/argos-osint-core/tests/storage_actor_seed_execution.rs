@@ -755,10 +755,24 @@ async fn manual_retry_after_lease_expiry_preserves_seed_and_index_progress() {
     let execution = actor_catalog::SeedExecution::from_claimed(&repo, &resumed.task, &cancel)
         .await
         .expect("execution under the new lease");
-    let result =
-        actor_catalog::seed_actors_pinned_claimed(&repo, actors(2), &execution, &cancel, |_| {})
-            .await
-            .expect("resume from the original checkpoint");
+    // Resume through the worker's bounded streaming path. The committed
+    // prefix ends inside the first batch returned by the revalidated source.
+    let initial_progress = std::cell::Cell::new(None);
+    let result = actor_catalog::seed_actors_stream_claimed(
+        &repo,
+        2,
+        futures_util::stream::iter([Ok(actors(2))]),
+        &execution,
+        &cancel,
+        |progress| {
+            if initial_progress.get().is_none() {
+                initial_progress.set(Some(progress.processed));
+            }
+        },
+    )
+    .await
+    .expect("resume from the original checkpoint");
+    assert_eq!(initial_progress.get(), Some(1));
     assert!(result.complete);
     assert_eq!(result.processed, 2);
     assert_eq!(support::count(repo.db(), "brain_actor").await, 2);

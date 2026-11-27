@@ -1302,10 +1302,10 @@ fn startup_label(state: &State) -> Option<&'static str> {
         return None;
     }
     match settings.startup_stage? {
-        QaStartupStage::DownloadingPack => Some("Downloading QA pack"),
-        QaStartupStage::VerifyingPack => Some("Verifying QA pack"),
-        QaStartupStage::LoadingModel => Some("Loading QA model"),
-        QaStartupStage::Activating => Some("Activating QA model"),
+        QaStartupStage::DownloadingPack => Some("Downloading Assistant files"),
+        QaStartupStage::VerifyingPack => Some("Verifying Assistant files"),
+        QaStartupStage::LoadingModel => Some("Loading Assistant model"),
+        QaStartupStage::Activating => Some("Activating Assistant model"),
         _ => None,
     }
 }
@@ -4214,22 +4214,22 @@ mod tests {
             (
                 QaPhase::Starting,
                 QaStartupStage::DownloadingPack,
-                "Downloading QA pack",
+                "Downloading Assistant files",
             ),
             (
                 QaPhase::Unavailable,
                 QaStartupStage::VerifyingPack,
-                "Verifying QA pack",
+                "Verifying Assistant files",
             ),
             (
                 QaPhase::Starting,
                 QaStartupStage::LoadingModel,
-                "Loading QA model",
+                "Loading Assistant model",
             ),
             (
                 QaPhase::Starting,
                 QaStartupStage::Activating,
-                "Activating QA model",
+                "Activating Assistant model",
             ),
         ];
         let mut runtime = active_drawer((640.0, 480.0));
@@ -4266,7 +4266,7 @@ mod tests {
             accessibility_nodes_with_key(&tree, "inbox-qa-settings-status"),
             1
         );
-        assert!(tree.to_string().contains("Activating QA model"));
+        assert!(tree.to_string().contains("Activating Assistant model"));
     }
 
     #[test]

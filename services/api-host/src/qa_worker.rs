@@ -298,8 +298,11 @@ impl QaWorkerSupervisor {
         let model = if packed_target == Some(target) {
             pack.join("model")
         } else {
-            progress(QaStartupStage::DownloadingPack);
-            match crate::qa_model_assets::provision(&self.state_dir, target).await {
+            match crate::qa_model_assets::provision(&self.state_dir, target, || {
+                progress(QaStartupStage::DownloadingPack);
+            })
+            .await
+            {
                 Ok(model) => model,
                 Err(error)
                     if preference == QaGeneratorPreference::Automatic

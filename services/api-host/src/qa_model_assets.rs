@@ -66,14 +66,27 @@ pub(crate) fn expected_files(target: QaModelTarget) -> Result<BTreeMap<String, S
 
 /// Return a private directory with the verified files used by this model.
 /// Complete cached assets survive retries. Dropping the future removes partial downloads.
-pub(crate) async fn provision(state_dir: &Path, target: QaModelTarget) -> Result<PathBuf> {
+/// Notify the caller immediately before the first needed download.
+pub(crate) async fn provision(
+    state_dir: &Path,
+    target: QaModelTarget,
+    on_download: impl Fn(),
+) -> Result<PathBuf> {
     let pin = model_pin(target)?;
+    provision_pinned(state_dir, target.slug(), pin, on_download).await
+}
 
+async fn provision_pinned(
+    state_dir: &Path,
+    model_name: &str,
+    pin: ModelPin,
+    on_download: impl Fn(),
+) -> Result<PathBuf> {
     let _permit = PROVISIONING.lock().await;
     check_private_dir(state_dir).await?;
     let cache = state_dir.join("qa-model-assets");
     private_dir(&cache).await?;
-    let model = cache.join(target.slug());
+    let model = cache.join(model_name);
     private_dir(&model).await?;
 
     let mut client = None;
@@ -93,6 +106,7 @@ pub(crate) async fn provision(state_dir: &Path, target: QaModelTarget) -> Result
         );
         if client.is_none() {
             client = Some(download_client()?);
+            on_download();
         }
         let url = format!(
             "https://huggingface.co/{}/resolve/{}/{}",
@@ -245,4 +259,54 @@ async fn download(
     drop(output);
     tokio::fs::rename(&stage.0, destination).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn cached_files_are_reused_without_reporting_a_download() {
+        let state = tempfile::tempdir().unwrap();
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let cache = state.path().join("qa-model-assets");
+        let model = cache.join("test-model");
+        private_dir(&cache).await.unwrap();
+        private_dir(&model).await.unwrap();
+        let contents = b"synthetic local model";
+        let name = "model.safetensors";
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(model.join(name))
+            .unwrap()
+            .write_all(contents)
+            .unwrap();
+        let pin = ModelPin {
+            repository: String::new(),
+            revision: String::new(),
+            files: BTreeMap::from([(
+                name.to_owned(),
+                AssetPin {
+                    bytes: contents.len() as u64,
+                    sha256: format!("{:x}", Sha256::digest(contents)),
+                },
+            )]),
+        };
+
+        let loaded = provision_pinned(state.path(), "test-model", pin, || {
+            panic!("verified local model requested a download");
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(loaded, model);
+        assert_eq!(
+            fs::read(loaded.join(name)).unwrap().as_slice(),
+            &contents[..]
+        );
+    }
 }

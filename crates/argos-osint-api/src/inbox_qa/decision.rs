@@ -78,6 +78,7 @@ pub fn response_plan(evidence: &FrozenEvidence, context: &PlanContext) -> Respon
         .as_ref()
         .map(|dialogue| dialogue.kind);
     let operational = dialogue_kind == Some(QaDialogueKind::Operational);
+    let contextual = dialogue_kind == Some(QaDialogueKind::Contextual);
     let clarify = dialogue_kind == Some(QaDialogueKind::Clarification);
     let historical = context.history_requested;
     let recheck = evidence
@@ -90,7 +91,7 @@ pub fn response_plan(evidence: &FrozenEvidence, context: &PlanContext) -> Respon
         ResponseMode::Historical
     } else if recheck {
         ResponseMode::Recheck
-    } else if operational {
+    } else if operational || contextual {
         ResponseMode::Current
     } else {
         ResponseMode::Conversation
@@ -112,6 +113,7 @@ pub fn response_plan(evidence: &FrozenEvidence, context: &PlanContext) -> Respon
                 .is_none_or(|focus| focus.allows_suggestions())
     });
     let note = match (mode, guidance.is_some()) {
+        _ if contextual => "Explain the general part of the question.",
         (ResponseMode::Historical, true) => {
             "Explain the recorded observations and offer the approved check."
         }
@@ -135,8 +137,12 @@ pub fn response_plan(evidence: &FrozenEvidence, context: &PlanContext) -> Respon
         (ResponseMode::Conversation, _) => match dialogue_kind {
             Some(QaDialogueKind::Greeting) => "Greet the operator briefly.",
             Some(QaDialogueKind::Acknowledgement) => "Acknowledge the operator briefly.",
-            Some(QaDialogueKind::Help) => "Explain the supported workstation checks.",
+            Some(QaDialogueKind::Help) => "Describe general questions and the workstation observations you can help interpret.",
             Some(QaDialogueKind::Recall) => "Answer from the authorized earlier exchanges.",
+            Some(QaDialogueKind::General) if context.inbox_notifications.is_some() => {
+                "Use the client-reported summary for this Inbox. Its notification counts describe the client view."
+            }
+            Some(QaDialogueKind::General) => "Answer the question using your knowledge.",
             _ => "Respond briefly to the current conversational request.",
         },
     }
@@ -148,16 +154,16 @@ pub fn response_plan(evidence: &FrozenEvidence, context: &PlanContext) -> Respon
         .take(3)
         .map(|passage| passage.source_id.clone())
         .collect::<Vec<_>>();
-    let required =
-        if recheck || historical || evidence.sources.iter().any(|source| !source.whole_passage) {
-            ordered_passages.len()
-        } else {
-            usize::from(operational)
-        };
-    let focus = context
-        .focus
-        .as_ref()
-        .map_or_else(String::new, |focus| focus.compact());
+    let required = if contextual
+        || recheck
+        || historical
+        || evidence.sources.iter().any(|source| !source.whole_passage)
+    {
+        ordered_passages.len()
+    } else {
+        usize::from(operational)
+    };
+    let focus = context.worker_focus();
     let constrained = context
         .focus
         .as_ref()
@@ -198,7 +204,11 @@ pub fn response_plan(evidence: &FrozenEvidence, context: &PlanContext) -> Respon
         worker,
         requires_worker_support: historical
             || needs_time_clarification
-            || operational && constrained,
+            || operational && constrained
+            || matches!(
+                dialogue_kind,
+                Some(QaDialogueKind::General | QaDialogueKind::Contextual)
+            ),
         negotiated: false,
         note,
     }
@@ -294,6 +304,7 @@ mod tests {
             }),
             guidance: None,
             history_requested: false,
+            inbox_notifications: None,
             decision_preference: QaDecisionPreference::RulesOnly,
             decision_generation: 1,
         };

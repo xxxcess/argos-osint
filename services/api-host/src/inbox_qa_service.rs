@@ -26,8 +26,8 @@ use fleetworks_contracts::chat::{
     QaAvailabilityReason, QaFinding, QaStartupStage, QaTurnLimitation, QaTurnState,
 };
 use fleetworks_contracts::qa_worker::{
-    verified_operational_sources, QaContextUsage, QaDialogueKind, QaWorkerEvent, QaWorkerOutcome,
-    QaWorkerSequence,
+    valid_uncited_reply, verified_operational_sources, QaContextUsage, QaDialogueKind,
+    QaWorkerEvent, QaWorkerOutcome, QaWorkerSequence,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
@@ -743,11 +743,16 @@ impl Executor {
                 .worker
                 .as_ref()
                 .is_some_and(|request| request.clarification.is_some());
+            let needs_general_dialogue = evidence
+                .request
+                .dialogue
+                .as_ref()
+                .is_some_and(|dialogue| dialogue.kind.needs_general_support());
             plan.negotiated = self
                 .model
-                .response_plan_supported(needs_decoded_clarification)
+                .response_plan_supported(needs_decoded_clarification, needs_general_dialogue)
                 .await;
-            if plan.requires_worker_support && !plan.negotiated {
+            if (plan.requires_worker_support || needs_general_dialogue) && !plan.negotiated {
                 return Ok(
                     if store::publish_unavailable(
                         &self.repo,
@@ -862,8 +867,16 @@ fn is_operational(evidence: &FrozenEvidence) -> bool {
         .is_some_and(|dialogue| dialogue.kind == QaDialogueKind::Operational)
 }
 
+fn is_contextual(evidence: &FrozenEvidence) -> bool {
+    evidence
+        .request
+        .dialogue
+        .as_ref()
+        .is_some_and(|dialogue| dialogue.kind == QaDialogueKind::Contextual)
+}
+
 fn inference_budget(evidence: &FrozenEvidence, now_ms: i64) -> Duration {
-    if !is_operational(evidence) {
+    if !is_operational(evidence) && !is_contextual(evidence) {
         return TURN_TIMEOUT;
     }
     let deadline = evidence
@@ -880,7 +893,8 @@ fn requires_complete_snapshot(evidence: &FrozenEvidence) -> bool {
 }
 
 fn defer_findings(evidence: &FrozenEvidence) -> bool {
-    requires_complete_snapshot(evidence)
+    is_contextual(evidence)
+        || requires_complete_snapshot(evidence)
         || evidence
             .request
             .plan
@@ -923,13 +937,21 @@ impl Publication {
             return None;
         }
         let reply = reply?;
-        if !is_operational(evidence) {
+        let contextual = is_contextual(evidence);
+        if !is_operational(evidence) && !contextual {
             return Some((reply, Vec::new()));
         }
         if !observation_is_fresh(evidence.sampled_at_ms, now_ms) {
             return None;
         }
-        let selected = verified_operational_sources(&evidence.request, &reply)?;
+        let selected = if contextual {
+            if !valid_uncited_reply(&evidence.request, &reply) {
+                return None;
+            }
+            evidence.request.passages.iter().collect()
+        } else {
+            verified_operational_sources(&evidence.request, &reply)?
+        };
         let complete = requires_complete_snapshot(evidence);
         if complete && selected.len() != evidence.sources.len() {
             return None;
@@ -962,7 +984,7 @@ impl Publication {
         self.sequence.accept(&evidence.request, &event)?;
         let (state, context, reply, findings) = match event {
             QaWorkerEvent::Delta { text, .. } => {
-                if is_operational(evidence)
+                if (is_operational(evidence) || is_contextual(evidence))
                     && (defer_findings(evidence)
                         || !observation_is_fresh(
                             evidence.sampled_at_ms,

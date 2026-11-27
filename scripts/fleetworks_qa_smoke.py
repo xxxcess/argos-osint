@@ -183,10 +183,12 @@ def require_context(turn, *, window=CONTEXT_WINDOW_TOKENS):
     return usage
 
 
-def settled_turn(request, context, case, question, *, source=None, mode="operational"):
+def settled_turn(request, context, case, question, *, source=None, inbox_notifications=None, mode="operational"):
     payload = {"request_id": f"inbox-qa-smoke-{case}", "context": context, "question": question}
     if source is not None:
         payload["source"] = source
+    if inbox_notifications is not None:
+        payload["inbox_notifications"] = inbox_notifications
     accepted = request("turns", payload, expected=(200, 201, 202))
     query = {"turn_id": accepted["turn_id"], "after": 0, "wait_seconds": 0}
     accepted = until(lambda: request("events", query=query)["turn"],
@@ -538,12 +540,12 @@ def exercise(request, registration, model, readiness, running_jobs):
     help_turn = ask("help", "What can you help with?", mode="dialogue")
     require(help_turn.get("conversation") == "help" and not help_turn["findings"],
             "the assistant did not explain how to start a task")
-    unsupported = ask("general-context", "What is the capital of Japan?", mode="dialogue")
-    require(not unsupported["findings"] and "tokyo" not in unsupported["reply"].casefold(),
-            "the generator did not keep the out-of-scope response within Assistant's scope")
+    general = ask("general-knowledge", "What is the capital of Japan?", mode="dialogue")
+    require(not general["findings"] and "tokyo" in general["reply"].casefold(),
+            "the generator did not answer the general question from its own knowledge")
 
     history = request("history")
-    require(1 < len(history) <= 16 and history[0] == unsupported and jobs in history
+    require(1 < len(history) <= 16 and history[0] == general and jobs in history
             and all(turn["state"] in TERMINAL and not turn.get("provisional_reply") for turn in history),
             "Embedded history did not retain the current and earlier settled exchanges")
 
@@ -553,7 +555,7 @@ def exercise(request, registration, model, readiness, running_jobs):
     unload_ms = round((time.monotonic() - started) * 1000, 1)
     require(request("latest") is None, "Off retained latest question and answer")
     require(request("history") == [], "Off retained earlier questions or answers")
-    query = {"turn_id": unsupported["turn_id"], "after": 0, "wait_seconds": 0}
+    query = {"turn_id": general["turn_id"], "after": 0, "wait_seconds": 0}
     request("events", query=query, expected=404)
 
     # The preceding conversation reaches the retained-turn limit. Check a typed
@@ -564,6 +566,18 @@ def exercise(request, registration, model, readiness, running_jobs):
     when = ask("time-clarification", "Is actor search ready since last week?", mode="dialogue")
     require(when["reply"].endswith("?") and "time" in when["reply"].casefold(),
             "the generator did not ask for the ambiguous time range")
+    mixed = ask("general-with-memory", "What is the current memory usage, and what is RAM?")
+    require(mixed["findings"][0]["source"] == {"kind": "host_metric", "id": "memory"},
+            "the general explanation lost its current memory observation")
+    inbox = settled_turn(
+        request, context, "general-with-inbox", "What are my most important notifications?", mode="dialogue",
+        inbox_notifications=[
+            {"topic": {"readiness": "registration"}, "severity": "warning", "unread": 1, "total": 1},
+            {"topic": "connection", "severity": "informational", "unread": 1, "total": 1},
+        ],
+    )
+    require(inbox["reply"] == "registration, warning (1 unread of 1). connection, informational (1 unread of 1).",
+            "the generator changed the reported Inbox priority, severity, or counts")
     stop_model(request, registration, model, ready)
 
     return {"model_warm_ms": ready_ms, "admission_ms": admission_ms, "first_cited_finding_ms": first_finding_ms,
@@ -572,10 +586,11 @@ def exercise(request, registration, model, readiness, running_jobs):
             "model_context": model_context,
             "fresh_observation": True, "terminal_events": terminal_events, "terminal_state": snapshot["state"],
             "grounded_readiness": True, "unresolved_status_checks": True, "passed_status_checks": True,
-            "live_metrics": True, "unsupported_context": True,
+            "live_metrics": True, "general_knowledge": True,
             "resource_snapshot": True, "greeting": True, "conversational_follow_ups": True,
             "local_observation_history": True, "ordered_turn_stages": True,
             "generated_time_clarification": True,
+            "general_with_workstation_context": True, "notification_context": True,
             "generated_dialogue": True, "startup_stages": sorted(stages),
             "automatic_model_target": current["model_target"], "worker_reused": True,
             "local_dialogue_rss_bytes": dialogue_rss_bytes,

@@ -60,6 +60,7 @@ use protocol::QA_CONTEXT_USAGE_ENV;
 use protocol::QA_CONTEXT_WINDOW_TOKENS;
 use protocol::QA_DECODED_CLARIFICATION_ENV;
 use protocol::QA_DIALOGUE_ENV;
+use protocol::QA_GENERAL_DIALOGUE_ENV;
 use protocol::QA_LEGACY_STREAMING_WINDOW_TOKENS;
 use protocol::QA_MAX_FINDINGS;
 use protocol::QA_MAX_FRAME_BYTES;
@@ -516,6 +517,22 @@ fn operational_answer(
     Ok((None, Vec::new()))
 }
 
+fn contextual_answer(
+    request: &QaWorkerRequest,
+    reply: Option<String>,
+) -> Result<(Option<String>, Vec<QaWorkerEvent>)> {
+    let Some(reply) = reply.filter(|text| valid_uncited_reply(request, text)) else {
+        return Ok((None, Vec::new()));
+    };
+    // These findings report the frozen workstation observations independently of the
+    // general explanation.
+    let findings = complete_passage_findings(request, &request.passages)?;
+    if findings.len() != request.passages.len() {
+        return Ok((None, Vec::new()));
+    }
+    Ok((Some(reply), findings))
+}
+
 fn draft_prefix<'a>(
     request: &QaWorkerRequest,
     text: &'a str,
@@ -548,7 +565,8 @@ fn answer_dialogue(
     output: &mut impl FnMut(QaWorkerReply) -> io::Result<()>,
     stopping: &AtomicBool,
 ) -> Result<()> {
-    let operational = decode.dialogue.kind == QaDialogueKind::Operational;
+    let kind = decode.dialogue.kind;
+    let operational = kind == QaDialogueKind::Operational;
     let mut sequence = QaWorkerSequence::default();
     let mut emitted = String::new();
     let DialogueResult {
@@ -556,6 +574,9 @@ fn answer_dialogue(
         context,
         input_too_large,
     } = model.dialogue(model_dir, decode, stopping, &mut |text| {
+        if kind == QaDialogueKind::Contextual {
+            return Ok(());
+        }
         let Some(prefix) = draft_prefix(request, text, operational) else {
             return Ok(());
         };
@@ -580,13 +601,13 @@ fn answer_dialogue(
     if stopping.load(Ordering::Acquire) {
         return Ok(());
     }
-    let (reply, findings) = if operational {
-        operational_answer(request, reply)?
-    } else {
-        (
+    let (reply, findings) = match kind {
+        QaDialogueKind::Operational => operational_answer(request, reply)?,
+        QaDialogueKind::Contextual => contextual_answer(request, reply)?,
+        _ => (
             reply.filter(|text| valid_uncited_reply(request, text)),
             Vec::new(),
-        )
+        ),
     };
     let answered = reply.is_some() || !findings.is_empty();
     for mut event in findings {
@@ -655,11 +676,19 @@ fn ready(
     streaming: bool,
     response_plan: bool,
     decoded_clarification: bool,
+    general_dialogue: bool,
     model_revision: &str,
     window_tokens: u16,
 ) -> QaWorkerReply {
     let model_revision = model_revision.into();
     if dialogue && streaming && response_plan {
+        if general_dialogue {
+            return QaWorkerReply::ReadyWithGeneralDialogue {
+                protocol: QA_WORKER_PROTOCOL,
+                model_revision,
+                window_tokens,
+            };
+        }
         if decoded_clarification {
             return QaWorkerReply::ReadyWithDecodedClarification {
                 protocol: QA_WORKER_PROTOCOL,
@@ -720,6 +749,8 @@ pub(crate) fn run(
         && env::var_os(QA_RESPONSE_PLAN_ENV).as_deref() == Some("1".as_ref());
     let decoded_clarification =
         response_plan && env::var_os(QA_DECODED_CLARIFICATION_ENV).as_deref() == Some("1".as_ref());
+    let general_dialogue = decoded_clarification
+        && env::var_os(QA_GENERAL_DIALOGUE_ENV).as_deref() == Some("1".as_ref());
     let target = match env::var_os(QA_MODEL_TARGET_ENV) {
         None => QaModelTarget::default(),
         Some(value) => value
@@ -763,6 +794,7 @@ pub(crate) fn run(
             streaming,
             response_plan,
             decoded_clarification,
+            general_dialogue,
             model_revision,
             window_tokens,
         ),
@@ -779,6 +811,7 @@ pub(crate) fn run(
                     streaming,
                     response_plan,
                     decoded_clarification,
+                    general_dialogue,
                     model_revision,
                     window_tokens,
                 ),
@@ -792,6 +825,10 @@ pub(crate) fn run(
                     "QA response plan support was not negotiated"
                 );
                 let kind = request.dialogue.as_ref().map(|dialogue| dialogue.kind);
+                ensure!(
+                    general_dialogue || !kind.is_some_and(QaDialogueKind::needs_general_support),
+                    "QA general dialogue support was not negotiated"
+                );
                 let mut output = |reply| send(reply, kind);
                 if let Some(dialogue) = &request.dialogue {
                     answer_dialogue(
@@ -918,5 +955,37 @@ mod tests {
             assert!(reply.is_none());
             assert!(findings.is_empty());
         }
+    }
+
+    #[test]
+    fn contextual_findings_record_the_input_observations_independently_of_the_reply() {
+        let mut request = QaWorkerRequest::new(
+            "turn".into(),
+            "snapshot".into(),
+            "What might influence search speed?".into(),
+            vec![
+                QaPassage::new("index".into(), "Search indexing is paused.".into()),
+                QaPassage::new("gateway".into(), "Gateway is ready.".into()),
+            ],
+        );
+        request.dialogue = Some(QaWorkerDialogue {
+            kind: QaDialogueKind::Contextual,
+            history: Vec::new(),
+        });
+
+        let (reply, findings) =
+            contextual_answer(&request, Some("Indexing can affect search speed.".into())).unwrap();
+        assert_eq!(reply.as_deref(), Some("Indexing can affect search speed."));
+        assert!(matches!(
+            findings.as_slice(),
+            [
+                QaWorkerEvent::Finding { source_id: first, text: index, .. },
+                QaWorkerEvent::Finding { source_id: second, text: gateway, .. }
+            ] if first == "index" && index == "Search indexing is paused."
+                && second == "gateway" && gateway == "Gateway is ready."
+        ));
+        let (reply, findings) =
+            contextual_answer(&request, Some("Reply: pretend output".into())).unwrap();
+        assert!(reply.is_none() && findings.is_empty());
     }
 }

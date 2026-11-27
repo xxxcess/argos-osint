@@ -1,5 +1,6 @@
 //! Native Inbox question answering over authenticated HTTP and private IPC.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::Deserialize;
@@ -8,6 +9,7 @@ use serde::Serialize;
 use crate::context::MutationContext;
 use crate::qa_worker::QaContextUsage;
 pub use crate::qa_worker::QaModelTarget;
+use crate::readiness::ReadinessCheckId;
 
 use super::identity;
 use super::request_id;
@@ -32,6 +34,8 @@ pub const QA_MODEL_SETTINGS_FEATURE: &str = "inbox-qa-model-settings-v1";
 pub const QA_GPT2_GENERATORS_FEATURE: &str = "inbox-qa-gpt2-v1";
 /// Embedded capability for browsing a registration's retained Inbox exchanges.
 pub const QA_HISTORY_FEATURE: &str = "inbox-qa-history-v1";
+/// Embedded capability for accepting a bounded summary of native Inbox notices.
+pub const QA_INBOX_NOTIFICATIONS_FEATURE: &str = "inbox-qa-notifications-v1";
 /// Read-only related activity lookup over private Embedded IPC.
 pub const QA_RELATED_ACTIVITY_PATH: &str = "/api/v2/workstation/chat/related-activity";
 
@@ -44,6 +48,10 @@ pub const QA_MAX_FINDINGS: usize = 3;
 pub const QA_MAX_WORDS: usize = 60;
 /// Maximum number of exchanges retained per registration.
 pub const QA_MAX_RETAINED_TURNS: usize = 16;
+/// Number of native Inbox notification topics that may accompany a question.
+pub const QA_MAX_INBOX_NOTIFICATION_GROUPS: usize = 3;
+/// Maximum notices retained in the native Inbox.
+pub const QA_MAX_INBOX_NOTIFICATION_ITEMS: u8 = 50;
 
 /// The selected backend's inference lifecycle.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -345,7 +353,98 @@ impl fmt::Debug for QaRelatedActivity {
     }
 }
 
-/// One question. Evidence is always selected by the authorized backend.
+/// Fixed categories of native Inbox observations. Jobs are aggregated without an identifier.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaInboxNotificationTopic {
+    Connection,
+    Jobs,
+    Readiness(ReadinessCheckId),
+}
+
+/// Highest visual severity among the unread notices in a group, or among its read notices.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaInboxNotificationSeverity {
+    Informational,
+    Warning,
+    Critical,
+}
+
+/// Counts observed by the submitting desktop. This value confers no authority.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct QaInboxNotificationGroup {
+    pub topic: QaInboxNotificationTopic,
+    pub severity: QaInboxNotificationSeverity,
+    pub unread: u8,
+    pub total: u8,
+}
+
+impl QaInboxNotificationGroup {
+    #[must_use]
+    pub const fn new(
+        topic: QaInboxNotificationTopic,
+        severity: QaInboxNotificationSeverity,
+        unread: u8,
+        total: u8,
+    ) -> Self {
+        Self {
+            topic,
+            severity,
+            unread,
+            total,
+        }
+    }
+}
+
+impl fmt::Display for QaInboxNotificationGroup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let topic = match self.topic {
+            QaInboxNotificationTopic::Connection => "connection",
+            QaInboxNotificationTopic::Jobs => "job activity",
+            QaInboxNotificationTopic::Readiness(check) => check.as_str(),
+        };
+        let severity = match self.severity {
+            QaInboxNotificationSeverity::Informational => "informational",
+            QaInboxNotificationSeverity::Warning => "warning",
+            QaInboxNotificationSeverity::Critical => "critical",
+        };
+        write!(
+            f,
+            "{}, {severity} ({} unread of {})",
+            topic.replace('_', " "),
+            self.unread,
+            self.total
+        )
+    }
+}
+
+/// Whether the question asks about the operator's visible Inbox notices.
+#[must_use]
+pub fn is_inbox_notification_question(question: &str) -> bool {
+    let mut names_inbox = false;
+    let mut refers_to_local_items = false;
+    for word in question.split(|ch: char| !ch.is_ascii_alphabetic()) {
+        names_inbox |= ["inbox", "notification", "notifications"]
+            .iter()
+            .any(|candidate| word.eq_ignore_ascii_case(candidate));
+        refers_to_local_items |= [
+            "my", "our", "these", "unread", "current", "recent", "latest", "today", "here",
+        ]
+        .iter()
+        .any(|candidate| word.eq_ignore_ascii_case(candidate));
+        if names_inbox && refers_to_local_items {
+            return true;
+        }
+    }
+    false
+}
+
+/// One question. The backend selects evidence and may receive a native Inbox observation.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -355,6 +454,9 @@ pub struct QaTurnRequest {
     pub question: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<ChatSourceReference>,
+    /// A summary of the submitting desktop's Inbox for an explicit notification question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbox_notifications: Option<Vec<QaInboxNotificationGroup>>,
 }
 
 impl fmt::Debug for QaTurnRequest {
@@ -376,9 +478,20 @@ impl QaTurnRequest {
             context,
             question,
             source,
+            inbox_notifications: None,
         };
         request.validate()?;
         Ok(request)
+    }
+
+    /// Attach a bounded Inbox summary to a question for a compatible Embedded companion.
+    pub fn with_inbox_notifications(
+        mut self,
+        groups: Vec<QaInboxNotificationGroup>,
+    ) -> Result<Self, ChatInputError> {
+        self.inbox_notifications = Some(groups);
+        self.validate()?;
+        Ok(self)
     }
 
     /// Validate the shape and bounds before resolving evidence or reserving worker capacity.
@@ -401,6 +514,26 @@ impl QaTurnRequest {
             .any(|c| c.is_control() && c != '\n' && c != '\t')
         {
             return Err(ChatInputError::ControlCharacter);
+        }
+        if let Some(groups) = &self.inbox_notifications {
+            if self.source.is_some()
+                || !is_inbox_notification_question(&self.question)
+                || groups.len() > QA_MAX_INBOX_NOTIFICATION_GROUPS
+            {
+                return Err(ChatInputError::InvalidInboxNotifications);
+            }
+            let mut topics = BTreeSet::new();
+            let mut total = 0_u16;
+            for group in groups {
+                total += u16::from(group.total);
+                if group.total == 0
+                    || group.unread > group.total
+                    || total > u16::from(QA_MAX_INBOX_NOTIFICATION_ITEMS)
+                    || !topics.insert(group.topic)
+                {
+                    return Err(ChatInputError::InvalidInboxNotifications);
+                }
+            }
         }
         Ok(())
     }
@@ -829,6 +962,70 @@ mod tests {
             supplied[field] = serde_json::json!([]);
             assert!(serde_json::from_value::<QaTurnRequest>(supplied).is_err());
         }
+    }
+
+    #[test]
+    fn inbox_notification_context_accepts_only_bounded_typed_local_observations() {
+        let legacy = serde_json::json!({
+            "request_id": "request-1",
+            "context": {
+                "registration_id": "registration-1",
+                "expected_registration_revision": 1,
+                "expected_context_revision": 1,
+            },
+            "question": "what are my most important notifications?",
+        });
+        let request = serde_json::from_value::<QaTurnRequest>(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&request).unwrap(), legacy);
+
+        let group = QaInboxNotificationGroup::new(
+            QaInboxNotificationTopic::Readiness(ReadinessCheckId::Registration),
+            QaInboxNotificationSeverity::Warning,
+            1,
+            2,
+        );
+        let request = request.with_inbox_notifications(vec![group]).unwrap();
+        assert_eq!(group.to_string(), "registration, warning (1 unread of 2)");
+        let valid = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            serde_json::from_value::<QaTurnRequest>(valid.clone()).unwrap(),
+            request
+        );
+
+        let invalid_groups = [
+            vec![group, group],
+            vec![QaInboxNotificationGroup::new(
+                group.topic,
+                group.severity,
+                3,
+                2,
+            )],
+            vec![
+                QaInboxNotificationGroup::new(group.topic, group.severity, 1, 50),
+                QaInboxNotificationGroup::new(
+                    QaInboxNotificationTopic::Connection,
+                    group.severity,
+                    1,
+                    1,
+                ),
+            ],
+        ];
+        for groups in invalid_groups {
+            assert_eq!(
+                request.clone().with_inbox_notifications(groups),
+                Err(ChatInputError::InvalidInboxNotifications)
+            );
+        }
+
+        let mut unrelated = request;
+        unrelated.question = "How do browser notifications work?".into();
+        assert_eq!(
+            unrelated.validate(),
+            Err(ChatInputError::InvalidInboxNotifications)
+        );
+        let mut injected = valid;
+        injected["inbox_notifications"][0]["title"] = serde_json::json!("untrusted text");
+        assert!(serde_json::from_value::<QaTurnRequest>(injected).is_err());
     }
 
     #[test]

@@ -26,6 +26,7 @@ use tch::Device;
 use tch::Kind;
 use tch::Tensor;
 
+use super::protocol::reported_inbox_summary;
 use super::protocol::valid_dialogue_reply;
 use super::protocol::verified_operational_reply;
 use super::protocol::QaDialogueExchange;
@@ -43,6 +44,7 @@ use super::protocol::QA_MODEL_PINS;
 use super::protocol::QA_OPERATIONAL_CHECKS_INTRODUCTION as CHECKS_INTRODUCTION;
 use super::protocol::QA_OPERATIONAL_OBSERVATIONS_INTRODUCTION as OBSERVATIONS_INTRODUCTION;
 use super::protocol::QA_OPERATIONAL_STATUS_INTRODUCTION as STATUS_INTRODUCTION;
+use super::protocol::QA_REPORTED_INBOX_PREFIX;
 
 const MAX_OPERATIONAL_DETAILS: usize = 6;
 const LEGACY_OUTPUT_TOKENS: u16 = 48;
@@ -187,16 +189,16 @@ fn prompt(
     let task = match kind {
         QaDialogueKind::Greeting => "Say hello to the operator in one friendly sentence.",
         QaDialogueKind::Acknowledgement => "Acknowledge the operator in one friendly sentence.",
-        QaDialogueKind::Help => {
-            "Explain that you can check workstation readiness, resource usage, and job counts."
-        }
+        QaDialogueKind::Help => "Explain what kinds of questions you can help with.",
         QaDialogueKind::Recall => {
             "Answer the question using only the earlier conversation. If it does not say, say you do not know."
         }
         QaDialogueKind::Clarification => {
             "Ask which workstation status check, resource, or visible job the operator wants to check."
         }
-        QaDialogueKind::Operational => unreachable!("operational turns use reply selection"),
+        QaDialogueKind::Operational | QaDialogueKind::General | QaDialogueKind::Contextual => {
+            unreachable!("this dialogue kind has its own prompt")
+        }
     };
     // Older companions can still send retained exchanges on these requests.
     let history = if kind == QaDialogueKind::Recall {
@@ -215,10 +217,12 @@ fn prompt(
         let example = match kind {
             QaDialogueKind::Greeting => Some("Current user: \"Good morning!\"\nReply: Hello!"),
             QaDialogueKind::Acknowledgement => Some("Current user: \"Thanks!\"\nReply: You're welcome."),
-            QaDialogueKind::Help => Some("Current user: \"What can you do?\"\nReply: I can check workstation readiness, resource usage, and job counts."),
+            QaDialogueKind::Help => Some("Current user: \"What can you do?\"\nReply: I can explain information and help you check workstation readiness, resource usage, and job counts."),
             QaDialogueKind::Recall => None,
             QaDialogueKind::Clarification => Some("Current user: \"What about it?\"\nReply: Which workstation check, resource, or job would you like me to look at?"),
-            QaDialogueKind::Operational => unreachable!("operational turns use reply selection"),
+            QaDialogueKind::Operational | QaDialogueKind::General | QaDialogueKind::Contextual => {
+                unreachable!("this dialogue kind has its own prompt")
+            }
         };
         if let Some(example) = example {
             writeln!(text, "{example}\nNew conversation:")?;
@@ -242,6 +246,66 @@ fn prompt(
         history_ends,
         history_count: history.len(),
     })
+}
+
+fn knowledge_prompt(request: &DecodeRequest<'_>, causal: bool) -> Result<String> {
+    let focus = request.plan.map_or("", |plan| plan.focus.as_str());
+    let inbox = focus.starts_with(QA_REPORTED_INBOX_PREFIX);
+    let contextual = request.dialogue.kind == QaDialogueKind::Contextual;
+    let mut text = String::new();
+    if !causal && !inbox {
+        text.push_str("Answer the question using your general knowledge and the supplied context where relevant.\n");
+        if !contextual {
+            write_plan_context(&mut text, request.plan)?;
+        }
+    }
+    if inbox && !causal {
+        text.push_str("Use the desktop's Inbox groups to answer the question. Groups are supplied in priority order.\n");
+    }
+    if causal && !inbox {
+        // Demonstrate the shape of an answer for the base completion model.
+        text.push_str(concat!(
+            "Question: \"What is the capital of France?\"\n",
+            "Reply: The capital of France is Paris.\n",
+            "Question: \"Who is Einstein?\"\n",
+            "Reply: Albert Einstein was a German-born physicist who developed the theory of relativity.\n\n",
+        ));
+    }
+    if !contextual && !focus.is_empty() && causal != inbox {
+        writeln!(text, "Resolved focus: {}", serde_json::to_string(focus)?)?;
+    }
+    let question = serde_json::to_string(&normalize_knowledge_question(request.question))?;
+    if let Some(groups) = focus
+        .strip_prefix(QA_REPORTED_INBOX_PREFIX)
+        .filter(|_| causal)
+    {
+        let groups = groups.trim();
+        write!(text, "Question: {question}\nInbox groups: {groups}\nReply:")?;
+    } else {
+        write!(text, "Question: {question}\nReply:")?;
+    }
+    Ok(text)
+}
+
+fn normalize_knowledge_question(question: &str) -> String {
+    let question = question.trim();
+    let mut words = question.split_whitespace();
+    let first = words.next().unwrap_or_default();
+    let next = words.next();
+    let subject = words.next();
+    if first.eq_ignore_ascii_case("who")
+        && next.is_some_and(|word| word.eq_ignore_ascii_case("is"))
+        && words.next().is_none()
+    {
+        if let Some(subject) = subject {
+            let subject = subject.trim_end_matches(['?', '.', '!']);
+            let mut letters = subject.chars();
+            if let Some(initial) = letters.next() {
+                return format!("Who is {}{}?", initial.to_uppercase(), letters.as_str());
+            }
+        }
+    }
+    question.to_owned()
 }
 
 fn input_ids(
@@ -623,6 +687,18 @@ fn prepare_input(
                 .ok_or_else(|| anyhow!("missing QA generator EOS token"))?,
         )
     };
+    if request.dialogue.kind.needs_general_support() {
+        // Mixed turns only generate the general clause. Their exact local
+        // observations travel independently through the finding events.
+        let prompt = knowledge_prompt(request, causal)?;
+        let Some(ids) = bounded_ids(tokenizer, &prompt, window_tokens, eos) else {
+            return Ok(PreparedInput::TooLarge);
+        };
+        return Ok(match request.plan.and_then(reported_inbox_summary) {
+            Some(summary) => constrained_input(tokenizer, request, &prompt, ids, &[summary]),
+            None => PreparedInput::Ready(ids, ReplyDecoding::Freeform),
+        });
+    }
     if request.dialogue.kind == QaDialogueKind::Operational {
         let mut tried = false;
         let prepared = fit_operational_prompt(
@@ -673,28 +749,7 @@ fn prepare_input(
         let Some(ids) = bounded_ids(tokenizer, &prompt, window_tokens, eos) else {
             return Ok(PreparedInput::TooLarge);
         };
-        let alternatives = replies
-            .iter()
-            .filter_map(|reply| {
-                let tokens = if causal {
-                    let continuation = format!("{prompt} {reply}");
-                    let combined =
-                        tokenizer.convert_tokens_to_ids(&tokenizer.tokenize(&continuation));
-                    combined.strip_prefix(ids.as_slice())?.to_vec()
-                } else {
-                    tokenizer.convert_tokens_to_ids(&tokenizer.tokenize(reply))
-                };
-                (!tokens.is_empty()
-                    && tokens.len() <= usize::from(request.target.output_tokens())
-                    && tokenizer.decode(&tokens, true, !causal).trim() == *reply)
-                    .then_some(tokens)
-            })
-            .collect::<Vec<_>>();
-        Ok(if alternatives.is_empty() {
-            PreparedInput::Unavailable
-        } else {
-            PreparedInput::Ready(ids, ReplyDecoding::Constrained(alternatives))
-        })
+        Ok(constrained_input(tokenizer, request, &prompt, ids, replies))
     } else {
         let ids = input_ids(tokenizer, window_tokens, request, eos)?;
         Ok(if ids.is_empty() {
@@ -702,6 +757,37 @@ fn prepare_input(
         } else {
             PreparedInput::Ready(ids, ReplyDecoding::Freeform)
         })
+    }
+}
+
+fn constrained_input(
+    tokenizer: &TokenizerOption,
+    request: &DecodeRequest<'_>,
+    prompt: &str,
+    ids: Vec<i64>,
+    replies: &[&str],
+) -> PreparedInput {
+    let causal = is_gpt2(request.target);
+    let alternatives: Vec<_> = replies
+        .iter()
+        .filter_map(|reply| {
+            let tokens = if causal {
+                let continuation = format!("{prompt} {reply}");
+                let combined = tokenizer.convert_tokens_to_ids(&tokenizer.tokenize(&continuation));
+                combined.strip_prefix(ids.as_slice())?.to_vec()
+            } else {
+                tokenizer.convert_tokens_to_ids(&tokenizer.tokenize(reply))
+            };
+            (!tokens.is_empty()
+                && tokens.len() <= usize::from(request.target.output_tokens())
+                && tokenizer.decode(&tokens, true, !causal).trim() == *reply)
+                .then_some(tokens)
+        })
+        .collect();
+    if alternatives.is_empty() {
+        PreparedInput::Unavailable
+    } else {
+        PreparedInput::Ready(ids, ReplyDecoding::Constrained(alternatives))
     }
 }
 
@@ -729,6 +815,7 @@ impl ReplyDecoding {
 struct ReplyTokens<'a> {
     eos: &'a [i64],
     allowed: Option<&'a [Vec<i64>]>,
+    deadline: Option<Instant>,
 }
 
 // The generic LanguageGenerator bound exposes Rust-BERT's shared forward/cache interface.
@@ -805,6 +892,8 @@ fn decode_flan<G: LanguageGenerator>(
                     .map(Vec::as_slice)
                     .unwrap_or_default(),
                 allowed: decoding.allowed(),
+                deadline: (request.dialogue.kind == QaDialogueKind::Contextual)
+                    .then(|| started + OPERATIONAL_DECODE_BUDGET),
             },
             &request,
             stopping,
@@ -858,6 +947,8 @@ fn decode_gpt2(
             ReplyTokens {
                 eos: &[model.eos],
                 allowed: decoding.allowed(),
+                deadline: (request.dialogue.kind == QaDialogueKind::Contextual)
+                    .then(|| started + OPERATIONAL_DECODE_BUDGET),
             },
             &request,
             stopping,
@@ -950,8 +1041,10 @@ fn decode_reply(
     draft: &mut impl FnMut(&str) -> Result<()>,
 ) -> Result<Option<String>> {
     let causal = is_gpt2(request.target);
+    let sentence_completion = causal && !request.dialogue.kind.needs_general_support();
     let mut cache = Cache::None;
     let mut generated = Vec::new();
+    let mut timed_out = false;
     let output_limit = if request.streaming {
         request.target.output_tokens()
     } else {
@@ -960,6 +1053,13 @@ fn decode_reply(
     for _ in 0..output_limit {
         if stopping.load(Ordering::Acquire) {
             return Ok(None);
+        }
+        if tokens
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            timed_out = true;
+            break;
         }
         let result = forward(&step, cache)?;
         let logits = result.lm_logits.select(1, -1);
@@ -989,11 +1089,11 @@ fn decode_reply(
                 let reply = decoded.trim();
                 return Ok(valid_dialogue_reply(reply).then(|| reply.to_owned()));
             }
-        } else if causal {
+        } else if sentence_completion {
             // Byte-level BPE may leave a trailing UTF-8 fragment between model steps.
             // Stream only a complete valid sentence, so the same text can be retained.
             let text = tokenizer.decode(&generated, true, false);
-            if let Some(reply) = causal_sentence(&text) {
+            if let Some(reply) = first_complete_sentence(&text) {
                 if stopping.load(Ordering::Acquire) {
                     return Ok(None);
                 }
@@ -1005,32 +1105,41 @@ fn decode_reply(
             if conversational_prefix(&text).len() < text.trim_start().len() {
                 break;
             }
-        } else if request.streaming
-            && (generated.len() == 1 || generated.len().is_multiple_of(4))
-            && !stopping.load(Ordering::Acquire)
+        } else if causal
+            || request.streaming && (generated.len() == 1 || generated.len().is_multiple_of(4))
         {
             let decoded = tokenizer.decode(&generated, true, false);
             let text = conversational_prefix(&decoded);
-            draft(text)?;
+            if request.streaming
+                && (generated.len() == 1 || generated.len().is_multiple_of(4))
+                && !stopping.load(Ordering::Acquire)
+            {
+                draft(text)?;
+            }
             if text.len() < decoded.trim_start().len() {
                 break;
             }
         }
         step = Tensor::f_from_slice(&[token])?.f_unsqueeze(0)?;
     }
-    if tokens.allowed.is_some() || causal || stopping.load(Ordering::Acquire) {
+    if tokens.allowed.is_some() || sentence_completion || stopping.load(Ordering::Acquire) {
         return Ok(None);
     }
-    if request.streaming && generated.len() > 1 && !generated.len().is_multiple_of(4) {
+    if !timed_out && request.streaming && generated.len() > 1 && !generated.len().is_multiple_of(4)
+    {
         let decoded = tokenizer.decode(&generated, true, false);
         draft(conversational_prefix(&decoded))?;
     }
-    let decoded = tokenizer.decode(&generated, true, true);
+    // The causal byte decoder keeps the exact spacing used in streamed deltas.
+    let decoded = tokenizer.decode(&generated, true, !causal);
+    if timed_out {
+        return Ok(first_complete_sentence(&decoded).map(str::to_owned));
+    }
     let text = conversational_prefix(&decoded).trim_end();
-    Ok(valid_dialogue_reply(text).then(|| text.to_owned()))
+    Ok((!text.contains('\u{fffd}') && valid_dialogue_reply(text)).then(|| text.to_owned()))
 }
 
-fn causal_sentence(text: &str) -> Option<&str> {
+fn first_complete_sentence(text: &str) -> Option<&str> {
     let line = conversational_prefix(text);
     line.char_indices().find_map(|(index, character)| {
         let end = index + character.len_utf8();
@@ -1081,13 +1190,13 @@ mod tests {
     #[test]
     fn causal_reply_stops_at_a_complete_valid_sentence() {
         assert_eq!(
-            causal_sentence("  Bonjour!\nCurrent user: follow-up"),
+            first_complete_sentence("  Bonjour!\nCurrent user: follow-up"),
             Some("Bonjour!")
         );
-        assert_eq!(causal_sentence("Current user: follow-up."), None);
-        assert_eq!(causal_sentence("Hello there, how can I"), None);
-        assert_eq!(causal_sentence("Caf\u{fffd}!"), None);
-        assert_eq!(causal_sentence("..."), None);
+        assert_eq!(first_complete_sentence("Current user: follow-up."), None);
+        assert_eq!(first_complete_sentence("Hello there, how can I"), None);
+        assert_eq!(first_complete_sentence("Caf\u{fffd}!"), None);
+        assert_eq!(first_complete_sentence("..."), None);
     }
 
     #[test]
@@ -1441,6 +1550,54 @@ mod tests {
             let prompt_without_history = prompt(kind, question, &[], false, None).unwrap();
             assert_eq!(prompt_with_history.text, prompt_without_history.text);
         }
+    }
+
+    #[test]
+    fn knowledge_prompt_keeps_workstation_facts_out_of_the_general_explanation() {
+        let question = "How does a paused index affect search?";
+        let plan = QaWorkerPlan::new(
+            "Search index".into(),
+            "Explain the broader concept.".into(),
+            vec!["index".into(), "gateway".into()],
+            None,
+        );
+        let passages = [
+            QaPassage::new("index".into(), "Search indexing is paused.".into()),
+            QaPassage::new("gateway".into(), "Gateway is ready.".into()),
+        ];
+        let general = QaWorkerDialogue {
+            kind: QaDialogueKind::General,
+            history: Vec::new(),
+        };
+        let contextual = QaWorkerDialogue {
+            kind: QaDialogueKind::Contextual,
+            history: Vec::new(),
+        };
+        let request = DecodeRequest {
+            target: QaModelTarget::Gpt2Small,
+            streaming: true,
+            decoded_clarification: true,
+            window_tokens: 896,
+            question,
+            dialogue: &general,
+            passages: &[],
+            plan: None,
+        };
+        let prompt = knowledge_prompt(&request, true).unwrap();
+        assert!(prompt.ends_with("Question: \"How does a paused index affect search?\"\nReply:"));
+        assert!(!prompt.contains("Approved observations:"));
+
+        let request = DecodeRequest {
+            dialogue: &contextual,
+            passages: &passages,
+            plan: Some(&plan),
+            ..request
+        };
+        let prompt = knowledge_prompt(&request, false).unwrap();
+        assert!(!prompt.contains(&plan.focus));
+        assert!(!prompt.contains("Search indexing is paused."));
+        assert!(!prompt.contains("Gateway is ready."));
+        assert!(prompt.ends_with("Question: \"How does a paused index affect search?\"\nReply:"));
     }
 
     #[test]

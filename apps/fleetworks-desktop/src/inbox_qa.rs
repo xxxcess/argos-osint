@@ -7,6 +7,7 @@ use std::time::Duration;
 use chrono::DateTime;
 use chrono::Local;
 use chrono::Utc;
+use fleetworks_contracts::chat::is_inbox_notification_question;
 use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::chat::QaAvailabilityReason;
@@ -34,6 +35,7 @@ use fleetworks_contracts::chat::MAX_EVENT_WAIT_SECS;
 use fleetworks_contracts::chat::MAX_INPUT_BYTES;
 use fleetworks_contracts::chat::QA_GPT2_GENERATORS_FEATURE;
 use fleetworks_contracts::chat::QA_HISTORY_FEATURE;
+use fleetworks_contracts::chat::QA_INBOX_NOTIFICATIONS_FEATURE;
 use fleetworks_contracts::chat::QA_MAX_RETAINED_TURNS;
 use fleetworks_contracts::chat::QA_MODEL_SETTINGS_FEATURE;
 use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
@@ -1175,12 +1177,29 @@ impl State {
             return;
         };
         let source = self.inbox_qa.source.clone();
-        let Ok(request) = QaTurnRequest::new(
+        let request = QaTurnRequest::new(
             request_id,
             MutationContext::new(context),
             question.to_owned(),
             source,
-        ) else {
+        )
+        .and_then(|request| {
+            let supports_notifications =
+                self.connection.capabilities.as_ref().is_some_and(|caps| {
+                    caps.features
+                        .iter()
+                        .any(|feature| feature == QA_INBOX_NOTIFICATIONS_FEATURE)
+                });
+            if supports_notifications
+                && request.source.is_none()
+                && is_inbox_notification_question(question)
+            {
+                request.with_inbox_notifications(self.inbox.assistant_notifications())
+            } else {
+                Ok(request)
+            }
+        });
+        let Ok(request) = request else {
             self.inbox_qa.status = Some("Check the question and selected source, then try again.");
             return;
         };
@@ -1869,6 +1888,7 @@ fn answer_sources(
     turn_id: &str,
     citations: &[chat_ui::Citation],
     evidence: Option<&[QaFinding]>,
+    show_observations: bool,
     expanded: bool,
     kit: &Kit,
 ) -> El {
@@ -1907,9 +1927,25 @@ fn answer_sources(
         .w_full()
         .min_w(0.0)
         .gap(4.0)
+        .children(evidence.filter(|_| show_observations).map(|findings| {
+            rune::col()
+                .gap(3.0)
+                .label("Workstation observations")
+                .child(
+                    rune::text("Workstation observations")
+                        .font(kit.ty.small_medium)
+                        .color(kit.c.text_muted),
+                )
+                .children(findings.iter().map(|finding| {
+                    rune::text(finding.text.as_str())
+                        .font(kit.ty.small)
+                        .color(kit.c.std_text)
+                        .wrap_anywhere()
+                }))
+        }))
         .child(rune::row().child(trigger))
         .children(expanded.then(|| {
-            let rows = if let Some(findings) = evidence {
+            let rows = if let Some(findings) = evidence.filter(|_| !show_observations) {
                 rune::col().w_full().gap(6.0).children(
                     citations.iter().zip(findings).enumerate().map(
                         |(index, (citation, finding))| {
@@ -2144,8 +2180,18 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
     let sources = turn_id
         .filter(|_| !answer.citations.is_empty())
         .map(|turn_id| {
-            let evidence = answer.text.is_empty().then_some(findings);
-            answer_sources(turn_id, &answer.citations, evidence, sources_open, kit)
+            let evidence = findings
+                .iter()
+                .any(|finding| !answer.text.contains(finding.text.as_str()))
+                .then_some(findings);
+            answer_sources(
+                turn_id,
+                &answer.citations,
+                evidence,
+                !answer.text.is_empty(),
+                sources_open,
+                kit,
+            )
         });
     let live_region = if answer.state == chat_ui::TurnState::Streaming {
         LiveRegion::Off

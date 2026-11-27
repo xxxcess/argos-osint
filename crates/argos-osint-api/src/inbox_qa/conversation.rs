@@ -11,6 +11,7 @@ use argos_osint_core::nlp::conversation::PendingClarification;
 use argos_osint_core::nlp::conversation::TemporalScope;
 use argos_osint_core::nlp::Span;
 use argos_osint_core::nlp::Status;
+use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 
@@ -24,6 +25,7 @@ pub(super) struct Resolution {
     pub focus: Option<Focus>,
     pub pending: Option<PendingClarification>,
     pub used_previous_exchange: bool,
+    pub general_clause: Option<String>,
 }
 
 impl Resolution {
@@ -34,6 +36,7 @@ impl Resolution {
             focus: None,
             pending: None,
             used_previous_exchange: false,
+            general_clause: None,
         }
     }
 
@@ -44,6 +47,7 @@ impl Resolution {
             focus: Some(focus),
             pending: None,
             used_previous_exchange,
+            general_clause: None,
         }
     }
 
@@ -67,7 +71,35 @@ impl Resolution {
                 },
             }),
             used_previous_exchange: reused,
+            general_clause: None,
         }
+    }
+
+    fn with_context(
+        question: &str,
+        source: Option<&ChatSourceReference>,
+        constraints: Vec<Constraint>,
+    ) -> Option<Self> {
+        let clauses = question::contextual_subject(question);
+        let (intent, general) = match source {
+            Some(source) => clauses
+                .filter(|(intent, _)| match *intent {
+                    Question::ExplainSelected => true,
+                    Question::ContextStatus(kind) | Question::ContextLogs(kind) => {
+                        kind == source.kind
+                    }
+                    Question::Readiness(check) | Question::ReadinessExplanation(check) => {
+                        source.kind == ChatSourceKind::Readiness && source.id == check.as_str()
+                    }
+                    _ => false,
+                })
+                .unwrap_or((Question::ExplainSelected, None)),
+            None => clauses?,
+        };
+        let mut resolution = Self::original(intent, source);
+        resolution.focus = make_focus(intent, source, constraints);
+        resolution.general_clause = general.map(str::to_owned);
+        Some(resolution)
     }
 }
 
@@ -82,6 +114,11 @@ pub(super) fn resolve(
     pending: Option<&PendingClarification>,
 ) -> Resolution {
     if features.status != Status::Complete {
+        if original == Question::Unsupported {
+            if let Some(contextual) = Resolution::with_context(question, selected, Vec::new()) {
+                return contextual;
+            }
+        }
         return Resolution::original(original, selected);
     }
     let (mut ignored, constraints) = advice_constraints(question, features);
@@ -176,10 +213,17 @@ pub(super) fn resolve(
             return apply_time(focus, &time, true);
         }
     }
-    if time == TimeRequest::Ambiguous {
+    if routed == Question::Unsupported {
+        if let Some(contextual) = Resolution::with_context(question, selected, constraints) {
+            return contextual;
+        }
+    }
+    // An unbound time reference can be an ordinary question about the world.
+    // Ask for a period or subject only when the wording refers back to local context.
+    if time == TimeRequest::Ambiguous && (safe_follow_up || anaphora) {
         return Resolution::clarify(ClarificationReason::Time, vec![], &time, false);
     }
-    if matches!(time, TimeRequest::Historical(_)) {
+    if matches!(time, TimeRequest::Historical(_)) && (safe_follow_up || anaphora) {
         return Resolution::clarify(ClarificationReason::Subject, vec![], &time, false);
     }
     if previous.is_none() && anaphora && original != Question::ExplainSelected {
@@ -971,5 +1015,77 @@ mod tests {
             assert!(result.focus.is_none());
             assert!(!result.used_previous_exchange);
         }
+    }
+
+    #[test]
+    fn mixed_question_resolves_an_explicit_workstation_clause_with_or_without_nlp() {
+        for (prompt, general) in [
+            (
+                "How does Linux use 4 KiB pages, AND how much memory are we using?",
+                "How does Linux use 4 KiB pages",
+            ),
+            (
+                "How much memory are we using? Explain paging.",
+                "Explain paging.",
+            ),
+            (
+                "Explain paging based on our current memory usage.",
+                "Explain paging",
+            ),
+        ] {
+            for features in [complete(), Features::terminal(Status::Disabled)] {
+                let result = resolve(
+                    prompt,
+                    None,
+                    question::classify(prompt),
+                    &features,
+                    None,
+                    None,
+                );
+                assert_eq!(result.intent, Question::Metric(Metric::Memory), "{prompt}");
+                assert_eq!(result.general_clause.as_deref(), Some(general), "{prompt}");
+            }
+        }
+    }
+
+    #[test]
+    fn local_followup_and_selected_source_do_not_request_general_generation() {
+        let prompt = "How much memory are we using, and should I restart it now?";
+        let result = resolve(prompt, None, Question::Unsupported, &complete(), None, None);
+        assert_eq!(result.intent, Question::Metric(Metric::Memory));
+        assert!(result.general_clause.is_none());
+        let prompt = "How much memory are we using? Explain paging and current CPU usage and explain file caches.";
+        let result = resolve(prompt, None, Question::Unsupported, &complete(), None, None);
+        assert_eq!(result.intent, Question::Metric(Metric::Memory));
+        assert!(result.general_clause.is_none());
+
+        let source = ChatSourceReference::new(ChatSourceKind::Job, "scoped".into()).unwrap();
+        let result = resolve(
+            "What does this failure indicate?",
+            Some(&source),
+            Question::Unsupported,
+            &complete(),
+            None,
+            None,
+        );
+        assert_eq!(result.intent, Question::ExplainSelected);
+        assert_eq!(result.source.as_ref(), Some(&source));
+        assert!(result.general_clause.is_none());
+    }
+
+    #[test]
+    fn general_question_with_a_date_and_a_resource_word_does_not_collect_workstation_data() {
+        let prompt = "How did computer memory work in the 1980s?";
+        let mut features = complete();
+        features.subjects.push(span(prompt, "memory"));
+        features.temporal.push(TemporalCandidate {
+            span: span(prompt, "in the 1980s"),
+            scope: TemporalScope::Ambiguous,
+        });
+        let result = resolve(prompt, None, Question::Unsupported, &features, None, None);
+        assert_eq!(result.intent, Question::Unsupported);
+        assert!(result.general_clause.is_none());
+        assert!(result.focus.is_none());
+        assert!(result.pending.is_none());
     }
 }

@@ -1317,6 +1317,7 @@ impl LocalGateway {
             QA_MODEL_SETTINGS_FEATURE,
             QA_HISTORY_FEATURE,
             QA_GPT2_GENERATORS_FEATURE,
+            fleetworks_contracts::chat::QA_INBOX_NOTIFICATIONS_FEATURE,
         ]
         .into_iter()
         .map(str::to_owned)

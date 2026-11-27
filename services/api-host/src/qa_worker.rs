@@ -51,6 +51,7 @@ use fleetworks_contracts::qa_worker::QaWorkerSequence;
 use fleetworks_contracts::qa_worker::QA_CONTEXT_USAGE_ENV;
 use fleetworks_contracts::qa_worker::QA_DECODED_CLARIFICATION_ENV;
 use fleetworks_contracts::qa_worker::QA_DIALOGUE_ENV;
+use fleetworks_contracts::qa_worker::QA_GENERAL_DIALOGUE_ENV;
 use fleetworks_contracts::qa_worker::QA_LEGACY_STREAMING_WINDOW_TOKENS;
 use fleetworks_contracts::qa_worker::QA_MODEL_CONTEXT_ENV;
 use fleetworks_contracts::qa_worker::QA_MODEL_FILES;
@@ -409,10 +410,16 @@ impl QaWorkerSupervisor {
             .map(|session| session.model_target)
     }
 
-    pub(crate) async fn response_plan_supported(&self, needs_decoded_clarification: bool) -> bool {
+    pub(crate) async fn response_plan_supported(
+        &self,
+        needs_decoded_clarification: bool,
+        needs_general_dialogue: bool,
+    ) -> bool {
         self.session.lock().await.as_ref().is_some_and(|session| {
             session.lifecycle == WorkerLifecycle::Ready
                 && session.response_plan.supports(needs_decoded_clarification)
+                && (!needs_general_dialogue
+                    || session.response_plan == ResponsePlanSupport::GeneralDialogue)
         })
     }
 
@@ -447,9 +454,14 @@ impl QaInference for QaWorkerSupervisor {
                 .filter(|session| session.lifecycle == WorkerLifecycle::Ready)
                 .ok_or_else(|| anyhow!("QA worker unavailable"))?;
             ensure!(
-                request.plan.as_ref().is_none_or(|plan| session
-                    .response_plan
-                    .supports(plan.clarification.is_some())),
+                (session.response_plan == ResponsePlanSupport::GeneralDialogue
+                    || !request
+                        .dialogue
+                        .as_ref()
+                        .is_some_and(|dialogue| dialogue.kind.needs_general_support()))
+                    && request.plan.as_ref().is_none_or(|plan| session
+                        .response_plan
+                        .supports(plan.clarification.is_some())),
                 "QA response plan support was not negotiated"
             );
             let child_pid = session.child_id();
@@ -523,6 +535,7 @@ enum ResponsePlanSupport {
     Unavailable,
     Legacy,
     DecodedClarification,
+    GeneralDialogue,
 }
 
 impl ResponsePlanSupport {
@@ -530,7 +543,7 @@ impl ResponsePlanSupport {
         match self {
             Self::Unavailable => false,
             Self::Legacy => !needs_decoded_clarification,
-            Self::DecodedClarification => true,
+            Self::DecodedClarification | Self::GeneralDialogue => true,
         }
     }
 }
@@ -562,6 +575,7 @@ impl WorkerSession {
             .env(QA_MODEL_CONTEXT_ENV, "1")
             .env(QA_RESPONSE_PLAN_ENV, "1")
             .env(QA_DECODED_CLARIFICATION_ENV, "1")
+            .env(QA_GENERAL_DIALOGUE_ENV, "1")
             .env(QA_MODEL_TARGET_ENV, target.slug())
             .env("OMP_NUM_THREADS", &threads)
             .env("MKL_NUM_THREADS", &threads)
@@ -683,6 +697,17 @@ impl WorkerSession {
                     Some(window_tokens),
                     ResponsePlanSupport::DecodedClarification,
                 )
+            }
+            QaWorkerReply::ReadyWithGeneralDialogue {
+                protocol,
+                model_revision,
+                window_tokens,
+            } if protocol == QA_WORKER_PROTOCOL
+                && model_revision == self.model_target.revision()
+                && (window_tokens == self.model_target.input_tokens()
+                    || window_tokens == QA_LEGACY_STREAMING_WINDOW_TOKENS) =>
+            {
+                (Some(window_tokens), ResponsePlanSupport::GeneralDialogue)
             }
             QaWorkerReply::StartupFailed {
                 source,

@@ -659,7 +659,7 @@ mod native {
         state.backend_kind = BackendKind::Local;
         state.connection.origin = TextEdit::new("local://embedded");
         let question = if stage == QaTurnState::Answered {
-            "And now?"
+            "Is actor search ready now, and what is a search index?"
         } else {
             "Is actor search ready?"
         };
@@ -694,8 +694,9 @@ mod native {
             turn.cursor = 3;
         }
         if stage == QaTurnState::Answered {
-            turn.reply = Some("Actor search is ready.".into());
-            turn.used_previous_exchange = true;
+            turn.reply = Some(
+                "A search index organizes data so matching records can be found quickly.".into(),
+            );
             turn.context = Some(QaContextUsage::new(
                 QaModelTarget::FlanT5Small.input_tokens(),
                 448,

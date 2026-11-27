@@ -38,6 +38,7 @@ use fleetworks_contracts::chat::{
 use fleetworks_contracts::context::{CredentialPurpose, MutationContext, Permission};
 use fleetworks_contracts::qa_worker::{
     QaDialogueKind, QaPassage, QaWorkerDialogue, QaWorkerEvent, QaWorkerRequest,
+    QA_MAX_DIALOGUE_MESSAGE_BYTES, QA_MAX_VISIBLE_WORDS,
 };
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use futures_util::StreamExt;
@@ -903,6 +904,10 @@ pub(crate) async fn submit_request(
     );
     let mut routed_request = request.clone();
     routed_request.source = resolved.source;
+    let contextual = resolved.general_clause.is_some();
+    if let Some(general_clause) = resolved.general_clause {
+        routed_request.question = general_clause;
+    }
     let historical = resolved
         .focus
         .as_ref()
@@ -936,6 +941,7 @@ pub(crate) async fn submit_request(
     require_evidence_permission(context, intent, routed_request.source.as_ref())?;
     let runtime = SnapshotRuntime {
         intent,
+        contextual,
         generation: setting.generation,
         history_generation: setting.history_generation,
         availability,
@@ -1124,6 +1130,7 @@ struct Snapshot {
 
 struct SnapshotRuntime<'a> {
     intent: Question,
+    contextual: bool,
     generation: i64,
     history_generation: i64,
     availability: &'a QaRuntimeAvailability,
@@ -1138,15 +1145,41 @@ struct SnapshotRuntime<'a> {
     parser_status: nlp::Status,
 }
 
-fn dialogue_kind(intent: Question, has_evidence: bool, may_read_backend: bool) -> QaDialogueKind {
+fn dialogue_kind(
+    intent: Question,
+    has_evidence: bool,
+    may_read_backend: bool,
+    contextual: bool,
+    may_answer_general: bool,
+) -> QaDialogueKind {
     match intent {
         Question::Greeting => QaDialogueKind::Greeting,
         Question::Acknowledgement => QaDialogueKind::Acknowledgement,
         Question::Help => QaDialogueKind::Help,
         Question::Recall if may_read_backend => QaDialogueKind::Recall,
+        _ if contextual && has_evidence => QaDialogueKind::Contextual,
         _ if has_evidence => QaDialogueKind::Operational,
+        _ if contextual || intent == Question::Unsupported && may_answer_general => {
+            QaDialogueKind::General
+        }
         _ => QaDialogueKind::Clarification,
     }
+}
+
+fn limit_contextual_evidence(passages: &mut Vec<QaPassage>, sources: &mut Vec<store::Source>) {
+    let mut words = 0;
+    let mut bytes = 0;
+    let retained = passages
+        .iter()
+        .take(QA_MAX_FINDINGS)
+        .take_while(|passage| {
+            words += passage.text.split_whitespace().count();
+            bytes += passage.text.len();
+            words <= QA_MAX_VISIBLE_WORDS && bytes <= QA_MAX_DIALOGUE_MESSAGE_BYTES
+        })
+        .count();
+    passages.truncate(retained);
+    sources.truncate(retained);
 }
 
 async fn snapshot(
@@ -1158,12 +1191,18 @@ async fn snapshot(
     runtime: &SnapshotRuntime<'_>,
 ) -> Result<Snapshot, ApiError> {
     let deadline = runtime.deadline;
-    let _permit = target.probes.try_acquire().map_err(|_| {
-        ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Backend health observation is busy",
-        )
-    })?;
+    let needs_probe = request.source.is_some()
+        || runtime.historical.is_some()
+        || question::is_operational(runtime.intent);
+    let _permit = needs_probe
+        .then(|| target.probes.try_acquire())
+        .transpose()
+        .map_err(|_| {
+            ApiError(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Backend health observation is busy",
+            )
+        })?;
     let terminal_boundary = store::freshness_boundary(&state.repo, actor)
         .await
         .map_err(storage_error)?;
@@ -1567,6 +1606,9 @@ async fn snapshot(
         | Question::Recall
         | Question::Unsupported => {}
     }
+    if runtime.contextual {
+        limit_contextual_evidence(&mut passages, &mut sources);
+    }
     let observation = if intent == Question::RunningJobList {
         None
     } else {
@@ -1574,6 +1616,9 @@ async fn snapshot(
     };
     if let Some((previous, current)) = runtime.previous_observation.zip(observation.as_ref()) {
         comparison::append(previous, current, &mut passages, &mut sources);
+        if runtime.contextual {
+            limit_contextual_evidence(&mut passages, &mut sources);
+        }
     }
     let sampled_at_ms = match earliest {
         Some(observed_at) => observed_at,
@@ -1586,6 +1631,9 @@ async fn snapshot(
         intent,
         !passages.is_empty(),
         context.permits(Permission::ReadBackend),
+        runtime.contextual,
+        request.inbox_notifications.is_some()
+            || !question::refers_to_workstation(&request.question),
     );
     let mut worker_request =
         QaWorkerRequest::new(turn_id.clone(), turn_id, request.question.clone(), passages);
@@ -1612,6 +1660,7 @@ async fn snapshot(
                 parser_status: Some(runtime.parser_status),
                 guidance,
                 history_requested: false,
+                inbox_notifications: request.inbox_notifications.clone(),
             },
         },
     })
@@ -1819,6 +1868,8 @@ async fn historical_snapshot(
         runtime.intent,
         !passages.is_empty(),
         request_context.permits(Permission::ReadBackend),
+        false,
+        false,
     );
     let turn_id = store::accepted_turn_id(actor, request, runtime.history_generation)
         .map_err(storage_error)?;
@@ -1851,6 +1902,7 @@ async fn historical_snapshot(
                 parser_status: Some(runtime.parser_status),
                 guidance,
                 history_requested: true,
+                inbox_notifications: None,
             },
         },
     })
@@ -1985,25 +2037,55 @@ mod tests {
             let intent = question::classify(prompt);
             assert_ne!(intent, Question::Unsupported, "{prompt}");
             assert!(matches!(
-                dialogue_kind(intent, true, true),
+                dialogue_kind(intent, true, true, false, false),
                 QaDialogueKind::Operational
             ));
             assert!(matches!(
-                dialogue_kind(intent, true, false),
+                dialogue_kind(intent, true, false, false, false),
                 QaDialogueKind::Operational
             ));
             assert!(matches!(
-                dialogue_kind(intent, false, true),
+                dialogue_kind(intent, false, true, false, false),
                 QaDialogueKind::Clarification
             ));
         }
+    }
 
-        let unsupported = "Can you give me the big picture on this workstation and reboot it?";
-        let intent = question::classify(unsupported);
-        assert_eq!(intent, Question::Unsupported);
+    #[test]
+    fn unverified_workstation_questions_do_not_enter_open_generation() {
+        for prompt in [
+            "Can you give me the big picture on this workstation and reboot it?",
+            "What is my processor's temperature?",
+            "What are my most important notifications?",
+        ] {
+            let intent = question::classify(prompt);
+            assert_eq!(intent, Question::Unsupported);
+            assert!(question::refers_to_workstation(prompt));
+            assert!(matches!(
+                dialogue_kind(intent, false, true, false, false),
+                QaDialogueKind::Clarification
+            ));
+        }
+        for prompt in ["who is trump", "What is RAM?"] {
+            let intent = question::classify(prompt);
+            assert!(!question::refers_to_workstation(prompt));
+            assert!(matches!(
+                dialogue_kind(intent, false, true, false, true),
+                QaDialogueKind::General
+            ));
+        }
+    }
+
+    #[test]
+    fn mixed_questions_can_use_bounded_evidence_and_still_answer_without_it() {
+        let intent = question::classify("What is the current CPU utilization?");
         assert!(matches!(
-            dialogue_kind(intent, false, true),
-            QaDialogueKind::Clarification
+            dialogue_kind(intent, true, true, true, true),
+            QaDialogueKind::Contextual
+        ));
+        assert!(matches!(
+            dialogue_kind(intent, false, true, true, true),
+            QaDialogueKind::General
         ));
     }
 

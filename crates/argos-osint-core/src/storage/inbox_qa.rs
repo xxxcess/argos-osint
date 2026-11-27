@@ -13,6 +13,7 @@ use fleetworks_contracts::chat::QaEvent;
 use fleetworks_contracts::chat::QaEvidenceProvenance;
 use fleetworks_contracts::chat::QaFinding;
 use fleetworks_contracts::chat::QaGeneratorPreference;
+use fleetworks_contracts::chat::QaInboxNotificationGroup;
 use fleetworks_contracts::chat::QaMeasurement;
 use fleetworks_contracts::chat::QaModelTarget;
 use fleetworks_contracts::chat::QaRelatedActivity;
@@ -41,6 +42,7 @@ use fleetworks_contracts::qa_worker::QA_MAX_DIALOGUE_HISTORY;
 use fleetworks_contracts::qa_worker::QA_MAX_DIALOGUE_MESSAGE_BYTES;
 use fleetworks_contracts::qa_worker::QA_MAX_DRAFT_BYTES;
 use fleetworks_contracts::qa_worker::QA_MAX_DRAFT_EVENTS;
+use fleetworks_contracts::qa_worker::QA_REPORTED_INBOX_PREFIX;
 use futures_util::{Stream, StreamExt};
 use serde::Deserialize;
 use serde::Serialize;
@@ -283,6 +285,8 @@ pub struct ConversationState {
     pub parser_status: Option<Status>,
     pub guidance: Option<QaGuidance>,
     pub history_requested: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbox_notifications: Option<Vec<QaInboxNotificationGroup>>,
 }
 
 impl ConversationState {
@@ -302,8 +306,35 @@ pub struct PlanContext {
     pub pending: Option<PendingClarification>,
     pub guidance: Option<QaGuidance>,
     pub history_requested: bool,
+    pub inbox_notifications: Option<Vec<QaInboxNotificationGroup>>,
     pub decision_preference: QaDecisionPreference,
     pub decision_generation: i64,
+}
+
+impl PlanContext {
+    /// Render the resolved focus and any display metadata supplied for this turn.
+    #[must_use]
+    pub fn worker_focus(&self) -> String {
+        worker_focus(self.focus.as_ref(), self.inbox_notifications.as_deref())
+    }
+}
+
+fn worker_focus(
+    focus: Option<&Focus>,
+    notifications: Option<&[QaInboxNotificationGroup]>,
+) -> String {
+    let Some(notifications) = notifications else {
+        return focus.map_or_else(String::new, Focus::compact);
+    };
+    if notifications.is_empty() {
+        return format!("{QA_REPORTED_INBOX_PREFIX} No groups were shared for this question.");
+    }
+    let groups = notifications
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(". ");
+    format!("{QA_REPORTED_INBOX_PREFIX} {groups}.")
 }
 
 /// The way the generator may respond to the admitted turn.
@@ -371,10 +402,10 @@ impl ResponsePlan {
             return false;
         }
         if let Some(worker) = &self.worker {
-            let compact = conversation
-                .focus
-                .as_ref()
-                .map_or_else(String::new, Focus::compact);
+            let compact = worker_focus(
+                conversation.focus.as_ref(),
+                conversation.inbox_notifications.as_deref(),
+            );
             if worker.note != self.note
                 || worker.focus != compact
                 || worker.guidance.is_some() && worker.guidance != conversation.guidance
@@ -1025,7 +1056,9 @@ async fn exchange_in(tx: &Tx, turn_id: &str) -> Result<Option<ExchangeRow>, TxEr
 }
 
 fn matching_request(existing: &Exchange, request: &QaTurnRequest) -> bool {
-    existing.turn.question == request.question && existing.source == request.source
+    existing.turn.question == request.question
+        && existing.source == request.source
+        && existing.conversation.inbox_notifications == request.inbox_notifications
 }
 
 /// Resolve an accepted request before fetching evidence, including during a temporary outage.
@@ -1285,7 +1318,10 @@ pub async fn admit(
                 observation: metadata.observation.clone(),
                 status_check_tally: metadata.status_check_tally,
                 generator_generation: Some(state.generation),
-                conversation: metadata.conversation.clone(),
+                conversation: ConversationState {
+                    inbox_notifications: request.inbox_notifications.clone(),
+                    ..metadata.conversation.clone()
+                },
                 plan: None,
             };
             exchange.turn.accepted_at = Some(timestamp.div_euclid(1_000));
@@ -1829,6 +1865,7 @@ pub async fn begin_planning(
             pending: exchange.conversation.pending,
             guidance: exchange.conversation.guidance,
             history_requested: exchange.conversation.history_requested,
+            inbox_notifications: exchange.conversation.inbox_notifications,
             decision_preference: setting.decision_preference,
             decision_generation: setting.decision_generation,
         }))
@@ -2059,7 +2096,7 @@ async fn publish_parts(
                         .request
                         .dialogue
                         .as_ref()
-                        .is_some_and(|dialogue| dialogue.kind == QaDialogueKind::Operational)
+                        .is_some_and(|dialogue| dialogue.kind.uses_evidence())
                         && !(0..=MAX_EVIDENCE_AGE_MS)
                             .contains(&now_ms().saturating_sub(evidence.sampled_at_ms))
                 });
@@ -2105,6 +2142,8 @@ async fn publish_parts(
                     || !has_model_usage
                     || model_target.is_none()
                     || !reply.as_deref().is_some_and(valid_dialogue_reply)
+                    || (dialogue.is_some_and(|dialogue| dialogue.kind.needs_general_support())
+                        && exchange.plan.as_ref().is_none_or(|plan| !plan.negotiated))
                 {
                     return Err(abort("invalid_part"));
                 }
@@ -2115,10 +2154,16 @@ async fn publish_parts(
                         .request(evidence)
                         .ok_or_else(|| abort("invalid_part"))?;
                     let valid = reply.as_deref().is_some_and(|reply| {
-                        if dialogue
-                            .is_some_and(|dialogue| dialogue.kind == QaDialogueKind::Operational)
-                        {
-                            verified_operational_sources(&request, reply).is_some_and(|passages| {
+                        if dialogue.is_some_and(|dialogue| dialogue.kind.uses_evidence()) {
+                            let passages = if dialogue
+                                .is_some_and(|dialogue| dialogue.kind == QaDialogueKind::Contextual)
+                            {
+                                valid_uncited_reply(&request, reply)
+                                    .then(|| request.passages.iter().collect())
+                            } else {
+                                verified_operational_sources(&request, reply)
+                            };
+                            passages.is_some_and(|passages| {
                                 if !plan.negotiated {
                                     return true;
                                 }

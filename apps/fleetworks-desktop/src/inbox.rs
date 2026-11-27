@@ -3,12 +3,18 @@
 //! Notification items come from fixed text, job titles and readiness check names. The list
 //! resets when the connection authority changes.
 
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
 
 use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::ChatSourceReference;
+use fleetworks_contracts::chat::QaInboxNotificationGroup;
+use fleetworks_contracts::chat::QaInboxNotificationSeverity;
+use fleetworks_contracts::chat::QaInboxNotificationTopic;
+use fleetworks_contracts::chat::QA_MAX_INBOX_NOTIFICATION_GROUPS;
+use fleetworks_contracts::chat::QA_MAX_INBOX_NOTIFICATION_ITEMS;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
 use rune::Cx;
@@ -30,7 +36,7 @@ use crate::theme::StatusTone;
 use crate::State;
 
 /// Retained items. The oldest is dropped first.
-pub(crate) const MAX_ITEMS: usize = 50;
+pub(crate) const MAX_ITEMS: usize = QA_MAX_INBOX_NOTIFICATION_ITEMS as usize;
 /// Remembered job transitions, so one job transition is recorded once.
 const MAX_SEEN_JOB_EVENTS: usize = 200;
 /// Bounded map of tracked job states across pagination and filtering.
@@ -157,6 +163,43 @@ impl Inbox {
 
     pub(crate) fn unread(&self) -> usize {
         self.items.iter().filter(|item| !item.read).count()
+    }
+
+    pub(crate) fn assistant_notifications(&self) -> Vec<QaInboxNotificationGroup> {
+        use QaInboxNotificationSeverity::{Critical, Informational, Warning};
+        use QaInboxNotificationTopic::{Connection, Jobs, Readiness};
+
+        let mut groups = BTreeMap::new();
+        for item in self.items.iter().filter(|item| !item.private_job) {
+            let topic = match &item.topic {
+                Topic::Connection => Connection,
+                Topic::Job(_) => Jobs,
+                Topic::Readiness(check) => Readiness(*check),
+            };
+            let severity = match item.tone {
+                StatusTone::Err => Critical,
+                StatusTone::Warn => Warning,
+                _ => Informational,
+            };
+            let group = groups
+                .entry(topic)
+                .or_insert_with(|| QaInboxNotificationGroup::new(topic, severity, 0, 0));
+            group.total += 1;
+            if !item.read {
+                group.severity = if group.unread == 0 {
+                    severity
+                } else {
+                    group.severity.max(severity)
+                };
+                group.unread += 1;
+            } else if group.unread == 0 {
+                group.severity = group.severity.max(severity);
+            }
+        }
+        let mut groups: Vec<_> = groups.into_values().collect();
+        groups.sort_by_key(|group| Reverse((group.unread > 0, group.severity, group.unread)));
+        groups.truncate(QA_MAX_INBOX_NOTIFICATION_GROUPS);
+        groups
     }
 
     fn groups(&self) -> Vec<Group<'_>> {
@@ -1387,6 +1430,73 @@ mod tests {
 
     fn job(id: &str, state: &str) -> (String, String, String) {
         (id.into(), format!("Title {id}"), state.into())
+    }
+
+    #[test]
+    fn assistant_notification_summary_ranks_unread_severity_and_omits_private_jobs() {
+        use QaInboxNotificationSeverity::{Critical, Informational, Warning};
+        use QaInboxNotificationTopic::{Connection, Jobs, Readiness};
+
+        let mut inbox = Inbox::default();
+        for (topic, tone, read, private) in [
+            (Topic::Connection, StatusTone::Err, true, false),
+            (Topic::Connection, StatusTone::Warn, false, false),
+            (
+                Topic::Readiness(ReadinessCheckId::ActorSearch),
+                StatusTone::Err,
+                false,
+                false,
+            ),
+            (
+                Topic::Readiness(ReadinessCheckId::Registration),
+                StatusTone::Ok,
+                false,
+                false,
+            ),
+            (
+                Topic::Job("shared-1".into()),
+                StatusTone::Info,
+                false,
+                false,
+            ),
+            (
+                Topic::Job("shared-2".into()),
+                StatusTone::Info,
+                false,
+                false,
+            ),
+            (Topic::Job("private-1".into()), StatusTone::Err, false, true),
+        ] {
+            inbox.push(
+                topic,
+                "Private display title".into(),
+                "Private item title".into(),
+                "Untrusted item detail".into(),
+                0.0,
+                tone,
+            );
+            let item = inbox.items.back_mut().unwrap();
+            item.read = read;
+            item.private_job = private;
+        }
+        let groups = inbox.assistant_notifications();
+        assert_eq!(
+            groups,
+            [
+                QaInboxNotificationGroup::new(
+                    Readiness(ReadinessCheckId::ActorSearch),
+                    Critical,
+                    1,
+                    1
+                ),
+                QaInboxNotificationGroup::new(Connection, Warning, 1, 2),
+                QaInboxNotificationGroup::new(Jobs, Informational, 2, 2),
+            ]
+        );
+        let serialized = serde_json::to_string(&groups).unwrap();
+        for private_value in ["private-1", "shared-1", "Private", "Untrusted"] {
+            assert!(!serialized.contains(private_value));
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use fleetworks_contracts::chat::ChatSourceKind;
+use fleetworks_contracts::chat::{is_inbox_notification_question, ChatSourceKind};
 use fleetworks_contracts::readiness::ReadinessCheckId;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -95,7 +95,7 @@ pub(super) fn classify(question: &str) -> Question {
     intent
 }
 
-fn is_operational(intent: Question) -> bool {
+pub(super) fn is_operational(intent: Question) -> bool {
     matches!(
         intent,
         Question::ExplainSelected
@@ -111,6 +111,141 @@ fn is_operational(intent: Question) -> bool {
             | Question::Configuration
             | Question::Summary
     )
+}
+
+/// Keep explicit requests about local state on the evidence path even when
+/// there is no supported observation for the particular question.
+pub(super) fn refers_to_workstation(question: &str) -> bool {
+    if is_inbox_notification_question(question) {
+        return true;
+    }
+    let mut scoped = false;
+    let mut operational_subject = false;
+    let mut previous = "";
+    let normalized = question.to_ascii_lowercase();
+    for word in normalized.split(|ch: char| !ch.is_ascii_alphabetic()) {
+        if word.is_empty() {
+            continue;
+        }
+        if matches!(
+            (previous, word),
+            ("workstation", "status" | "configuration" | "logs")
+                | ("embedded", "backend")
+                | ("this" | "my" | "our", "workstation" | "backend" | "inbox")
+        ) {
+            return true;
+        }
+        scoped |= matches!(
+            word,
+            "my" | "our" | "this" | "these" | "current" | "recent" | "latest" | "here"
+        );
+        operational_subject |= matches!(
+            word,
+            "workstation"
+                | "backend"
+                | "notification"
+                | "notifications"
+                | "inbox"
+                | "readiness"
+                | "cpu"
+                | "gpu"
+                | "ram"
+                | "memory"
+                | "disk"
+                | "processor"
+                | "datastore"
+                | "indexing"
+        );
+        previous = word;
+    }
+    scoped && operational_subject
+}
+
+const MIXED_SEPARATORS: &[&str] = &[
+    "? ",
+    ". ",
+    "; ",
+    ", and ",
+    " and also ",
+    " and ",
+    " given ",
+    " based on ",
+];
+
+/// Find a recognized workstation clause and an independent general question.
+/// The renderer can still answer the workstation clause if the rest depends on local state.
+pub(super) fn contextual_subject(question: &str) -> Option<(Question, Option<&str>)> {
+    let folded = question.to_ascii_lowercase();
+    let mut grounded_only = None;
+    for &separator in MIXED_SEPARATORS {
+        for (offset, _) in folded.match_indices(separator) {
+            let punctuation = usize::from(matches!(separator, "? " | ". "));
+            let left = question[..offset + punctuation].trim();
+            let right = question[offset + separator.len()..].trim();
+            for (local, other) in [(left, right), (right, left)] {
+                let local = classify(local);
+                if is_operational(local) && classify(other) == Question::Unsupported {
+                    if general_clause(other) {
+                        return Some((local, Some(other)));
+                    }
+                    grounded_only.get_or_insert(local);
+                }
+            }
+        }
+    }
+    grounded_only.map(|intent| (intent, None))
+}
+
+fn general_clause(text: &str) -> bool {
+    let folded = text.to_ascii_lowercase();
+    let scoped = folded
+        .split(|ch: char| !ch.is_ascii_alphabetic())
+        .any(|word| {
+            matches!(
+                word,
+                "my" | "our" | "your" | "this" | "these" | "those" | "here" | "it" | "its" | "them"
+            )
+        });
+    let nested_workstation_clause = folded
+        .split(['?', '.', ';'])
+        .flat_map(|sentence| sentence.split(" and "))
+        .flat_map(|clause| clause.split(" given "))
+        .flat_map(|clause| clause.split(" based on "))
+        .any(|clause| {
+            let clause = clause.trim_matches([' ', ',']);
+            is_operational(classify(clause.strip_prefix("also ").unwrap_or(clause)))
+        });
+    !scoped
+        && !refers_to_workstation(text)
+        && !nested_workstation_clause
+        && matches!(
+            folded.split_whitespace().next(),
+            Some(
+                "what"
+                    | "what's"
+                    | "why"
+                    | "how"
+                    | "how's"
+                    | "when"
+                    | "where"
+                    | "who"
+                    | "which"
+                    | "is"
+                    | "are"
+                    | "can"
+                    | "could"
+                    | "would"
+                    | "should"
+                    | "does"
+                    | "do"
+                    | "explain"
+                    | "describe"
+                    | "define"
+                    | "compare"
+                    | "summarize"
+                    | "tell"
+            )
+        )
 }
 
 fn classify_simple(question: &str) -> Question {

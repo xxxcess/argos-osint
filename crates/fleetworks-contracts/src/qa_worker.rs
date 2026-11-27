@@ -18,6 +18,8 @@ pub const QA_STREAMING_ENV: &str = "FLEETWORKS_QA_STREAMING";
 pub const QA_MODEL_CONTEXT_ENV: &str = "FLEETWORKS_QA_MODEL_CONTEXT";
 pub const QA_RESPONSE_PLAN_ENV: &str = "FLEETWORKS_QA_RESPONSE_PLAN";
 pub const QA_DECODED_CLARIFICATION_ENV: &str = "FLEETWORKS_QA_DECODED_CLARIFICATION";
+pub const QA_GENERAL_DIALOGUE_ENV: &str = "FLEETWORKS_QA_GENERAL_DIALOGUE";
+pub const QA_REPORTED_INBOX_PREFIX: &str = "Inbox notification groups reported by the desktop.";
 pub const QA_MODEL_PINS: &str = include_str!("qa_models.json");
 pub const QA_MODEL_TARGET_ENV: &str = "FLEETWORKS_QA_MODEL_TARGET";
 pub const QA_DIALOGUE_ENV: &str = "FLEETWORKS_QA_DIALOGUE";
@@ -242,8 +244,18 @@ impl QaWorkerRequest {
             || !bounded_text(&self.question, QA_MAX_QUESTION_BYTES)
             || self.passages.len() > QA_MAX_PASSAGES
             || self.dialogue.as_ref().is_some_and(|dialogue| {
-                (!self.passages.is_empty() && dialogue.kind != QaDialogueKind::Operational)
-                    || (self.passages.is_empty() && dialogue.kind == QaDialogueKind::Operational)
+                (dialogue.kind.uses_evidence() == self.passages.is_empty())
+                    || (dialogue.kind == QaDialogueKind::Contextual
+                        && (self.passages.len() > QA_MAX_FINDINGS
+                            || self
+                                .passages
+                                .iter()
+                                .map(|p| p.text.split_whitespace().count())
+                                .sum::<usize>()
+                                > QA_MAX_VISIBLE_WORDS
+                            || self.passages.iter().map(|p| p.text.len()).sum::<usize>()
+                                > QA_MAX_DIALOGUE_MESSAGE_BYTES))
+                    || (dialogue.kind.needs_general_support() && !dialogue.history.is_empty())
                     || dialogue.history.len() > QA_MAX_DIALOGUE_HISTORY
                     || dialogue.history.iter().any(|exchange| {
                         !bounded_text(&exchange.question, QA_MAX_DIALOGUE_MESSAGE_BYTES)
@@ -311,6 +323,11 @@ impl QaWorkerPlan {
             QaDialogueKind::Operational => {
                 !self.required_passages.is_empty() && self.clarification.is_none()
             }
+            QaDialogueKind::Contextual => {
+                self.required_passages.len() == request.passages.len()
+                    && self.guidance.is_none()
+                    && self.clarification.is_none()
+            }
             QaDialogueKind::Clarification => {
                 self.required_passages.is_empty()
                     && self.guidance.is_none()
@@ -319,6 +336,7 @@ impl QaWorkerPlan {
             QaDialogueKind::Greeting
             | QaDialogueKind::Acknowledgement
             | QaDialogueKind::Help
+            | QaDialogueKind::General
             | QaDialogueKind::Recall => {
                 self.required_passages.is_empty()
                     && self.guidance.is_none()
@@ -424,6 +442,20 @@ pub enum QaDialogueKind {
     Recall,
     Clarification,
     Operational,
+    General,
+    Contextual,
+}
+
+impl QaDialogueKind {
+    /// Whether a turn carries authorized source passages.
+    pub const fn uses_evidence(self) -> bool {
+        matches!(self, Self::Operational | Self::Contextual)
+    }
+
+    /// Whether the worker must negotiate the general dialogue capability.
+    pub const fn needs_general_support(self) -> bool {
+        matches!(self, Self::General | Self::Contextual)
+    }
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -441,11 +473,12 @@ pub fn valid_dialogue_reply(reply: &str) -> bool {
         && !contains_prompt_marker(reply)
 }
 
-const PROMPT_MARKERS: [&str; 13] = [
+const PROMPT_MARKERS: [&str; 14] = [
     "earlier user",
     "earlier assistant",
     "current user",
     "approved observations:",
+    "inbox groups:",
     "reply:",
     "resolved focus:",
     "response instruction:",
@@ -663,6 +696,11 @@ pub enum QaWorkerReply {
         model_revision: String,
         window_tokens: u16,
     },
+    ReadyWithGeneralDialogue {
+        protocol: u16,
+        model_revision: String,
+        window_tokens: u16,
+    },
     StartupFailed {
         source: QaWorkerPanicSource,
         line: u32,
@@ -783,18 +821,22 @@ impl QaWorkerSequence {
                 text,
             } => {
                 let passage = request.passages.iter().find(|p| &p.source_id == source_id);
-                let operational = request
+                let grounded = request
                     .dialogue
                     .as_ref()
-                    .is_some_and(|dialogue| dialogue.kind == QaDialogueKind::Operational);
+                    .is_some_and(|dialogue| dialogue.kind.uses_evidence());
                 let words = self.words + text.split_whitespace().count();
                 let bytes = self.bytes + text.len();
                 if turn_id != &request.turn_id
-                    || (request.dialogue.is_some() && !operational)
+                    || (request.dialogue.is_some() && !grounded)
                     || *sequence != expected
                     || self.sources.len() == QA_MAX_FINDINGS
                     || self.sources.contains(source_id)
-                    || (request.plan.is_some()
+                    || ((request.plan.is_some()
+                        || request
+                            .dialogue
+                            .as_ref()
+                            .is_some_and(|dialogue| dialogue.kind == QaDialogueKind::Contextual))
                         && request
                             .passages
                             .get(self.sources.len())
@@ -803,7 +845,7 @@ impl QaWorkerSequence {
                     || bytes > MAX_ANSWER_BYTES
                     || !passage.is_some_and(|p| {
                         exact_span(&p.text, *start, *end, text)
-                            && (!operational || (*start == 0 && p.text == *text))
+                            && (!grounded || (*start == 0 && p.text == *text))
                     })
                 {
                     return Err(invalid("QA worker returned an invalid evidence span"));
@@ -838,6 +880,8 @@ impl QaWorkerSequence {
                                 )
                             } else {
                                 !valid_uncited_reply(request, text)
+                                    || (dialogue.kind == QaDialogueKind::Contextual
+                                        && self.sources.len() != request.passages.len())
                             }
                     })
                     || (*outcome == QaWorkerOutcome::Answered
@@ -846,7 +890,11 @@ impl QaWorkerSequence {
                     || (*outcome == QaWorkerOutcome::InsufficientContext
                         && !self.sources.is_empty())
                     || (*outcome == QaWorkerOutcome::InputTooLarge
-                        && (request.plan.is_none()
+                        && ((request.plan.is_none()
+                            && !request
+                                .dialogue
+                                .as_ref()
+                                .is_some_and(|dialogue| dialogue.kind.needs_general_support()))
                             || !self.sources.is_empty()
                             || !self.draft.is_empty()
                             || context.is_none_or(|usage| usage.model_windows != 0)))
@@ -860,10 +908,20 @@ impl QaWorkerSequence {
     }
 }
 
-/// Clarification replies must match approved wording. The plan note stays private.
+/// The exact ranked notification facts supplied by the desktop for this turn.
+pub fn reported_inbox_summary(plan: &QaWorkerPlan) -> Option<&str> {
+    plan.focus
+        .strip_prefix(QA_REPORTED_INBOX_PREFIX)
+        .map(str::trim)
+}
+
+/// Clarifications and reported Inbox data retain their approved wording.
 pub fn valid_uncited_reply(request: &QaWorkerRequest, text: &str) -> bool {
     valid_dialogue_reply(text)
         && request.plan.as_ref().is_none_or(|plan| {
+            if let Some(summary) = reported_inbox_summary(plan) {
+                return text == summary;
+            }
             if let Some(clarification) = plan.clarification {
                 return clarification.approved_replies().contains(&text);
             }
@@ -1024,6 +1082,49 @@ mod tests {
                 .accept(&request, &result(reply))
                 .unwrap());
         }
+    }
+
+    #[test]
+    fn contextual_prose_requires_ordered_exact_input_observations() {
+        let mut request = QaWorkerRequest::new(
+            "turn".into(),
+            "snapshot".into(),
+            "Is the index ready, and what does indexing do?".into(),
+            vec![QaPassage::new(
+                "index".into(),
+                "Search indexing is paused.".into(),
+            )],
+        );
+        request.dialogue = Some(QaWorkerDialogue {
+            kind: QaDialogueKind::Contextual,
+            history: Vec::new(),
+        });
+        request.validate().unwrap();
+        let reply = |sequence| QaWorkerEvent::Complete {
+            turn_id: request.turn_id.clone(),
+            sequence,
+            outcome: QaWorkerOutcome::Answered,
+            context: Some(QaContextUsage::new(512, 92, 1)),
+            reply: Some("An index helps search find records faster.".into()),
+        };
+        let finding = |end, text: &str| QaWorkerEvent::Finding {
+            turn_id: request.turn_id.clone(),
+            sequence: 1,
+            source_id: "index".into(),
+            start: 0,
+            end,
+            text: text.into(),
+        };
+        let mut sequence = QaWorkerSequence::default();
+        assert!(sequence.accept(&request, &reply(1)).is_err());
+        assert!(sequence
+            .accept(&request, &finding(15, "Search indexing"))
+            .is_err());
+        let text = &request.passages[0].text;
+        assert!(!sequence
+            .accept(&request, &finding(text.chars().count() as u32, text))
+            .unwrap());
+        assert!(sequence.accept(&request, &reply(2)).unwrap());
     }
 
     #[test]

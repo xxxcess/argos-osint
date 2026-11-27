@@ -426,11 +426,7 @@ impl QaWorkerSupervisor {
         let support = session.response_plan;
         (
             support.supports(needs_decoded_clarification)
-                && (!needs_general_dialogue
-                    || matches!(
-                        support,
-                        ResponsePlanSupport::GeneralDialogue | ResponsePlanSupport::JobLogContext
-                    )),
+                && (!needs_general_dialogue || support.supports_general_dialogue()),
             support == ResponsePlanSupport::JobLogContext,
         )
     }
@@ -466,7 +462,7 @@ impl QaInference for QaWorkerSupervisor {
                 .filter(|session| session.lifecycle == WorkerLifecycle::Ready)
                 .ok_or_else(|| anyhow!("QA worker unavailable"))?;
             ensure!(
-                (session.response_plan == ResponsePlanSupport::GeneralDialogue
+                (session.response_plan.supports_general_dialogue()
                     || !request
                         .dialogue
                         .as_ref()
@@ -558,6 +554,10 @@ impl ResponsePlanSupport {
             Self::Legacy => !needs_decoded_clarification,
             Self::DecodedClarification | Self::GeneralDialogue | Self::JobLogContext => true,
         }
+    }
+
+    fn supports_general_dialogue(self) -> bool {
+        matches!(self, Self::GeneralDialogue | Self::JobLogContext)
     }
 }
 
@@ -1641,12 +1641,18 @@ mod tests {
                 model_revision: target.revision().into(),
                 window_tokens,
             };
+            let job_log_context = QaWorkerReply::ReadyWithJobLogContext {
+                protocol: QA_WORKER_PROTOCOL,
+                model_revision: target.revision().into(),
+                window_tokens: target.input_tokens(),
+            };
             assert!(session.validate_ready(plan(256)).is_err());
             session.validate_ready(plan(target.input_tokens())).unwrap();
             session.lifecycle = WorkerLifecycle::Ready;
             session.validate_ready(plan(target.input_tokens())).unwrap();
             assert!(session.response_plan.supports(false));
             assert!(!session.response_plan.supports(true));
+            assert!(!session.response_plan.supports_general_dialogue());
             assert!(session
                 .validate_ready(decoded(target.input_tokens()))
                 .is_err());
@@ -1666,6 +1672,7 @@ mod tests {
                 .validate_ready(decoded(target.input_tokens()))
                 .unwrap();
             assert!(session.response_plan.supports(true));
+            assert!(!session.response_plan.supports_general_dialogue());
             assert!(session.validate_ready(plan(target.input_tokens())).is_err());
             session.lifecycle = WorkerLifecycle::Starting;
             if target.input_tokens() != QA_LEGACY_STREAMING_WINDOW_TOKENS {
@@ -1687,6 +1694,10 @@ mod tests {
             assert!(session
                 .validate_ready(decoded(target.input_tokens()))
                 .is_err());
+            assert!(session.response_plan.supports_general_dialogue());
+            session.lifecycle = WorkerLifecycle::Starting;
+            session.validate_ready(job_log_context).unwrap();
+            assert!(session.response_plan.supports_general_dialogue());
         }
     }
 

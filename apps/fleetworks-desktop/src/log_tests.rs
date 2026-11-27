@@ -494,24 +494,57 @@ fn large_loaded_log_set_mounts_only_table_window_and_preserves_full_safe_selecti
 }
 
 fn fake_reply(state: &mut crate::app::State, intent: &crate::app::Intent) {
-    let crate::app::Intent::OperationalLogs { action } = intent else {
-        return;
-    };
-    let ticket = state
-        .scoped_logs
-        .active_ticket()
-        .expect("same-handler ticket")
-        .clone();
-    let result = if *action == LogAction::Export {
-        export_reply(1, Some(cursor(2)))
-    } else {
-        LogReply::Page(page(0, 1, 10, Some(cursor(1)), Some(cursor(2))))
-    };
-    state.complete_scoped_logs(ticket, Ok(result));
+    use crate::app::Intent;
+    use crate::backend::JobDetail;
+    use crate::backend::ReadKind;
+    use crate::backend::ReadResult;
+
+    match intent {
+        Intent::BackendRead {
+            kind: ReadKind::JobDetail,
+        } => {
+            let Load::Ready(jobs) = &state.backend.jobs else {
+                panic!("fixture detail requires the job list");
+            };
+            let job = jobs
+                .rows
+                .iter()
+                .find(|job| Some(job.id.as_str()) == state.backend.selected_job.as_deref())
+                .expect("selected fixture job")
+                .clone();
+            state.backend.revisions.insert(ReadKind::JobDetail, 1);
+            state.complete_backend_read(
+                ReadKind::JobDetail,
+                1,
+                Ok(ReadResult::JobDetail(Box::new(JobDetail {
+                    job,
+                    stages: Vec::new(),
+                    private_details_available: true,
+                    activity_actions_available: false,
+                    maintenance_result: None,
+                }))),
+            );
+        }
+        Intent::OperationalLogs { action } => {
+            let ticket = state
+                .scoped_logs
+                .active_ticket()
+                .expect("same-handler ticket")
+                .clone();
+            let result = if *action == LogAction::Export {
+                export_reply(1, Some(cursor(2)))
+            } else {
+                LogReply::Page(page(0, 1, 10, None, Some(cursor(2))))
+            };
+            state.complete_scoped_logs(ticket, Ok(result));
+        }
+        _ => {}
+    }
 }
 #[test]
 fn actual_shell_job_selection_automatically_reads_safe_logs_and_fences_hidden_replies() {
     let mut state = shell();
+    state.back_to_jobs();
     state.fixture_effect = Some(fake_reply);
     let mut runtime = Runtime::new(
         state,
@@ -885,9 +918,15 @@ fn loading_list_areas_render_shape_accurate_shimmering_skeletons_with_reduced_mo
         },
     );
     runtime.frame(0.0);
-    assert!(runtime.find("jobs-loading").is_some());
+    assert!(runtime.find("jobs-loading").is_none());
     assert!(runtime.find("job-detail-loading").is_some());
     assert!(runtime.find("skeleton-shimmer").is_some());
+    runtime.update(|state, _| {
+        state.back_to_jobs();
+    });
+    runtime.frame(1.0 / 60.0);
+    assert!(runtime.find("jobs-loading").is_some());
+    assert!(runtime.find("job-detail-loading").is_none());
 
     runtime.update(|state, _| {
         state.navigate(crate::app::Page::Workstation);
@@ -1429,27 +1468,109 @@ async fn simulated_actor_reindex_post_reconcile_job_projection_and_readiness_tra
 }
 
 #[test]
-fn jobs_list_sits_beside_the_detail_only_when_the_page_is_wide_enough() {
-    for (width, side_by_side) in [(1700.0, true), (1100.0, false)] {
+fn jobs_list_groups_newest_first_and_slides_to_scoped_logs_with_focus_return() {
+    for (size, reduced_motion) in [((640.0, 480.0), true), ((1700.0, 1100.0), false)] {
         let mut state = shell();
+        state.back_to_jobs();
         state.fixture_effect = Some(fake_reply);
+        state.accessibility.fixture_override = Some(crate::accessibility::FixtureAccessibility {
+            reduced_motion,
+            ..Default::default()
+        });
+        let Load::Ready(jobs) = &mut state.backend.jobs else {
+            panic!("expected ready job fixtures");
+        };
+        let job = jobs.rows[0].clone();
+        jobs.rows.extend(
+            [
+                ("job-done", "completed"),
+                ("job-failed", "failed"),
+                ("job-queued", "queued"),
+                ("job-retry", "retry_scheduled"),
+                ("job-running", "running"),
+                ("job-cancelled", "cancelled"),
+            ]
+            .map(|(id, status)| crate::backend::ActivityJob {
+                id: id.into(),
+                state: status.into(),
+                ..job.clone()
+            }),
+        );
         let mut runtime = Runtime::new(
             state,
             crate::app::view,
-            (width, 900.0),
+            size,
             Env {
                 system_dark: true,
                 scale: 1.0,
             },
         );
-        runtime.frame(0.0);
-        runtime.frame(1.0 / 60.0);
-        assert!(runtime.find("activity-job-fixture-job").is_some());
-        assert_eq!(runtime.find("jobs-workbench").is_some(), side_by_side);
-        if side_by_side {
-            let (list_x, _) = runtime.find("activity-job-fixture-job").expect("list row");
-            assert!(list_x < 700.0, "the list stays in the left column");
+        runtime.frame(0.5);
+        if !reduced_motion {
+            let elements = runtime.elements();
+            let sequence = [
+                "jobs-group-latest",
+                "activity-job-fixture-job",
+                "jobs-group-running",
+                "activity-job-job-running",
+                "jobs-group-queued",
+                "activity-job-job-queued",
+                "activity-job-job-retry",
+                "jobs-group-failed",
+                "activity-job-job-failed",
+                "jobs-group-completed",
+                "activity-job-job-done",
+                "jobs-group-other",
+                "activity-job-job-cancelled",
+            ];
+            let positions = sequence.map(|key| {
+                elements
+                    .iter()
+                    .find(|element| element.key.as_deref() == Some(key))
+                    .unwrap_or_else(|| panic!("expected {key}"))
+                    .rect[1]
+            });
+            assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
         }
+        let (x, y) = runtime
+            .find("activity-job-fixture-job")
+            .expect("latest job");
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(0.0);
+        assert!(runtime.find("activity-job-fixture-job").is_none());
+        assert!(runtime.find("jobs-back-to-list").is_some());
+        let entering = runtime.presented("jobs-detail-view").expect("logs view").0;
+        runtime.frame(0.5);
+        let settled = runtime.presented("jobs-detail-view").expect("logs view").0;
+        if reduced_motion {
+            assert_eq!(entering, settled);
+        } else {
+            assert!(entering[0] > settled[0] + 1.0);
+        }
+        assert_eq!(runtime.state.scoped_logs.rows[0].id, "event-0");
+        assert!(runtime.find("scoped-logs-table").is_some());
+        let pending = runtime
+            .state
+            .scoped_logs
+            .follow()
+            .expect("in-flight log read");
+
+        let (x, y) = runtime.find("jobs-back-to-list").expect("Back to jobs");
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(0.5);
+        assert!(runtime.find("jobs-detail-view").is_none());
+        assert!(runtime.state.backend.selected_job.is_none());
+        assert!(!runtime.state.scoped_logs.visible);
+        runtime.update(|state, _| {
+            state.complete_scoped_logs(pending, Ok(LogReply::Page(page(2, 1, 10, None, None))));
+        });
+        runtime.frame(0.0);
+        assert!(runtime.state.scoped_logs.rows.is_empty());
+        assert!(runtime.elements().iter().any(|element| {
+            element.key.as_deref() == Some("activity-job-fixture-job") && element.focused
+        }));
     }
 }
 

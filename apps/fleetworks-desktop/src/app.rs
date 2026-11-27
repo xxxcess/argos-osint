@@ -490,6 +490,9 @@ impl State {
         } else {
             Page::Workstation
         };
+        if self.page == Page::Jobs {
+            self.back_to_jobs();
+        }
         self.sync_jobs_binding();
         self.sync_log_visibility();
         if self.connected() {

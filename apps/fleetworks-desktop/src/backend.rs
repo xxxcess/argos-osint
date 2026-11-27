@@ -524,6 +524,25 @@ impl State {
         self.backend_read(ReadRequest::JobDetail { id: id.to_owned() });
     }
 
+    /// Leave the job log view without resetting the bounded job list or any submitted action.
+    pub(crate) fn back_to_jobs(&mut self) -> Option<String> {
+        let id = self.backend.selected_job.take()?;
+        self.backend.detail = Load::Idle;
+        self.backend.logs = Load::Idle;
+        self.job_actions.confirmation = None;
+        self.job_actions.message = None;
+        for kind in [ReadKind::JobDetail, ReadKind::Logs] {
+            self.backend.requests.remove(&kind);
+            self.backend.refresh_errors.remove(&kind);
+            let revision = self.backend.revisions.entry(kind).or_default();
+            *revision = revision.wrapping_add(1);
+        }
+        self.scoped_logs
+            .select_target(crate::logs::LogTarget::Workstation);
+        self.select_activity_tab(crate::logs::ActivityTab::Jobs);
+        Some(id)
+    }
+
     /// Cross-page links still resolve through the current registered node; the
     /// gateway may deny a job that is outside this workstation's associations.
     pub fn open_job(&mut self, id: &str) {

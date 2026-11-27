@@ -149,7 +149,7 @@ Jobs SQLite owns safe summaries, not provider stdout/payloads. Membership/privat
 
 Richer backend APIs retain independent permissions. Opaque cursors bind proof/scope/snapshot, expire and require restart after invalidation. Follow/export stay bounded; partial exports and unavailable counts remain explicit.
 
-**Layout.** When the Jobs page is at least 940 pt wide, the paged list is a 300 pt column beside the selected job's detail. Below that the two stack, and below 660 pt the list and detail alternate with **Back to jobs**. Refreshes keep the selected job and page.
+**Layout.** The newest job appears under **Latest**. The remaining jobs are grouped under **Running**, **Queued**, **Failed**, and **Completed**, followed by **Other** when needed. Jobs stay newest first within each group. Select a job to slide into its details and authorized operational logs. **Back to jobs** returns to the list and restores focus to the selected row when it is still loaded. Reduced Motion swaps the views directly.
 
 ## Readiness and maintenance
 

@@ -1230,6 +1230,7 @@ mod native {
                 ("inbox-notice-actions", |state| {
                     inbox_notice_actions(state, QaPhase::Ready);
                 }),
+                ("jobs-grouped-list", jobs_scenes::grouped_list),
                 ("jobs-filters-ready", jobs_scenes::filters_ready),
                 ("jobs-page-two", jobs_scenes::page_two),
                 ("jobs-no-matches", jobs_scenes::no_matches),

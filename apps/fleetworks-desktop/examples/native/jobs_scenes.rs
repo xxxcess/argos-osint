@@ -101,6 +101,41 @@ fn setup(state: &mut State) {
     state.page = Page::Jobs;
     state.sync_jobs_binding();
 }
+pub fn grouped_list(state: &mut State) {
+    setup(state);
+    let rows = [
+        (
+            "synthetic-tools-job",
+            "tools",
+            "Run tool check",
+            "completed",
+        ),
+        (
+            "synthetic-completed",
+            "brain",
+            "Index actor catalog",
+            "completed",
+        ),
+        ("synthetic-failed", "jobs", "Actor seed", "failed"),
+        ("synthetic-queued", "jobs", "Actor seed", "queued"),
+        (
+            "synthetic-running",
+            "brain",
+            "Index actor catalog",
+            "running",
+        ),
+    ];
+    let jobs = rows
+        .into_iter()
+        .map(|(id, app, title, status)| {
+            let mut job = row(id, app, "", status);
+            job.title = title.into();
+            job
+        })
+        .collect();
+    install(state, jobs);
+}
+
 pub fn filters_ready(state: &mut State) {
     setup(state);
     state.scoped_jobs.draft.status = JobsStatusFilter::Failed;

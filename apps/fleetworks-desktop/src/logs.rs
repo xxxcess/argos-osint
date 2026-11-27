@@ -552,9 +552,10 @@ impl LogState {
                     ClientError::Status(401 | 403 | 409) | ClientError::InvalidResponse
                 );
             if transient_loaded {
+                let retry_follow = ticket.action == LogAction::Follow && self.following;
                 self.following = false;
                 self.status = LogStatus::Unavailable;
-                self.message = Some(if ticket.action == LogAction::Follow {
+                self.message = Some(if retry_follow {
                     "Operational log follow was interrupted. Syncing again with worker status…"
                         .into()
                 } else {

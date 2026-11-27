@@ -665,7 +665,7 @@ fn scheduler_discovers_new_work_while_a_completed_job_with_unavailable_logs_is_s
     assert_ne!(
         runtime.state.scoped_jobs.reads_begun(),
         before,
-        "the list is re-read even though log recovery owns the active path"
+        "the list is re-read while historical logs are unavailable"
     );
     assert_eq!(runtime.state.jobs_discovery_at, 105.0);
     assert_eq!(

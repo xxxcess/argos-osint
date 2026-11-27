@@ -1038,10 +1038,7 @@ impl State {
             && !self.fixture
             && self.connected()
             && self.scoped_logs.window_focused
-            && (self.job_list_has_active()
-                || self.selected_job_is_active()
-                || (self.backend.selected_job.is_some()
-                    && self.scoped_logs.status == crate::logs::LogStatus::Unavailable))
+            && (self.job_list_has_active() || self.selected_job_is_active())
             && now >= self.jobs_refresh_at
     }
 
@@ -1246,7 +1243,7 @@ const JOBS_DISCOVERY_SECS: f64 = 5.0;
 const JOBS_BACKGROUND_DISCOVERY_SECS: f64 = 15.0;
 
 /// Jobs scheduling. On the Jobs page, two independent loops share the tick:
-/// - follow known active work, or recover unavailable logs of the selected job;
+/// - follow known active work and recover its unavailable logs;
 /// - discover newly admitted work for the registered workstation.
 ///
 /// Off the Jobs page, refresh the shared registered job aggregate at a bounded low cadence
@@ -1277,11 +1274,7 @@ pub(crate) fn poll_jobs(state: &mut State, now: f64, tx: &mut Tx) -> bool {
         return false;
     }
     let mut changed = false;
-    if state.job_list_has_active()
-        || state.selected_job_is_active()
-        || (state.backend.selected_job.is_some()
-            && state.scoped_logs.status == crate::logs::LogStatus::Unavailable)
-    {
+    if state.job_list_has_active() || state.selected_job_is_active() {
         if state.jobs_poll_due(now) {
             state.refresh_active_job_status(now);
             changed = true;

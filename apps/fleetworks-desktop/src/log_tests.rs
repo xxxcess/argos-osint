@@ -749,6 +749,119 @@ fn transient_follow_error_preserves_validated_rows_and_resumes_on_job_sync() {
 }
 
 #[test]
+fn completed_job_stops_live_and_keeps_a_late_summary_while_focused() {
+    use crate::backend::ReadKind;
+    use crate::backend::ReadResult;
+
+    let mut state = shell();
+    state.selected_log_job_changed("fixture-job");
+    let initial = state
+        .scoped_logs
+        .active_ticket()
+        .expect("job-scoped initial read")
+        .clone();
+    state.complete_scoped_logs(
+        initial,
+        Ok(LogReply::Page(page(0, 1, 1, None, Some(cursor(1))))),
+    );
+    assert!(state.poll_scoped_logs());
+    let live_read = state
+        .scoped_logs
+        .active_ticket()
+        .expect("in-flight live follow")
+        .clone();
+    assert_eq!(live_read.action, LogAction::Follow);
+    assert_eq!(live_read.query.cursor, Some(cursor(1)));
+
+    let mut runtime = Runtime::new(
+        state,
+        crate::app::view,
+        (1180.0, 800.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    let shows_live = |runtime: &Runtime<crate::app::State>| {
+        runtime.elements().iter().any(|element| {
+            !element.exiting
+                && element.path.contains("logs-status/")
+                && element.text.as_deref() == Some("Live")
+        })
+    };
+    runtime.frame(0.0);
+    assert!(shows_live(&runtime));
+    let sent = runtime.state.intents.len();
+
+    runtime.update(|state, _| {
+        let Load::Ready(detail) = &state.backend.detail else {
+            panic!("expected the selected running job");
+        };
+        let mut completed = detail.clone();
+        completed.job.state = "completed".into();
+        completed.job.phase = "Completed".into();
+        state.backend.revisions.insert(ReadKind::JobDetail, 1);
+        state.complete_backend_read(
+            ReadKind::JobDetail,
+            1,
+            Ok(ReadResult::JobDetail(Box::new(completed))),
+        );
+    });
+    runtime.frame(1.0 / 60.0);
+    assert!(runtime.state.scoped_logs.window_focused && runtime.state.scoped_logs.visible);
+    assert!(!runtime.state.scoped_logs.following && !shows_live(&runtime));
+    assert_eq!(runtime.state.scoped_logs.rows[0].id, "event-0");
+    assert!(runtime.find("logs-status").is_none());
+
+    runtime.update(move |state, _| {
+        assert!(!state.poll_scoped_logs());
+        // A previously started long poll may deliver a final summary.
+        let mut last = page(1, 1, 2, Some(cursor(2)), None);
+        last.has_more = false;
+        state.complete_scoped_logs(live_read, Ok(LogReply::Page(last)));
+    });
+    runtime.update(|_, tx| tx.scroll_into_view("scoped-logs-table"));
+    runtime.frame(2.0 / 60.0);
+    assert!(runtime.state.scoped_logs.window_focused && runtime.state.scoped_logs.visible);
+    assert_eq!(runtime.state.scoped_logs.status, LogStatus::Ready);
+    assert!(!runtime.state.scoped_logs.following && !runtime.state.scoped_logs.busy());
+    assert_eq!(runtime.state.scoped_logs.rows[0].id, "event-1");
+    assert_eq!(runtime.state.scoped_logs.rows[1].id, "event-0");
+    assert!(
+        runtime.find("event-1").is_some(),
+        "the final summary is shown"
+    );
+    assert!(runtime.find("logs-status").is_none());
+    runtime.update(|state, _| {
+        assert!(!state.poll_scoped_logs());
+    });
+    assert_eq!(runtime.state.intents.len(), sent);
+}
+
+#[test]
+fn opening_a_terminal_job_reads_a_snapshot_without_starting_live_follow() {
+    let mut state = shell();
+    let Load::Ready(jobs) = &mut state.backend.jobs else {
+        panic!("expected a loaded job list");
+    };
+    jobs.rows[0].state = "completed".into();
+    state.back_to_jobs();
+    state.select_job("fixture-job");
+    let initial = state
+        .scoped_logs
+        .active_ticket()
+        .expect("initial snapshot read")
+        .clone();
+    state.complete_scoped_logs(
+        initial,
+        Ok(LogReply::Page(page(0, 1, 1, None, Some(cursor(1))))),
+    );
+    assert_eq!(state.scoped_logs.rows[0].id, "event-0");
+    assert!(state.scoped_logs.visible && !state.scoped_logs.following);
+    assert!(!state.poll_scoped_logs());
+}
+
+#[test]
 fn job_detail_status_and_progress_updates_synchronize_logs_and_poll_preserves_selection() {
     let mut state = shell();
     state.scoped_logs.follow_cursor = Some(cursor(1));

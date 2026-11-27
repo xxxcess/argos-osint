@@ -50,10 +50,15 @@ impl State {
     pub(crate) fn sync_operational_logs_with_selected_job(&mut self, transition_detected: bool) {
         self.sync_log_binding();
         self.sync_log_visibility();
-        if !self.scoped_logs.visible
-            || self.backend.selected_job.is_none()
-            || self.scoped_logs.busy()
-        {
+        if !self.scoped_logs.visible || self.backend.selected_job.is_none() {
+            return;
+        }
+        if !self.selected_job_is_active() {
+            // Keep the current reply eligible so it can deliver the job's last summaries.
+            self.scoped_logs.following = false;
+            return;
+        }
+        if self.scoped_logs.busy() {
             return;
         }
         if self.scoped_logs.status == logs::LogStatus::Unavailable {
@@ -69,7 +74,7 @@ impl State {
             if !self.scoped_logs.following || !self.scoped_logs.has_follow_cursor() {
                 self.refresh_operational_logs();
             }
-        } else if self.selected_job_is_active() && self.scoped_logs.available() {
+        } else if self.scoped_logs.available() {
             self.scoped_logs.set_following(true);
             if !self.scoped_logs.has_follow_cursor() {
                 self.refresh_operational_logs();
@@ -153,7 +158,8 @@ impl State {
             LogEvent::Refresh => self.scoped_logs.refresh(),
             LogEvent::Older => self.scoped_logs.older(),
             LogEvent::ToggleFollow => {
-                self.scoped_logs.set_following(!self.scoped_logs.following);
+                let following = self.selected_job_is_active() && !self.scoped_logs.following;
+                self.scoped_logs.set_following(following);
                 self.scoped_logs.follow()
             }
             LogEvent::PrepareExport => self.scoped_logs.prepare_export(),
@@ -214,8 +220,10 @@ impl State {
     ) {
         self.sync_log_binding();
         self.sync_log_visibility();
-        self.scoped_logs.complete(&ticket, result);
-        self.scoped_logs.set_following(self.scoped_logs.visible);
+        if self.scoped_logs.complete(&ticket, result) {
+            let following = self.selected_job_is_active();
+            self.scoped_logs.set_following(following);
+        }
         // Poll owns resubscription. A fixture completion remains finite and
         // never recursively invents a stream of backend events.
     }

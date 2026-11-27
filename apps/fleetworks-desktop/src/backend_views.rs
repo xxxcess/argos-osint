@@ -1376,7 +1376,7 @@ fn job_logs(state: &State, preferences: ViewPreferences, kit: &Kit, detail_width
             // the individual request, so follow polls do not swap text or resize the section.
             let job_active = crate::backend::job_is_active(&detail.job.state)
                 && state.scoped_logs.status != LogStatus::Unavailable;
-            let strip = if state.scoped_logs.following {
+            let strip = if job_active && state.scoped_logs.following {
                 Some(("Live", format!("Worker: {worker_summary}"), tone))
             } else if job_active {
                 Some((
@@ -1384,7 +1384,7 @@ fn job_logs(state: &State, preferences: ViewPreferences, kit: &Kit, detail_width
                     format!("Phase: {worker_summary}"),
                     StatusTone::Info,
                 ))
-            } else if state.scoped_logs.busy() {
+            } else if state.scoped_logs.status == LogStatus::Loading {
                 Some((
                     "Reading summaries",
                     format!("Worker: {worker_summary}"),

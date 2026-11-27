@@ -742,13 +742,6 @@ impl State {
         self.inbox_qa_settings()?.decision
     }
 
-    pub(crate) fn triage_generation(&self) -> Option<u64> {
-        if !self.supports_workstation_triage() || !self.assistant_settings_visible() {
-            return None;
-        }
-        self.inbox_qa_settings().map(|settings| settings.generation)
-    }
-
     pub(crate) fn inbox_qa_visible(&self) -> bool {
         self.assistant_settings_visible()
             && (self.supports_workstation_triage()
@@ -2381,8 +2374,6 @@ mod tests {
     use fleetworks_contracts::chat::QaGeneratorPreference;
     use fleetworks_contracts::chat::QaGeneratorSettings;
     use fleetworks_contracts::chat::QaModelTarget;
-    use fleetworks_contracts::chat::QaRelatedActivity;
-    use fleetworks_contracts::chat::QaRelationshipReason;
     use fleetworks_contracts::chat::QaTurnNotice;
     use rune::Env;
     use rune::Ime;
@@ -3125,11 +3116,6 @@ mod tests {
             modeled.completed_at = Some(1_767_225_665);
             modeled.response_time_ms = Some(1_240);
             modeled.used_previous_exchange = true;
-            modeled.related_activity = Some(QaRelatedActivity::Found {
-                target: ChatSourceReference::new(ChatSourceKind::Readiness, "actor_search".into())
-                    .unwrap(),
-                reason: QaRelationshipReason::CurrentStatus,
-            });
             modeled.context = Some(QaContextUsage::new(
                 QaModelTarget::FlanT5Small.input_tokens(),
                 448,
@@ -3152,8 +3138,6 @@ mod tests {
         assert!(rendered.contains("448 of 512 tokens, 88% peak usage"));
         assert!(rendered.contains("Used previous exchange"));
         assert!(rendered.contains("Response time 1.2 s"));
-        assert!(!rendered.contains("Latest readiness check"));
-        assert!(runtime.find("inbox-qa-open-related").is_none());
         let elements = runtime.elements();
         for text in ["448/512", "1.2 s", "You"] {
             assert!(elements

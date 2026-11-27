@@ -1876,8 +1876,11 @@ fn jobs(
                 if !error_summary.is_empty() {
                     details = details.child(line(error_summary, kit).role("alert"));
                 }
-                details =
-                    details.children(crate::activity_triage::job_actions(state, kit, preferences));
+                details = details.children(crate::activity_triage::explain_job_button(
+                    state,
+                    kit,
+                    preferences,
+                ));
                 if detail.job.state == "failed" || detail.job.can_retry {
                     let retry_reason = state.job_action_disabled_reason(JobAction::Retry);
                     let retry_busy = matches!(state.job_actions.response, Load::Loading);

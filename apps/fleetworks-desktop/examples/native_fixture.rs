@@ -26,8 +26,6 @@ mod native {
     use fleetworks_contracts::chat::QaGeneratorSettings;
     use fleetworks_contracts::chat::QaModelTarget;
     use fleetworks_contracts::chat::QaPhase;
-    use fleetworks_contracts::chat::QaRelatedActivity;
-    use fleetworks_contracts::chat::QaRelationshipReason;
     use fleetworks_contracts::chat::QaSettings;
     use fleetworks_contracts::chat::QaTurn;
     use fleetworks_contracts::chat::QaTurnLimitation;
@@ -754,14 +752,29 @@ mod native {
         state.seed_inbox_qa_fixture(QaSettings::new(true, phase, 2, 1, true), None);
     }
 
-    fn jobs_related_activity(state: &mut State) {
+    fn jobs_assistant_explain(state: &mut State) {
         jobs_ready(state);
         triage_connection(state, QaPhase::Ready);
-        state.seed_activity_triage_fixture(QaRelatedActivity::Found {
-            target: ChatSourceReference::new(ChatSourceKind::Readiness, "actor_catalog".into())
-                .expect("synthetic triage target"),
-            reason: QaRelationshipReason::StageCheck,
-        });
+        state
+            .connection
+            .capabilities
+            .as_mut()
+            .expect("synthetic permissions")
+            .permissions
+            .push(Permission::RetryJob);
+        let Load::Ready(detail) = &mut state.backend.detail else {
+            panic!("Actor seed fixture must set job detail");
+        };
+        detail.job.title = "Actor seed".into();
+        detail.job.state = "failed".into();
+        detail.job.phase = "Failed".into();
+        detail.job.error_summary = "Task lease expired after maximum worker recoveries".into();
+        detail.job.can_retry = true;
+        detail.job.activity_actions_available = true;
+        detail.job.action_reason_code = "supported".into();
+        detail.activity_actions_available = true;
+        let row = detail.job.clone();
+        jobs_scenes::install(state, vec![row]);
     }
 
     fn inbox_notice_actions(state: &mut State, phase: QaPhase) {
@@ -1211,8 +1224,8 @@ mod native {
                 ("maintenance-preview", maintenance_preview),
                 ("jobs-offline", |state| state.page = Page::Jobs),
                 ("jobs-ready", jobs_ready),
-                ("jobs-related-activity", jobs_related_activity),
-                ("inbox-related-activity-limited", |state| {
+                ("jobs-assistant-explain", jobs_assistant_explain),
+                ("inbox-notice-actions-starting", |state| {
                     inbox_notice_actions(state, QaPhase::Starting);
                 }),
                 ("inbox-notice-actions", |state| {

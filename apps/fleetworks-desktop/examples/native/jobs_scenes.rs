@@ -62,10 +62,10 @@ fn response(
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect(),
+        activity_actions_available: rows.iter().any(|row| row.activity_actions_available),
         rows,
         activity_scope: scope,
         relation_counts_available: false,
-        activity_actions_available: false,
         counts: Some(JobsDashboardCounts {
             active: 7,
             queued: 12,

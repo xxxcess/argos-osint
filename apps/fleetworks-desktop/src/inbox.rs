@@ -636,7 +636,6 @@ impl State {
         let trigger = self.inbox_focus_return();
         self.inbox.close();
         self.inbox_qa.reset_sources_view();
-        self.poll_activity_triage();
         tx.focus(trigger, tx.focus_visible());
     }
 
@@ -985,7 +984,6 @@ fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
         .label("Filter notifications")
         .placeholder("Search Inbox")
         .on_edit(|state: &mut State| &mut state.inbox.query)
-        .on_change(|state: &mut State, _| state.cancel_activity_triage())
         .build(kit)
         .key("inbox-filter")
         .w_full();
@@ -1129,7 +1127,6 @@ fn group_view(group: &Group<'_>, state: &State, kit: &Kit, preferences: ViewPref
         .hover(theme::hex(theme::SURFACE_ELEVATED))
         .on_press_tx(move |state: &mut State, tx| {
             state.inbox.toggle_group(&topic);
-            state.poll_activity_triage();
             tx.keep_on_screen(group_toggle_key.clone());
         })
         .child(status_dot(latest.tone))
@@ -1336,7 +1333,6 @@ fn row(item: &Item, state: &State, kit: &Kit, preferences: ViewPreferences) -> E
         .hover(theme::hex(theme::SURFACE_ELEVATED))
         .on_press_tx(move |state: &mut State, tx| {
             state.inbox.select(id);
-            state.poll_activity_triage();
             tx.keep_on_screen(toggle_key.clone());
         })
         .child(

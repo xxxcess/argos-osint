@@ -41,7 +41,7 @@ Turn states are `queued`, `running`, `retrying`, `final` and `failed`. V1 is a s
 
 ## Inbox QA V2
 
-The [V2 wire contract](../../../crates/fleetworks-contracts/src/chat/qa.rs) is available through the Embedded companion's inherited Unix socket. Distributed retains Inbox notifications. In Embedded, Workstation Settings shows Generator and Decision preferences, effective engines, provisioning, and context usage for a registered Embedded connection while Backend inference is on. Open the Assistant composer from the toolbar bell. Workstation Status keeps deterministic diagnostics accessible independently. The Inbox prompts the operator to enable inference when it is off. The composer requires a ready generator. The separate related-activity lookup remains available under its own capability and permissions. The transcript starts empty. Assistant reply text appears when a submitted question reaches the generator.
+The [V2 wire contract](../../../crates/fleetworks-contracts/src/chat/qa.rs) is available through the Embedded companion's inherited Unix socket. Distributed retains Inbox notifications. In Embedded, Workstation Settings shows Generator and Decision preferences, effective engines, provisioning, and context usage for a registered Embedded connection while Backend inference is on. Open the Assistant composer from the toolbar bell. Workstation Status keeps deterministic diagnostics accessible independently. The Inbox prompts the operator to enable inference when it is off. The composer requires a ready generator. The transcript starts empty. Assistant reply text appears when a submitted question reaches the generator.
 
 ### Prompt flow
 
@@ -86,11 +86,9 @@ Focus, pending choices and accepted plans follow the turn store's 15-minute expi
 
 ### Jobs and Inbox triage
 
-Use **Find related activity** on a selected private job. The companion resolves the job in the current registration. An explicit stage/check relation can open the associated diagnostic. Missing relations, ambiguous choices and unavailable inference have distinct outcomes.
+In Inbox, **View status** on a readiness notification opens the current check. **Open Job Logs** on a job notification opens the selected job and its log view in **Jobs & Logs**. Navigation uses the ordinary destination authorization.
 
-The inline lookup returns one compact result. In Inbox, **View status** on a readiness notification opens the current check. **Open Job Logs** on a job notification opens the selected job and its log view in **Jobs & Logs**. Navigation uses the ordinary destination authorization.
-
-**Explain in Assistant** attaches the notification’s subject to the composer for the operator to submit. A readiness notice grounds the explanation in a fresh observation. Registration status comes from the caller’s verified registration. For a job notification, the companion reads recent sanitized entries for that job under the current registration, including jobs that are running, completed or failed. It scales the bounded tail read to the active model and passes up to two short excerpts alongside the required job status. The worker fits those excerpts and their prompt overhead within half its negotiated input window. The status still answers when authorized logs are absent, the worker lacks the capability, or no excerpt fits.
+**Explain in Assistant** attaches a private job or notification subject to the composer for the operator to submit. A readiness notice grounds the explanation in a fresh observation. Registration status comes from the caller’s verified registration. For a job notification, the companion reads recent sanitized entries for that job under the current registration, including jobs that are running, completed or failed. It scales the bounded tail read to the active model and passes up to two short excerpts alongside the required job status. The worker fits those excerpts and their prompt overhead within half its negotiated input window. The status still answers when authorized logs are absent, the worker lacks the capability, or no excerpt fits.
 
 ### Models and lifecycle
 

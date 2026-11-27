@@ -163,6 +163,13 @@ pub static SOURCES: Icon = Icon {
     body: r#"<path d="M11 4.6h1.1c.8 0 1.4.6 1.4 1.4v6.1c0 .8-.6 1.4-1.4 1.4H7.5" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/><rect x="2.5" y="2.5" width="8.5" height="9.2" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.35"/><path d="M5 5.5h3.5M5 8.4h2.4" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>"#,
 };
 
+/// Elapsed response time.
+pub static STOPWATCH: Icon = Icon {
+    name: "fw-stopwatch",
+    view: 16.0,
+    body: r#"<circle cx="8" cy="9.5" r="4.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 5V2.25M6.5 2.25h3m2.2 4.3 1.3-1.3M8 7.25V9.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>"#,
+};
+
 /// Expanded record disclosure.
 pub static CHEVRON_DOWN: Icon = Icon {
     name: "fw-chevron-down",

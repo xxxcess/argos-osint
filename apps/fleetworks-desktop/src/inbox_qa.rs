@@ -1200,11 +1200,7 @@ impl State {
             QaSettingsUpdate::preferences(MutationContext::new(context), settings.revision);
         let update = match preference {
             ModelPreference::Generator(preference)
-                if (self.supports_gpt2_generators()
-                    || !matches!(
-                        preference,
-                        QaGeneratorPreference::Gpt2Small | QaGeneratorPreference::Gpt2Medium
-                    ))
+                if generator_choices(self).any(|(choice, _)| choice == preference)
                     && settings
                         .generator
                         .is_some_and(|role| role.preference != preference) =>
@@ -1537,14 +1533,10 @@ fn model_footprint(target: QaModelTarget) -> String {
     }
 }
 
-const GENERATOR_CHOICES: [(QaGeneratorPreference, &str); 3] = [
+const GENERATOR_CHOICES: [(QaGeneratorPreference, &str); 2] = [
     (
         QaGeneratorPreference::Automatic,
         "assistant-generator-automatic",
-    ),
-    (
-        QaGeneratorPreference::FlanT5Small,
-        "assistant-generator-small",
     ),
     (
         QaGeneratorPreference::FlanT5Base,
@@ -1552,26 +1544,18 @@ const GENERATOR_CHOICES: [(QaGeneratorPreference, &str); 3] = [
     ),
 ];
 
-const GPT2_GENERATOR_CHOICES: [(QaGeneratorPreference, &str); 2] = [
-    (
-        QaGeneratorPreference::Gpt2Small,
-        "assistant-generator-gpt2-small",
-    ),
-    (
-        QaGeneratorPreference::Gpt2Medium,
-        "assistant-generator-gpt2-medium",
-    ),
-];
+const GPT2_GENERATOR_CHOICE: (QaGeneratorPreference, &str) = (
+    QaGeneratorPreference::Gpt2Small,
+    "assistant-generator-gpt2-small",
+);
 
 fn generator_choices(
     state: &State,
 ) -> impl Iterator<Item = (QaGeneratorPreference, &'static str)> + Clone {
-    let extra: &[_] = if state.supports_gpt2_generators() {
-        &GPT2_GENERATOR_CHOICES
-    } else {
-        &[]
-    };
-    GENERATOR_CHOICES.into_iter().chain(extra.iter().copied())
+    let gpt2 = state
+        .supports_gpt2_generators()
+        .then_some(GPT2_GENERATOR_CHOICE);
+    GENERATOR_CHOICES.into_iter().chain(gpt2)
 }
 
 const DECISION_CHOICES: [(QaDecisionPreference, &str); 3] = [
@@ -1595,6 +1579,14 @@ fn generator_target(preference: QaGeneratorPreference) -> Option<QaModelTarget> 
 
 fn generator_label(preference: QaGeneratorPreference) -> &'static str {
     generator_target(preference).map_or("Automatic", QaModelTarget::label)
+}
+
+fn generator_choice_label(preference: QaGeneratorPreference) -> &'static str {
+    match preference {
+        QaGeneratorPreference::FlanT5Base => "Google",
+        QaGeneratorPreference::Gpt2Small => "GPT",
+        _ => generator_label(preference),
+    }
 }
 
 fn decision_label(preference: QaDecisionPreference) -> &'static str {
@@ -1695,24 +1687,17 @@ fn generator_settings_content(
     let choices = generator_choices(state);
     let choice_count = choices.clone().count();
     let options = choices.enumerate().map(|(index, (preference, key))| {
-        let label = generator_label(preference);
-        let label = generator_target(preference).map_or_else(
-            || label.into(),
-            |target| {
-                format!(
-                    "{label} · {:.0} MB",
-                    target.weight_bytes() as f64 / 1_000_000.0
-                )
-            },
-        );
-        RadioItem::new(label, preference == generator.preference)
-            .disabled(disabled)
-            .on_select(move |state: &mut State| {
-                state.set_model_preference(ModelPreference::Generator(preference));
-            })
-            .build(kit)
-            .key(key)
-            .position_in_set(index + 1, choice_count)
+        RadioItem::new(
+            generator_choice_label(preference),
+            preference == generator.preference,
+        )
+        .disabled(disabled)
+        .on_select(move |state: &mut State| {
+            state.set_model_preference(ModelPreference::Generator(preference));
+        })
+        .build(kit)
+        .key(key)
+        .position_in_set(index + 1, choice_count)
     });
     let phase = if generator.phase == QaPhase::Ready && generator.effective.is_none() {
         QaPhase::Unavailable
@@ -2245,11 +2230,23 @@ fn response_time(milliseconds: u64, kit: &Kit) -> El {
     } else {
         format!("{milliseconds} ms")
     };
-    rune::text(format!("Took {value}"))
+    rune::row()
         .key(RESPONSE_TIME)
+        .role("group")
         .label(format!("Response time {value}"))
-        .font(kit.ty.text_xsmall)
-        .color(kit.c.text_muted)
+        .center_y()
+        .gap(4.0)
+        .child(
+            rune::icon(&icons::STOPWATCH, 12.0)
+                .color(kit.c.text_muted)
+                .a11y_hidden(),
+        )
+        .child(
+            rune::text(value)
+                .font(kit.ty.text_xsmall)
+                .color(kit.c.text_muted)
+                .a11y_hidden(),
+        )
 }
 
 pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -> Option<El> {
@@ -2441,15 +2438,18 @@ fn generator_picker(state: &State, kit: &Kit, menus: &mut Vec<El>) -> Option<El>
                 {
                     format!("Automatic · {}", target.label())
                 }
-                _ => generator_label(preference).to_owned(),
+                _ => generator_choice_label(preference).to_owned(),
             };
             (preference, label)
         })
         .collect();
     let labels: Vec<_> = choices.iter().map(|(_, label)| label.as_str()).collect();
-    let current = choices.iter().find_map(|(preference, label)| {
-        (*preference == generator.preference).then_some(label.as_str())
-    });
+    let current = choices
+        .iter()
+        .find_map(|(preference, label)| {
+            (*preference == generator.preference).then_some(label.as_str())
+        })
+        .unwrap_or_else(|| generator_choice_label(generator.preference));
     let qa = &state.inbox_qa;
     let disabled = !state.can_manage_inbox_qa()
         || qa.settings_change_pending()
@@ -2462,7 +2462,7 @@ fn generator_picker(state: &State, kit: &Kit, menus: &mut Vec<El>) -> Option<El>
     let trigger = Select::new("inbox-qa-generator-picker", &labels)
         .label("Generator model")
         .placeholder("Generator model")
-        .current(current)
+        .current(Some(current))
         .placement(Placement::TopStart)
         .open(!disabled && state.inbox.generator_picker_open)
         .disabled(disabled)
@@ -3195,16 +3195,21 @@ mod tests {
         let (menu, _) = runtime.presented(MENU).expect("generator choices open");
         assert!(menu[1] + menu[3] <= picker[1] + 0.5);
         assert!(menu[2] >= picker[2]);
-        let choice = runtime
+        let choices: Vec<_> = runtime
             .elements()
             .into_iter()
-            .find(|element| {
-                element.role == "option"
-                    && element.label.as_deref() == Some(QaModelTarget::Gpt2Medium.label())
-            })
-            .expect("GPT-2 Medium option");
-        press_disclosure(&mut runtime, "option4", 1.75);
-        assert_eq!(choice.key.as_deref(), Some("option4"));
+            .filter(|element| element.role == "option")
+            .filter_map(|element| element.label)
+            .collect();
+        assert_eq!(
+            choices,
+            [
+                format!("Automatic · {}", QaModelTarget::FlanT5Small.label()),
+                "Google".to_owned(),
+                "GPT".to_owned(),
+            ]
+        );
+        press_disclosure(&mut runtime, "option2", 1.75);
         assert!(runtime.find(MENU).is_none());
         assert_eq!(
             runtime
@@ -3214,35 +3219,93 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .generator_preference,
-            Some(QaGeneratorPreference::Gpt2Medium)
+            Some(QaGeneratorPreference::Gpt2Small)
         );
         assert_eq!(runtime.state.inbox_qa.draft.text, "A draft to preserve");
         assert!(runtime.find(COMPOSER).is_none());
+
+        runtime.update(|state, _| {
+            state.inbox_qa.apply_settings(
+                model_settings(
+                    QaGeneratorPreference::Gpt2Small,
+                    QaDecisionPreference::RulesOnly,
+                    3,
+                    2,
+                ),
+                2.25,
+            );
+        });
+        runtime.frame(2.25);
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("\"value\":\"GPT\""));
     }
 
     #[test]
-    fn gpt2_generator_choices_require_companion_support_and_save_with_keyboard_focus() {
-        let mut runtime = model_settings_runtime();
-        let selections = [
-            (
-                10,
-                8,
-                QaGeneratorPreference::Gpt2Small,
-                QaModelTarget::Gpt2Small,
-            ),
-            (
-                11,
-                9,
-                QaGeneratorPreference::Gpt2Medium,
-                QaModelTarget::Gpt2Medium,
-            ),
-        ];
-        for (_, key) in GPT2_GENERATOR_CHOICES {
-            assert!(runtime.find(key).is_none());
+    fn saved_generator_preferences_remain_visible_without_selectable_rows() {
+        const PICKER: &str = "inbox-qa-generator-picker-trigger";
+        for preference in [
+            QaGeneratorPreference::FlanT5Small,
+            QaGeneratorPreference::Gpt2Medium,
+        ] {
+            let label = generator_label(preference);
+            let mut runtime = qa_drawer((640.0, 480.0), None);
+            runtime.update(|state, _| {
+                state
+                    .connection
+                    .capabilities
+                    .as_mut()
+                    .unwrap()
+                    .features
+                    .extend([
+                        QA_MODEL_SETTINGS_FEATURE.into(),
+                        QA_GPT2_GENERATORS_FEATURE.into(),
+                    ]);
+                state.inbox_qa.apply_settings(
+                    model_settings(preference, QaDecisionPreference::RulesOnly, 2, 1),
+                    1.0,
+                );
+            });
+            runtime.frame(1.0);
+            assert!(runtime
+                .accessibility_json()
+                .to_string()
+                .contains(&format!("\"value\":\"{label}\"")));
+
+            press_disclosure(&mut runtime, PICKER, 1.25);
+            assert!(!runtime.elements().into_iter().any(|element| {
+                element.role == "option" && element.label.as_deref() == Some(label)
+            }));
+
+            runtime.update(|state, _| {
+                state.inbox.close();
+                state.fixture_show_assistant_settings();
+            });
+            runtime.frame(1.75);
+            let tree = runtime.accessibility_json().to_string();
+            assert!(tree.contains(&format!("Preferred · {label}")));
+            assert!(tree.contains(&format!("In use · {label}")));
+            assert!(!runtime.elements().into_iter().any(|element| {
+                element.role == "radio"
+                    && element
+                        .label
+                        .is_some_and(|option| option.starts_with(label))
+            }));
+            assert!(runtime.state.inbox_qa.captured_update.is_none());
         }
+    }
+
+    #[test]
+    fn gpt2_small_requires_companion_support_and_saves_with_keyboard_focus() {
+        let mut runtime = model_settings_runtime();
+        let (preference, key) = GPT2_GENERATOR_CHOICE;
+        let target = QaModelTarget::Gpt2Small;
+        let revision = 10;
+        let generation = 8;
+        assert!(runtime.find(key).is_none());
         runtime.update(|state, _| {
-            state
-                .set_model_preference(ModelPreference::Generator(QaGeneratorPreference::Gpt2Small));
+            state.set_model_preference(ModelPreference::Generator(preference));
         });
         runtime.frame(0.5);
         assert!(runtime.state.inbox_qa.captured_update.is_none());
@@ -3257,64 +3320,61 @@ mod tests {
                 .push(QA_GPT2_GENERATORS_FEATURE.into());
         });
         runtime.frame(0.5);
-        for ((revision, generation, preference, target), (_, key)) in
-            selections.into_iter().zip(GPT2_GENERATOR_CHOICES)
-        {
-            let option = runtime
-                .elements()
-                .into_iter()
-                .find(|element| element.key.as_deref() == Some(key))
-                .expect("advertised GPT-2 generator choice");
-            let label = option.label.expect("accessible choice name");
-            assert!(label.starts_with(target.label()));
-            let path = choose_model_setting(&mut runtime, &label, 0.5);
-            let update = runtime.state.inbox_qa.captured_update.as_ref().unwrap();
-            assert_eq!(update.expected_revision, revision);
-            assert_eq!(update.generator_preference, Some(preference));
-            assert_eq!(update.decision_preference, None);
+        let option = runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some(key))
+            .expect("advertised GPT-2 generator choice");
+        let label = option.label.expect("accessible choice name");
+        assert_eq!(label, "GPT");
+        let path = choose_model_setting(&mut runtime, &label, 0.5);
+        let update = runtime.state.inbox_qa.captured_update.as_ref().unwrap();
+        assert_eq!(update.expected_revision, revision);
+        assert_eq!(update.generator_preference, Some(preference));
+        assert_eq!(update.decision_preference, None);
 
-            model_settings_reply(
-                &mut runtime,
-                Reply::Update(Ok(model_settings(
-                    preference,
-                    QaDecisionPreference::RulesOnly,
-                    revision + 1,
-                    generation,
-                ))),
-            );
-            runtime.frame(0.5);
-            assert!(runtime.elements().iter().any(|element| {
-                element.path == path && element.focused && element.focus_visible
-            }));
-            let tree = runtime.accessibility_json().to_string();
-            assert!(tree.contains(&format!("Preferred · {}", target.label())));
-            assert!(tree.contains(&format!("In use · {}", target.label())));
-            assert!(runtime.find("assistant-context-usage").is_none());
+        model_settings_reply(
+            &mut runtime,
+            Reply::Update(Ok(model_settings(
+                preference,
+                QaDecisionPreference::RulesOnly,
+                revision + 1,
+                generation,
+            ))),
+        );
+        runtime.frame(0.5);
+        assert!(runtime
+            .elements()
+            .iter()
+            .any(|element| { element.path == path && element.focused && element.focus_visible }));
+        let tree = runtime.accessibility_json().to_string();
+        assert!(tree.contains(&format!("Preferred · {}", target.label())));
+        assert!(tree.contains(&format!("In use · {}", target.label())));
+        assert!(runtime.find("assistant-context-usage").is_none());
 
-            runtime.update(move |state, _| {
-                let mut answered = turn(QaTurnState::Answered, generation);
-                answered.context = Some(QaContextUsage::new(512, 128, 1));
-                answered.model_target = Some(target);
-                answered.model_generation = Some(generation);
-                state.inbox_qa.adopt(Some(answered));
-            });
-            runtime.frame(0.5);
-            assert!(runtime.find("assistant-context-usage").is_some());
-            assert!(runtime
-                .accessibility_json()
-                .to_string()
-                .contains("128 of 512 tokens, 25% peak usage"));
+        runtime.update(move |state, _| {
+            let mut answered = turn(QaTurnState::Answered, generation);
+            answered.context = Some(QaContextUsage::new(512, 128, 1));
+            answered.model_target = Some(target);
+            answered.model_generation = Some(generation);
+            state.inbox_qa.adopt(Some(answered));
+        });
+        runtime.frame(0.5);
+        assert!(runtime.find("assistant-context-usage").is_some());
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("128 of 512 tokens, 25% peak usage"));
 
-            runtime.update(move |state, _| {
-                let turn = state.inbox_qa.latest.as_mut().unwrap();
-                turn.context = Some(QaContextUsage::new(target.input_tokens(), 640, 1));
-            });
-            runtime.frame(0.5);
-            assert!(runtime
-                .accessibility_json()
-                .to_string()
-                .contains("640 of 896 tokens, 71% peak usage"));
-        }
+        runtime.update(move |state, _| {
+            let turn = state.inbox_qa.latest.as_mut().unwrap();
+            turn.context = Some(QaContextUsage::new(target.input_tokens(), 640, 1));
+        });
+        runtime.frame(0.5);
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("640 of 896 tokens, 71% peak usage"));
     }
 
     #[test]
@@ -3396,8 +3456,7 @@ mod tests {
             choices,
             [
                 "Automatic",
-                "FLAN-T5 Small · 308 MB",
-                "FLAN-T5 Base · 990 MB",
+                "Google",
                 "Rules only",
                 "Julia-1 Q8 · 168 MB",
                 "vLLM d3-edge Q8 · 806 MB",
@@ -3405,7 +3464,7 @@ mod tests {
         );
         assert!(runtime.find("assistant-context-usage").is_some());
 
-        let generator = choose_model_setting(&mut runtime, "FLAN-T5 Base · 990 MB", 1.5);
+        let generator = choose_model_setting(&mut runtime, "Google", 1.5);
         let update = runtime
             .state
             .inbox_qa
@@ -3513,7 +3572,7 @@ mod tests {
     #[test]
     fn assistant_preference_conflict_refreshes_and_old_backend_replies_are_fenced() {
         let mut runtime = model_settings_runtime();
-        choose_model_setting(&mut runtime, "FLAN-T5 Small · 308 MB", 1.5);
+        choose_model_setting(&mut runtime, "Google", 1.5);
         model_settings_reply(&mut runtime, Reply::Update(Err(ClientError::Status(409))));
         runtime.frame(1.8);
         assert!(runtime.state.inbox_qa.settings_refresh_required);
@@ -3521,7 +3580,7 @@ mod tests {
             .accessibility_json()
             .to_string()
             .contains("Settings changed. Review the current preference"));
-        choose_model_setting(&mut runtime, "FLAN-T5 Base · 990 MB", 2.0);
+        choose_model_setting(&mut runtime, "Julia-1 Q8 · 168 MB", 2.0);
         let update = runtime
             .state
             .inbox_qa
@@ -3530,7 +3589,7 @@ mod tests {
             .expect("original update");
         assert_eq!(
             update.generator_preference,
-            Some(QaGeneratorPreference::FlanT5Small)
+            Some(QaGeneratorPreference::FlanT5Base)
         );
         model_settings_reply(
             &mut runtime,
@@ -3704,8 +3763,9 @@ mod tests {
         assert!(rendered.contains("Assistant message"));
         assert!(rendered.contains("448 of 512 tokens, 88% peak usage"));
         assert!(rendered.contains("Used previous exchange"));
+        assert!(rendered.contains("Response time 1.2 s"));
         let elements = runtime.elements();
-        for text in ["448/512", "Took 1.2 s", "You"] {
+        for text in ["448/512", "1.2 s", "You"] {
             assert!(elements
                 .iter()
                 .any(|element| !element.exiting && element.text.as_deref() == Some(text)));

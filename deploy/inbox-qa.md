@@ -2,7 +2,7 @@
 
 Inbox Assistant starts Off. In an Embedded workstation, turn on **Backend inference**. The **Assistant** tab in Workstation Settings shows the saved preferences, effective engines, startup progress and current generator context usage. Open Inbox from the toolbar bell and use its Assistant composer. Sending becomes available when the selected generator is ready. The composer shows the reason whenever sending is unavailable.
 
-- **Generator** offers **Automatic**, **FLAN-T5 Small** (~308 MB), **FLAN-T5 Base** (~990 MB), **GPT-2 Small** (~548 MB) and **GPT-2 Medium** (~1.52 GB). Automatic uses fresh headroom and verified assets to choose between the FLAN-T5 models. Each explicit choice stays selected if it cannot fit or provision, with the cause shown in Settings.
+- **Generator** offers **Automatic**, **Google** (FLAN-T5 Base, ~990 MB) and **GPT** (GPT-2 Small, ~548 MB). Automatic uses fresh headroom and verified assets to choose between the FLAN-T5 models. Existing FLAN-T5 Small and GPT-2 Medium preferences continue to apply until you choose a different setting. Settings shows the cause if the preferred model cannot fit or provision.
 - **Decision** offers **Rules only**, **Julia-1 Q8** (168 MB) and **vLLM d3-edge Q8** (806 MB). The companion saves either model preference with **Rules only** effective until that exact model and runtime qualify on the current native target. Saving an unqualified choice triggers no downloads. A Decision save keeps the current generator warm.
 
 Workstation Status keeps its deterministic warnings and diagnostic checks available during startup and when inference is off.

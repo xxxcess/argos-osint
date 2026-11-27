@@ -897,8 +897,11 @@ pub(crate) fn drawer(
     if !state.inbox.open || state.has_active_confirmation() {
         return None;
     }
-    let [window_width, window_height] = cx.layout_size("app-shell").unwrap_or([640.0, 480.0]);
-    let mut panel = body(state, kit, preferences, window_height * 0.5)
+    let window_width = cx.layout_size("app-shell").map_or(640.0, |size| size[0]);
+    let max_notifications_height = cx
+        .layout_with("inbox-panel-position", |rect| rect[3] * 0.5)
+        .unwrap_or(240.0);
+    let mut panel = body(state, kit, preferences, max_notifications_height)
         .w(DRAWER_WIDTH)
         .max_w(DRAWER_WIDTH)
         .h_full()
@@ -2042,8 +2045,12 @@ mod tests {
             let mut state = crate::tests::registered_fixture();
             state.seed_inbox_qa_overflow_fixture();
             let mut runtime = runtime(state, size);
+            let (drawer, _) = runtime.presented("inbox-body").unwrap();
             let (viewport, _) = runtime.presented(NOTIFICATIONS_SCROLL).unwrap();
-            assert!((viewport[3] - size.1 * 0.5).abs() < 0.5);
+            assert!(
+                (viewport[3] - drawer[3] * 0.5).abs() < 0.5,
+                "notification viewport {viewport:?} must fill half of drawer {drawer:?}",
+            );
             assert_eq!(runtime.scroll_at_bottom(NOTIFICATIONS_SCROLL), Some(false));
 
             runtime.update(|_, tx| tx.scroll_to_bottom_instant(NOTIFICATIONS_SCROLL));

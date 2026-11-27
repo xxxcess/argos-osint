@@ -44,6 +44,7 @@ const MAX_SEEN_JOB_EVENTS: usize = 200;
 const MAX_TRACKED_JOBS: usize = 512;
 const DAY_SECONDS: f64 = 24.0 * 60.0 * 60.0;
 const DRAWER_WIDTH: f32 = 440.0;
+pub(crate) const NOTIFICATIONS_SCROLL: &str = "inbox-notifications-scroll";
 pub(crate) const SCROLL: &str = "inbox-scroll";
 const BELL: Icon = Icon {
     name: "fw-inbox-bell",
@@ -76,12 +77,8 @@ struct Group<'a> {
 }
 
 impl Group<'_> {
-    fn oldest_priority_item(&self) -> &Item {
-        self.items
-            .iter()
-            .copied()
-            .find(|item| !item.read)
-            .unwrap_or(self.items[0])
+    fn latest_item(&self) -> &Item {
+        self.items[self.items.len() - 1]
     }
 }
 
@@ -148,7 +145,7 @@ pub struct Inbox {
     checks: Vec<(ReadinessCheckId, ReadinessState)>,
     seen_job_events: VecDeque<String>,
     pub(crate) open: bool,
-    pub(crate) at_bottom: bool,
+    pub(crate) transcript_at_bottom: bool,
     focus_return: Option<&'static str>,
     query: TextEdit,
     expanded: BTreeSet<Topic>,
@@ -222,11 +219,7 @@ impl Inbox {
                 }
             })
             .collect();
-        groups.sort_by(|left, right| {
-            let priority = (left.unread == 0).cmp(&(right.unread == 0));
-            priority
-                .then_with(|| item_order(left.oldest_priority_item(), right.oldest_priority_item()))
-        });
+        groups.sort_by(|left, right| item_order(right.latest_item(), left.latest_item()));
         groups
     }
 
@@ -243,12 +236,6 @@ impl Inbox {
             });
         }
         groups
-    }
-
-    fn filtered_group_position(&self, topic: &Topic) -> Option<usize> {
-        self.filtered_groups()
-            .iter()
-            .position(|group| group.topic == topic)
     }
 
     #[cfg(test)]
@@ -661,7 +648,7 @@ impl State {
         }
     }
 
-    /// Open a synthetic Inbox whose notification history overflows at minimum window size.
+    /// Open a synthetic Inbox whose notification history overflows for visual review.
     #[doc(hidden)]
     pub fn seed_inbox_qa_overflow_fixture(&mut self) {
         if !self.fixture {
@@ -673,8 +660,14 @@ impl State {
             ReadinessCheckId::Datastore,
             ReadinessCheckId::Jobs,
             ReadinessCheckId::Brain,
+            ReadinessCheckId::Control,
+            ReadinessCheckId::Nlp,
+            ReadinessCheckId::Classifier,
+            ReadinessCheckId::Registration,
             ReadinessCheckId::ActorCatalog,
             ReadinessCheckId::ActorSearch,
+            ReadinessCheckId::ClassifierInference,
+            ReadinessCheckId::ClassifierTraining,
         ];
         for check in checks {
             let name = readiness_name(check);
@@ -904,8 +897,8 @@ pub(crate) fn drawer(
     if !state.inbox.open || state.has_active_confirmation() {
         return None;
     }
-    let window_width = cx.layout_size("app-shell").map_or(640.0, |size| size[0]);
-    let mut panel = body(state, kit, preferences)
+    let [window_width, window_height] = cx.layout_size("app-shell").unwrap_or([640.0, 480.0]);
+    let mut panel = body(state, kit, preferences, window_height * 0.5)
         .w(DRAWER_WIDTH)
         .max_w(DRAWER_WIDTH)
         .h_full()
@@ -972,7 +965,12 @@ fn enter(el: El, preferences: ViewPreferences, transition: rune::Transition) -> 
         .transition(transition)
 }
 
-fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
+fn body(
+    state: &State,
+    kit: &Kit,
+    preferences: ViewPreferences,
+    max_notifications_height: f32,
+) -> El {
     let inbox = &state.inbox;
     let close = rune_kit::Button::new("Close")
         .variant(rune_kit::ButtonVariant::Ghost)
@@ -1004,9 +1002,7 @@ fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
     }
     let mut last_section = "";
     for group in groups {
-        // The observation clock is elapsed time. Keep unread-first ordering, then group
-        // adjacent cards by the age of the item that determines each group's place.
-        let section = if state.clock - group.oldest_priority_item().at < DAY_SECONDS {
+        let section = if state.clock - group.latest_item().at < DAY_SECONDS {
             "PAST 24 HOURS"
         } else {
             "EARLIER"
@@ -1023,28 +1019,45 @@ fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
         }
         rows = rows.child(group_view(&group, state, kit, preferences));
     }
-    let chat = crate::inbox_qa::exchange(state, kit, preferences);
-    let show_chat = chat.is_some();
-    let list = rune::col()
-        .key("inbox-content")
+    let notifications = rune::col()
+        .key(NOTIFICATIONS_SCROLL)
+        .role("region")
+        .label("Notifications")
         .w_full()
         .grow(1.0)
-        .padding(12.0)
-        .child(rows)
-        .children(show_chat.then(|| {
-            rune::spacer()
-                .key("inbox-chat-space")
-                .min_h(8.0)
-                .a11y_hidden()
-        }))
-        .children(show_chat.then(|| {
-            rune::rule(1.0, theme::hex(theme::BORDER_CONTROL))
-                .key("inbox-chat-divider")
-                .w_full()
-                .mb(8.0)
-                .a11y_hidden()
-        }))
-        .children(chat);
+        .min_h(0.0)
+        .max_h(max_notifications_height)
+        .scroll(rune::ScrollSpec {
+            stick_bottom: false,
+        })
+        .scroll_anchor()
+        .child(rows.padding(12.0));
+    let transcript = state.inbox_qa_visible().then(|| {
+        let chat = crate::inbox_qa::exchange(state, kit, preferences);
+        rune::col()
+            .w_full()
+            .grow(1.0)
+            .min_h(0.0)
+            .children(chat.is_some().then(|| {
+                rune::rule(1.0, theme::hex(theme::BORDER_CONTROL))
+                    .key("inbox-chat-divider")
+                    .w_full()
+                    .a11y_hidden()
+            }))
+            .child(
+                rune::col()
+                    .key(SCROLL)
+                    .w_full()
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .scroll(rune::ScrollSpec { stick_bottom: true })
+                    .scroll_anchor()
+                    .on_at_bottom(|state: &mut State, at_bottom| {
+                        state.inbox.transcript_at_bottom = at_bottom;
+                    })
+                    .child(rune::col().w_full().padding(12.0).children(chat)),
+            )
+    });
     rune::col()
         .key("inbox-body")
         .child(
@@ -1078,19 +1091,8 @@ fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
                 )
                 .child(material::glass_control(filter, preferences)),
         )
-        .child(
-            rune::col()
-                .key(SCROLL)
-                .w_full()
-                .grow(1.0)
-                .min_h(0.0)
-                .scroll(rune::ScrollSpec {
-                    stick_bottom: show_chat,
-                })
-                .scroll_anchor()
-                .on_at_bottom(|state: &mut State, at_bottom| state.inbox.at_bottom = at_bottom)
-                .child(list),
-        )
+        .child(notifications)
+        .children(transcript)
         .children(crate::inbox_qa::footer(state, kit, preferences))
 }
 
@@ -1102,7 +1104,7 @@ fn group_view(group: &Group<'_>, state: &State, kit: &Kit, preferences: ViewPref
     let topic = group.topic.clone();
     let mark_topic = topic.clone();
     let mark_focus = toggle_key.clone();
-    let latest = group.items[group.items.len() - 1];
+    let latest = group.latest_item();
     let count = format!("{} unread", group.unread);
     let label = format!(
         "{}, {}, {}",
@@ -1177,14 +1179,9 @@ fn group_view(group: &Group<'_>, state: &State, kit: &Kit, preferences: ViewPref
         .help("Mark group as read")
         .disabled(group.unread == 0)
         .on_press_tx(move |state: &mut State, tx| {
-            let before = state.inbox.filtered_group_position(&mark_topic);
             state.inbox.mark_group_read(&mark_topic);
-            if state.inbox.filtered_group_position(&mark_topic) == before {
-                tx.focus(mark_focus.clone(), tx.focus_visible());
-                tx.keep_on_screen(mark_focus.clone());
-            } else {
-                tx.focus("inbox-close", tx.focus_visible());
-            }
+            tx.focus(mark_focus.clone(), tx.focus_visible());
+            tx.keep_on_screen(mark_focus.clone());
         })
         .build(kit)
         .key(format!("{key}-mark-read"));
@@ -1633,7 +1630,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_use_oldest_unread_then_insertion_order_with_chronological_rows() {
+    fn groups_use_latest_item_without_reordering_when_read() {
         let mut inbox = Inbox::default();
         seed_drawer(&mut inbox, 900.0);
         let actor = Topic::Readiness(ReadinessCheckId::ActorSearch);
@@ -1656,10 +1653,10 @@ mod tests {
         assert_eq!(inbox.selected, None);
         assert_eq!(inbox.unread(), 2);
         let groups = inbox.groups();
-        assert_eq!(groups[0].topic, &job);
-        assert_eq!(groups[1].topic, &actor);
-        assert_eq!(groups[1].unread, 1);
-        assert!(!groups[1].items[1].read);
+        assert_eq!(groups[0].topic, &actor);
+        assert_eq!(groups[1].topic, &job);
+        assert_eq!(groups[0].unread, 1);
+        assert!(!groups[0].items[1].read);
 
         inbox.toggle_group(&actor);
         inbox.select(latest_id);
@@ -1669,10 +1666,36 @@ mod tests {
         inbox.select(earliest_id);
         assert_eq!(inbox.selected, Some(earliest_id));
         assert_eq!(inbox.unread(), 1);
-        assert_eq!(inbox.groups()[0].topic, &job);
+        assert_eq!(inbox.groups()[0].topic, &actor);
         inbox.mark_group_read(&job);
         assert_eq!(inbox.unread(), 0);
-        assert_eq!(inbox.groups()[0].topic, &Topic::Connection);
+        assert_eq!(inbox.groups()[0].topic, &actor);
+
+        let latest_at = inbox.groups()[0].latest_item().at;
+        inbox.push(
+            Topic::Connection,
+            "Connection".into(),
+            "Connected".into(),
+            "The connection to the backend is ready.".into(),
+            latest_at,
+            StatusTone::Ok,
+        );
+        inbox.mark_group_read(&Topic::Connection);
+        inbox.push(
+            job.clone(),
+            "Actor index".into(),
+            "Job completed".into(),
+            "The actor index is ready.".into(),
+            latest_at - 1.0,
+            StatusTone::Ok,
+        );
+        let groups = inbox.groups();
+        assert_eq!(
+            groups.iter().map(|group| group.topic).collect::<Vec<_>>(),
+            [&Topic::Connection, &actor, &job],
+        );
+        assert_eq!(groups[0].unread, 0);
+        assert_eq!(groups[2].unread, 1);
     }
 
     #[test]
@@ -1808,6 +1831,24 @@ mod tests {
         runtime.frame(now);
     }
 
+    fn click_notification(runtime: &mut rune::Runtime<State>, key: &str, now: f64) {
+        runtime.update(|_, tx| tx.scroll_into_view(key));
+        runtime.frame(now);
+        let (x, y) = runtime.find(key).unwrap_or_else(|| panic!("visible {key}"));
+        assert!(
+            runtime.elements().iter().any(|element| {
+                element.key.as_deref() == Some(key)
+                    && x >= element.visible[0]
+                    && x < element.visible[0] + element.visible[2]
+                    && y >= element.visible[1]
+                    && y < element.visible[1] + element.visible[3]
+                    && !element.exiting
+            }),
+            "{key} center must be visible before clicking"
+        );
+        click(runtime, key, now);
+    }
+
     fn focused(runtime: &rune::Runtime<State>, key: &str) -> bool {
         runtime.elements().into_iter().any(|element| {
             element.key.as_deref() == Some(key) && element.focused && !element.exiting
@@ -1896,7 +1937,7 @@ mod tests {
                 "inbox-group-connection-mark-read",
                 "inbox-helper",
                 "inbox-filter",
-                "inbox-scroll",
+                NOTIFICATIONS_SCROLL,
             ] {
                 let (rect, _) = runtime.presented(key).expect(key);
                 assert!(
@@ -1996,6 +2037,30 @@ mod tests {
     }
 
     #[test]
+    fn notifications_without_assistant_hold_half_the_drawer_height() {
+        for size in [(640.0, 480.0), (1280.0, 800.0)] {
+            let mut state = crate::tests::registered_fixture();
+            state.seed_inbox_qa_overflow_fixture();
+            let mut runtime = runtime(state, size);
+            let (viewport, _) = runtime.presented(NOTIFICATIONS_SCROLL).unwrap();
+            assert!((viewport[3] - size.1 * 0.5).abs() < 0.5);
+            assert_eq!(runtime.scroll_at_bottom(NOTIFICATIONS_SCROLL), Some(false));
+
+            runtime.update(|_, tx| tx.scroll_to_bottom_instant(NOTIFICATIONS_SCROLL));
+            runtime.frame(1.0);
+            assert_eq!(runtime.scroll_at_bottom(NOTIFICATIONS_SCROLL), Some(true));
+            assert_eq!(runtime.presented(NOTIFICATIONS_SCROLL).unwrap().0, viewport);
+
+            runtime.update(|state, _| {
+                state.inbox.query = TextEdit::new("unmatched notification");
+            });
+            runtime.frame(1.25);
+            assert!(runtime.find("inbox-empty").is_some());
+            assert_eq!(runtime.presented(NOTIFICATIONS_SCROLL).unwrap().0, viewport);
+        }
+    }
+
+    #[test]
     fn inbox_filter_keeps_unread_totals_and_restores_all_groups_on_reopen() {
         let mut state = crate::tests::registered_fixture();
         state.seed_inbox_drawer_fixture();
@@ -2046,7 +2111,7 @@ mod tests {
         state.readiness_received_at = Some(0.0);
         seed_drawer(&mut state.inbox, 900.0);
         let mut runtime = runtime(state, (640.0, 480.0));
-        click(&mut runtime, "inbox-item-2-action", 1.0);
+        click_notification(&mut runtime, "inbox-item-2-action", 1.0);
         runtime.frame(1.3);
 
         assert_eq!(runtime.state.page, crate::app::Page::Workstation);
@@ -2167,12 +2232,12 @@ mod tests {
         assert!(runtime.find(unread).is_some());
         assert!(runtime.find("inbox-item-2-mark").is_none());
 
-        click(&mut runtime, row, 1.0);
+        click_notification(&mut runtime, row, 1.0);
         runtime.frame(1.3);
         assert_eq!(label(&runtime, "inbox-toggle-close"), "Inbox, 2 unread");
         assert_eq!(
             runtime.state.inbox.groups()[0].topic,
-            &Topic::Job("fixture-index-job".into())
+            &Topic::Readiness(ReadinessCheckId::ActorSearch)
         );
         assert!(runtime.find("inbox-item-2-detail").is_none());
         assert!(label(&runtime, row).starts_with("Read, "));
@@ -2192,13 +2257,14 @@ mod tests {
         });
         runtime.frame(1.5);
         assert_eq!(label(&runtime, "inbox-toggle-close"), "Inbox, 3 unread");
+        assert_eq!(runtime.state.inbox.groups()[0].topic, &Topic::Connection);
         assert!(focused(&runtime, row));
         assert!(runtime.find(later_unread).is_some());
 
-        click(&mut runtime, later_row, 1.6);
+        click_notification(&mut runtime, later_row, 1.6);
         assert!(runtime.find("inbox-item-4-detail").is_some());
         assert!(runtime.find(later_unread).is_some());
-        click(
+        click_notification(
             &mut runtime,
             "inbox-group-readiness-Actor search-toggle",
             1.7,
@@ -2209,16 +2275,17 @@ mod tests {
             label(&runtime, mark_connection),
             "Mark Connection notifications as read"
         );
-        click(&mut runtime, mark_job, 1.8);
+        click_notification(&mut runtime, mark_job, 1.8);
         assert_eq!(label(&runtime, "inbox-toggle-close"), "Inbox, 1 unread");
         assert!(label(&runtime, "inbox-group-connection-toggle").contains("1 unread"));
         assert!(label(&runtime, group).contains("0 unread"));
+        assert!(focused(&runtime, group));
         assert!(runtime
             .state
             .inbox
             .expanded
             .contains(&Topic::Job("fixture-index-job".into())));
-        click(&mut runtime, mark_connection, 1.9);
+        click_notification(&mut runtime, mark_connection, 1.9);
         assert_eq!(label(&runtime, "inbox-toggle-close"), "Inbox");
         assert_eq!(runtime.state.inbox.unread(), 0);
     }

@@ -1002,7 +1002,7 @@ impl State {
                 if qa.accept_pending(&turn) {
                     qa.adopt(Some(turn));
                     qa.retry_count = 0;
-                    if self.inbox.open && self.inbox.at_bottom {
+                    if self.inbox.open && self.inbox.transcript_at_bottom {
                         tx.focus(COMPOSER, tx.focus_visible());
                     }
                 } else {
@@ -1019,7 +1019,7 @@ impl State {
                 if denied(error) {
                     qa.retire();
                     qa.settings_loaded = false;
-                } else if !unavailable && self.inbox.open && self.inbox.at_bottom {
+                } else if !unavailable && self.inbox.open && self.inbox.transcript_at_bottom {
                     tx.focus(COMPOSER, tx.focus_visible());
                 }
             }
@@ -1036,7 +1036,7 @@ impl State {
                 if qa.pending.is_none() {
                     qa.adopt(turn);
                 }
-                if self.inbox.open && self.inbox.at_bottom && qa.latest.is_some() {
+                if self.inbox.open && self.inbox.transcript_at_bottom && qa.latest.is_some() {
                     if !had_exchange {
                         tx.scroll_to_bottom_instant(crate::inbox::SCROLL);
                     }
@@ -1077,7 +1077,7 @@ impl State {
             Reply::Cancel(Ok(turn)) => {
                 qa.adopt(Some(turn));
                 qa.status = None;
-                if self.inbox.open && self.inbox.at_bottom {
+                if self.inbox.open && self.inbox.transcript_at_bottom {
                     tx.focus(COMPOSER, true);
                 }
             }
@@ -3224,19 +3224,20 @@ mod tests {
         for size in [(640.0, 480.0), (1280.0, 800.0)] {
             let mut runtime = active_drawer(size);
             let (drawer, _) = runtime.presented("inbox-body").unwrap();
-            let (scroll, _) = runtime.presented("inbox-scroll").unwrap();
+            let (scroll, _) = runtime.presented(crate::inbox::SCROLL).unwrap();
             let (footer, _) = runtime.presented("inbox-qa-footer").unwrap();
             assert!((drawer[0] + drawer[2] - size.0).abs() < 0.5);
             assert!((drawer[1] + drawer[3] - size.1).abs() < 0.5);
             assert!(scroll[1] + scroll[3] <= footer[1] + 0.5);
             assert!((footer[1] + footer[3] - size.1).abs() < 1.5);
-            let (exchange, _) = runtime.presented("inbox-qa-exchange").unwrap();
-            assert!((scroll[1] + scroll[3] - exchange[1] - exchange[3] - 12.0).abs() < 0.5);
-            let (notifications, _) = runtime.presented("inbox-list").unwrap();
+            let (notifications, _) = runtime
+                .presented(crate::inbox::NOTIFICATIONS_SCROLL)
+                .unwrap();
             let (divider, _) = runtime.presented("inbox-chat-divider").unwrap();
-            assert!(notifications[1] + notifications[3] < divider[1]);
+            assert!(notifications[3] > 0.0 && notifications[3] <= drawer[3] * 0.5);
+            assert!(notifications[1] + notifications[3] <= divider[1] + 0.5);
             assert!(divider[2] > 0.0 && divider[3] > 0.0);
-            assert!(divider[1] + divider[3] < exchange[1]);
+            assert!(divider[1] + divider[3] <= scroll[1] + 0.5);
             assert!(runtime.find("inbox-qa-stop").is_some());
             assert!(runtime.find(SOURCES_TOGGLE).is_none());
             let unread = runtime.state.inbox.unread();
@@ -3268,7 +3269,13 @@ mod tests {
             assert!((bubble[0] + bubble[2] - toggle.rect[0] - toggle.rect[2] - 10.0).abs() < 2.0);
             assert!(!runtime.accessibility_json().to_string().contains(FINDING));
             let (exchange, _) = runtime.presented("inbox-qa-exchange").unwrap();
-            assert!((scroll[1] + scroll[3] - exchange[1] - exchange[3] - 12.0).abs() < 0.5);
+            assert_eq!(
+                runtime
+                    .presented(crate::inbox::NOTIFICATIONS_SCROLL)
+                    .unwrap()
+                    .0,
+                notifications,
+            );
 
             press_disclosure(&mut runtime, SOURCES_TOGGLE, 1.25);
             let elements = runtime.elements();
@@ -3739,20 +3746,39 @@ mod tests {
         runtime.frame(0.75);
         assert_eq!(runtime.scroll_at_bottom(crate::inbox::SCROLL), Some(true));
 
-        runtime.update(|_, tx| tx.scroll_to_y(crate::inbox::SCROLL, 0.0));
+        runtime.update(|state, _| state.seed_inbox_qa_overflow_fixture());
         runtime.frame(1.0);
-        let (older, _) = runtime.presented("inbox-group-connection-toggle").unwrap();
+        let (exchange, _) = runtime.presented("inbox-qa-exchange").unwrap();
+        assert_eq!(
+            runtime.scroll_at_bottom(crate::inbox::NOTIFICATIONS_SCROLL),
+            Some(false),
+        );
+
+        runtime.update(|_, tx| tx.scroll_to_bottom_instant(crate::inbox::NOTIFICATIONS_SCROLL));
+        runtime.frame(1.25);
+        assert_eq!(
+            runtime.scroll_at_bottom(crate::inbox::NOTIFICATIONS_SCROLL),
+            Some(true),
+        );
+        assert_eq!(runtime.presented("inbox-qa-exchange").unwrap().0, exchange);
+        assert_eq!(runtime.scroll_at_bottom(crate::inbox::SCROLL), Some(true));
+
+        runtime.update(|_, tx| tx.scroll_to_y(crate::inbox::SCROLL, 0.0));
+        runtime.frame(1.5);
+        let (sources_back, _) = runtime.presented(SOURCES_BACK).unwrap();
+        let (older_notice, _) = runtime.presented("inbox-group-connection-toggle").unwrap();
         assert_eq!(runtime.scroll_at_bottom(crate::inbox::SCROLL), Some(false));
 
         runtime.update(move |state, _| state.inbox_qa.adopt(Some(completed)));
-        runtime.frame(1.25);
+        runtime.frame(1.75);
         assert_eq!(
             runtime
                 .presented("inbox-group-connection-toggle")
                 .unwrap()
                 .0,
-            older
+            older_notice,
         );
+        assert_eq!(runtime.presented(SOURCES_BACK).unwrap().0, sources_back);
         assert_eq!(runtime.scroll_at_bottom(crate::inbox::SCROLL), Some(false));
         assert_eq!(runtime.state.inbox_qa.draft.text, "An unsent follow-up");
     }
@@ -3831,7 +3857,7 @@ mod tests {
                 press_disclosure(&mut runtime, DETAILS_TOGGLE, now + 0.25);
                 assert!(runtime.accessibility_json().to_string().contains(details));
                 let (footer, _) = runtime.presented("inbox-qa-footer").unwrap();
-                let (scroll, _) = runtime.presented("inbox-scroll").unwrap();
+                let (scroll, _) = runtime.presented(crate::inbox::SCROLL).unwrap();
                 assert!(scroll[1] + scroll[3] <= footer[1] + 0.5);
                 assert!((footer[1] + footer[3] - size.1).abs() < 1.5);
             }
@@ -3992,7 +4018,7 @@ mod tests {
             state.inbox_qa.pending = Some(Pending::new(
                 QaTurnRequest::new("new-request".into(), context, draft.into(), None).unwrap(),
             ));
-            tx.scroll_to_bottom_instant("inbox-scroll");
+            tx.scroll_to_bottom_instant(crate::inbox::SCROLL);
         });
         runtime.frame(1.0);
         assert!(!runtime.accessibility_json().to_string().contains(FINDING));

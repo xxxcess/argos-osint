@@ -656,7 +656,7 @@ mod native {
         additional_finding: Option<QaFinding>,
     ) {
         registered(state);
-        state.seed_inbox_qa_drawer_fixture();
+        state.seed_inbox_qa_overflow_fixture();
         state.backend_kind = BackendKind::Local;
         state.connection.origin = TextEdit::new("local://embedded");
         let question = if additional_finding.is_some() {

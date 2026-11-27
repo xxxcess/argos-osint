@@ -1367,6 +1367,10 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
 
 fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
     if state.startup.active() {
+        if event.key == Key::Escape && state.connection_profiles.embedded_folder.open {
+            state.close_embedded_folder(tx);
+            return true;
+        }
         if event.key == Key::Escape && state.setup_gateway {
             if state.startup.data_setup_active() {
                 if state.maintenance.confirmation.is_some() {

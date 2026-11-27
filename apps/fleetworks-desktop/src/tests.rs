@@ -631,6 +631,7 @@ fn compact_connected_setup_readiness_toggle(kind: fleetworks_workstation::native
 
     let mut state = registered_fixture();
     state.backend_kind = kind;
+    state.setup_gateway = true;
     if kind == BackendKind::Local {
         state.connection.origin = TextEdit::new("local://embedded");
     }
@@ -660,21 +661,7 @@ fn compact_connected_setup_readiness_toggle(kind: fleetworks_workstation::native
     );
     runtime.frame(0.0);
     runtime.frame(1.0 / 60.0);
-    assert!(!runtime.state.setup_gateway);
-    let (x, y) = runtime
-        .find("open-workstation-settings")
-        .expect("open Settings");
-    runtime.pointer_down(x, y);
-    runtime.pointer_up(x, y);
-    runtime.frame(2.0 / 60.0);
-    let (x, y) = runtime
-        .find("settings-category-connection")
-        .expect("reopen Connection settings");
-    runtime.pointer_down(x, y);
-    runtime.pointer_up(x, y);
-    runtime.frame(2.5 / 60.0);
-    assert!(runtime.state.settings_open);
-    assert!(!runtime.state.setup_gateway);
+    assert!(runtime.find("gateway-setup-body").is_some());
     assert!(runtime.state.connected());
     assert!(runtime.state.registration.context.is_some());
 

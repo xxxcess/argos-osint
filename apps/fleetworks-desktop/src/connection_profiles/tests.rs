@@ -1,5 +1,6 @@
 use fleetworks_contracts::capabilities::Capabilities;
 use fleetworks_workstation::native::WorkspaceState;
+use fleetworks_workstation::native::DEFAULT_LOCAL_ORIGIN;
 use rune::Env;
 use rune::Runtime;
 
@@ -339,4 +340,83 @@ fn late_saved_distributed_url_prefill_respects_the_connection_draft() {
         state.connection.origin.text,
         fleetworks_contracts::DEFAULT_API_ORIGIN
     );
+}
+
+#[test]
+fn embedded_startup_configures_only_the_selected_local_folder() {
+    let mut state = fixture();
+    state.startup = crate::startup::Startup::cold_launch();
+    let folder_id = "c".repeat(64);
+    let folder = PathBuf::from("/fixture/workstations/Private desk");
+    let remote_id = "b".repeat(64);
+    let mut catalog = catalog();
+    catalog.profiles.push(
+        serde_json::from_value(serde_json::json!({
+            "id":folder_id, "revision":1, "kind":"local", "name":"Private desk",
+            "origin":"local://private-desk", "local_state_dir":folder
+        }))
+        .expect("synthetic saved folder"),
+    );
+    state.connection_profiles.catalog = Load::Ready(catalog.clone());
+    let targets = state.embedded_targets();
+    assert_eq!(targets.len(), 2, "the default and one local target");
+    assert!(targets[0].id.is_none() && targets[0].path.ends_with("local-backend/embedded"));
+    assert_eq!(targets[1].id.as_deref(), Some(folder_id.as_str()));
+    assert_eq!(targets[1].path, folder.display().to_string());
+    assert!(!state.select_embedded_target(Some(&remote_id)));
+    assert!(state.select_embedded_target(Some(&folder_id)));
+    state.complete_profile_catalog(state.connection_profiles.revision(), Ok(catalog));
+    assert_eq!(state.connection.origin.text, "local://private-desk");
+    assert_eq!(state.local_backend.state_dir.as_ref(), Some(&folder));
+    assert!(state.connection_profiles.credential.is_none());
+    assert!(state.connection.token_file.text.is_empty());
+    assert!(state.select_embedded_target(None));
+    assert_eq!(state.connection.origin.text, DEFAULT_LOCAL_ORIGIN);
+    assert!(state.local_backend.state_dir.is_none());
+    assert!(!state.intents.contains(&Intent::Connect));
+}
+
+#[test]
+fn stale_folder_picker_answer_preserves_newer_typed_path() {
+    let mut state = State::fixture();
+    state.startup = crate::startup::Startup::cold_launch();
+    let mut runtime = Runtime::new(state, app::view, (1180.0, 780.0), Env::new(true, 1.0));
+    runtime.frame(0.0);
+    runtime.update(|state, tx| {
+        state.open_embedded_folder(tx);
+        state.choose_embedded_folder(tx);
+    });
+    assert_eq!(
+        runtime
+            .file_dialog_json()
+            .expect("folder picker was requested")["kind"],
+        "folder"
+    );
+    runtime.update(|state, _| {
+        state
+            .connection_profiles
+            .embedded_folder
+            .path
+            .replace_text("/fixture/typed");
+        state.embedded_folder_path_changed();
+    });
+    runtime
+        .resolve_file_dialog(Some("/fixture/stale-picker".into()))
+        .expect("resolve picker");
+    runtime.frame(0.1);
+    assert_eq!(
+        runtime.state.connection_profiles.embedded_folder.path.text,
+        "/fixture/typed"
+    );
+
+    runtime.update(State::choose_embedded_folder);
+    runtime
+        .resolve_file_dialog(Some("/fixture/current-picker".into()))
+        .expect("resolve picker again");
+    runtime.frame(0.2);
+    assert_eq!(
+        runtime.state.connection_profiles.embedded_folder.path.text,
+        "/fixture/current-picker"
+    );
+    assert!(!runtime.state.intents.contains(&Intent::Connect));
 }

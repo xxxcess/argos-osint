@@ -874,16 +874,12 @@ mod native {
         rune::run(AppSpec {
             init,
             scenes: &[
-                ("backend-choice", State::fixture_show_backend_choice),
+                ("backend-choice", startup_data_scenes::folders),
                 ("backend-choice-opening", |state| {
                     state.startup = fleetworks_desktop::startup::Startup::cold_launch();
                 }),
                 ("backend-choice-matte", |state| {
-                    review_appearance(
-                        state,
-                        State::fixture_show_backend_choice,
-                        ReviewAppearance::Matte,
-                    );
+                    review_appearance(state, startup_data_scenes::folders, ReviewAppearance::Matte);
                 }),
                 ("backend-choice-reduced-motion", |state| {
                     state.fixture_show_backend_choice();

@@ -39,14 +39,14 @@ python3 scripts/fleetworks_candidate.py build-native --target host --profile deb
 
 [![Provision and connect](docs/diagrams/native-connections.svg)](docs/diagrams/native-connections.html)
 
-The helper prints the app and manifest paths. Add `--open` to launch it. The startup choice opens **Setup Gateway** for the selected backend type.
+The helper prints the app and manifest paths. Add `--open` to launch it.
 
-**Embedded:** Choose **Embedded** and click **Start Embedded Backend** to start the bundled companion.
+**Embedded.** Choose a workstation folder to start the bundled companion. Select **Default folder**, open a saved folder, or add a folder using its path or the native picker.
 
 **Distributed:** Enter the gateway URL and obtain operator approval. macOS Keychain or Linux Secret Service retains the scoped credential for reconnect, with explicit Linux session-only mode also available. [Pairing and recovery](docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target) · [Verification status](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md)
 
 1. Start the backend with the [Docker Compose quick start below](#backend-for-the-native-app). Backend deployment requires Docker and Docker Compose **v2.20 or newer**.
-2. Open **Setup Gateway**, select **Distributed**, enter the gateway URL and choose **Connect**. Give its pairing request ID and approval code to the gateway operator for [approval](docs/wiki/code/native-connections.md#operator-approval-and-revocation).
+2. In **Settings → Connection**, switch to **Distributed**, enter the gateway URL and choose **Connect**. Give its pairing request ID and approval code to the gateway operator for [approval](docs/wiki/code/native-connections.md#operator-approval-and-revocation).
 3. The app authenticates the approved access, retains it using the selected credential storage mode and registers the installation. Workstation Status shows its stable opaque Connect ID; later connections reuse saved access.
 
 Normal startup initializes protected settings in `~/.fleetworks` without creating a default child. IP is optional metadata; folders do not select identity or partition shared actors, model defaults and provider accounts. Existing folders and historical receipts remain preserved. See [workstation identity](docs/wiki/code/native-workspaces.md).

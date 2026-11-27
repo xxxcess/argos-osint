@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
+use fleetworks_workstation::native::BackendKind;
+use fleetworks_workstation::native::DEFAULT_LOCAL_ORIGIN;
 use rune::App;
 use rune::Chrome;
 use rune::TextEdit;
@@ -160,7 +162,7 @@ pub fn run() -> anyhow::Result<()> {
         .build()?;
     let services = Arc::new(GatewayEffects::new(runtime.handle().clone()));
     let init_services = services.clone();
-    // A scripted launch with an explicit gateway skips the interactive splash and choice.
+    // Explicit gateway launches bypass the interactive Embedded folder picker.
     let interactive_startup = options.api_origin.is_none() && options.api_token_file.is_none();
     let app = App::new(app::spec())
         .init(move || {
@@ -175,6 +177,9 @@ pub fn run() -> anyhow::Result<()> {
                 state.connection.token_file = TextEdit::new(path.to_string_lossy());
             }
             if interactive_startup {
+                state.backend_kind = BackendKind::Local;
+                state.connection.origin = TextEdit::new(DEFAULT_LOCAL_ORIGIN);
+                state.connection_profiles.initial_selection_applied = true;
                 state.startup = crate::startup::Startup::cold_launch();
             }
             state.local_backend.cli_binary_override = options.local_backend_bin.clone();

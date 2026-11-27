@@ -283,9 +283,12 @@ impl State {
             }
         }
         // Preload local pairing/profile metadata only; never start a connection automatically.
-        if self.uses_native_pairing() {
+        let native_pairing = self.uses_native_pairing();
+        if native_pairing {
             self.initialize_pairing_connection();
-        } else if matches!(self.connection_profiles.catalog, Load::Idle)
+        }
+        if (self.startup.active() || !native_pairing)
+            && matches!(self.connection_profiles.catalog, Load::Idle)
             && self.workspaces.container.is_some()
         {
             self.initialize_connection_profiles();

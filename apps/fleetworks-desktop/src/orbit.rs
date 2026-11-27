@@ -491,10 +491,7 @@ mod tests {
         let startup = &manifest["startup"];
         let ms = |key: &str| startup[key].as_f64().unwrap();
         assert!((ms("duration_ms") - crate::startup::INTRO_SECONDS * 1000.0).abs() < 1e-6);
-        assert_eq!(
-            startup["backend_choices_from_first_frame"].as_bool(),
-            Some(true)
-        );
+        assert!((ms("folder_fade_ms") - crate::startup::FOLDER_FADE_SECONDS * 1000.0).abs() < 1e-6);
         assert_eq!(manifest["canvas"]["color"].as_str(), Some("#060709"));
         assert_eq!(crate::theme::BACKGROUND, "#060709");
     }

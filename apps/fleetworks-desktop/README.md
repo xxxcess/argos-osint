@@ -23,7 +23,7 @@ PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=1 \
   python3 -B scripts/fleetworks_quick_start.py --profile debug --start-embedded
 ```
 
-The launcher builds and opens the app, then starts its bundled Embedded companion. Automatic startup uses macOS Accessibility. If macOS asks for permission, allow RustRover or Terminal under **System Settings → Privacy & Security → Accessibility**. To start the companion by hand, omit `--start-embedded`, then click **Start Embedded Backend** in Fleetworks.
+The launcher builds and opens the app, then starts its bundled Embedded companion. Automatic startup uses macOS Accessibility. If macOS asks for permission, allow RustRover or Terminal under **System Settings → Privacy & Security → Accessibility**. To start it manually, omit `--start-embedded` and select **Default folder** in Fleetworks.
 
 At the source prompt, press Enter for the latest `origin/nightly`. Type `pr` to list open PRs targeting `nightly`, then enter a PR number. You can also enter a PR number or commit SHA directly. Sign in with `gh auth login` for PR selection.
 
@@ -58,7 +58,7 @@ If an older copy of the launcher reports `Select the root of a Fleetworks checko
 
 ### Build and backend options
 
-Distributed setup uses [operator pairing and the system keyring](../../docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target). Embedded setup uses **Start Embedded Backend** and a private companion state directory. See the [backend type and parity contract](../../docs/wiki/code/native-connections.md#backend-types-and-parity).
+Distributed setup in Settings uses [operator pairing and the system keyring](../../docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target). Each Embedded folder holds private companion state. See the [backend type and parity contract](../../docs/wiki/code/native-connections.md#backend-types-and-parity).
 
 Use the complete-app helper; agent builds add `--agent` and reuse the shared debug graph. Opening the app is an explicit action.
 
@@ -92,7 +92,7 @@ Add `--provision-gateway-credential` to save a protected exact-origin file refer
 
 ## Embedded desktop in Docker
 
-Use the Linux x86_64 development image when you want the Rune app and its Embedded companion in one container. The desktop opens its usual backend chooser. Select **Embedded**, then choose **Start Embedded Backend**. The app starts its packaged companion over a private Unix socket, so the container needs no published backend port.
+Use the Linux x86_64 development image when you want the Rune app and its Embedded companion in one container. Select **Default folder** to start the packaged companion over a private Unix socket. The container needs no published backend port.
 
 Download the `Fleetworks-Embedded-Desktop-Docker-Archive-*` artifact from an [opt-in image run](../../docs/wiki/code/ci.md#embedded-desktop-docker-image), verify its checksum, then load the image.
 
@@ -163,6 +163,6 @@ Pairing tests use injected Keychain stores. Installed-app launch, real Keychain 
 
 ## Startup, utilities and materials
 
-A cold launch opens **Choose a backend** with the animated Quiet Orbit mark and two interactive tiles. Select **Embedded** or **Distributed** to show setup, then explicitly start or connect. **Back** returns to the chooser with the settled mark. Launches with `--api-origin` or `--api-token-file` skip the chooser. The `backend-choice` fixture shows the production chooser with synthetic effects. The toolbar has a command button (Cmd/Ctrl+K), an inbox bell and an Assistant toggle. The Assistant is off by default and sends a turn to the backend's chat endpoint, which only answers ok; there are no replies yet.
+A cold launch fades in the Embedded folder grid beneath Quiet Orbit. Choose a folder to start Embedded and proceed through registration, data setup, optional inference, and workstation checks. **Back** returns to the grid with the settled mark. Launches with `--api-origin` or `--api-token-file` bypass the folder picker. The `backend-choice` fixture shows the same grid with synthetic data. [Startup and connection guide](../../docs/wiki/code/native-connections.md#cold-launch-startup)
 
 Glass surfaces (the Assistant composer and the command panel) use a same-window blur. They draw opaque, with the same bounds, when macOS Reduce Transparency is on or when `FLEETWORKS_OPAQUE_MATERIALS` is `1`, `true`, `yes` or `on`. Linux no longer forces the opaque mode.

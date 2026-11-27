@@ -9,10 +9,38 @@ use fleetworks_desktop::app::Intent;
 use fleetworks_desktop::app::Load;
 use fleetworks_desktop::backend::ReadKind;
 use fleetworks_desktop::local_backend::BinaryDiscoveryStatus;
+use fleetworks_desktop::workspaces::WorkspaceSnapshot;
 use fleetworks_desktop::Page;
 use fleetworks_desktop::State;
 use fleetworks_workstation::native::BackendKind;
 use rune::TextEdit;
+
+pub(super) fn folders(state: &mut State) {
+    state.fixture_show_backend_choice();
+    state.workspaces.snapshot = Load::Ready(WorkspaceSnapshot {
+        root: "/fixture/home/.fleetworks".into(),
+        installation_marker: "synthetic-installation".into(),
+        rows: Vec::new(),
+        operations: Vec::new(),
+        registration_attempts: Vec::new(),
+        rebind_attempts: Vec::new(),
+    });
+    state.connection_profiles.catalog = Load::Ready(
+        serde_json::from_value(serde_json::json!({
+            "revision": 1,
+            "selected_profile_id": null,
+            "profiles": [{
+                "id": "a".repeat(64),
+                "revision": 1,
+                "kind": "local",
+                "name": "Field workstation",
+                "origin": "local://field-workstation",
+                "local_state_dir": "/fixture/Workstations/Field workstation"
+            }],
+        }))
+        .expect("synthetic Embedded folder catalog"),
+    );
+}
 
 fn embedded_setup(state: &mut State, readiness_scene: fn(&mut State)) {
     state.fixture_show_startup_setup(BackendKind::Local);

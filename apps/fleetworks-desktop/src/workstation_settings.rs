@@ -13,6 +13,8 @@ use crate::accessibility::ViewPreferences;
 use crate::app::Load;
 use crate::app::Page;
 use crate::app::State;
+use crate::connection::ConnectionStatus;
+use crate::icons;
 use crate::material;
 use crate::material::MetalFinish;
 use crate::resource_settings::Resource;
@@ -293,6 +295,90 @@ fn resource_settings(state: &State, preferences: ViewPreferences, kit: &Kit) -> 
     body
 }
 
+fn embedded_connection_settings(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    let pointer = (!preferences.matte()).then_some(&state.pointer_offset);
+    let connected = state.connected();
+    let connecting = state.connection.status == ConnectionStatus::Connecting;
+    let stopping = state.local_backend.stopping;
+    let saving_resources = state.resource_save_pending();
+    let status = if connecting || stopping {
+        ui_components::skeleton_text_value(
+            if connecting {
+                "Starting Embedded"
+            } else {
+                "Stopping Embedded"
+            },
+            52.0,
+            StatusTone::Info,
+            preferences,
+        )
+        .w(52.0)
+    } else {
+        let (label, tone) = match &state.connection.status {
+            ConnectionStatus::Connected => ("Running", StatusTone::Ok),
+            ConnectionStatus::Failed(_) => ("Failed", StatusTone::Err),
+            _ => ("Stopped", StatusTone::Neutral),
+        };
+        ui_components::status_pill(label, None, tone, kit)
+    };
+    let action = if connected {
+        ActionButton::new("Stop Embedded Backend")
+            .key("stop-local-backend")
+            .finish(MetalFinish::Gunmetal)
+            .disabled(stopping)
+            .on_press(|state: &mut State| state.stop_local_backend())
+    } else {
+        ActionButton::new("Start Embedded Backend")
+            .key("connect-local")
+            .icon(&icons::WORKSTATION)
+            .finish(MetalFinish::GoldCta)
+            .busy(connecting || saving_resources)
+            .disabled(stopping)
+            .on_press(|state: &mut State| state.connect_local())
+    };
+    let mut controls = rune::col()
+        .key("embedded-connection-settings")
+        .gap(12.0)
+        .child(ui_components::section_header(
+            &icons::WORKSTATION,
+            "Embedded backend",
+            None,
+            Some(status),
+            None,
+            kit,
+        ))
+        .child(
+            rune::row()
+                .w_full()
+                .flex_wrap()
+                .gap(8.0)
+                .center_y()
+                .child(action.build(kit, preferences, pointer))
+                .child(
+                    ActionButton::new("Switch to Distributed")
+                        .key("switch-remote-gateway")
+                        .disabled(connecting || stopping)
+                        .on_press_tx(State::open_distributed_setup)
+                        .build(kit, preferences, pointer),
+                ),
+        );
+    if let ConnectionStatus::Failed(error) = &state.connection.status {
+        controls = controls.child(crate::views::quiet(error.clone(), kit).role("alert"));
+    }
+    rune::col()
+        .w_full()
+        .gap(16.0)
+        .child(material::responsive_card(controls, true, preferences))
+        .children(connected.then(|| {
+            setting_group(
+                "Backend inference",
+                crate::inbox_qa::settings_content(state, kit, preferences).padding(12.0),
+                preferences,
+                kit,
+            )
+        }))
+}
+
 fn section_content(
     state: &State,
     section: SettingsSection,
@@ -385,23 +471,12 @@ fn section_content(
                 kit,
             )),
         SettingsSection::Resources => resource_settings(state, preferences, kit),
-        SettingsSection::Connection => rune::col()
-            .w_full()
-            .gap(22.0)
-            .child(crate::views::setup_gateway_content(
-                state,
-                kit,
-                preferences,
-                connection_size,
-            ))
-            .children(state.is_local_backend().then(|| {
-                setting_group(
-                    "Backend inference",
-                    crate::inbox_qa::settings_content(state, kit, preferences).padding(12.0),
-                    preferences,
-                    kit,
-                )
-            })),
+        SettingsSection::Connection if state.is_local_backend() => {
+            embedded_connection_settings(state, preferences, kit)
+        }
+        SettingsSection::Connection => {
+            crate::views::setup_gateway_content(state, kit, preferences, connection_size)
+        }
         SettingsSection::Assistant => material::glass_panel(
             crate::inbox_qa::assistant_settings_content(state, kit)
                 .radius(8.0)
@@ -575,6 +650,8 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
 
 #[cfg(test)]
 mod tests {
+    use fleetworks_contracts::chat::QaPhase;
+    use fleetworks_contracts::chat::QaSettings;
     use fleetworks_contracts::embedded_resources::EmbeddedResourcePreferences;
     use fleetworks_contracts::embedded_resources::ResourcePreset;
     use fleetworks_workstation::native::BackendKind;
@@ -582,8 +659,10 @@ mod tests {
     use rune::Runtime;
 
     use crate::app;
+    use crate::app::Intent;
     use crate::app::Page;
     use crate::app::State;
+    use crate::local_backend::BinaryDiscoveryStatus;
 
     use super::SettingsSection;
 
@@ -685,7 +764,7 @@ mod tests {
     }
 
     #[test]
-    fn connection_settings_exposes_the_existing_backend_stepper_on_a_compact_window() {
+    fn connection_settings_keeps_both_backend_actions_on_a_compact_window() {
         let mut state = State::fixture();
         state.fixture_show_workstation_settings();
         let mut runtime = Runtime::new(
@@ -727,8 +806,60 @@ mod tests {
         runtime.frame(4.0 / 60.0);
         assert_eq!(runtime.state.backend_kind, BackendKind::Local);
         assert!(runtime.find("connect-local").is_some());
+        assert!(runtime.find("switch-remote-gateway").is_some());
+        assert!(runtime.find("gateway-setup-stepper").is_none());
         assert!(runtime.find("gateway-origin").is_none());
         assert!(runtime.state.settings_open);
         assert!(!runtime.state.setup_gateway);
+    }
+
+    #[test]
+    fn embedded_connection_settings_keeps_controls_without_diagnostics() {
+        let mut state = crate::tests::registered_fixture();
+        state.backend_kind = BackendKind::Local;
+        state.connection.origin = rune::TextEdit::new("local://embedded");
+        state.local_backend.state_dir = Some("/fixture/embedded".into());
+        state.local_backend.binary_status =
+            BinaryDiscoveryStatus::Ready("/fixture/api-host".into());
+        state.setup_advanced_open = true;
+        state.seed_inbox_qa_fixture(QaSettings::new(false, QaPhase::Off, 1, 1, true), None);
+        state.open_connection_settings();
+        let mut runtime = Runtime::new(
+            state,
+            app::view,
+            (640.0, 480.0),
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.frame(0.0);
+        runtime.frame(1.0 / 60.0);
+
+        assert!(runtime.find("embedded-connection-settings").is_some());
+        assert!(runtime.find("inbox-qa-toggle").is_some());
+        for key in [
+            "local-state-dir",
+            "local-binary-status",
+            "connection-status",
+            "workstation-registered",
+            "setup-advanced-toggle",
+        ] {
+            assert!(runtime.find(key).is_none(), "{key} leaked into Settings");
+        }
+        let tree = runtime.accessibility_json().to_string();
+        for detail in ["local://embedded", "/fixture/", "Advertised Capabilities"] {
+            assert!(!tree.contains(detail), "{detail} leaked into Settings");
+        }
+
+        let (x, y) = runtime
+            .find("stop-local-backend")
+            .expect("stop action in Connection settings");
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(2.0 / 60.0);
+        assert!(runtime.state.intents.contains(&Intent::StopLocalBackend));
+        assert!(runtime.find("connect-local").is_some());
+        assert!(runtime.state.settings_open);
     }
 }

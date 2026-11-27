@@ -96,16 +96,18 @@ on run arguments
                     set labelText to missing value
                     try
                         set controlItem to contents of controlRef
-                        if (value of attribute "AXRole" of controlItem) is "AXButton" then
+                        if (value of attribute "AXRole" of controlItem) is "AXButton" and (value of attribute "AXEnabled" of controlItem) is true then
                             set labelText to value of attribute "AXTitle" of controlItem
                         end if
                     end try
-                    if labelText is "Embedded. Run on this PC" then
-                        perform action "AXPress" of controlItem
-                        exit repeat
-                    else if labelText is "Start Embedded Backend" then
-                        perform action "AXPress" of controlItem
-                        return
+                    if labelText is not missing value then
+                        if labelText starts with "Open Default folder. " or labelText is "Start Embedded Backend" then
+                            perform action "AXPress" of controlItem
+                            return
+                        else if labelText is "Embedded. Run on this PC" then
+                            perform action "AXPress" of controlItem
+                            exit repeat
+                        end if
                     end if
                 end repeat
             end if
@@ -660,7 +662,7 @@ def start_companion(app, pid, state):
         subprocess.run(["osascript", "-", str(pid)], input=EMBEDDED_BUTTONS, text=True, check=True, timeout=30)
     except subprocess.SubprocessError as error:
         raise ValueError("Could not start Embedded through macOS Accessibility. "
-                         "In Fleetworks, choose Embedded and click Start Embedded Backend, then rerun Quick Start.") from error
+                         "Select the default workstation folder in Fleetworks, then rerun Quick Start.") from error
     wait_for(lambda: embedded_running(app, pid, state), "The Embedded companion did not start for this profile")
 
 
@@ -955,7 +957,7 @@ def main():
             if running:
                 print(f"Embedded companion launched with state in {state}")
             else:
-                print('Choose Embedded, then "Start Embedded Backend".')
+                print("Choose the default workstation folder to start Embedded.")
     except KeyboardInterrupt:
         parser.exit(130, "\nQuick Start cancelled.\n")
     except (BadZipFile, KeyError, OSError, TypeError, ValueError, subprocess.SubprocessError) as error:

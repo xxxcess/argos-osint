@@ -1,4 +1,4 @@
-//! Cold-launch backend choice and the Quiet Orbit handoff into the workstation.
+//! Cold-launch Embedded folder selection and the Quiet Orbit handoff into the workstation.
 
 use std::cell::Cell;
 
@@ -9,24 +9,32 @@ use rune::KeyEvent;
 use rune::Mods;
 use rune::Transition;
 use rune::Tx;
+use rune_kit::glyphs;
 use rune_kit::Kit;
+use rune_kit::TextInput;
 
 use crate::accessibility::ViewPreferences;
 use crate::app;
+use crate::app::Load;
 use crate::connection::ConnectionStatus;
 use crate::icons;
+use crate::local_backend::BinaryDiscoveryStatus;
 use crate::material;
+use crate::material::MetalFinish;
 use crate::orbit;
 use crate::startup_data;
 use crate::theme;
+use crate::theme::StatusTone;
+use crate::ui_components;
 use crate::ui_components::ActionButton;
 use crate::views;
 use crate::State;
 
 /// The opening samples three seconds at the reference pace, then holds the final pose.
 pub(crate) const INTRO_SECONDS: f64 = 3.0;
+pub(crate) const FOLDER_FADE_SECONDS: f64 = 0.44;
 const LOCAL: &str = "startup-local";
-const REMOTE: &str = "startup-remote";
+const ADD_FOLDER: &str = "startup-add-folder";
 const SETUP_MARK: &str = "startup-setup-mark";
 const RAIL_SLOT: &str = "startup-rail-mark-slot";
 const SETUP_SECONDS: f64 = 0.22;
@@ -84,6 +92,7 @@ pub struct Startup {
     settled: bool,
     reduced_motion: Cell<bool>,
     mark_rect: Cell<Option<[f32; 4]>>,
+    target_id: Option<String>,
     docked_pose: f32,
     flight: Option<Flight>,
 }
@@ -232,7 +241,7 @@ pub(crate) fn rail_handoff(
     moving_mark(state, cx, Dock::Rail, preferences, None)
 }
 
-/// The chooser and both setup paths share the same canvas.
+/// Folder selection and setup stages share the same canvas and mark.
 pub(crate) fn view(
     state: &State,
     cx: &rune::Cx<State>,
@@ -268,69 +277,61 @@ pub(crate) fn view(
             1.0
         })
         .inert();
-        let back = ActionButton::new("Back")
-            .key("startup-back")
-            .disabled(state.connected())
-            .on_press_tx(State::return_to_startup_choice)
-            .build(kit, preferences, None)
-            .on_key(|state: &mut State, event, tx| {
-                activate_on_return(state, event, tx, State::return_to_startup_choice)
-            });
         let data_step = state
             .startup
             .data_step
             .filter(|_| state.connected() && state.registration.context.is_some());
         let data_checks =
             state.startup.data_checks && state.connected() && state.registration.context.is_some();
-        let showing_data = data_step.is_some() || data_checks;
-        let mut header = rune::row()
-            .key("startup-setup-header")
-            .transition(Transition::none())
-            .instant_changes()
-            .w_full()
-            .px(20.0)
-            .gap(12.0)
-            .center_y();
-        if !showing_data {
-            header = header.child(back);
-        }
-        header = header.child(rune::spacer());
-        if !showing_data && state.connected() && state.registration.context.is_some() {
-            header = header
-                .child(
-                    ActionButton::new("Open Workstation")
-                        .key("startup-open-workstation")
-                        .on_press_tx(State::finish_startup)
-                        .build(kit, preferences, None)
-                        .on_key(|state: &mut State, event, tx| {
-                            activate_on_return(state, event, tx, State::finish_startup)
-                        }),
-                )
-                .child(
-                    ActionButton::new("Continue data setup")
-                        .key("gateway-setup-done")
-                        .icon(&icons::SHIELD_CHECK)
-                        .finish(crate::material::MetalFinish::GoldCta)
-                        .on_press_tx(State::finish_gateway_setup)
-                        .build(kit, preferences, None)
-                        .on_key(|state: &mut State, event, tx| {
-                            activate_on_return(state, event, tx, State::finish_gateway_setup)
-                        }),
-                );
-        }
-        header = header.child(setup_mark);
-        if showing_data {
-            header = header.child(rune::spacer());
-        }
-        let body = if data_checks {
-            startup_data::checks_view(state, preferences, kit)
+        let (stage, body) = if data_checks {
+            (
+                if crate::inbox_qa::setup_choice(state) {
+                    "startup-stage-inference"
+                } else {
+                    "startup-stage-checks"
+                },
+                startup_data::checks_view(state, preferences, kit),
+            )
         } else if let Some(step) = data_step {
-            startup_data::view(state, step, preferences, kit)
+            (
+                match step {
+                    startup_data::Step::Seed => "startup-stage-seed",
+                    startup_data::Step::Index => "startup-stage-index",
+                },
+                startup_data::view(state, step, preferences, kit),
+            )
+        } else if state.is_local_backend() {
+            embedded_stage(state, preferences, kit)
         } else {
-            views::setup_gateway(state, cx, kit).transition(app::surface_transition(
-                preferences.reduced_motion,
-                Transition::opacity().combined(Transition::offset(0.0, 6.0)),
-            ))
+            (
+                "startup-stage-distributed",
+                rune::col()
+                    .w_full()
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .child(
+                        rune::row()
+                            .px(20.0)
+                            .gap(8.0)
+                            .child(back_button(state.connected(), preferences, kit))
+                            .child(rune::spacer())
+                            .children(
+                                (state.connected() && state.registration.context.is_some()).then(
+                                    || {
+                                        ActionButton::new("Open Workstation")
+                                            .key("startup-open-workstation")
+                                            .on_press_tx(State::finish_startup)
+                                            .build(kit, preferences, None)
+                                    },
+                                ),
+                            )
+                            .children(
+                                (state.connected() && state.registration.context.is_some())
+                                    .then(|| continue_setup(preferences, kit)),
+                            ),
+                    )
+                    .child(views::setup_gateway(state, cx, kit)),
+            )
         };
         let setup = rune::col()
             .key("startup-setup")
@@ -339,8 +340,27 @@ pub(crate) fn view(
             .max_w(820.0)
             .h_full()
             .pt(20.0)
-            .child(header)
-            .child(body);
+            .child(
+                rune::row()
+                    .key("startup-setup-header")
+                    .transition(Transition::none())
+                    .instant_changes()
+                    .w_full()
+                    .center()
+                    .child(setup_mark),
+            )
+            .child(
+                rune::col()
+                    .key(stage)
+                    .transition(app::surface_transition(
+                        preferences.reduced_motion,
+                        Transition::opacity().combined(Transition::offset(18.0, 0.0)),
+                    ))
+                    .w_full()
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .child(body),
+            );
         root = root.child(setup);
         if let Some(mark) = moving_mark(state, cx, Dock::Setup, preferences, cx.layout("startup")) {
             root = root.child(mark);
@@ -353,15 +373,21 @@ pub(crate) fn view(
 
 fn choose(state: &State, preferences: ViewPreferences, kit: &Kit, window: Option<[f32; 2]>) -> El {
     let [width, height] = window.unwrap_or([640.0, 480.0]);
-    // Leave room for the controls before containing the complete orbit in the remaining space.
     let [orbit_width, orbit_height] = orbit::display_size(Some([width, height - 210.0]));
-    let scrim = theme::hex(theme::CAST_SHADOW);
+    let creating = state.connection_profiles.embedded_folder.open;
+    let controls = if creating {
+        folder_form(state, preferences, kit)
+    } else {
+        folder_grid(state, preferences, kit, width)
+    };
     rune::col()
         .key("startup-choose")
         .transition(Transition::none())
         .w_full()
+        .h_full()
         .items_center()
         .gap(8.0)
+        .pt((height * 0.08).clamp(22.0, 64.0))
         .child(
             orbit::view(
                 state.startup.seconds(state.clock) as f32,
@@ -376,90 +402,430 @@ fn choose(state: &State, preferences: ViewPreferences, kit: &Kit, window: Option
             rune::col()
                 .key("startup-choice-controls")
                 .w_full()
-                .max_w(400.0)
-                .items_center()
-                .radial_gradient(
-                    [0.5, 0.45],
-                    [200.0, 82.0],
-                    [(0.0, scrim.alpha(0.72)), (1.0, scrim.alpha(0.0))],
-                )
-                .gap(14.0)
+                .grow(1.0)
+                .min_h(0.0)
+                .scroll(rune::ScrollSpec {
+                    stick_bottom: false,
+                })
                 .child(
-                    rune::text("Choose a backend")
-                        .font(kit.ty.body_medium)
-                        .color(theme::hex(theme::TEXT_PRIMARY)),
-                )
-                .child(
-                    rune::row()
-                        .gap(14.0)
-                        .center()
-                        .child(destination(
-                            kit,
-                            preferences,
-                            LOCAL,
-                            &icons::WORKSTATION,
-                            "Embedded",
-                            "Run on this PC",
-                            BackendKind::Local,
+                    rune::col()
+                        .key(if creating {
+                            "startup-folder-form"
+                        } else {
+                            "startup-folder-list"
+                        })
+                        .transition(app::surface_transition(
+                            preferences.reduced_motion,
+                            Transition::opacity().combined(Transition::offset(12.0, 0.0)),
                         ))
-                        .child(destination(
-                            kit,
-                            preferences,
-                            REMOTE,
-                            &icons::SERVER,
-                            "Distributed",
-                            "Use a gateway",
-                            BackendKind::Remote,
-                        )),
+                        .w_full()
+                        .items_center()
+                        .px(16.0)
+                        .pb(22.0)
+                        .child(controls),
                 ),
         )
 }
 
-fn destination(
-    kit: &Kit,
+fn reveal_opacity(state: &State, preferences: ViewPreferences, delay: f64) -> f32 {
+    if preferences.reduced_motion {
+        return 1.0;
+    }
+    let phase =
+        ((state.startup.seconds(state.clock) - delay) / FOLDER_FADE_SECONDS).clamp(0.0, 1.0) as f32;
+    0.02 + 0.98 * (phase * phase * (3.0 - 2.0 * phase))
+}
+
+fn folder_grid(state: &State, preferences: ViewPreferences, kit: &Kit, width: f32) -> El {
+    const TILE_WIDTH: f32 = 172.0;
+    const GAP: f32 = 10.0;
+    let available = (width - 32.0).max(20.0);
+    let columns = (((available + GAP) / (TILE_WIDTH + GAP)).floor() as usize).clamp(1, 4);
+    let tile_width = TILE_WIDTH.min(available);
+    let can_select =
+        (state.fixture || state.workspaces.container.is_some()) && !state.local_backend.stopping;
+    let targets = state.embedded_targets();
+    let mut grid = rune::col()
+        .key("startup-folder-grid")
+        .w_full()
+        .gap(GAP)
+        .child(
+            rune::row().center().child(
+                views::heading("Choose a workstation folder", kit)
+                    .role("heading")
+                    .instant_changes()
+                    .opacity(reveal_opacity(state, preferences, 0.01)),
+            ),
+        );
+    let mut row = rune::row().center().gap(GAP);
+    for (index, target) in targets
+        .iter()
+        .map(Some)
+        .chain(std::iter::once(None))
+        .enumerate()
+    {
+        let opacity = reveal_opacity(state, preferences, 0.04 + 0.035 * index.min(4) as f64);
+        row = row.child(
+            folder_tile(target, can_select, tile_width, preferences, kit)
+                .instant_changes()
+                .opacity(opacity),
+        );
+        if (index + 1) % columns == 0 || index == targets.len() {
+            grid = grid.child(row.key(format!("startup-folder-row-{}", index / columns)));
+            row = rune::row().center().gap(GAP);
+        }
+    }
+    let status = match &state.workspaces.snapshot {
+        Load::Failed(error) => Some(
+            rune::col().gap(7.0).child(startup_error(error, kit)).child(
+                ActionButton::new("Retry folder access")
+                    .key("startup-workspaces-retry")
+                    .on_press(|state: &mut State| state.initialize_workspaces(None))
+                    .build(kit, preferences, None),
+            ),
+        ),
+        Load::Pending | Load::Loading => Some(ui_components::skeleton_text_value(
+            "Opening workstation folders",
+            150.0,
+            StatusTone::Info,
+            preferences,
+        )),
+        _ if state.local_backend.stopping => Some(ui_components::skeleton_text_value(
+            "Stopping the previous Embedded backend",
+            150.0,
+            StatusTone::Info,
+            preferences,
+        )),
+        _ => match &state.connection_profiles.catalog {
+            Load::Failed(error) => Some(
+                rune::col().gap(7.0).child(startup_error(error, kit)).child(
+                    ActionButton::new("Reload saved folders")
+                        .key("startup-folders-retry")
+                        .on_press(State::reload_embedded_targets)
+                        .build(kit, preferences, None),
+                ),
+            ),
+            _ if state.connection_profiles.busy => Some(ui_components::skeleton_text_value(
+                "Loading saved folders",
+                150.0,
+                StatusTone::Info,
+                preferences,
+            )),
+            _ => None,
+        },
+    };
+    grid.children(status.map(|body| {
+        rune::row()
+            .w_full()
+            .center()
+            .child(rune::col().w_full().max_w(360.0).child(body))
+    }))
+}
+
+fn folder_tile(
+    target: Option<&crate::connection_profiles::EmbeddedTarget>,
+    enabled: bool,
+    width: f32,
     preferences: ViewPreferences,
-    key: &'static str,
-    glyph: &'static rune::Icon,
-    title: &'static str,
-    detail: &'static str,
-    kind: BackendKind,
+    kit: &Kit,
 ) -> El {
+    let (key, glyph, title, path) = match target {
+        Some(target) => (
+            folder_key(target.id.as_deref()),
+            &glyphs::FOLDER,
+            target.name.as_str(),
+            Some(target.path.as_str()),
+        ),
+        None => (ADD_FOLDER.to_owned(), &icons::PLUS, "Add folder", None),
+    };
+    let label = path.map_or_else(|| title.to_owned(), |path| format!("Open {title}. {path}"));
     let tile = rune::col()
         .key(key)
-        .size(150.0, 150.0)
+        .size(width, 108.0)
+        .px(9.0)
         .center()
-        .gap(7.0)
+        .gap(5.0)
         .radius(12.0)
         .hover(theme::hex(theme::SURFACE_ELEVATED))
         .press(theme::hex(theme::SURFACE))
         .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT))
         .role("button")
-        .focusable(true)
-        .label(format!("{title}. {detail}"))
-        .on_press_tx(move |state: &mut State, tx| state.open_startup_setup(kind, tx))
-        .on_key(move |state: &mut State, event, tx| {
-            activate_on_return(state, event, tx, |state, tx| {
-                state.open_startup_setup(kind, tx)
-            })
-        })
+        .disabled(!enabled)
+        .focusable(enabled)
+        .label(label)
+        .help(path.unwrap_or("Choose a folder or enter its path"))
         .child(
-            rune::icon(glyph, 27.0)
-                .color(theme::hex(theme::TEXT_SECONDARY))
+            rune::row()
+                .size(44.0, 44.0)
+                .radius(22.0)
+                .center()
+                .fill(StatusTone::Accent.bg())
+                .border(1.0, StatusTone::Accent.border())
+                .child(rune::icon(glyph, 21.0).color(StatusTone::Accent.fg()))
                 .a11y_hidden(),
         )
         .child(
             rune::text(title)
                 .font(kit.ty.body_medium)
                 .color(theme::hex(theme::TEXT_PRIMARY))
+                .max_w(width - 18.0)
+                .truncate()
                 .a11y_hidden(),
         )
-        .child(
-            rune::text(detail)
+        .children(path.map(|path| {
+            rune::text(path)
                 .font(kit.ty.small)
                 .color(theme::hex(theme::TEXT_SECONDARY))
-                .a11y_hidden(),
-        );
+                .max_w(width - 18.0)
+                .truncate_middle()
+                .a11y_hidden()
+        }));
+    let tile = if let Some(target) = target {
+        let pointer_id = target.id.clone();
+        let keyboard_id = target.id.clone();
+        tile.on_press_tx(move |state: &mut State, tx| {
+            state.open_startup_target(pointer_id.as_deref(), tx);
+        })
+        .on_key(move |state: &mut State, event, tx| {
+            activate_on_return(state, event, tx, |state, tx| {
+                state.open_startup_target(keyboard_id.as_deref(), tx);
+            })
+        })
+    } else {
+        tile.on_press_tx(State::open_embedded_folder)
+            .on_key(|state: &mut State, event, tx| {
+                activate_on_return(state, event, tx, State::open_embedded_folder)
+            })
+    };
     material::glass_control(tile, preferences)
+}
+
+fn folder_key(id: Option<&str>) -> String {
+    id.map_or_else(|| LOCAL.to_owned(), |id| format!("startup-folder-{id}"))
+}
+
+fn folder_form(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    let form = &state.connection_profiles.embedded_folder;
+    let ready = matches!(state.connection_profiles.catalog, Load::Ready(_));
+    let mut actions = rune::row()
+        .w_full()
+        .center_y()
+        .gap(8.0)
+        .child(
+            ActionButton::new("Choose folder")
+                .key("startup-folder-browse")
+                .icon(&glyphs::FOLDER_OPEN)
+                .disabled(form.saving)
+                .on_press_tx(State::choose_embedded_folder)
+                .build(kit, preferences, None),
+        )
+        .child(rune::spacer())
+        .child(
+            ActionButton::new("Cancel")
+                .key("startup-folder-cancel")
+                .disabled(form.saving)
+                .on_press_tx(State::close_embedded_folder)
+                .build(kit, preferences, None),
+        );
+    actions = actions.child(
+        ActionButton::new("Save folder")
+            .key("startup-folder-save")
+            .busy(form.saving)
+            .disabled(state.connection_profiles.busy || !ready || form.path.text.trim().is_empty())
+            .finish(MetalFinish::GoldCta)
+            .on_press_tx(State::save_embedded_folder)
+            .build(kit, preferences, None),
+    );
+    material::glass_panel(
+        rune::col()
+            .w_full()
+            .max_w(484.0)
+            .padding(15.0)
+            .gap(9.0)
+            .radius(12.0)
+            .child(views::heading("Add a workstation folder", kit).role("heading"))
+            .child(
+                TextInput::new(&form.path)
+                    .label("Folder path")
+                    .placeholder("/absolute/path/to/workstation")
+                    .width(None)
+                    .disabled(form.saving)
+                    .on_edit(|state: &mut State| {
+                        &mut state.connection_profiles.embedded_folder.path
+                    })
+                    .on_change(|state: &mut State, _| state.embedded_folder_path_changed())
+                    .on_submit(State::save_embedded_folder)
+                    .build(kit)
+                    .key("startup-folder-path"),
+            )
+            .children(form.error.as_deref().map(|error| startup_error(error, kit)))
+            .children(match &state.connection_profiles.catalog {
+                Load::Failed(error) if !form.saving => Some(
+                    rune::col().gap(7.0).child(startup_error(error, kit)).child(
+                        ActionButton::new("Reload saved folders")
+                            .key("startup-folders-retry")
+                            .on_press(State::reload_embedded_targets)
+                            .build(kit, preferences, None),
+                    ),
+                ),
+                _ if !ready && state.connection_profiles.busy => {
+                    Some(ui_components::skeleton_text_value(
+                        "Loading saved folders",
+                        150.0,
+                        StatusTone::Info,
+                        preferences,
+                    ))
+                }
+                _ => None,
+            })
+            .child(actions),
+        preferences,
+    )
+}
+
+fn startup_error(detail: &str, kit: &Kit) -> El {
+    rune::text(detail)
+        .font(kit.ty.small)
+        .color(StatusTone::Err.fg())
+        .w_full()
+        .min_w(0.0)
+        .wrap_anywhere()
+        .role("alert")
+}
+
+fn back_button(disabled: bool, preferences: ViewPreferences, kit: &Kit) -> El {
+    ActionButton::new("Back")
+        .key("startup-back")
+        .disabled(disabled)
+        .on_press_tx(State::return_to_startup_choice)
+        .build(kit, preferences, None)
+        .on_key(|state: &mut State, event, tx| {
+            activate_on_return(state, event, tx, State::return_to_startup_choice)
+        })
+}
+
+fn continue_setup(preferences: ViewPreferences, kit: &Kit) -> El {
+    ActionButton::new("Continue setup")
+        .key("gateway-setup-done")
+        .icon(&icons::SHIELD_CHECK)
+        .finish(MetalFinish::GoldCta)
+        .on_press_tx(State::finish_gateway_setup)
+        .build(kit, preferences, None)
+        .on_key(|state: &mut State, event, tx| {
+            activate_on_return(state, event, tx, State::finish_gateway_setup)
+        })
+}
+
+fn embedded_stage(state: &State, preferences: ViewPreferences, kit: &Kit) -> (&'static str, El) {
+    let start = |title| {
+        ActionButton::new(title)
+            .key("connect-local")
+            .disabled(state.local_backend.stopping || state.resource_save_pending())
+            .finish(MetalFinish::GoldCta)
+            .on_press(State::connect_local)
+            .build(kit, preferences, None)
+    };
+    let (key, title, detail, next) = match &state.connection.status {
+        ConnectionStatus::Disconnected => (
+            "startup-stage-start",
+            "Embedded backend",
+            match &state.local_backend.binary_status {
+                BinaryDiscoveryStatus::Missing(error) => Some(
+                    rune::col()
+                        .key("local-binary-status")
+                        .role("alert")
+                        .child(startup_error(error, kit).key("local-binary-status-detail")),
+                ),
+                _ => None,
+            },
+            Some(start("Start Embedded")),
+        ),
+        ConnectionStatus::Connecting => (
+            "startup-stage-starting",
+            "Starting Embedded",
+            Some(ui_components::skeleton_text_value(
+                "Opening the Embedded companion",
+                180.0,
+                StatusTone::Cyan,
+                preferences,
+            )),
+            None,
+        ),
+        ConnectionStatus::Failed(error) => (
+            "startup-stage-start-failed",
+            "Embedded connection failed",
+            Some(startup_error(error, kit)),
+            Some(start("Retry start")),
+        ),
+        ConnectionStatus::Connected if state.registration.context.is_some() => (
+            "startup-stage-registered",
+            "Workstation registered",
+            None,
+            Some(continue_setup(preferences, kit)),
+        ),
+        ConnectionStatus::Connected => match &state.registration.receipt {
+            Load::Pending | Load::Loading => (
+                "startup-stage-registering",
+                "Registering this workstation",
+                Some(ui_components::skeleton_text_value(
+                    "Verifying the workstation registration",
+                    180.0,
+                    StatusTone::Info,
+                    preferences,
+                )),
+                None,
+            ),
+            receipt => (
+                "startup-stage-registration-retry",
+                "Workstation registration needs attention",
+                match receipt {
+                    Load::Failed(error) => Some(startup_error(error, kit)),
+                    _ => None,
+                },
+                state.can_register().then(|| {
+                    ActionButton::new("Retry registration")
+                        .key("workstation-register")
+                        .finish(MetalFinish::GoldCta)
+                        .on_press(State::ensure_registration)
+                        .build(kit, preferences, None)
+                }),
+            ),
+        },
+    };
+    let footer = rune::row()
+        .key("startup-embedded-actions")
+        .w_full()
+        .center_y()
+        .gap(8.0)
+        .child(back_button(false, preferences, kit))
+        .child(rune::spacer())
+        .children(next);
+    let body = material::glass_panel(
+        rune::col()
+            .w_full()
+            .max_w(510.0)
+            .padding(16.0)
+            .gap(10.0)
+            .radius(12.0)
+            .child(
+                views::heading(title, kit)
+                    .key("startup-embedded-stage")
+                    .role("heading")
+                    .focusable(true)
+                    .tab_index(-1),
+            )
+            .child(views::quiet(state.local_state_dir_label(), kit).wrap_anywhere())
+            .child(footer)
+            .children(detail),
+        preferences,
+    );
+    (
+        key,
+        views::scroll(
+            rune::col().items_center().child(body),
+            "startup-stage-scroll",
+        ),
+    )
 }
 
 fn activate_on_return(
@@ -478,20 +844,23 @@ fn activate_on_return(
 }
 
 impl State {
-    fn open_startup_setup(&mut self, kind: BackendKind, tx: &mut Tx) {
-        self.choose_startup_destination(kind);
-        // The input-triggered commit would otherwise fade newly mounted descendants, even
-        // when the setup container itself has no transition.
+    fn open_startup_target(&mut self, id: Option<&str>, tx: &mut Tx) {
+        if !self.select_embedded_target(id) {
+            return;
+        }
+        self.startup.target_id = id.map(str::to_owned);
+        self.choose_startup_destination(BackendKind::Local);
+        self.connect_local();
         if self.startup.reduced_motion.get() {
             tx.settle();
         }
         if self.startup.flight.is_some() {
             tx.wake_after(std::time::Duration::from_secs_f64(1.0 / 60.0));
         }
-        tx.focus("startup-back", tx.by_keys());
+        tx.focus("startup-embedded-stage", tx.by_keys());
     }
 
-    /// Render the settled backend choice through the production startup view in a fixture.
+    /// Render the settled Embedded folder chooser with synthetic effects.
     pub fn fixture_show_backend_choice(&mut self) {
         if self.fixture {
             self.startup = Startup::cold_launch();
@@ -507,7 +876,7 @@ impl State {
         }
     }
 
-    /// Select a setup path while retaining the explicit Start or Connect action.
+    /// Move the mark into the setup pane after a user or fixture chooses a target.
     pub(crate) fn choose_startup_destination(&mut self, kind: BackendKind) {
         if !self.startup.active() || self.setup_gateway {
             return;
@@ -523,11 +892,15 @@ impl State {
     }
 
     pub(crate) fn return_to_startup_choice(&mut self, tx: &mut Tx) {
-        if !self.startup.active() || !self.setup_gateway || self.connected() {
+        if !self.startup.active()
+            || !self.setup_gateway
+            || self.connected() && !self.is_local_backend()
+        {
             return;
         }
         // Leaving a pending attempt uses the same cancellation and stale-response fence as setup.
-        if self.connection.status == ConnectionStatus::Connecting
+        if self.is_local_backend()
+            || self.connection.status == ConnectionStatus::Connecting
             || self.pairing.busy()
             || self.pairing.paused
         {
@@ -538,14 +911,7 @@ impl State {
         if self.startup.reduced_motion.get() {
             tx.settle();
         }
-        tx.focus(
-            if self.is_local_backend() {
-                LOCAL
-            } else {
-                REMOTE
-            },
-            tx.by_keys(),
-        );
+        tx.focus(folder_key(self.startup.target_id.as_deref()), tx.by_keys());
     }
 
     pub(crate) fn finish_gateway_setup(&mut self, tx: &mut Tx) {
@@ -560,10 +926,6 @@ impl State {
         if !self.connected() || self.registration.context.is_none() {
             return;
         }
-        self.startup.start_flight(Dock::Setup, self.clock);
-        if self.startup.flight.is_some() {
-            tx.wake_after(std::time::Duration::from_secs_f64(1.0 / 60.0));
-        }
         self.startup.data_step = startup_data::first_unfinished(self);
         self.startup.data_checks = self.startup.data_step.is_none();
         self.backend_read(crate::backend::ReadRequest::Profile);
@@ -571,7 +933,9 @@ impl State {
             self.refresh_readiness();
         }
         self.drive_startup_dataset();
-        tx.instant();
+        if self.startup.reduced_motion.get() {
+            tx.settle();
+        }
         tx.focus("startup-data-stage", tx.by_keys());
     }
 
@@ -677,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn both_paths_are_keyboard_usable_on_the_first_frame_and_back_does_not_replay() {
+    fn folder_tiles_fade_in_and_return_does_not_replay_the_opening() {
         for (size, reduced) in [
             ((640.0, 480.0), false),
             ((640.0, 480.0), true),
@@ -697,10 +1061,9 @@ mod tests {
                 orbit_y + orbit_h <= controls_y,
                 "controls backing must leave the full orbit visible"
             );
-            for (choice, name) in [(LOCAL, "Embedded"), (REMOTE, "Distributed")] {
+            for (choice, name) in [(LOCAL, "Open Default folder"), (ADD_FOLDER, "Add folder")] {
                 let ([x, y, w, h], alpha) = runtime.presented(choice).expect("first-frame tile");
-                assert_eq!(w, h, "backend choice must be square");
-                assert_eq!(alpha, 1.0, "the tile must be visible immediately");
+                assert_eq!(alpha == 1.0, reduced);
                 assert!(x >= 0.0 && y >= 0.0 && x + w <= size.0 && y + h <= size.1);
                 assert!(runtime.elements().iter().any(|element| {
                     element.key.as_deref() == Some(choice)
@@ -710,45 +1073,55 @@ mod tests {
                             .is_some_and(|v| v.starts_with(name))
                 }));
             }
+            assert!(runtime.find("startup-remote").is_none());
+            assert!(!runtime.state.intents.contains(&Intent::Connect));
+
+            tick(&mut runtime, 0.7);
+            assert_opaque(&runtime, LOCAL);
+            assert_opaque(&runtime, ADD_FOLDER);
             key(&mut runtime, rune::Key::Tab);
-            runtime.frame(0.02);
+            runtime.frame(0.03);
             key(&mut runtime, rune::Key::Enter);
             runtime.frame(0.30);
             assert_eq!(runtime.state.backend_kind, BackendKind::Local);
-            assert!(runtime.find("connect-local").is_some());
+            assert_eq!(
+                runtime.state.connection.status,
+                ConnectionStatus::Connecting
+            );
+            assert!(runtime.find("startup-stage-starting").is_some());
+            assert!(runtime.find("connect-local").is_none());
+            assert!(runtime.state.intents.contains(&Intent::Connect));
 
             click(&mut runtime, "startup-back");
             if reduced {
                 runtime.frame(0.0);
                 assert_opaque(&runtime, LOCAL);
-                assert_opaque(&runtime, REMOTE);
+                assert_opaque(&runtime, ADD_FOLDER);
                 assert_opaque(&runtime, "startup-orbit");
             }
             runtime.frame(0.60);
             assert_eq!(runtime.state.startup.seconds(0.6), INTRO_SECONDS);
             assert!(runtime.find("startup-orbit").is_some());
-            assert!(runtime.find(REMOTE).is_some());
+            assert!(runtime.find(ADD_FOLDER).is_some());
 
             key(&mut runtime, rune::Key::Tab);
             runtime.frame(0.62);
             key(&mut runtime, rune::Key::Text(" ".into()));
-            if reduced {
-                runtime.frame(0.0);
-                assert_opaque(&runtime, "gateway-origin");
-                assert_opaque(&runtime, "connect");
-            }
             runtime.frame(0.90);
-            assert_eq!(runtime.state.backend_kind, BackendKind::Remote);
-            assert!(runtime.find("gateway-origin").is_some());
-            assert!(runtime.find("connect").is_some());
+            assert!(runtime.find("startup-folder-browse").is_some());
+            assert!(runtime.find("startup-folder-path/value/input").is_some());
             assert!(runtime.find("nav-workstation").is_none());
             assert!(!runtime.state.connected());
             assert!(runtime.state.client.is_none());
-            assert!(!runtime
-                .state
-                .intents
-                .iter()
-                .any(|intent| { matches!(intent, Intent::Connect | Intent::PairingConnect) }));
+            assert_eq!(
+                runtime
+                    .state
+                    .intents
+                    .iter()
+                    .filter(|intent| matches!(intent, Intent::Connect))
+                    .count(),
+                1
+            );
         }
     }
 
@@ -775,9 +1148,9 @@ mod tests {
             click(&mut runtime, LOCAL);
             runtime.frame(0.02);
             assert_eq!(runtime.state.startup.docked_pose, 1.0);
-            assert!(runtime.find("connect-local").is_some());
+            assert!(runtime.find("startup-stage-starting").is_some());
             if reduced {
-                assert_opaque(&runtime, "connect-local");
+                assert_opaque(&runtime, "startup-embedded-stage");
             }
             tick(&mut runtime, 1.11);
             let (dock, _) = runtime.presented(SETUP_MARK).expect("setup mark slot");
@@ -1079,29 +1452,33 @@ mod tests {
     }
 
     #[test]
-    fn registered_backend_can_open_workstation_before_data_setup() {
+    fn fresh_embedded_folder_guides_data_setup_before_offering_workstation() {
         let (mut runtime, _) = data_setup_runtime([ReadinessState::NotReady; 3]);
+        runtime.state.backend_kind = BackendKind::Local;
+        runtime.state.connection.origin = rune::TextEdit::new("local://embedded");
         let registration = runtime.state.registration.context.take();
+        runtime.state.registration.receipt = Load::Loading;
         runtime.state.page = app::Page::Brain;
         runtime.frame(0.0);
+        assert!(runtime.find("startup-stage-registering").is_some());
         assert!(runtime.find("startup-open-workstation").is_none());
 
         runtime.update(|state, _| state.registration.context = registration);
         runtime.frame(0.02);
         let ([x, y, width, height], _) = runtime
-            .presented("startup-open-workstation")
-            .expect("registered backend offers a direct workstation entry");
+            .presented("gateway-setup-done")
+            .expect("registered backend offers guided setup");
         assert!(x >= 0.0 && y >= 0.0 && x + width <= 640.0 && y + height <= 480.0);
-        assert!(runtime.find("gateway-setup-done").is_some());
+        assert!(runtime.find("startup-open-workstation").is_none());
 
-        click(&mut runtime, "startup-open-workstation");
+        click(&mut runtime, "gateway-setup-done");
         runtime.frame(0.02);
-        assert!(!runtime.state.startup.active());
-        assert!(!runtime.state.setup_gateway);
-        assert!(runtime.state.startup.data_step.is_none());
-        assert_eq!(runtime.state.page, app::Page::Workstation);
-        assert!(runtime.find("screen-workstation").is_some());
-        assert!(runtime.find("nav-workstation").is_some());
+        assert_eq!(
+            runtime.state.startup.data_step,
+            Some(startup_data::Step::Seed)
+        );
+        assert!(runtime.find("startup-stage-seed").is_some());
+        assert!(runtime.find("nav-workstation").is_none());
     }
 
     #[test]

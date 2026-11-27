@@ -24,6 +24,8 @@ pub(crate) fn content(state: &State, kit: &Kit) -> El {
     for (id, title) in [
         (ReadinessCheckId::Gateway, "Gateway"),
         (ReadinessCheckId::Datastore, "Datastore"),
+        (ReadinessCheckId::Nlp, "Language service"),
+        (ReadinessCheckId::Registration, "Registration"),
         (ReadinessCheckId::Jobs, "Jobs"),
         (ReadinessCheckId::ActorCatalog, "Actor catalog"),
         (ReadinessCheckId::ActorSearch, "Actor search"),

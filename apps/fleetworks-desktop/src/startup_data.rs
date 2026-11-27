@@ -683,13 +683,18 @@ impl State {
     }
 }
 
-fn step_dots(step: Option<Step>, kit: &Kit) -> El {
-    let total = Step::ALL.len() + 1;
-    let current = step.map_or(total, Step::number);
+fn step_dots(state: &State, step: Option<Step>, kit: &Kit) -> El {
+    let has_inference = state.supports_inbox_qa();
+    let total = Step::ALL.len() + 1 + usize::from(has_inference);
+    let current = step.map_or(
+        total - usize::from(crate::inbox_qa::setup_choice(state)),
+        Step::number,
+    );
     let mut dots = rune::row().key("startup-data-dots").center_y().gap(7.0);
     for (index, key) in Step::ALL
         .into_iter()
         .map(Step::key)
+        .chain(has_inference.then_some("startup-data-step-inference"))
         .chain(std::iter::once("startup-data-step-checks"))
         .enumerate()
     {
@@ -748,7 +753,7 @@ pub(crate) fn checks_view(state: &State, preferences: ViewPreferences, kit: &Kit
         return layout(
             panel,
             setup_sequence(state, None, preferences, kit),
-            step_dots(None, kit),
+            step_dots(state, None, kit),
         );
     }
     let panel = panel(kit, "Workstation checks")
@@ -765,13 +770,13 @@ pub(crate) fn checks_view(state: &State, preferences: ViewPreferences, kit: &Kit
     layout(
         panel,
         setup_sequence(state, None, preferences, kit),
-        step_dots(None, kit),
+        step_dots(state, None, kit),
     )
 }
 
 pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit: &Kit) -> El {
     let stage = stage(state, step);
-    let dots = step_dots(Some(step), kit);
+    let dots = step_dots(state, Some(step), kit);
     let sequence = setup_sequence(state, Some(step), preferences, kit);
     let csv_input = step
         .csv_input(&state.startup.csv_inputs)

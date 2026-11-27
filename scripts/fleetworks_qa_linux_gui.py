@@ -312,7 +312,6 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         return None
 
     button("startup-local")
-    button("connect-local")
     button("gateway-setup-done")
     state = home / ".fleetworks/local-backend/embedded"
     fd = os.open(state / "qa-pack.json", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)

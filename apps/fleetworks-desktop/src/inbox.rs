@@ -1073,41 +1073,46 @@ fn body(
             )
             .children(crate::inbox_qa::transcript_footer(state, kit, preferences))
     });
+    let header = rune::col()
+        .key("inbox-header")
+        .w_full()
+        .px(14.0)
+        .py(8.0)
+        .gap(6.0)
+        .border_sides([0.0, 0.0, 1.0, 0.0], theme::hex(theme::BORDER_SUBTLE))
+        .child(
+            rune::row()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    rune::text("Inbox")
+                        .font(kit.ty.body_medium)
+                        .color(theme::hex(theme::TEXT_PRIMARY))
+                        .grow(1.0)
+                        .wrap(),
+                )
+                .child(material::glass_control(close, preferences))
+                .child(tray(state, kit, "inbox-toggle-close", preferences).tab_index(-1)),
+        )
+        .child(
+            rune::text("Only changes observed by this workstation.")
+                .key("inbox-helper")
+                .font(kit.ty.small)
+                .color(theme::hex(theme::TEXT_MUTED))
+                .wrap(),
+        )
+        .child(material::glass_control(filter, preferences));
     rune::col()
         .key("inbox-body")
         .child(
             rune::col()
-                .key("inbox-header")
                 .w_full()
-                .px(14.0)
-                .py(8.0)
-                .gap(6.0)
-                .border_sides([0.0, 0.0, 1.0, 0.0], theme::hex(theme::BORDER_SUBTLE))
-                .child(
-                    rune::row()
-                        .gap(8.0)
-                        .center_y()
-                        .child(
-                            rune::text("Inbox")
-                                .font(kit.ty.body_medium)
-                                .color(theme::hex(theme::TEXT_PRIMARY))
-                                .grow(1.0)
-                                .wrap(),
-                        )
-                        .child(material::glass_control(close, preferences))
-                        .child(tray(state, kit, "inbox-toggle-close", preferences).tab_index(-1)),
-                )
-                .child(
-                    rune::text("Only changes observed by this workstation.")
-                        .key("inbox-helper")
-                        .font(kit.ty.small)
-                        .color(theme::hex(theme::TEXT_MUTED))
-                        .wrap(),
-                )
-                .child(material::glass_control(filter, preferences)),
+                .grow(1.0)
+                .min_h(0.0)
+                .child(header)
+                .child(notifications)
+                .children(transcript),
         )
-        .child(notifications)
-        .children(transcript)
         .children(crate::inbox_qa::footer(state, kit, preferences))
 }
 
@@ -2052,10 +2057,28 @@ mod tests {
     }
 
     #[test]
-    fn notifications_without_assistant_hold_half_the_drawer_height() {
+    fn notifications_without_assistant_hold_half_the_drawer_and_keep_the_footer_pinned() {
+        use fleetworks_contracts::chat::QaPhase;
+        use fleetworks_contracts::chat::QaSettings;
+        use fleetworks_workstation::native::BackendKind;
+
+        let assert_pinned = |runtime: &rune::Runtime<State>| {
+            let (drawer, _) = runtime.presented("inbox-body").unwrap();
+            let (footer, _) = runtime.presented("inbox-qa-footer").unwrap();
+            let (viewport, _) = runtime.presented(NOTIFICATIONS_SCROLL).unwrap();
+            assert!(
+                (footer[1] + footer[3] - drawer[1] - drawer[3]).abs() < 0.5,
+                "footer {footer:?} must reach the drawer bottom {drawer:?}",
+            );
+            assert!(viewport[1] + viewport[3] <= footer[1] + 0.5);
+            assert!(runtime.find(SCROLL).is_none());
+        };
         for size in [(640.0, 480.0), (1280.0, 800.0)] {
             let mut state = crate::tests::registered_fixture();
+            state.backend_kind = BackendKind::Local;
+            state.connection.origin = TextEdit::new("local://embedded");
             state.seed_inbox_qa_overflow_fixture();
+            state.seed_inbox_qa_fixture(QaSettings::new(false, QaPhase::Off, 1, 1, true), None);
             let mut runtime = runtime(state, size);
             let (drawer, _) = runtime.presented("inbox-body").unwrap();
             let (viewport, _) = runtime.presented(NOTIFICATIONS_SCROLL).unwrap();
@@ -2064,6 +2087,7 @@ mod tests {
                 "notification viewport {viewport:?} must fill half of drawer {drawer:?}",
             );
             assert_eq!(runtime.scroll_at_bottom(NOTIFICATIONS_SCROLL), Some(false));
+            assert_pinned(&runtime);
 
             runtime.update(|_, tx| tx.scroll_to_bottom_instant(NOTIFICATIONS_SCROLL));
             runtime.frame(1.0);
@@ -2076,6 +2100,17 @@ mod tests {
             runtime.frame(1.25);
             assert!(runtime.find("inbox-empty").is_some());
             assert_eq!(runtime.presented(NOTIFICATIONS_SCROLL).unwrap().0, viewport);
+            assert_pinned(&runtime);
+
+            runtime.update(|state, _| {
+                state.connection.status = crate::connection::ConnectionStatus::Disconnected;
+            });
+            runtime.frame(1.5);
+            assert_pinned(&runtime);
+            assert!(runtime
+                .accessibility_json()
+                .to_string()
+                .contains("Reconnect the selected backend to check inference."));
         }
     }
 

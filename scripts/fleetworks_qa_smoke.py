@@ -531,7 +531,7 @@ def exercise(request, registration, model, readiness, running_jobs):
                                and observed(finding) < history_started
                                for finding in historical),
             "local history lost its original observation times or coverage")
-    resources = ask("resources", "What is our resource usage?")
+    resources = ask("resources", "what is the current resource consumption in workstation?")
     require(resources["state"] == "answered"
             and {part["source"]["id"] for part in resources["findings"]} == {"cpu", "memory", "disk"}
             and len(resources["findings"]) == 3

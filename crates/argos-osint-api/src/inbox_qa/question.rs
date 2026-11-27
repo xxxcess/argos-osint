@@ -662,6 +662,10 @@ fn host_resource_query(query: &str) -> &str {
             "api host ",
             "backend host's ",
             "backend host ",
+            "workstation's ",
+            "workstation ",
+            "this workstation's ",
+            "this workstation ",
             "our ",
         ],
     )
@@ -672,6 +676,12 @@ fn host_resource_query(query: &str) -> &str {
             " on the api host",
             " of the api host",
             " on the backend host",
+            " on this workstation",
+            " on the workstation",
+            " on workstation",
+            " in this workstation",
+            " in the workstation",
+            " in workstation",
         ],
     )
     .unwrap_or(host_query);
@@ -688,7 +698,16 @@ fn host_resources(query: &str) -> bool {
     let query =
         strip_any_prefix(query, &["how is ", "how's ", "how are we doing on "]).unwrap_or(query);
     let query = host_resource_query(strip_article(query));
-    let usage = strip_any_suffix(query, &[" usage", " utilization", " utilisation"]);
+    let usage = strip_any_suffix(
+        query,
+        &[
+            " usage",
+            " utilization",
+            " utilisation",
+            " consumption",
+            " use",
+        ],
+    );
     match usage.unwrap_or(query) {
         "resources"
         | "host resources"
@@ -1199,6 +1218,18 @@ mod tests {
         for (question, intent) in [
             ("What is our resource usage?", Question::HostResources),
             (
+                "what is the current resource consumption in workstation?",
+                Question::HostResources,
+            ),
+            (
+                "What is this workstation’s resource use?",
+                Question::HostResources,
+            ),
+            (
+                "Show disk usage on this workstation.",
+                Question::Metric(Metric::Disk),
+            ),
+            (
                 "What are the current host resources?",
                 Question::HostResources,
             ),
@@ -1424,6 +1455,9 @@ mod tests {
             "List unresolved status checks for all workstations.",
             "Which status checks are green on my laptop?",
             "What is CPU, memory, and disk usage on my laptop?",
+            "What is the current resource consumption in workstation A?",
+            "What is resource consumption on another workstation?",
+            "What is resource consumption by the Assistant process?",
             "What is CPU, memory, and disk usage by user?",
             "What is CPU, memory, disk, and GPU usage?",
             "What is the memory usage? Include gateway status.",

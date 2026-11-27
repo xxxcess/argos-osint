@@ -30,7 +30,11 @@ import { FeedHeader } from "./FeedHeader";
 import { ArticleCard } from "./ArticleCard";
 import { DeskButton } from "../desk-ui";
 import { CategoryRail } from "./CategoryRail";
-import { intelColors as c, intelRadius } from "../../shell/intel-theme";
+import {
+  intelColors as c,
+  intelRadius,
+  intelKindFills,
+} from "../../shell/intel-theme";
 import { intelFonts } from "../../shell/intel-fonts";
 
 type Props = {
@@ -229,7 +233,11 @@ export function BulletinView(p: Props) {
                   ))}
                 </View>
                 {p.list.isFetchingNextPage ? (
-                  <LoadingState label="Loading more articles…" compact />
+                  <LoadingState
+                    label="Loading more articles…"
+                    compact
+                    baseColor={intelKindFills.article}
+                  />
                 ) : null}
                 {p.list.isFetchNextPageError ? (
                   <Notice>
@@ -243,11 +251,9 @@ export function BulletinView(p: Props) {
                       void p.list.fetchNextPage({ cancelRefetch: false });
                     }}
                   >
-                    {p.list.isFetchingNextPage
-                      ? "Loading…"
-                      : p.list.isFetchNextPageError
-                        ? "Retry loading articles"
-                        : "Load more articles"}
+                    {p.list.isFetchNextPageError
+                      ? "Retry loading articles"
+                      : "Load more articles"}
                   </DeskButton>
                 ) : null}
               </ScrollView>

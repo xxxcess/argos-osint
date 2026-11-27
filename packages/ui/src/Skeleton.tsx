@@ -89,11 +89,14 @@ export function Skeleton({
   height = 16,
   radius = 4,
   fill = false,
+  baseColor = SKELETON_BASE,
 }: {
   lines?: number;
   width?: DimensionValue;
   height?: number;
   radius?: number;
+  /** Steady fill for a placeholder inheriting its surface context. */
+  baseColor?: string;
   /** Stretch one block to its parent. Used for the topology graph square. */
   fill?: boolean;
 }) {
@@ -125,7 +128,7 @@ export function Skeleton({
             height: fill ? "100%" : height,
             flex: fill ? 1 : undefined,
             borderRadius: radius,
-            backgroundColor: SKELETON_BASE,
+            backgroundColor: baseColor,
             overflow: "hidden",
           }}
         >

@@ -14,7 +14,13 @@ import {
   intelStatus,
 } from "./intel-theme";
 import { intelFonts } from "./intel-fonts";
-import { colors, FleetworksMark, glassProps } from "@argos/ui";
+import {
+  colors,
+  FleetworksMark,
+  glassProps,
+  LoadingState,
+  Skeleton,
+} from "@argos/ui";
 import type { JobState } from "./jobState";
 
 const subscribeHydration = () => () => {};
@@ -25,6 +31,7 @@ export type StatusJob = {
   id: string;
   label: string;
   detail?: string;
+  loading?: string;
   state: JobState;
 };
 
@@ -241,7 +248,12 @@ export function IntelStatusBar({
               {onRetryConnection ? (
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel="Retry connection"
+                  accessibilityLabel={
+                    connectionRetrying
+                      ? "Retrying connection"
+                      : "Retry connection"
+                  }
+                  accessibilityState={{ busy: connectionRetrying }}
                   disabled={connectionRetrying}
                   onPress={onRetryConnection}
                   style={({ pressed }) => [
@@ -250,9 +262,15 @@ export function IntelStatusBar({
                     connectionRetrying && { opacity: 0.6 },
                   ]}
                 >
-                  <Text style={s.retryText}>
-                    {connectionRetrying ? "Retrying…" : "Retry"}
-                  </Text>
+                  {connectionRetrying ? (
+                    <Skeleton
+                      width={34}
+                      height={13}
+                      baseColor={c.selectionSurface}
+                    />
+                  ) : (
+                    <Text style={s.retryText}>Retry</Text>
+                  )}
                 </Pressable>
               ) : null}
             </View>
@@ -342,7 +360,9 @@ export function JobDropUp({ jobs }: { jobs: StatusJob[] }) {
                 />
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={s.jobLabel}>{job.label}</Text>
-                  {job.detail ? (
+                  {job.loading ? (
+                    <LoadingState label={job.loading} compact />
+                  ) : job.detail ? (
                     <Text style={s.jobDetail}>{job.detail}</Text>
                   ) : null}
                 </View>

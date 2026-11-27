@@ -54,6 +54,7 @@ export const intelKindColors = {
 };
 export const intelKindFills = {
   actor: "rgba(255,179,71,0.12)",
+  article: "rgba(95,211,154,0.15)",
   claim: "rgba(33,217,238,0.12)",
   inference: "rgba(180,142,255,0.14)",
   link: "rgba(255,106,150,0.14)",
@@ -121,4 +122,5 @@ export const intelStatus = Object.fromEntries(
 export const landingColors = {
   core: "#FFB347",
   coreGlow: "#FFB347",
+  pendingFill: "rgba(255,179,71,0.12)",
 };

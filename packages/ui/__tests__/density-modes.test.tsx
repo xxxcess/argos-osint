@@ -25,9 +25,9 @@ describe("Density modes (real components)", () => {
     const box = container.querySelector('[role="progressbar"]') as HTMLElement;
     expect(sheetProp(box, "paddingTop")).toBe("0px");
     expect(sheetProp(box, "paddingBottom")).toBe("0px");
-    // Row machinery (gap + spinner + label) is unchanged, only spacing differs.
-    expect(sheetProp(box, "gap")).toBe("10px");
-    expect(screen.getByText("Refreshing bulletin…")).toBeVisible();
+    expect(
+      screen.getByRole("progressbar", { name: "Refreshing bulletin…" }),
+    ).toBeVisible();
   });
 
   it("LoadingState instances without compact are identical", () => {
@@ -45,8 +45,8 @@ describe("Density modes (real components)", () => {
     const b = sheetProp(boxes[1] as Element, "paddingTop");
     expect(a).toBe(b);
     expect(a).toBe("20px");
-    expect(screen.getByText("A")).toBeVisible();
-    expect(screen.getByText("B")).toBeVisible();
+    expect(screen.getByRole("progressbar", { name: "A" })).toBeVisible();
+    expect(screen.getByRole("progressbar", { name: "B" })).toBeVisible();
   });
 
   it("EmptyState keeps spaced density (24px block padding, 8px gap)", () => {

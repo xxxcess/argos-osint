@@ -1,13 +1,8 @@
 "use client";
 import React, { useState } from "react";
 import { ROCK_TILE, rockTileImage } from "./rockTile";
-import {
-  View,
-  Text,
-  Pressable,
-  StyleSheet,
-  ActivityIndicator,
-} from "react-native";
+import { Skeleton } from "./Skeleton";
+import { View, Text, Pressable, StyleSheet } from "react-native";
 
 // Glass Canvas tokens. Semantic colors and layout remain independent.
 export const colors = {
@@ -188,9 +183,11 @@ export function Copy({ children }: { children: React.ReactNode }) {
 export function LoadingState({
   label,
   compact = false,
+  baseColor = colors.selectionSurface,
 }: {
   label: string;
   compact?: boolean;
+  baseColor?: string;
 }) {
   return (
     <View
@@ -199,12 +196,11 @@ export function LoadingState({
       accessibilityState={{ busy: true }}
       style={[s.loading, compact && { paddingVertical: 0 }]}
     >
-      <ActivityIndicator
-        size="small"
-        color={colors.accent}
-        aria-hidden={true}
+      <Skeleton
+        width={compact ? 120 : 160}
+        height={compact ? 13 : 16}
+        baseColor={baseColor}
       />
-      <Text style={s.copy}>{label}</Text>
     </View>
   );
 }
@@ -346,10 +342,6 @@ export function Notice({ children }: { children: React.ReactNode }) {
 export { ErrorBoundary } from "./ErrorBoundary";
 const s = StyleSheet.create({
   loading: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    alignItems: "center",
-    gap: 10,
     paddingVertical: 20,
     minWidth: 0,
   },

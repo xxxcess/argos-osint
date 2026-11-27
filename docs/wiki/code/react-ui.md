@@ -177,3 +177,7 @@ Related leads in the Brief sidebar form a single full-width stack. RelatedBriefC
 
 Brief actor states preserve available metadata chips during Full article cleanup and append clean-body actors by canonical ID. An initially empty collection uses the actor skeleton until cleanup/matching finishes. Failure remains incomplete detection; an empty result appears only after the pending state ends. The compact progress indicator sits after already available actors, without replacing them or disturbing keyboard order.
 
+
+### Unresolved values
+
+Use the shared Skeleton and LoadingState for pending Intel Web data. Match the settled geometry and use the relevant surface color. Keep status text available to assistive technology and use static placeholders when Reduced Motion is enabled. Keep actual work stages, progress counts, and errors readable. [Shared interaction states](../../design/matte-canvas/interaction-state.md)

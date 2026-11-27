@@ -3,7 +3,10 @@ import React from "react";
 import { View, Text, Pressable } from "react-native";
 import type { Brief } from "@argos/api-client";
 import { EmptyState, LoadingState } from "@argos/ui";
-import { intelKindColors as kinds } from "../../shell/intel-theme";
+import {
+  intelKindColors as kinds,
+  intelKindFills,
+} from "../../shell/intel-theme";
 import { BriefSection } from "./BriefSection";
 import { BriefSkeleton } from "./BriefSkeleton";
 import { briefStyles as s } from "./briefStyles";
@@ -85,6 +88,7 @@ export function ActorChips({
             <LoadingState
               compact
               label="Checking cleaned article for more actors…"
+              baseColor={intelKindFills.actor}
             />
           ) : null}
         </View>

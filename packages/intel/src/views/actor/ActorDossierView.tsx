@@ -17,6 +17,7 @@ import { DeskButton } from "../desk-ui";
 import {
   intelColors as c,
   intelKindColors as kinds,
+  intelKindFills,
 } from "../../shell/intel-theme";
 import { dossierStyles as s } from "./dossierStyles";
 
@@ -333,7 +334,11 @@ export function ActorDossierView({
           ))}
         </View>
         {refreshing ? (
-          <LoadingState compact label="Refreshing Actor Dossier…" />
+          <LoadingState
+            compact
+            label="Refreshing Actor Dossier…"
+            baseColor={intelKindFills.actor}
+          />
         ) : null}
         {error ? (
           <>

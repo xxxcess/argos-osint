@@ -118,6 +118,7 @@ export function OrbitScene({
       <View nativeID="intel-landing-controls" style={s.controls}>
         <StatusMessage
           message={message}
+          loading={connecting && !ready && !sequence.active}
           color={
             sequence.phase === "healthy" || sequence.phase === "ready"
               ? coreColor

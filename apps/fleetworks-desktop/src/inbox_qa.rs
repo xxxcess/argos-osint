@@ -767,7 +767,9 @@ impl State {
                         |generator| {
                             generator.phase == QaPhase::Ready
                                 && generator.effective.is_some_and(|effective| {
-                                    generator_target(generator.preference)
+                                    generator
+                                        .preference
+                                        .explicit_target()
                                         .is_none_or(|preferred| preferred == effective)
                                 })
                         },

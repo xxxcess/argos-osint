@@ -1488,7 +1488,8 @@ async fn run_shared_flow(
         assert!(qa_settings.can_manage);
         assert_eq!(
             qa_settings.generator.unwrap().preference,
-            QaGeneratorPreference::Automatic
+            QaGeneratorPreference::Gpt2Small,
+            "A fresh Embedded registration uses the default GPT-2 Small preference"
         );
         assert_eq!(
             qa_settings.decision.unwrap().preference,
@@ -1618,7 +1619,7 @@ async fn run_shared_flow(
         );
         assert_eq!(
             julia.generation, enabled.generation,
-            "decision save keeps FLAN warm"
+            "decision save retains the active generator generation"
         );
         assert_eq!(
             client.update_qa_settings(&julia_update).await.unwrap_err(),

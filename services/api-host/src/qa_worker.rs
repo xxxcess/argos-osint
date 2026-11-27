@@ -704,8 +704,7 @@ impl WorkerSession {
                 window_tokens,
             } if protocol == QA_WORKER_PROTOCOL
                 && model_revision == self.model_target.revision()
-                && (window_tokens == self.model_target.input_tokens()
-                    || window_tokens == QA_LEGACY_STREAMING_WINDOW_TOKENS) =>
+                && window_tokens == self.model_target.input_tokens() =>
             {
                 (Some(window_tokens), ResponsePlanSupport::GeneralDialogue)
             }
@@ -1585,7 +1584,7 @@ mod tests {
 
     #[tokio::test]
     async fn reply_plan_negotiation_is_fixed_at_startup() {
-        for target in [QaModelTarget::FlanT5Small, QaModelTarget::Gpt2Small] {
+        for target in QaModelTarget::ALL {
             let (io, _peer) = UnixStream::pair().unwrap();
             let (reader, writer) = io.into_split();
             let mut session = WorkerSession {
@@ -1604,6 +1603,11 @@ mod tests {
                 window_tokens,
             };
             let decoded = |window_tokens| QaWorkerReply::ReadyWithDecodedClarification {
+                protocol: QA_WORKER_PROTOCOL,
+                model_revision: target.revision().into(),
+                window_tokens,
+            };
+            let general = |window_tokens| QaWorkerReply::ReadyWithGeneralDialogue {
                 protocol: QA_WORKER_PROTOCOL,
                 model_revision: target.revision().into(),
                 window_tokens,
@@ -1634,6 +1638,26 @@ mod tests {
                 .unwrap();
             assert!(session.response_plan.supports(true));
             assert!(session.validate_ready(plan(target.input_tokens())).is_err());
+            session.lifecycle = WorkerLifecycle::Starting;
+            if target.input_tokens() != QA_LEGACY_STREAMING_WINDOW_TOKENS {
+                assert!(session
+                    .validate_ready(general(QA_LEGACY_STREAMING_WINDOW_TOKENS))
+                    .is_err());
+                session
+                    .validate_ready(decoded(QA_LEGACY_STREAMING_WINDOW_TOKENS))
+                    .unwrap();
+            }
+            session
+                .validate_ready(general(target.input_tokens()))
+                .unwrap();
+            assert_eq!(session.streaming_window, Some(target.input_tokens()));
+            session.lifecycle = WorkerLifecycle::Ready;
+            session
+                .validate_ready(general(target.input_tokens()))
+                .unwrap();
+            assert!(session
+                .validate_ready(decoded(target.input_tokens()))
+                .is_err());
         }
     }
 

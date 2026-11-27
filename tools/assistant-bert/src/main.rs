@@ -758,7 +758,8 @@ pub(crate) fn run(
             .and_then(QaModelTarget::from_slug)
             .ok_or_else(|| anyhow!("invalid QA model target"))?,
     };
-    let model_context = env::var_os(QA_MODEL_CONTEXT_ENV).as_deref() == Some("1".as_ref());
+    let model_context =
+        general_dialogue || env::var_os(QA_MODEL_CONTEXT_ENV).as_deref() == Some("1".as_ref());
     let window_tokens = match (streaming, model_context) {
         (true, true) => target.input_tokens(),
         (true, false) => QA_LEGACY_STREAMING_WINDOW_TOKENS,

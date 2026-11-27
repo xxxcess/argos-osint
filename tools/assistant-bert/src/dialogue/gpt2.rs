@@ -4,8 +4,8 @@ use std::path::Path;
 
 use anyhow::ensure;
 use anyhow::Result;
-use rust_bert::gpt2::GPT2LMHeadModel;
 use rust_bert::gpt2::Gpt2Config;
+use rust_bert::gpt2::Gpt2Model;
 use rust_bert::pipelines::common::ModelType;
 use rust_bert::pipelines::common::TokenizerOption;
 use rust_bert::pipelines::generation_utils::Cache;
@@ -18,7 +18,8 @@ use tch::Tensor;
 use super::QaModelTarget;
 
 pub(super) struct Model {
-    model: GPT2LMHeadModel,
+    model: Gpt2Model,
+    token_embeddings: Tensor,
     pub(super) tokenizer: TokenizerOption,
     pub(super) eos: i64,
 }
@@ -58,22 +59,31 @@ impl Model {
         // newly allocated destination cannot both be resident with the decoded weights.
         let checkpoint = Tensor::read_safetensors(dir.join("model.safetensors"))?;
         let mut store = nn::VarStore::new(Device::Cpu);
-        let model = GPT2LMHeadModel::new(store.root(), &config);
+        let model = Gpt2Model::new(store.root(), &config);
         load_official_weights(store.variables(), checkpoint)?;
         store.freeze();
+        let token_embeddings = (store.root() / "transformer" / "wte")
+            .get("weight")
+            .ok_or_else(|| anyhow::anyhow!("missing GPT-2 token embeddings"))?;
         Ok(Self {
             model,
+            token_embeddings,
             tokenizer,
             eos,
         })
     }
 
     pub(super) fn forward(&self, input: &Tensor, cache: Cache) -> Result<LMModelOutput> {
-        forward(&self.model, input, cache)
+        forward(&self.model, &self.token_embeddings, input, cache)
     }
 }
 
-fn forward(model: &GPT2LMHeadModel, input: &Tensor, cache: Cache) -> Result<LMModelOutput> {
+fn forward(
+    model: &Gpt2Model,
+    token_embeddings: &Tensor,
+    input: &Tensor,
+    cache: Cache,
+) -> Result<LMModelOutput> {
     let past = match &cache {
         Cache::None => None,
         Cache::GPT2Cache(Some(past)) => Some(past),
@@ -81,7 +91,17 @@ fn forward(model: &GPT2LMHeadModel, input: &Tensor, cache: Cache) -> Result<LMMo
     };
     // The one-row prompt has no padding. Rust-BERT uses the cache length to set the
     // next position and applies its causal mask over the full sequence internally.
-    Ok(model.forward_t(Some(input), past, None, None, None, None, false)?)
+    let output = model.forward_t(Some(input), past, None, None, None, None, false)?;
+    // The full prompt is needed for attention. Only its last position is used
+    // to predict the next token, so project that row through the tied head.
+    let lm_logits = output
+        .output
+        .f_narrow(1, -1, 1)?
+        .f_linear::<Tensor>(token_embeddings, None)?;
+    Ok(LMModelOutput {
+        lm_logits,
+        cache: Cache::GPT2Cache(output.cache),
+    })
 }
 
 fn load_official_weights(
@@ -143,7 +163,9 @@ mod tests {
     }
 
     #[test]
-    fn cached_decoding_uses_the_same_position_as_the_full_prompt() {
+    fn projects_only_the_last_position_and_preserves_cached_decoding() {
+        use rust_bert::gpt2::GPT2LMHeadModel;
+
         let store = nn::VarStore::new(Device::Cpu);
         let config = Gpt2Config {
             n_ctx: 8,
@@ -155,21 +177,41 @@ mod tests {
             output_past: Some(true),
             ..Gpt2Config::default()
         };
-        let model = GPT2LMHeadModel::new(store.root(), &config);
+        let reference_store = nn::VarStore::new(Device::Cpu);
+        let reference = GPT2LMHeadModel::new(reference_store.root(), &config);
+        let model = Gpt2Model::new(store.root(), &config);
+        let embeddings = (store.root() / "transformer" / "wte")
+            .get("weight")
+            .unwrap();
         let input = |tokens: &[i64]| Tensor::from_slice(tokens).unsqueeze(0);
         tch::no_grad(|| {
-            let prefix = forward(&model, &input(&[1, 4, 3]), Cache::None).unwrap();
+            let reference_weights = reference_store.variables();
+            for (name, mut value) in store.variables() {
+                value.copy_(&reference_weights[&name]);
+            }
+            let tokens = [1, 4, 3, 2, 0, 7, 3, 5];
+            let prefix_input = input(&tokens[..7]);
+            let reference_prefix = reference
+                .forward_t(Some(&prefix_input), None, None, None, None, None, false)
+                .unwrap();
+            let prefix = forward(&model, &embeddings, &prefix_input, Cache::None).unwrap();
+            assert_eq!(prefix.lm_logits.size(), [1, 1, 16]);
+            assert!(prefix.lm_logits.allclose(
+                &reference_prefix.lm_logits.narrow(1, 6, 1),
+                1e-5,
+                1e-5,
+                false
+            ));
             assert!(matches!(&prefix.cache, Cache::GPT2Cache(Some(_))));
-            let cached = forward(&model, &input(&[2]), prefix.cache).unwrap();
-            let full = forward(&model, &input(&[1, 4, 3, 2]), Cache::None).unwrap();
+            let cached = forward(&model, &embeddings, &input(&tokens[7..]), prefix.cache).unwrap();
+            let full = reference
+                .forward_t(Some(&input(&tokens)), None, None, None, None, None, false)
+                .unwrap();
             assert!(
-                cached.lm_logits.select(1, -1).allclose(
-                    &full.lm_logits.select(1, -1),
-                    1e-5,
-                    1e-5,
-                    false
-                ),
-                "one cached continuation should match the same token in a full decode"
+                cached
+                    .lm_logits
+                    .allclose(&full.lm_logits.narrow(1, 7, 1), 1e-5, 1e-5, false),
+                "a cached continuation at the final position should match a full decode"
             );
         });
     }

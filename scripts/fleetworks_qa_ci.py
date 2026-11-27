@@ -172,7 +172,8 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
                  "FLEETWORKS_QA_MODEL_TARGET": chat_model}
     extended_context = chat_model in GPT2_MODELS
     if extended_context:
-        model_env["FLEETWORKS_QA_MODEL_CONTEXT"] = "1"
+        model_env.update(FLEETWORKS_QA_RESPONSE_PLAN="1", FLEETWORKS_QA_DECODED_CLARIFICATION="1",
+                         FLEETWORKS_QA_GENERAL_DIALOGUE="1")
     window = GPT2_INPUT_WINDOW if extended_context else FLAN_INPUT_WINDOW
     started = time.monotonic()
     worker = root / pack.WORKER
@@ -313,11 +314,35 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
         return {"context": context, "delta_events": first_finding - 1, "composed": bool(reply),
                 "reply_ms": round((turn_finished - turn_started) * 1000, 1)}
 
+    def probe_context_limit(turn_id, padding):
+        nonlocal deadline
+        # Pinned GPT-2 tokenizes each space-prefixed x into one token. Keep the
+        # question within the wire byte limit while exercising the tokenizer limit.
+        summary = "Registration, warning (1 unread of 1)."
+        request = {
+            "turn_id": turn_id, "snapshot_id": turn_id,
+            "question": "Fixture labels:" + " x" * padding + ". What are my notifications?",
+            "passages": [], "dialogue": {"kind": "general", "history": []},
+            "plan": {"focus": f"Inbox notification groups reported by the desktop. {summary}",
+                     "note": "Use the reported groups.", "required_passages": []},
+        }
+        deadline = time.monotonic() + 25
+        send({"command": "ask", "request": request})
+        event, _, draft, _ = read_drafts(request)
+        if event.get("outcome") == "input_too_large":
+            pack.check(not draft and event.get("reply") is None and event.get("context") == {
+                "window_tokens": window, "model_windows": 0, "peak_input_tokens": 0,
+            }, "oversized GPT-2 prompt reached the decoder")
+            return None
+        context, reply = complete_turn(event)
+        pack.check(reply == summary, "GPT-2 changed the approved notification summary")
+        return context
+
     try:
         ready = {"reply": "ready_with_streaming", "protocol": 1,
                  "model_revision": pack.CHAT_MODELS[chat_model]["revision"]}
         if extended_context:
-            ready.update(reply="ready_with_streaming_context", window_tokens=window)
+            ready.update(reply="ready_with_general_dialogue", window_tokens=window)
         pack.check(receive() == ready, "chat checkpoint did not become ready with streaming")
         warm = time.monotonic()
         if extended_context:
@@ -356,8 +381,17 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
             long_operational = probe_operational("pack-long-operational-probe", long_question)
             pack.check(long_operational["context"]["peak_input_tokens"] > FLAN_INPUT_WINDOW,
                        "GPT-2 did not exercise an input above the FLAN window")
+            short = probe_context_limit("pack-short-context-probe", 0)
+            pack.check(short is not None, "short GPT-2 prompt unexpectedly exceeded its window")
+            remaining = window - short["peak_input_tokens"]
+            exact = probe_context_limit("pack-exact-context-probe", remaining)
+            pack.check(exact is not None and exact["peak_input_tokens"] == window,
+                       "GPT-2 did not accept the full prompt window")
+            pack.check(probe_context_limit("pack-over-context-probe", remaining + 1) is None,
+                       "GPT-2 accepted a prompt one token over its window")
             extended = {"long_operational_context": long_operational["context"],
-                        "long_operational_reply_ms": long_operational["reply_ms"]}
+                        "long_operational_reply_ms": long_operational["reply_ms"],
+                        "exact_prompt_context": exact, "oversized_prompt_rejected": True}
 
         send({"command": "shutdown"})
         pack.check(process.wait(timeout=10) == 0, "QA checkpoint worker did not shut down")

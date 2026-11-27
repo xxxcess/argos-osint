@@ -30,7 +30,6 @@ use rune_kit::shell;
 use rune_kit::shell::PaneState;
 use rune_kit::shell::RowStatus;
 use rune_kit::shell::Sidebar;
-use rune_kit::shell::SidebarHeader;
 use rune_kit::shell::SidebarRow;
 use rune_kit::shell::SplitView;
 use rune_kit::shell::Toolbar;
@@ -1519,11 +1518,6 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
             );
 
         if state.connected() {
-            sidebar = sidebar.child(
-                SidebarHeader::new("Operations")
-                    .build(&kit)
-                    .key("sidebar-operations-heading"),
-            );
             for page in Page::ALL.into_iter().filter(|page| *page != Page::Seed) {
                 let selected = !state.setup_gateway && state.page == page;
                 let mut row_builder = SidebarRow::new(page.title())

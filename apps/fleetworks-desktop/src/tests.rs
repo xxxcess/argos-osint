@@ -123,6 +123,7 @@ fn real_shell_navigation_works_offline_without_boundary_effects() {
     );
     connected.frame(0.0);
     assert!(connected.find("sidebar-context-footer").is_none());
+    assert!(connected.find("sidebar-operations-heading").is_none());
     assert!(connected.find("deployment").is_none());
     assert!(connected.find("gateway-status-header").is_none());
     assert!(connected.find("connection-editor").is_none());

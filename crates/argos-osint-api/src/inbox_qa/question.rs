@@ -196,7 +196,7 @@ pub(super) fn contextual_subject(question: &str) -> Option<(Question, Option<&st
     grounded_only.map(|intent| (intent, None))
 }
 
-fn general_clause(text: &str) -> bool {
+pub(super) fn general_clause(text: &str) -> bool {
     let folded = text.to_ascii_lowercase();
     let scoped = folded
         .split(|ch: char| !ch.is_ascii_alphabetic())

@@ -103,6 +103,52 @@ impl Resolution {
     }
 }
 
+/// An attachment from an earlier composer action can survive a new question.
+/// Ignore it only when the question can stand on its own without the source.
+pub(super) fn ignores_selected_source(question: &str, intent: Question) -> bool {
+    if intent != Question::Unsupported || !question::general_clause(question) {
+        return false;
+    }
+    let normalized = normalize(question);
+    if reference_request(&normalized)
+        || subject_question(&normalized).is_some()
+        || normalized == "what went wrong"
+    {
+        return false;
+    }
+    let mut previous = "";
+    for word in normalized
+        .split(|ch: char| !ch.is_ascii_alphabetic())
+        .filter(|word| !word.is_empty())
+    {
+        if matches!(word, "selected" | "attached")
+            || matches!(
+                (previous, word),
+                (
+                    "the" | "that",
+                    "job"
+                        | "cycle"
+                        | "check"
+                        | "failure"
+                        | "error"
+                        | "log"
+                        | "logs"
+                        | "source"
+                        | "notification"
+                        | "alert"
+                        | "readiness"
+                        | "workstation"
+                        | "backend"
+                ) | ("that", "mean" | "indicate" | "happen" | "compare")
+            )
+        {
+            return false;
+        }
+        previous = word;
+    }
+    previous != "that"
+}
+
 /// Resolve only known routing forms and standalone selections. Parser hints never
 /// grant access, identify a resource, or override the established routing allowlist.
 pub(super) fn resolve(
@@ -113,6 +159,7 @@ pub(super) fn resolve(
     previous: Option<&Focus>,
     pending: Option<&PendingClarification>,
 ) -> Resolution {
+    let selected = selected.filter(|_| !ignores_selected_source(question, original));
     if features.status != Status::Complete {
         if original == Question::Unsupported {
             if let Some(contextual) = Resolution::with_context(question, selected, Vec::new()) {
@@ -1071,6 +1118,76 @@ mod tests {
         assert_eq!(result.intent, Question::ExplainSelected);
         assert_eq!(result.source.as_ref(), Some(&source));
         assert!(result.general_clause.is_none());
+    }
+
+    #[test]
+    fn a_standalone_general_question_ignores_a_retained_source_with_or_without_nlp() {
+        let source =
+            ChatSourceReference::new(ChatSourceKind::Readiness, "registration".into()).unwrap();
+        for features in [complete(), Features::terminal(Status::Disabled)] {
+            for prompt in ["who is obama?", "What is a search index?"] {
+                let result = resolve(
+                    prompt,
+                    Some(&source),
+                    question::classify(prompt),
+                    &features,
+                    None,
+                    None,
+                );
+                assert_eq!(result.intent, Question::Unsupported, "{prompt}");
+                assert!(result.source.is_none(), "{prompt}");
+                assert!(result.focus.is_none(), "{prompt}");
+                assert!(result.general_clause.is_none(), "{prompt}");
+            }
+            for (prompt, general) in [
+                ("What does the selected check indicate?", None),
+                ("What does that error mean?", None),
+                ("What does that mean?", None),
+                (
+                    "What happened with this readiness check? Explain DNS.",
+                    Some("Explain DNS."),
+                ),
+            ] {
+                let result = resolve(
+                    prompt,
+                    Some(&source),
+                    question::classify(prompt),
+                    &features,
+                    None,
+                    None,
+                );
+                assert_eq!(result.intent, Question::ExplainSelected, "{prompt}");
+                assert_eq!(result.source.as_ref(), Some(&source), "{prompt}");
+                assert_eq!(result.general_clause.as_deref(), general, "{prompt}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_retained_source_does_not_override_a_named_historical_readiness_question() {
+        let prompt = "What happened to the index since yesterday?";
+        let source =
+            ChatSourceReference::new(ChatSourceKind::Readiness, "registration".into()).unwrap();
+        let mut features = complete();
+        features.subjects.push(span(prompt, "index"));
+        features.temporal.push(TemporalCandidate {
+            span: span(prompt, "since yesterday"),
+            scope: TemporalScope::Historical(interval()),
+        });
+        let result = resolve(
+            prompt,
+            Some(&source),
+            question::classify(prompt),
+            &features,
+            None,
+            None,
+        );
+        assert_eq!(
+            result.intent,
+            Question::ReadinessExplanation(ReadinessCheckId::ActorSearch)
+        );
+        assert!(result.source.is_none());
+        assert_eq!(result.focus.unwrap().temporal, Some(interval()));
     }
 
     #[test]

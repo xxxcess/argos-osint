@@ -837,7 +837,10 @@ pub(crate) async fn submit_request(
     request.validate().map_err(|_| crate::bad())?;
     context.revalidate(&state.repo).await?;
     let intent = question::classify(&request.question);
-    require_evidence_permission(context, intent, request.source.as_ref())?;
+    let ignores_attachment = request.source.is_some()
+        && conversation::ignores_selected_source(&request.question, intent);
+    let selected = request.source.as_ref().filter(|_| !ignores_attachment);
+    require_evidence_permission(context, intent, selected)?;
     if let Some(turn) = store::replay(&state.repo, &actor, &request)
         .await
         .map_err(storage_error)?
@@ -867,14 +870,15 @@ pub(crate) async fn submit_request(
         deadline,
     )
     .await;
-    let may_reuse = matches!(
-        intent,
-        Question::FollowUp
-            | Question::StatusChecksFollowUp(..)
-            | Question::ChooseSubject
-            | Question::ExplainSelected
-            | Question::Unsupported,
-    );
+    let may_reuse = !ignores_attachment
+        && matches!(
+            intent,
+            Question::FollowUp
+                | Question::StatusChecksFollowUp(..)
+                | Question::ChooseSubject
+                | Question::ExplainSelected
+                | Question::Unsupported,
+        );
     let read_previous = async {
         if may_reuse {
             store::last_answered_prompt(&state.repo, &actor).await

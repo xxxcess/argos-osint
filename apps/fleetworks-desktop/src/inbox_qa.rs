@@ -318,12 +318,10 @@ impl Default for InboxQa {
 
 impl InboxQa {
     fn begin_submission(&mut self, request: QaTurnRequest) {
-        // Transport retries reuse the submitted request. Later questions can
-        // keep using the selected source without inheriting the notice action.
+        // The pending request retains the attachment for transport retries.
+        // The next question starts without an attachment.
         self.pending = Some(Pending::new(request));
-        if let Some(source) = &mut self.source {
-            source.origin = SourceOrigin::Selection;
-        }
+        self.source = None;
         self.history.select(None);
         self.reset_sources_view();
         self.status = None;
@@ -2879,9 +2877,10 @@ mod tests {
     }
 
     #[test]
-    fn composer_can_include_the_selected_readiness_check() {
-        let mut runtime = active_drawer((640.0, 480.0));
+    fn composer_includes_the_selected_readiness_check_for_one_submission() {
+        let mut runtime = qa_drawer((640.0, 480.0), None);
         let key = "inbox-qa-pin-source";
+        let clear_key = "inbox-qa-clear-source";
         assert!(runtime.find(key).is_none());
 
         runtime.update(|state, _| state.selected_readiness = Some("actor_search".into()));
@@ -2891,6 +2890,42 @@ mod tests {
             .accessibility_json()
             .to_string()
             .contains("Include readiness"));
+
+        press_disclosure(&mut runtime, key, 1.25);
+        assert!(runtime.find(clear_key).is_some());
+        runtime.update(|state, _| {
+            let context = state.registration.context.as_ref().unwrap();
+            let request = state
+                .inbox_question_request(
+                    "fixture-readiness-request".into(),
+                    context,
+                    "What happened with this readiness check?",
+                )
+                .unwrap();
+            let source = request.source.as_ref().unwrap();
+            assert_eq!(source.kind, ChatSourceKind::Readiness);
+            assert_eq!(source.id, "actor_search");
+            let turn = QaTurn::queued(
+                "fixture-readiness-turn".into(),
+                request.request_id.clone(),
+                request.question.clone(),
+            );
+            state.inbox_qa.begin_submission(request.clone());
+            assert_eq!(state.inbox_qa.pending.as_ref().unwrap().request, request);
+            assert!(state.inbox_qa.accept_pending(&turn));
+
+            let follow_up = state
+                .inbox_question_request(
+                    "fixture-general-request".into(),
+                    state.registration.context.as_ref().unwrap(),
+                    "What is the capital of Japan?",
+                )
+                .unwrap();
+            assert!(follow_up.source.is_none());
+        });
+        runtime.frame(1.75);
+        assert!(runtime.find(clear_key).is_none());
+        assert!(runtime.find(key).is_some());
     }
 
     #[test]
@@ -2934,7 +2969,7 @@ mod tests {
             state.inbox_qa.begin_submission(submitted.clone());
             assert_eq!(state.inbox_qa.pending.as_ref().unwrap().request, submitted);
             let follow_up = prepare(state, "fixture-job-follow-up");
-            assert_eq!(follow_up.source, submitted.source);
+            assert!(follow_up.source.is_none());
             assert!(!follow_up.job_notification);
         });
     }

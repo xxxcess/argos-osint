@@ -540,9 +540,12 @@ def exercise(request, registration, model, readiness, running_jobs):
     help_turn = ask("help", "What can you help with?", mode="dialogue")
     require(help_turn.get("conversation") == "help" and not help_turn["findings"],
             "the assistant did not explain how to start a task")
-    general = ask("general-knowledge", "What is the capital of Japan?", mode="dialogue")
+    general = settled_turn(
+        request, context, "general-knowledge", "What is the capital of Japan?", mode="dialogue",
+        source={"kind": "job", "id": "missing-stale-job-attachment"},
+    )
     require(not general["findings"] and "tokyo" in general["reply"].casefold(),
-            "the generator did not answer the general question from its own knowledge")
+            "the stale job attachment overrode the general question")
 
     history = request("history")
     require(1 < len(history) <= 16 and history[0] == general and jobs in history
@@ -566,6 +569,12 @@ def exercise(request, registration, model, readiness, running_jobs):
     when = ask("time-clarification", "Is actor search ready since last week?", mode="dialogue")
     require(when["reply"].endswith("?") and "time" in when["reply"].casefold(),
             "the generator did not ask for the ambiguous time range")
+    general_with_readiness = settled_turn(
+        request, context, "general-with-readiness", "What is the capital of Japan?", mode="dialogue",
+        source={"kind": "readiness", "id": "registration"},
+    )
+    require("tokyo" in general_with_readiness["reply"].casefold(),
+            "the stale readiness attachment overrode the general question")
     mixed = ask("general-with-memory", "What is the current memory usage, and what is RAM?")
     require(mixed["findings"][0]["source"] == {"kind": "host_metric", "id": "memory"},
             "the general explanation lost its current memory observation")

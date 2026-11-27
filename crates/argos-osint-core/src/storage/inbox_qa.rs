@@ -474,6 +474,9 @@ struct Exchange {
     resolved_question: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resolved_source: Option<ChatSourceReference>,
+    /// Keep the submitted source for replay matching when routing ignores it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    source_ignored: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     observation: Option<Observation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -494,7 +497,9 @@ impl Exchange {
     }
 
     fn subject(&self) -> Option<&ChatSourceReference> {
-        self.resolved_source.as_ref().or(self.source.as_ref())
+        self.resolved_source
+            .as_ref()
+            .or_else(|| self.source.as_ref().filter(|_| !self.source_ignored))
     }
 
     fn private_citation_ids(&self) -> impl Iterator<Item = &str> {
@@ -1321,6 +1326,7 @@ pub async fn admit(
                 resolved_question: (request.question != evidence.request.question)
                     .then(|| evidence.request.question.clone()),
                 resolved_source: metadata.subject.as_ref().filter(|source| Some(*source) != request.source.as_ref()).cloned(),
+                source_ignored: metadata.subject.is_none() && request.source.is_some(),
                 observation: metadata.observation.clone(),
                 status_check_tally: metadata.status_check_tally,
                 generator_generation: Some(state.generation),

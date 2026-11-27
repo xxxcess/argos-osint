@@ -901,7 +901,7 @@ pub(crate) fn drawer(
     let max_notifications_height = cx
         .layout_with("inbox-panel-position", |rect| rect[3] * 0.5)
         .unwrap_or(240.0);
-    let mut panel = body(state, kit, preferences, max_notifications_height)
+    let mut panel = body(state, cx, kit, preferences, max_notifications_height)
         .w(DRAWER_WIDTH)
         .max_w(DRAWER_WIDTH)
         .h_full()
@@ -970,6 +970,7 @@ fn enter(el: El, preferences: ViewPreferences, transition: rune::Transition) -> 
 
 fn body(
     state: &State,
+    cx: &Cx<State>,
     kit: &Kit,
     preferences: ViewPreferences,
     max_notifications_height: f32,
@@ -1036,7 +1037,11 @@ fn body(
         .scroll_anchor()
         .child(rows.padding(12.0));
     let transcript = state.inbox_qa_visible().then(|| {
-        let chat = crate::inbox_qa::exchange(state, kit, preferences);
+        const PADDING: f32 = 12.0;
+        let reply_min_height = cx
+            .layout_with(SCROLL, |rect| (rect[3] - 2.0 * PADDING).max(0.0))
+            .unwrap_or(0.0);
+        let chat = crate::inbox_qa::exchange(state, kit, preferences, reply_min_height);
         rune::col()
             .w_full()
             .grow(1.0)
@@ -1058,8 +1063,9 @@ fn body(
                     .on_at_bottom(|state: &mut State, at_bottom| {
                         state.inbox.transcript_at_bottom = at_bottom;
                     })
-                    .child(rune::col().w_full().padding(12.0).children(chat)),
+                    .child(rune::col().w_full().padding(PADDING).children(chat)),
             )
+            .children(crate::inbox_qa::transcript_footer(state, kit, preferences))
     });
     rune::col()
         .key("inbox-body")

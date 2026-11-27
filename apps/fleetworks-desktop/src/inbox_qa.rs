@@ -44,6 +44,7 @@ use fleetworks_contracts::Client;
 use fleetworks_contracts::ClientError;
 use fleetworks_workstation::native::BackendKind;
 use rune::El;
+use rune::Icon;
 use rune::Key;
 use rune::KeyEvent;
 use rune::LiveRegion;
@@ -82,6 +83,7 @@ const HISTORY_PREVIOUS: &str = "inbox-qa-history-previous";
 const HISTORY_NEXT: &str = "inbox-qa-history-next";
 const HISTORY_ARROW_SIZE: f32 = 28.0;
 const CONTEXT_DIAL: &str = "inbox-qa-context";
+const TRANSCRIPT_FOOTER: &str = "inbox-qa-transcript-footer";
 const RESPONSE_TIME: &str = "inbox-qa-response-time";
 const PREVIOUS_EXCHANGE_USED: &str = "inbox-qa-previous-exchange-used";
 const SETTINGS_CONTROL: &str = "inbox-qa-toggle";
@@ -1659,43 +1661,47 @@ fn answer_state(turn: &QaTurn, has_text: bool) -> chat_ui::TurnState {
     }
 }
 
-fn answer_annotations(turn_id: &str, findings: &[QaFinding], reply: &str, kit: &Kit) -> El {
-    let active_turn_id = turn_id.to_owned();
-    let trigger = IconButton::new(&icons::SOURCES)
-        .variant(IconButtonVariant::Ghost)
-        .control_size(ControlSize::Large)
-        .label(format!("Sources ({})", findings.len()))
-        .help("View sources for this reply")
-        .on_press_tx(move |state: &mut State, tx| {
-            state.show_inbox_qa_sources(&active_turn_id, tx);
-        })
-        .build(kit)
-        .key(SOURCES_TOGGLE);
+fn answer_observations(findings: &[QaFinding], reply: &str, kit: &Kit) -> Option<El> {
     let show_observations = !reply.is_empty()
         && findings
             .iter()
             .any(|finding| !reply.contains(finding.text.as_str()));
-    rune::col()
-        .w_full()
-        .min_w(0.0)
-        .gap(4.0)
-        .children(show_observations.then(|| {
-            rune::col()
-                .gap(3.0)
-                .label("Workstation observations")
-                .child(
-                    rune::text("Workstation observations")
-                        .font(kit.ty.small_medium)
-                        .color(kit.c.text_muted),
-                )
-                .children(findings.iter().map(|finding| {
-                    rune::text(finding.text.as_str())
-                        .font(kit.ty.small)
-                        .color(kit.c.std_text)
-                        .wrap_anywhere()
-                }))
-        }))
-        .child(rune::row().w_full().justify_end().child(trigger))
+    show_observations.then(|| {
+        rune::col()
+            .w_full()
+            .min_w(0.0)
+            .gap(3.0)
+            .label("Workstation observations")
+            .child(
+                rune::text("Workstation observations")
+                    .font(kit.ty.small_medium)
+                    .color(kit.c.text_muted),
+            )
+            .children(findings.iter().map(|finding| {
+                rune::text(finding.text.as_str())
+                    .font(kit.ty.small)
+                    .color(kit.c.std_text)
+                    .wrap_anywhere()
+            }))
+    })
+}
+
+fn transcript_icon(glyph: &'static Icon) -> IconButton {
+    IconButton::new(glyph)
+        .variant(IconButtonVariant::Ghost)
+        .control_size(ControlSize::Large)
+}
+
+fn sources_button(turn: &QaTurn, kit: &Kit) -> El {
+    let turn_id = turn.turn_id.clone();
+    transcript_icon(&icons::SOURCES)
+        .label(format!("Sources ({})", turn.findings.len()))
+        .help("View sources for this reply")
+        .on_press_tx(move |state: &mut State, tx| {
+            state.show_inbox_qa_sources(&turn_id, tx);
+        })
+        .build(kit)
+        .key(SOURCES_TOGGLE)
 }
 
 fn sources_view(turn: &QaTurn, kit: &Kit, preferences: ViewPreferences) -> El {
@@ -1950,16 +1956,19 @@ fn response_time(milliseconds: u64, kit: &Kit) -> El {
         )
 }
 
-pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -> Option<El> {
+pub(crate) fn exchange(
+    state: &State,
+    kit: &Kit,
+    preferences: ViewPreferences,
+    min_height: f32,
+) -> Option<El> {
     if !state.inbox_qa_visible() {
         return None;
     }
     let qa = &state.inbox_qa;
     let browsing = state.browsed_inbox_qa_turn().is_some();
     let pending = qa.pending.as_ref().filter(|_| !browsing);
-    let displayed_turn = state
-        .displayed_inbox_qa_turn()
-        .filter(|_| pending.is_none());
+    let displayed_turn = state.displayed_inbox_qa_turn();
     if let Some(turn) =
         displayed_turn.filter(|turn| state.displayed_sources_open() && !turn.findings.is_empty())
     {
@@ -1971,46 +1980,34 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
                 .child(sources_view(turn, kit, preferences)),
         );
     }
-    let (
-        question,
-        stage,
-        answer,
-        findings,
-        request_id,
-        turn_id,
-        usage,
-        [accepted_at, completed_at],
-    ) = if let Some(pending) = pending {
-        (
-            pending.request.question.as_str(),
-            chat_ui::TurnState::Queued,
-            String::new(),
-            &[][..],
-            pending.request.request_id.as_str(),
-            None,
-            None,
-            [Some(pending.sent_at), None],
-        )
-    } else if let Some(turn) = displayed_turn {
-        let reply = match turn.state {
-            QaTurnState::Answered => turn.reply.as_deref(),
-            QaTurnState::Running => turn.provisional_reply.as_deref(),
-            _ => None,
-        }
-        .filter(|reply| !reply.trim().is_empty());
-        (
-            turn.question.as_str(),
-            answer_state(turn, reply.is_some()),
-            reply.unwrap_or_default().to_owned(),
-            turn.findings.as_slice(),
-            turn.request_id.as_str(),
-            Some(turn.turn_id.as_str()),
-            turn.context,
-            [turn.accepted_at, turn.completed_at],
-        )
-    } else {
-        return None;
-    };
+    let (question, stage, answer, findings, request_id, [accepted_at, completed_at]) =
+        if let Some(pending) = pending {
+            (
+                pending.request.question.as_str(),
+                chat_ui::TurnState::Queued,
+                String::new(),
+                &[][..],
+                pending.request.request_id.as_str(),
+                [Some(pending.sent_at), None],
+            )
+        } else if let Some(turn) = displayed_turn {
+            let reply = match turn.state {
+                QaTurnState::Answered => turn.reply.as_deref(),
+                QaTurnState::Running => turn.provisional_reply.as_deref(),
+                _ => None,
+            }
+            .filter(|reply| !reply.trim().is_empty());
+            (
+                turn.question.as_str(),
+                answer_state(turn, reply.is_some()),
+                reply.unwrap_or_default().to_owned(),
+                turn.findings.as_slice(),
+                turn.request_id.as_str(),
+                [turn.accepted_at, turn.completed_at],
+            )
+        } else {
+            return None;
+        };
     let question = chat_ui::ChatMessage {
         id: "inbox-qa-question".into(),
         role: chat_ui::Role::Operator,
@@ -2027,9 +2024,7 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
         text: answer,
         citations: Vec::new(),
     };
-    let sources = turn_id
-        .filter(|_| !findings.is_empty())
-        .map(|turn_id| answer_annotations(turn_id, findings, &answer.text, kit));
+    let observations = answer_observations(findings, &answer.text, kit);
     let live_region = if answer.state == chat_ui::TurnState::Streaming {
         LiveRegion::Off
     } else {
@@ -2045,8 +2040,11 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
             preferences,
         ))
         .child(crate::inbox::enter_from_below(
-            message_row(chat_ui::inbox_answer(&answer, sources, kit), ANSWER_ROW)
-                .live_region(live_region),
+            message_row(
+                chat_ui::inbox_answer(&answer, observations, kit),
+                ANSWER_ROW,
+            )
+            .live_region(live_region),
             preferences,
         ));
     // Admission and streaming keep the same request key as the queued draft.
@@ -2078,31 +2076,67 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
                 .center()
                 .child(response_time(milliseconds, kit))
         });
-    let context = rune::row()
-        .w_full()
-        .gap(6.0)
-        .flex_wrap()
-        .center()
-        .child(context_dial(usage, kit))
-        .children(
-            terminal_turn
-                .filter(|turn| turn.used_previous_exchange)
-                .map(|_| {
-                    rune::text("Used previous exchange")
-                        .key(PREVIOUS_EXCHANGE_USED)
-                        .font(kit.ty.text_xsmall)
-                        .color(kit.c.text_muted)
-                }),
-        );
     Some(
         rune::col()
             .key("inbox-qa-exchange")
             .w_full()
             .min_w(0.0)
+            .min_h(min_height)
+            .justify_center()
             .gap(5.0)
             .children(timing)
-            .child(transcript)
-            .child(context),
+            .child(transcript),
+    )
+}
+
+pub(crate) fn transcript_footer(
+    state: &State,
+    kit: &Kit,
+    preferences: ViewPreferences,
+) -> Option<El> {
+    let displayed_turn = state.displayed_inbox_qa_turn();
+    let has_exchange = displayed_turn.is_some() || state.inbox_qa.pending.is_some();
+    let attachment = source_control(state, kit, preferences);
+    if !has_exchange && attachment.is_none() {
+        return None;
+    }
+    let context = has_exchange.then(|| {
+        rune::row()
+            .gap(6.0)
+            .center_y()
+            .shrink()
+            .child(context_dial(
+                displayed_turn.and_then(|turn| turn.context),
+                kit,
+            ))
+            .children(
+                displayed_turn
+                    .filter(|turn| turn.state.is_terminal() && turn.used_previous_exchange)
+                    .map(|_| {
+                        rune::text("Used previous exchange")
+                            .key(PREVIOUS_EXCHANGE_USED)
+                            .font(kit.ty.text_xsmall)
+                            .color(kit.c.text_muted)
+                            .shrink()
+                            .truncate()
+                    }),
+            )
+    });
+    let sources = displayed_turn
+        .filter(|turn| !turn.findings.is_empty() && !state.displayed_sources_open())
+        .map(|turn| sources_button(turn, kit));
+    Some(
+        rune::row()
+            .key(TRANSCRIPT_FOOTER)
+            .w_full()
+            .h(36.0)
+            .px(12.0)
+            .gap(6.0)
+            .center_y()
+            .children(context)
+            .child(rune::spacer())
+            .children(attachment)
+            .children(sources),
     )
 }
 
@@ -2195,28 +2229,22 @@ fn footer_content(state: &State, kit: &Kit, preferences: ViewPreferences) -> El 
     if qa.active().is_some() && state.browsed_inbox_qa_turn().is_some() {
         content = content.child(hint("A newer exchange is running.", kit).role("status"));
     }
-    let source = source_control(state, editing_disabled, kit, preferences);
-    footer_layer(
-        content
-            .child(message_row)
-            .children(source.map(|control| rune::row().child(control))),
-        preferences,
-    )
+    footer_layer(content.child(message_row), preferences)
 }
 
-fn source_control(
-    state: &State,
-    disabled: bool,
-    kit: &Kit,
-    preferences: ViewPreferences,
-) -> Option<El> {
-    if let Some(source) = &state.inbox_qa.source {
+fn source_control(state: &State, kit: &Kit, preferences: ViewPreferences) -> Option<El> {
+    let ready = state.inbox_generator_ready();
+    let qa = &state.inbox_qa;
+    if !state.permission(Permission::SubmitInteractive) || (!ready && qa.active().is_none()) {
+        return None;
+    }
+    let disabled = !ready || qa.pending.is_some();
+    if let Some(source) = &qa.source {
         let label = &source.label;
         let kind = citation_kind(source.reference.kind).to_lowercase();
-        let remove = IconButton::new(kit.glyph.close)
-            .variant(IconButtonVariant::GhostMuted)
-            .control_size(ControlSize::Small)
+        let remove = transcript_icon(kit.glyph.close)
             .label(format!("Remove {kind} source: {label}"))
+            .help(format!("Remove attached evidence: {label}"))
             .disabled(disabled)
             .on_press_tx(|state: &mut State, tx| {
                 state.inbox_qa.source = None;
@@ -2230,6 +2258,7 @@ fn source_control(
                 .role("group")
                 .label(format!("Attached evidence: {label}"))
                 .center_y()
+                .max_w(152.0)
                 .shrink()
                 .min_w(0.0)
                 .pl(8.0)
@@ -2257,18 +2286,20 @@ fn source_control(
     let current = assistant::current_context(state);
     let source = assistant::source_for(&current)?;
     Some(
-        ActionButton::new(format!("Include {}", current.kind.to_lowercase()))
-            .key("inbox-qa-pin-source")
-            .finish(MetalFinish::Gunmetal)
+        transcript_icon(&icons::PAPERCLIP)
+            .label(format!("Include {}", current.kind.to_lowercase()))
+            .help(format!("Attach evidence: {}", current.label))
             .disabled(disabled)
-            .on_press(move |state: &mut State| {
+            .on_press_tx(move |state: &mut State, tx| {
                 state.inbox_qa.source = Some(SelectedSource {
                     reference: source.clone(),
                     label: current.label.clone(),
                     origin: SourceOrigin::Selection,
                 });
+                tx.focus(COMPOSER, tx.focus_visible());
             })
-            .build(kit, preferences, None),
+            .build(kit)
+            .key("inbox-qa-pin-source"),
     )
 }
 
@@ -2487,6 +2518,7 @@ mod tests {
             assert!(runtime.find(COMPOSER).is_some());
             assert!(runtime.find(SOURCES_TOGGLE).is_none());
             assert!(runtime.find(CONTEXT_DIAL).is_none());
+            assert!(runtime.find(TRANSCRIPT_FOOTER).is_none());
             assert!(runtime.state.inbox_qa.latest.is_none());
             assert!(runtime.state.inbox_qa.pending.is_none());
 
@@ -2517,6 +2549,77 @@ mod tests {
             runtime.frame(1.25);
             let rendered = runtime.accessibility_json().to_string();
             assert!(rendered.contains("Assistant message") && rendered.contains(FINDING));
+        }
+    }
+
+    #[test]
+    fn transcript_centers_short_bubbles_and_keeps_long_bubbles_scrollable() {
+        for (size, expect_spare_room) in [((640.0, 480.0), false), ((1280.0, 800.0), true)] {
+            let mut runtime = active_drawer(size);
+            let (viewport, _) = runtime.presented(crate::inbox::SCROLL).unwrap();
+            let (pair, _) = runtime.presented("inbox-qa-turn-fixture-request").unwrap();
+            let fits = pair[3] + 24.0 <= viewport[3];
+            if expect_spare_room {
+                assert!(
+                    fits,
+                    "short fixture must fit at {size:?}: {pair:?} vs {viewport:?}"
+                );
+            }
+            if fits {
+                assert!((pair[1] + pair[3] * 0.5 - viewport[1] - viewport[3] * 0.5).abs() < 0.5);
+            } else {
+                assert_eq!(runtime.scroll_at_bottom(crate::inbox::SCROLL), Some(true));
+            }
+
+            runtime.update(|state, tx| {
+                let mut running = turn(QaTurnState::Running, 2);
+                running.provisional_reply =
+                    Some("The search service is still warming up. ".repeat(75));
+                state.inbox_qa.adopt(Some(running));
+                tx.scroll_to_y(crate::inbox::SCROLL, 0.0);
+            });
+            runtime.frame(1.0);
+            let (question, _) = runtime.presented(QUESTION_ROW).unwrap();
+            assert!((question[1] - viewport[1] - 12.0).abs() < 0.5);
+            assert_eq!(runtime.scroll_at_bottom(crate::inbox::SCROLL), Some(false));
+        }
+    }
+
+    #[test]
+    fn transcript_keeps_evidence_actions_together_above_the_composer() {
+        for size in [(640.0, 480.0), (1280.0, 800.0)] {
+            const ATTACH: &str = "inbox-qa-pin-source";
+            const ATTACHED: &str = "inbox-qa-attached-source";
+            const REMOVE: &str = "inbox-qa-clear-source";
+            let mut runtime = qa_drawer(size, Some(turn(QaTurnState::Answered, 3)));
+            runtime.update(|state, _| state.selected_readiness = Some("actor_search".into()));
+            runtime.frame(1.0);
+
+            let (toolbar, _) = runtime.presented(TRANSCRIPT_FOOTER).unwrap();
+            let (scroll, _) = runtime.presented(crate::inbox::SCROLL).unwrap();
+            let (composer, _) = runtime.presented("inbox-qa-footer").unwrap();
+            let (sources, _) = runtime.presented(SOURCES_TOGGLE).unwrap();
+            assert!(scroll[1] + scroll[3] <= toolbar[1] + 0.5);
+            assert!(toolbar[1] + toolbar[3] <= composer[1] + 0.5);
+            let (attach, _) = runtime.presented(ATTACH).unwrap();
+            assert!(attach[0] + attach[2] <= sources[0]);
+            assert!((attach[1] - sources[1]).abs() < 0.5);
+            assert!((sources[0] + sources[2] - toolbar[0] - toolbar[2] + 12.0).abs() < 0.5);
+
+            press_disclosure(&mut runtime, ATTACH, 1.25);
+            let (attached, _) = runtime.presented(ATTACHED).unwrap();
+            assert!(attached[0] + attached[2] <= sources[0]);
+            assert_eq!(runtime.presented(TRANSCRIPT_FOOTER).unwrap().0, toolbar);
+            assert!(runtime
+                .accessibility_json()
+                .to_string()
+                .contains("Attached evidence: Readiness: actor_search"));
+
+            press_disclosure(&mut runtime, REMOVE, 1.5);
+            assert!(runtime.find(ATTACHED).is_none());
+            assert!(runtime.find(ATTACH).is_some());
+            assert_eq!(runtime.presented(SOURCES_TOGGLE).unwrap().0, sources);
+            assert!(runtime.state.inbox_qa.draft.focused);
         }
     }
 
@@ -3169,13 +3272,14 @@ mod tests {
         let pair_center = pair[0] + pair[2] * 0.5;
         assert!(duration[1] + duration[3] <= pair[1] + 0.5);
         assert!((duration[0] + duration[2] * 0.5 - pair_center).abs() < 1.0);
+        let (toolbar, _) = runtime.presented(TRANSCRIPT_FOOTER).unwrap();
+        let (composer, _) = runtime.presented("inbox-qa-footer").unwrap();
+        assert!((context[0] - toolbar[0] - 12.0).abs() < 0.5);
+        assert!(previous[0] >= context[0] + context[2]);
+        assert!(toolbar[1] + toolbar[3] <= composer[1] + 0.5);
         for rect in [context, previous] {
-            assert!(rect[1] >= pair[1] + pair[3] - 0.5);
-            assert!(rect[0] >= pair[0] - 0.5 && rect[0] + rect[2] <= pair[0] + pair[2] + 0.5);
+            assert!(rect[1] >= toolbar[1] && rect[1] + rect[3] <= toolbar[1] + toolbar[3]);
         }
-        let context_left = context[0].min(previous[0]);
-        let context_right = (context[0] + context[2]).max(previous[0] + previous[2]);
-        assert!(((context_left + context_right) * 0.5 - pair_center).abs() < 1.0);
 
         runtime.update(|state, _| {
             state.inbox_qa.latest.as_mut().unwrap().context = Some(QaContextUsage::new(
@@ -3265,8 +3369,10 @@ mod tests {
             assert_eq!(toggle.role, "button");
             assert_eq!(toggle.label.as_deref(), Some("Sources (2)"));
             assert_eq!(toggle.expanded, None);
-            let (bubble, _) = runtime.presented(REPLY).unwrap();
-            assert!((bubble[0] + bubble[2] - toggle.rect[0] - toggle.rect[2] - 10.0).abs() < 2.0);
+            let (toolbar, _) = runtime.presented(TRANSCRIPT_FOOTER).unwrap();
+            assert!((toolbar[0] + toolbar[2] - toggle.rect[0] - toggle.rect[2] - 12.0).abs() < 0.5);
+            assert!(toggle.visible == toggle.rect);
+            assert!(toggle.rect[1] >= scroll[1] + scroll[3] - 0.5);
             assert!(!runtime.accessibility_json().to_string().contains(FINDING));
             let (exchange, _) = runtime.presented("inbox-qa-exchange").unwrap();
             assert_eq!(

@@ -697,6 +697,7 @@ mod native {
             turn.cursor = 3;
         }
         if stage == QaTurnState::Answered {
+            state.selected_readiness = Some("actor_search".into());
             turn.reply = Some(if let Some(finding) = additional_finding {
                 let reply = format!("Actor search is ready. {}", finding.text);
                 turn.findings.push(finding);

@@ -108,13 +108,12 @@ fn select_target(
     let limit = available_memory
         .saturating_sub(WORKSTATION_RESERVE)
         .min(operator_limit);
-    let target = preference.explicit_target().unwrap_or_else(|| {
-        if limit >= GPT2_SMALL_RESIDENT_LIMIT {
-            QaModelTarget::Gpt2Small
-        } else {
-            QaModelTarget::FlanT5Small
-        }
-    });
+    let automatic_target = if limit >= GPT2_SMALL_RESIDENT_LIMIT {
+        QaModelTarget::Gpt2Small
+    } else {
+        QaModelTarget::FlanT5Small
+    };
+    let target = preference.explicit_target().unwrap_or(automatic_target);
     (limit >= resident_limit(target)).then_some(target)
 }
 

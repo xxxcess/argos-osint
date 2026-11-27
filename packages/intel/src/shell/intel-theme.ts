@@ -54,11 +54,16 @@ export const intelKindColors = {
 };
 export const intelKindFills = {
   actor: "rgba(255,179,71,0.12)",
-  article: "rgba(95,211,154,0.15)",
   claim: "rgba(33,217,238,0.12)",
   inference: "rgba(180,142,255,0.14)",
   link: "rgba(255,106,150,0.14)",
   focus: intelColors.selectionSurface,
+};
+export const intelLoadingTints = {
+  search: { baseColor: "#20363D", sheenColor: "rgba(116,216,221,0.06)" },
+  article: { baseColor: "#263831", sheenColor: "rgba(146,215,177,0.06)" },
+  actor: { baseColor: "#382D26", sheenColor: "rgba(221,175,130,0.06)" },
+  dossier: { baseColor: "#2E283F", sheenColor: "rgba(182,156,224,0.06)" },
 };
 export const intelEffects = {
   accentGlow: "none",
@@ -122,5 +127,4 @@ export const intelStatus = Object.fromEntries(
 export const landingColors = {
   core: "#FFB347",
   coreGlow: "#FFB347",
-  pendingFill: "rgba(255,179,71,0.12)",
 };

@@ -9,6 +9,7 @@ import {
 } from "react-native";
 import {
   intelColors as c,
+  intelLoadingTints,
   intelMetricColors,
   intelRadius,
   intelStatus,
@@ -266,7 +267,7 @@ export function IntelStatusBar({
                     <Skeleton
                       width={34}
                       height={13}
-                      baseColor={c.selectionSurface}
+                      tint={intelLoadingTints.search}
                     />
                   ) : (
                     <Text style={s.retryText}>Retry</Text>

@@ -1,7 +1,7 @@
 "use client";
 import React, { useState } from "react";
 import { ROCK_TILE, rockTileImage } from "./rockTile";
-import { Skeleton } from "./Skeleton";
+import { Skeleton, type SkeletonTint } from "./Skeleton";
 import { View, Text, Pressable, StyleSheet } from "react-native";
 
 // Glass Canvas tokens. Semantic colors and layout remain independent.
@@ -183,11 +183,11 @@ export function Copy({ children }: { children: React.ReactNode }) {
 export function LoadingState({
   label,
   compact = false,
-  baseColor = colors.selectionSurface,
+  tint,
 }: {
   label: string;
   compact?: boolean;
-  baseColor?: string;
+  tint?: SkeletonTint;
 }) {
   return (
     <View
@@ -199,7 +199,7 @@ export function LoadingState({
       <Skeleton
         width={compact ? 120 : 160}
         height={compact ? 13 : 16}
-        baseColor={baseColor}
+        tint={tint}
       />
     </View>
   );

@@ -1,7 +1,7 @@
 "use client";
 import { Text, View } from "react-native";
 import { Skeleton } from "@argos/ui";
-import { landingColors } from "../shell/intel-theme";
+import { intelLoadingTints } from "../shell/intel-theme";
 import { intelFonts } from "../shell/intel-fonts";
 
 export function StatusMessage({
@@ -22,11 +22,7 @@ export function StatusMessage({
         accessibilityLabel={message}
         accessibilityState={{ busy: true }}
       >
-        <Skeleton
-          width={160}
-          height={13}
-          baseColor={landingColors.pendingFill}
-        />
+        <Skeleton width={160} height={13} tint={intelLoadingTints.search} />
       </View>
     );
   }

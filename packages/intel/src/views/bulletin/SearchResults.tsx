@@ -20,7 +20,7 @@ import {
 import { ActorHitCard } from "./ActorHitCard";
 import { ArticleCard } from "./ArticleCard";
 import { DeskButton } from "../desk-ui";
-import { intelColors as c, intelKindFills } from "../../shell/intel-theme";
+import { intelColors as c, intelLoadingTints } from "../../shell/intel-theme";
 import { intelFonts } from "../../shell/intel-fonts";
 
 const UNAVAILABLE_STATUS = [404, 405, 501];
@@ -88,7 +88,7 @@ function ActorResults({
         <LoadingState
           label="Searching actors…"
           compact
-          baseColor={intelKindFills.actor}
+          tint={intelLoadingTints.search}
         />
       ) : missingRoute && !hasData ? (
         <Notice>Actor search is unavailable on this backend.</Notice>
@@ -306,7 +306,7 @@ export function SearchResults({
         <LoadingState
           label="Searching articles…"
           compact
-          baseColor={intelKindFills.article}
+          tint={intelLoadingTints.search}
         />
       ) : null}
       {unavailable ? (
@@ -343,7 +343,7 @@ export function SearchResults({
         <LoadingState
           label="Loading more results…"
           compact
-          baseColor={intelKindFills.article}
+          tint={intelLoadingTints.search}
         />
       ) : null}
       {search.isFetchNextPageError ? (

@@ -5,7 +5,7 @@ import type { Brief } from "@argos/api-client";
 import { EmptyState, LoadingState } from "@argos/ui";
 import {
   intelKindColors as kinds,
-  intelKindFills,
+  intelLoadingTints,
 } from "../../shell/intel-theme";
 import { BriefSection } from "./BriefSection";
 import { BriefSkeleton } from "./BriefSkeleton";
@@ -88,7 +88,7 @@ export function ActorChips({
             <LoadingState
               compact
               label="Checking cleaned article for more actors…"
-              baseColor={intelKindFills.actor}
+              tint={intelLoadingTints.actor}
             />
           ) : null}
         </View>

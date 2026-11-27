@@ -33,7 +33,7 @@ import { CategoryRail } from "./CategoryRail";
 import {
   intelColors as c,
   intelRadius,
-  intelKindFills,
+  intelLoadingTints,
 } from "../../shell/intel-theme";
 import { intelFonts } from "../../shell/intel-fonts";
 
@@ -236,7 +236,7 @@ export function BulletinView(p: Props) {
                   <LoadingState
                     label="Loading more articles…"
                     compact
-                    baseColor={intelKindFills.article}
+                    tint={intelLoadingTints.article}
                   />
                 ) : null}
                 {p.list.isFetchNextPageError ? (

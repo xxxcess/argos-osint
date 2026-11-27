@@ -13,7 +13,12 @@ export const SKELETON_BASE = "#27313B";
 const SHEEN_WIDTH = 0.2;
 const SWEEP_MS = 1200;
 const PAUSE_MS = 400;
-const SHEEN = "169,200,217";
+const SHEEN = "rgba(169,200,217,0.06)";
+
+export type SkeletonTint = {
+  baseColor: string;
+  sheenColor: string;
+};
 // One phase drives every mounted skeleton, so bands sweep together instead of flashing
 // independently. The loop runs while any skeleton is mounted, motion is allowed and the page
 // is visible; the last skeleton to unmount stops it.
@@ -89,18 +94,18 @@ export function Skeleton({
   height = 16,
   radius = 4,
   fill = false,
-  baseColor = SKELETON_BASE,
+  tint,
 }: {
   lines?: number;
   width?: DimensionValue;
   height?: number;
   radius?: number;
-  /** Steady fill for a placeholder inheriting its surface context. */
-  baseColor?: string;
+  /** Steady fill and peak sheen color for the placeholder’s surface. */
+  tint?: SkeletonTint;
   /** Stretch one block to its parent. Used for the topology graph square. */
   fill?: boolean;
 }) {
-  // Steady base, constant opacity. One cool sheen band crosses the clipped region in a shared
+  // Steady base, constant opacity. One dim sheen band crosses the clipped region in a shared
   // 1.6 s cycle: a 1.2 s linear sweep, then 0.4 s outside the region. Nothing pulses.
   const progress = phase.progress;
   const [regionWidth, setRegionWidth] = useState(0);
@@ -128,7 +133,7 @@ export function Skeleton({
             height: fill ? "100%" : height,
             flex: fill ? 1 : undefined,
             borderRadius: radius,
-            backgroundColor: baseColor,
+            backgroundColor: tint?.baseColor ?? SKELETON_BASE,
             overflow: "hidden",
           }}
         >
@@ -140,7 +145,7 @@ export function Skeleton({
                   top: 0,
                   bottom: 0,
                   width: bandWidth,
-                  backgroundImage: `linear-gradient(90deg, rgba(${SHEEN},0) 0%, rgba(${SHEEN},0.06) 50%, rgba(${SHEEN},0) 100%)`,
+                  backgroundImage: `linear-gradient(90deg, transparent 0%, ${tint?.sheenColor ?? SHEEN} 50%, transparent 100%)`,
                   transform: [{ translateX }],
                 } as object
               }

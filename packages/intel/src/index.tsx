@@ -42,7 +42,7 @@ import {
 } from "@argos/ui";
 import { OrbitScene } from "./landing/OrbitScene";
 import { IntelStatusBar, JobDropUp, type StatusJob } from "./shell/IntelShell";
-import { intelKindFills } from "./shell/intel-theme";
+import { intelLoadingTints } from "./shell/intel-theme";
 import { ActorDossierView } from "./views/actor/ActorDossierView";
 import { Topology } from "./topology/Topology";
 import { HomeView } from "./views/HomeView";
@@ -852,7 +852,7 @@ function Focus({
         <LoadingState
           label="Loading related leads…"
           compact
-          baseColor={intelKindFills.article}
+          tint={intelLoadingTints.article}
         />
       ) : null}
       {related.error && <Notice>{related.error.message}</Notice>}
@@ -885,7 +885,7 @@ function Focus({
         <LoadingState
           label="Loading more related leads…"
           compact
-          baseColor={intelKindFills.article}
+          tint={intelLoadingTints.article}
         />
       ) : null}
       {related.hasNextPage && (

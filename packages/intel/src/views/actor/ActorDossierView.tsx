@@ -17,7 +17,7 @@ import { DeskButton } from "../desk-ui";
 import {
   intelColors as c,
   intelKindColors as kinds,
-  intelKindFills,
+  intelLoadingTints,
 } from "../../shell/intel-theme";
 import { dossierStyles as s } from "./dossierStyles";
 
@@ -126,7 +126,7 @@ function Block({
         overflow: "hidden",
       }}
     >
-      <Skeleton fill radius={12} />
+      <Skeleton fill radius={12} tint={intelLoadingTints.dossier} />
     </View>
   );
 }
@@ -337,7 +337,7 @@ export function ActorDossierView({
           <LoadingState
             compact
             label="Refreshing Actor Dossier…"
-            baseColor={intelKindFills.actor}
+            tint={intelLoadingTints.dossier}
           />
         ) : null}
         {error ? (

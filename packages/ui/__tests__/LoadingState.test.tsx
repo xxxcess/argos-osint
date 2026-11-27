@@ -19,7 +19,12 @@ describe("LoadingState", () => {
   });
 
   it("uses the loading surface's contextual fill", () => {
-    render(<LoadingState label="Loading rows…" baseColor="#5FD39A" />);
+    render(
+      <LoadingState
+        label="Loading rows…"
+        tint={{ baseColor: "#5FD39A", sheenColor: "rgba(146,215,177,0.06)" }}
+      />,
+    );
     const line = screen.getByTestId("skeleton-line");
     expect(getComputedStyle(line).backgroundColor).toBe("rgb(95, 211, 154)");
   });

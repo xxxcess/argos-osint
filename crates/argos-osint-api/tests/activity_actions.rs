@@ -8,21 +8,28 @@ use argos_osint_api::network_router;
 use argos_osint_api::ApiState;
 use argos_osint_api::NetworkPolicy;
 use argos_osint_api::ScopedCredential;
+use argos_osint_core::storage::actor_search_outbox;
+use argos_osint_core::storage::actor_search_outbox::SourceCause;
 use argos_osint_core::storage::connect_registry;
 use argos_osint_core::storage::connect_registry::RegistryAuthority;
 use argos_osint_core::storage::job_actions;
 use argos_osint_core::storage::job_context::InteractiveAdmission;
 use argos_osint_core::storage::job_dispatch;
+use argos_osint_core::storage::job_dispatch::DeliveryClaim;
 use argos_osint_core::storage::jobs::NewJob;
 use argos_osint_core::storage::jobs::NewTask;
+use argos_osint_core::storage::jobs::MAX_WORKER_RECOVERIES;
 use argos_osint_core::storage::open::Target;
 use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::setup_jobs;
+use argos_osint_core::storage::tx;
+use argos_osint_core::storage::tx::RetryPolicy;
 use axum::body::to_bytes;
 use axum::body::Body;
 use axum::http::Request;
 use axum::http::StatusCode;
 use axum::Router;
+use chrono::Duration;
 use chrono::Utc;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
 use fleetworks_contracts::connect::RegistrationReceipt;
@@ -32,6 +39,7 @@ use fleetworks_contracts::context::OriginSource;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use fleetworks_contracts::JOB_CANCEL_PATH;
+use fleetworks_contracts::JOB_DETAIL_PATH;
 use fleetworks_contracts::JOB_RETRY_PATH;
 use serde_json::json;
 use serde_json::Value;
@@ -360,14 +368,57 @@ async fn scenario() {
     .expect("submit retry fixture");
     repo.db()
         .query(
-            "CREATE setup_operation:`action-retry-seed-job` SET operation='actor_seed', payload_json='{}', payload_hash='fixture-seed-hash', scope_id='action-scope', updated_at=time::now() RETURN NONE;
-             UPDATE job:`action-retry-seed-job` SET state='failed', error_category='transient', error_summary='seed failed' RETURN NONE;
-             UPDATE task:`action-retry-seed-job:execute` SET state='failed', attempts=1 RETURN NONE;",
+            "CREATE setup_operation:`action-retry-seed-job` SET operation='actor_seed', payload_json='{}', payload_hash='fixture-seed-hash', scope_id='action-scope', updated_at=time::now() RETURN NONE;",
         )
         .await
-        .expect("fail retry fixture")
+        .expect("seed operation")
         .check()
-        .expect("fail retry fixture statements");
+        .expect("seed operation statement");
+
+    let mut now = Utc::now();
+    for attempt in 0..MAX_WORKER_RECOVERIES {
+        let relay = job_dispatch::claim_ready(repo.db(), "actor_seed", "seed-relay", now)
+            .await
+            .expect("claim seed outbox")
+            .expect("seed delivery");
+        let DeliveryClaim::Claimed(_) = job_dispatch::claim_delivery(
+            repo.db(),
+            &relay.envelope,
+            "seed-worker",
+            5,
+            now,
+            &format!("seed-claim-{attempt}"),
+        )
+        .await
+        .expect("claim seed delivery") else {
+            panic!("seed delivery must be runnable after each recovery");
+        };
+        if attempt == 0 {
+            // A committed seed batch creates a causal index child via the same
+            // outbox transaction used by the worker.
+            tx::run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+                actor_search_outbox::enqueue_actors_in(
+                    &tx,
+                    &["synthetic-seeded-actor".into()],
+                    Some(&SourceCause {
+                        parent_job: "action-retry-seed-job".into(),
+                        operation_id: "seed-fixture-attempt".into(),
+                    }),
+                    now,
+                )
+                .await
+            })
+            .await
+            .expect("publish seed index intent");
+        }
+        now += Duration::seconds(6);
+        assert_eq!(
+            job_dispatch::recover_expired(repo.db(), "actor_seed", now)
+                .await
+                .expect("recover expired seed lease"),
+            1
+        );
+    }
 
     let retry_input = json!({"id":"action-retry-seed-job","request_id":"retry-action-once"});
     assert_eq!(
@@ -400,6 +451,25 @@ async fn scenario() {
         .expect("seed row");
     assert_eq!(seed_row["can_retry"], true);
 
+    let detail_path = format!("{JOB_DETAIL_PATH}?id=action-retry-seed-job");
+    let (detail_status, detail) = call(
+        &app,
+        "GET",
+        &detail_path,
+        ACTOR,
+        Some(&registration),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(detail_status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["activity_actions_available"], true);
+    assert_eq!(detail["job"]["can_retry"], true);
+    assert_eq!(detail["job"]["state"], "failed");
+    assert_eq!(
+        detail["job"]["error_summary"],
+        "Task lease expired after maximum worker recoveries"
+    );
+
     let (retry_status, retry_receipt) = call(
         &app,
         "POST",
@@ -424,18 +494,38 @@ async fn scenario() {
         .await,
         (StatusCode::OK, retry_receipt)
     );
-    let mut after = repo
-        .db()
-        .query("RETURN type::record('task','action-retry-seed-job:execute').state;")
+    let relay = job_dispatch::claim_ready(repo.db(), "actor_seed", "seed-relay", now)
         .await
-        .expect("task state query")
+        .expect("claim retry outbox")
+        .expect("retry delivery for the original job");
+    assert_eq!(relay.envelope.job_id, "action-retry-seed-job");
+    let DeliveryClaim::Claimed(retried) = job_dispatch::claim_delivery(
+        repo.db(),
+        &relay.envelope,
+        "seed-worker-successor",
+        5,
+        now,
+        "seed-claim-manual-retry",
+    )
+    .await
+    .expect("claim retried seed") else {
+        panic!("the existing seed task must be runnable after manual retry");
+    };
+    assert_eq!(retried.task.id, "action-retry-seed-job:execute");
+    assert_eq!(retried.task.attempts, MAX_WORKER_RECOVERIES + 1);
+
+    let mut index_jobs = repo
+        .db()
+        .query(
+            "SELECT VALUE state FROM job WHERE parent=job:`action-retry-seed-job`
+             AND operation='index_actor_catalog';",
+        )
+        .await
+        .expect("read seed index jobs")
         .check()
-        .expect("task state check");
+        .expect("check seed index jobs");
     assert_eq!(
-        after
-            .take::<Option<String>>(0)
-            .expect("retried task state")
-            .as_deref(),
-        Some("queued")
+        index_jobs.take::<Vec<String>>(0).expect("index children"),
+        ["queued"]
     );
 }

@@ -52,7 +52,7 @@ impl SettingsSection {
             Self::General => "About and workstation readiness",
             Self::Appearance => "Display and motion preferences",
             Self::Connection => "Backend setup and pairing",
-            Self::Assistant => "Local model and readiness",
+            Self::Assistant => "Decision models",
             Self::Models => "Model routes and provider accounts",
         }
     }
@@ -336,7 +336,7 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
         .accessibility
         .for_view(state.fixture, cx.is_reduced_motion());
     let pointer = (!preferences.matte()).then_some(&state.pointer_offset);
-    let assistant_visible = state.assistant_settings_visible();
+    let assistant_visible = state.assistant_decision_settings().is_some();
     let current_section =
         if state.settings_section == SettingsSection::Assistant && !assistant_visible {
             SettingsSection::Connection

@@ -23,6 +23,7 @@ SUMMARY_QUESTION = "What is the current workstation readiness?"
 MEMORY_QUESTION = "What is the current memory usage ?"
 SOURCES_TOGGLE = "inbox-qa-sources-toggle"
 SOURCES_CONTENT = "inbox-qa-sources"
+SOURCES_BACK = "inbox-qa-sources-back"
 PREVIOUS_EXCHANGE = "inbox-qa-history-previous"
 NEXT_EXCHANGE = "inbox-qa-history-next"
 DRAWER = "inbox-layer"
@@ -262,15 +263,29 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         return None
 
     def sources_ready(turn_id, *, expanded):
-        toggle = find(SOURCES_TOGGLE, button=True)
-        if screen_bounds(toggle, atspi) is None:
-            return None
         sources = find(SOURCES_CONTENT)
         citation = find_citation(turn_id, 0)
+        back = find(SOURCES_BACK, button=True)
+        toggle = find(SOURCES_TOGGLE, button=True)
         if expanded:
-            return citation if sources is not None and screen_bounds(citation, atspi) is not None else None
-        require(sources is None and citation is None, "a new turn's citations were visible before expanding Sources")
+            # The full-width panel replaces the reply, including its Sources trigger.
+            if toggle is not None or any(screen_bounds(node, atspi) is None for node in (sources, back, citation)):
+                return None
+            return citation
+        if screen_bounds(toggle, atspi) is None:
+            return None
+        require(sources is None and citation is None and back is None,
+                "Sources remained visible in the reply view")
         return toggle
+
+    def citation_details(citation):
+        return tuple(child.name for child in citation if child is not None)
+
+    def focused_button(key, label=None):
+        node = find(key, label=label, button=True)
+        if screen_bounds(node, atspi) is not None and node.getState().contains(atspi.STATE_FOCUSED):
+            return node
+        return None
 
     button("startup-local")
     button("connect-local")
@@ -398,15 +413,17 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         require(find_citation(turn_id, 1) is None, "the drawer showed another citation before release")
         companions = [row["companion_pid"] for row in records if "companion_pid" in row]
         require(len(companions) == 1, "expected one IPC companion")
-        return pages[-1], companions[0], sources.name if expanded else None
+        return pages[-1], companions[0], citation_details(sources) if expanded else None
 
     wait_for(lambda: first_frame(1, expanded=False), app,
              "collapsed Sources for the first finding and enabled Stop", timeout=16)
     first_ms = round((time.monotonic() - started) * 1000, 1)
     subprocess.run(["scrot", "--overwrite", str(output / "first-finding-sources-collapsed.png")], check=True, timeout=5)
     button(SOURCES_TOGGLE)
-    early, companion, citation_name = wait_for(lambda: first_frame(1, expanded=True), app,
-                                                "an early citation and enabled Stop", timeout=4)
+    early, companion, early_citation = wait_for(lambda: first_frame(1, expanded=True), app,
+                                                 "an early citation and enabled Stop", timeout=4)
+    require(len(early_citation) == 3 and early_citation[2].startswith("Observed "),
+            "the early citation omitted its title, text, or observation time")
     subprocess.run(["scrot", "--overwrite", str(output / "first-finding.png")], check=True, timeout=5)
     wait_for(lambda: first_frame(1, expanded=True), app,
              "the early citation and enabled Stop while completion is held", timeout=2)
@@ -423,12 +440,7 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         if find("inbox-qa-stop") is not None:
             return None
         citation = sources_ready(final["turn_id"], expanded=True)
-        if citation is None or citation.name != citation_name or not all(
-            message_time(message) for message in ("question", "answer")
-        ):
-            return None
-        if any(screen_bounds(find(key), atspi) is None
-               for key in ("inbox-qa-response-time", "inbox-qa-context")):
+        if citation is None or citation_details(citation) != early_citation:
             return None
         count = len(final["findings"])
         require(all(find_citation(final["turn_id"], index) is not None for index in range(count))
@@ -438,6 +450,20 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
 
     final = wait_for(completed_frame, app, "completion in the same drawer", timeout=12)
     completion_ms = round((time.monotonic() - started) * 1000, 1)
+    subprocess.run(["scrot", "--overwrite", str(output / "completed-sources.png")], check=True, timeout=5)
+    button(SOURCES_BACK, "Back to reply", timeout=4)
+
+    def completed_reply():
+        if sources_ready(final["turn_id"], expanded=False) is None or not all(
+            message_time(message) for message in ("question", "answer")
+        ):
+            return None
+        if any(screen_bounds(find(key), atspi) is None
+               for key in ("inbox-qa-response-time", "inbox-qa-context")):
+            return None
+        return True
+
+    wait_for(completed_reply, app, "the completed reply, timestamps, duration and context", timeout=8)
     subprocess.run(["scrot", "--overwrite", str(output / "completed-turn.png")], check=True, timeout=5)
 
     submit(MEMORY_QUESTION)
@@ -463,31 +489,38 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
                 and len(turn["findings"]) == 1 and sample is not None,
                 "the metric did not resolve to one frozen memory observation")
         whole, tenths = divmod(sample["value"], 10)
-        answer = find("chat-message-inbox-qa-answer")
-        if answer is None:
-            return None
         expected_text = f"The API host memory usage is {whole}.{tenths}%."
-        allowed_text = (expected_text, "Here is the current status. " + expected_text,
-                        "Here are the current checks. " + expected_text)
-        expected_citation = f"Host metric: API host memory usage · {sample['observed_at']}"
-        if not any(
-            node.name in allowed_text and screen_bounds(node, atspi) is not None
-            for node in descendants(answer)
-        ):
-            return None
         sources = sources_ready(turn["turn_id"], expanded=expanded)
-        if sources is None or (expanded and sources.name != expected_citation):
+        if sources is None:
             return None
+        if expanded:
+            observation = ("API host memory usage", expected_text, f"Observed {sample['observed_at']}")
+            if citation_details(sources) != observation:
+                return None
+            require(find("inbox-qa-sources-group-Host metric") is not None,
+                    "the memory observation was not grouped as a host metric")
+        else:
+            answer = find("chat-message-inbox-qa-answer")
+            allowed_text = (expected_text, "Here is the current status. " + expected_text,
+                            "Here are the current checks. " + expected_text)
+            if answer is None or not any(
+                node.name in allowed_text and screen_bounds(node, atspi) is not None
+                for node in descendants(answer)
+            ):
+                return None
         require(find_citation(turn["turn_id"], 1) is None and find("inbox-qa-stop") is None,
                 "the completed memory answer showed unrelated evidence or an unfinished turn")
         return sample
 
     wait_for(lambda: grounded_memory(expanded=False), app,
              "grounded memory reading with collapsed Sources", timeout=16)
+    subprocess.run(["scrot", "--overwrite", str(output / "grounded-memory.png")], check=True, timeout=5)
     button(SOURCES_TOGGLE)
     memory = wait_for(lambda: grounded_memory(expanded=True), app,
                       "grounded memory reading and its original timestamp", timeout=4)
-    subprocess.run(["scrot", "--overwrite", str(output / "grounded-memory.png")], check=True, timeout=5)
+    subprocess.run(["scrot", "--overwrite", str(output / "grounded-memory-sources.png")], check=True, timeout=5)
+    button(SOURCES_BACK, "Back to reply", timeout=4)
+    wait_for(lambda: grounded_memory(expanded=False), app, "memory reply restored after Sources", timeout=8)
 
     def transcript_shows(question, *, hidden_arrow):
         message = find("chat-message-inbox-qa-question")
@@ -499,16 +532,30 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
     button(PREVIOUS_EXCHANGE, "Previous exchange", timeout=12)
     wait_for(lambda: transcript_shows(SUMMARY_QUESTION, hidden_arrow=PREVIOUS_EXCHANGE),
              app, "oldest readiness exchange with the previous arrow hidden", timeout=8)
+    wait_for(lambda: focused_button(NEXT_EXCHANGE, "Next exchange"), app,
+             "keyboard focus on the newer arrow at the oldest exchange", timeout=8)
     button(SOURCES_TOGGLE, timeout=8)
     previous_source = wait_for(lambda: sources_ready(final["turn_id"], expanded=True),
                                app, "previous exchange with its original source", timeout=8)
-    require(previous_source.name == citation_name, "history replaced the previous exchange's original citation")
+    require(citation_details(previous_source) == early_citation,
+            "history replaced the previous exchange's original citation")
+    subprocess.run(["scrot", "--overwrite", str(output / "previous-exchange-sources.png")], check=True, timeout=5)
+    wait_for(lambda: focused_button(SOURCES_BACK, "Back to reply"), app,
+             "keyboard focus on Back to reply", timeout=8)
+    subprocess.run(["xdotool", "key", "--clearmodifiers", "space"], check=True, timeout=5)
+    wait_for(lambda: transcript_shows(SUMMARY_QUESTION, hidden_arrow=PREVIOUS_EXCHANGE),
+             app, "oldest readiness reply restored after Sources", timeout=8)
+    wait_for(lambda: focused_button(SOURCES_TOGGLE), app,
+             "focus restored to the original source trigger", timeout=8)
     subprocess.run(["scrot", "--overwrite", str(output / "previous-exchange.png")], check=True, timeout=5)
 
     def focused_next_exchange():
+        focused = focused_button(NEXT_EXCHANGE, "Next exchange")
+        if focused is not None:
+            return focused
         arrow = find(NEXT_EXCHANGE, label="Next exchange", button=True)
-        if screen_bounds(arrow, atspi) and arrow.getState().contains(atspi.STATE_FOCUSED):
-            return arrow
+        if screen_bounds(arrow, atspi) is not None:
+            require(arrow.queryComponent().grabFocus(), "the next exchange arrow rejected accessible focus")
         return None
 
     # Space activates the focused native control. Return is reserved for a default action.
@@ -523,7 +570,7 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
     wait_for(lambda: first_frame(3, expanded=False), app,
              "a separate Running turn with collapsed Sources", timeout=16)
     button(SOURCES_TOGGLE)
-    pending, cancel_companion, cancel_citation_name = wait_for(
+    pending, cancel_companion, cancel_citation = wait_for(
         lambda: first_frame(3, expanded=True), app,
         "a separate Running turn with its first citation", timeout=4,
     )
@@ -549,11 +596,22 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
                 and canceled["cursor"] == pending["cursor"] + 1,
                 "Stop did not add exactly one terminal cursor to the held turn")
         citation = sources_ready(canceled["turn_id"], expanded=True)
-        if citation is None or citation.name != cancel_citation_name:
+        if citation is None or citation_details(citation) != cancel_citation:
             return None
         return canceled
 
     canceled = wait_for(canceled_frame, app, "the retained canceled turn after clicking Stop", timeout=12)
+    subprocess.run(["scrot", "--overwrite", str(output / "canceled-sources.png")], check=True, timeout=5)
+    button(SOURCES_BACK, "Back to reply", timeout=4)
+
+    def stopped_reply():
+        answer = find("chat-message-inbox-qa-answer")
+        if answer is None or sources_ready(canceled["turn_id"], expanded=False) is None:
+            return None
+        return next((node for node in descendants(answer)
+                     if node.name == "Stopped" and screen_bounds(node, atspi) is not None), None)
+
+    wait_for(stopped_reply, app, "the stopped reply after closing its retained Sources", timeout=8)
     subprocess.run(["scrot", "--overwrite", str(output / "canceled-turn.png")], check=True, timeout=5)
     require_no_seed()
     receipts = [row["transport_attestation"] for row in read_journal(journal) if "transport_attestation" in row]

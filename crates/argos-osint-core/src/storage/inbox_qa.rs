@@ -615,7 +615,8 @@ pub struct Setting {
 impl SettingsRow {
     fn state(&self, epoch: &str) -> Result<Setting, TxError> {
         let generator_preference = match self.generator_preference.as_deref() {
-            None | Some("automatic") => QaGeneratorPreference::Automatic,
+            None => QaGeneratorPreference::default(),
+            Some("automatic") => QaGeneratorPreference::Automatic,
             Some("flan_t5_small") => QaGeneratorPreference::FlanT5Small,
             Some("flan_t5_base") => QaGeneratorPreference::FlanT5Base,
             Some("gpt2_small") => QaGeneratorPreference::Gpt2Small,
@@ -672,7 +673,7 @@ async fn settings_row(tx: &Tx) -> Result<SettingsRow, TxError> {
         tx,
         tx.query(
             "SELECT enabled,revision,generation,epoch,changed_at,
-                    (generator_preference ?? 'automatic') AS generator_preference,
+                    (generator_preference ?? 'gpt2_small') AS generator_preference,
                     (decision_preference ?? 'rules_only') AS decision_preference,
                     (history_generation ?? generation) AS history_generation,
                     (decision_generation ?? generation) AS decision_generation

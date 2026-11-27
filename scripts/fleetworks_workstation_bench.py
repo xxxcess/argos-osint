@@ -227,7 +227,9 @@ def result_row(case, turn, timings, admitted_to_worker, oracle, previous_memory)
 def prepare_pack(args, state, target):
     source = args.pack_dir.expanduser().absolute()
     manifest = pack.verify_directory(source, target, args.manifest_sha256)
-    qa.require(pack.model_for_pack(manifest) == "flan-t5-small", "Use the standard offline pack containing Small")
+    bundled = pack.model_for_pack(manifest)
+    qa.require(bundled == pack.DEFAULT_CHAT_MODEL or (args.base_model_assets is not None and bundled is not None),
+               "Use the verified offline pack containing GPT-2 Small")
     if args.base_model_assets is not None:
         pack.materialize_model_assets(args.base_model_assets, state, "flan-t5-base")
 
@@ -301,25 +303,28 @@ def run_iteration(args, binary, target):
         state = root / "state"
         state.mkdir(mode=0o700)
         prepare_pack(args, state, target)
-        # Keep the one-profile run offline even when only the Small pack is supplied.
-        memory_limit = None if args.base_model_assets is not None else 1536
+        memory_limit = None if args.base_model_assets is not None else qa.FIXTURE_MODEL_MEMORY_MIB
         with qa.embedded_qa_session(binary, state, qa_memory_mib=memory_limit,
                                     isolated_root=root) as (session, registration, request):
             context = qa.authorize(registration)
             defaults = request("settings")
-            qa.require(defaults["generator"]["preference"] == "automatic"
+            qa.require(defaults["generator"]["preference"] == "gpt2_small"
                        and defaults["decision"]["preference"] == "rules_only",
-                       "Fresh settings must default to Automatic and Rules only")
+                       "Fresh settings must default to GPT-2 Small and Rules only")
             oracle = observe_oracle(session, registration)
             started = time.monotonic()
-            request("settings", {"context": context, "expected_revision": defaults["revision"],
-                                 "enabled": True})
+            update = {"context": context, "expected_revision": defaults["revision"], "enabled": True}
+            model = pack.DEFAULT_CHAT_MODEL
+            if args.base_model_assets is not None:
+                model = "flan-t5-base"
+                update["generator_preference"] = "flan_t5_base"
+            request("settings", update)
             settings = qa.until(lambda: request("settings"), lambda value: value["phase"] in {"ready", "unavailable"},
-                                "Automatic did not settle its generator selection", timeout=110)
+                                "The generator did not settle", timeout=110)
             generator = settings["generator"]
-            qa.require(generator["preference"] == "automatic" and settings["phase"] == "ready"
-                       and generator["effective"] in pack.CHAT_MODELS,
-                       f"Automatic did not warm a verified worker ({settings.get('availability_reason')})")
+            qa.require(generator["preference"] == model.replace("-", "_") and settings["phase"] == "ready"
+                       and generator["effective"] == model,
+                       f"The selected model did not warm a verified worker ({settings.get('availability_reason')})")
             warm_ms = round(1000 * (time.monotonic() - started), 1)
             rules = check_rules_only(session, registration, request, settings)
             for warmup in range(args.warmup_turns):
@@ -398,9 +403,9 @@ def benchmark(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app", type=Path, required=True, help="Path to the packaged Fleetworks app with companion")
-    parser.add_argument("--pack-dir", type=Path, required=True, help="Read-only directory of the verified Small pack")
+    parser.add_argument("--pack-dir", type=Path, required=True, help="Read-only directory of the verified GPT-2 Small pack")
     parser.add_argument("--manifest-sha256", required=True, help="The manifest SHA-256 from the trusted pack receipt")
-    parser.add_argument("--base-model-assets", type=Path, help="Pinned cached Base checkpoint for offline Automatic selection")
+    parser.add_argument("--base-model-assets", type=Path, help="Use the explicit offline FLAN-T5 Base comparison model")
     parser.add_argument("--warmup-turns", type=int, choices=range(MAX_WARMUP_TURNS + 1), default=0,
                         help="Unmeasured greetings before each measured iteration")
     parser.add_argument("--iterations", type=int, choices=range(1, MAX_ITERATIONS + 1), default=1,

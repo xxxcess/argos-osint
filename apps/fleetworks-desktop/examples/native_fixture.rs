@@ -29,12 +29,10 @@ mod native {
     use fleetworks_contracts::chat::QaRelatedActivity;
     use fleetworks_contracts::chat::QaRelationshipReason;
     use fleetworks_contracts::chat::QaSettings;
-    use fleetworks_contracts::chat::QaStartupStage;
     use fleetworks_contracts::chat::QaTurn;
     use fleetworks_contracts::chat::QaTurnLimitation;
     use fleetworks_contracts::chat::QaTurnStage;
     use fleetworks_contracts::chat::QaTurnState;
-    use fleetworks_contracts::chat::QA_GPT2_GENERATORS_FEATURE;
     use fleetworks_contracts::chat::QA_MODEL_SETTINGS_FEATURE;
     use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
     use fleetworks_contracts::connect::RegistrationReceipt;
@@ -770,10 +768,7 @@ mod native {
         readiness_scenes::observed(state);
         triage_connection(state, phase);
         if let Some(capabilities) = &mut state.connection.capabilities {
-            capabilities.features.extend([
-                QA_MODEL_SETTINGS_FEATURE.into(),
-                QA_GPT2_GENERATORS_FEATURE.into(),
-            ]);
+            capabilities.features.push(QA_MODEL_SETTINGS_FEATURE.into());
         }
         let mut settings = QaSettings::new(true, phase, 2, 1, true);
         settings.generator = Some(QaGeneratorSettings::new(
@@ -816,61 +811,27 @@ mod native {
         registered(state);
         state.backend_kind = BackendKind::Local;
         state.connection.origin = TextEdit::new("local://embedded");
-        let mut settings = QaSettings::new(
-            true,
-            if provisioning {
-                QaPhase::Starting
-            } else {
-                QaPhase::Ready
-            },
-            2,
-            1,
-            true,
-        );
-        if provisioning {
-            settings.model_target = QaModelTarget::Gpt2Medium;
-            settings.startup_stage = Some(QaStartupStage::DownloadingPack);
-        }
+        let mut settings = QaSettings::new(true, QaPhase::Ready, 2, 1, true);
         if let Some(capabilities) = &mut state.connection.capabilities {
             capabilities.features.push(QA_MODEL_SETTINGS_FEATURE.into());
-            capabilities
-                .features
-                .push(QA_GPT2_GENERATORS_FEATURE.into());
         }
         settings.generator = Some(QaGeneratorSettings::new(
-            if provisioning {
-                QaGeneratorPreference::Gpt2Medium
-            } else {
-                QaGeneratorPreference::Automatic
-            },
-            (!provisioning).then_some(settings.model_target),
+            QaGeneratorPreference::Automatic,
+            Some(settings.model_target),
             settings.phase,
             None,
         ));
         settings.decision = Some(QaDecisionSettings::new(
             QaDecisionPreference::Julia1Q8,
             QaDecisionPreference::RulesOnly,
-            QaPhase::Off,
-            Some(QaDecisionAvailabilityReason::AwaitingQualification),
+            if provisioning {
+                QaPhase::Starting
+            } else {
+                QaPhase::Off
+            },
+            (!provisioning).then_some(QaDecisionAvailabilityReason::AwaitingQualification),
         ));
-        let turn = (!provisioning).then(|| {
-            let mut turn = QaTurn::queued(
-                "settings-fixture-turn".into(),
-                "settings-fixture-request".into(),
-                "Summarize workstation readiness.".into(),
-            );
-            turn.state = QaTurnState::Answered;
-            turn.cursor = 3;
-            turn.context = Some(QaContextUsage::new(
-                settings.model_target.input_tokens(),
-                448,
-                1,
-            ));
-            turn.model_target = Some(settings.model_target);
-            turn.model_generation = Some(settings.generation);
-            turn
-        });
-        state.seed_inbox_qa_fixture(settings, turn);
+        state.seed_inbox_qa_fixture(settings, None);
         state.fixture_show_assistant_settings();
     }
 

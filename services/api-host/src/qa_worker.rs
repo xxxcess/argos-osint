@@ -108,18 +108,13 @@ fn select_target(
     let limit = available_memory
         .saturating_sub(WORKSTATION_RESERVE)
         .min(operator_limit);
-    let target = match preference {
-        QaGeneratorPreference::Automatic if limit >= BASE_RESIDENT_LIMIT => {
-            QaModelTarget::FlanT5Base
-        }
-        QaGeneratorPreference::Automatic | QaGeneratorPreference::FlanT5Small => {
+    let target = preference.explicit_target().unwrap_or_else(|| {
+        if limit >= GPT2_SMALL_RESIDENT_LIMIT {
+            QaModelTarget::Gpt2Small
+        } else {
             QaModelTarget::FlanT5Small
         }
-        QaGeneratorPreference::FlanT5Base => QaModelTarget::FlanT5Base,
-        QaGeneratorPreference::Gpt2Small => QaModelTarget::Gpt2Small,
-        QaGeneratorPreference::Gpt2Medium => QaModelTarget::Gpt2Medium,
-        _ => return None,
-    };
+    });
     (limit >= resident_limit(target)).then_some(target)
 }
 
@@ -309,10 +304,10 @@ impl QaWorkerSupervisor {
                 Ok(model) => model,
                 Err(error)
                     if preference == QaGeneratorPreference::Automatic
-                        && target == QaModelTarget::FlanT5Base
+                        && target == QaModelTarget::Gpt2Small
                         && packed_target == Some(QaModelTarget::FlanT5Small) =>
                 {
-                    let _ = warm_error("base_model_provision", error);
+                    let _ = warm_error("default_model_provision", error);
                     target = QaModelTarget::FlanT5Small;
                     selected_model(target);
                     pack.join("model")
@@ -999,18 +994,17 @@ fn load_installed_pointer(state_dir: &Path, target: QaModelTarget) -> Result<Pac
         }
     }
     match read_pointer(&state_dir.join("qa-pack.json")) {
-        Err(error)
-            if pointer_missing(&error)
-                && named
-                && matches!(
-                    target,
-                    QaModelTarget::FlanT5Base
-                        | QaModelTarget::Gpt2Small
-                        | QaModelTarget::Gpt2Medium
-                ) =>
-        {
-            // The standard Small pack also contains the shared verified generator runtime.
-            read_pointer(&targets.join("flan-t5-small.json"))
+        Err(error) if pointer_missing(&error) && named => {
+            // Named default and legacy packs also contain the shared verified runtime.
+            for fallback in [QaModelTarget::Gpt2Small, QaModelTarget::FlanT5Small] {
+                if fallback != target {
+                    match read_pointer(&targets.join(format!("{}.json", fallback.slug()))) {
+                        Err(error) if pointer_missing(&error) => {}
+                        other => return other,
+                    }
+                }
+            }
+            Err(error)
         }
         other => other,
     }
@@ -1251,22 +1245,22 @@ fn host_target() -> String {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn selects_largest_model_with_memory_left_for_the_workstation() {
+    fn automatic_prefers_gpt_with_memory_left_for_the_workstation() {
         use super::{
-            select_target, BASE_RESIDENT_LIMIT, SMALL_RESIDENT_LIMIT, WORKSTATION_RESERVE,
+            select_target, GPT2_SMALL_RESIDENT_LIMIT, SMALL_RESIDENT_LIMIT, WORKSTATION_RESERVE,
         };
         use fleetworks_contracts::chat::QaModelTarget;
 
-        let base_available = BASE_RESIDENT_LIMIT + WORKSTATION_RESERVE;
+        let gpt_available = GPT2_SMALL_RESIDENT_LIMIT + WORKSTATION_RESERVE;
         let small_available = SMALL_RESIDENT_LIMIT + WORKSTATION_RESERVE;
         assert_eq!(
-            select_target(QaGeneratorPreference::Automatic, base_available, u64::MAX),
-            Some(QaModelTarget::FlanT5Base)
+            select_target(QaGeneratorPreference::Automatic, gpt_available, u64::MAX),
+            Some(QaModelTarget::Gpt2Small)
         );
         assert_eq!(
             select_target(
                 QaGeneratorPreference::Automatic,
-                base_available - 1,
+                gpt_available - 1,
                 u64::MAX
             ),
             Some(QaModelTarget::FlanT5Small)
@@ -1274,7 +1268,7 @@ mod tests {
         assert_eq!(
             select_target(
                 QaGeneratorPreference::Automatic,
-                base_available,
+                gpt_available,
                 SMALL_RESIDENT_LIMIT
             ),
             Some(QaModelTarget::FlanT5Small)
@@ -1294,7 +1288,7 @@ mod tests {
         assert_eq!(
             select_target(
                 QaGeneratorPreference::Automatic,
-                base_available,
+                gpt_available,
                 SMALL_RESIDENT_LIMIT - 1
             ),
             None
@@ -1416,13 +1410,6 @@ mod tests {
         let targets = state.path().join("qa-model-packs");
         fs::create_dir(&targets).unwrap();
         fs::set_permissions(&targets, fs::Permissions::from_mode(0o700)).unwrap();
-        let target = select_target(
-            QaGeneratorPreference::Automatic,
-            BASE_RESIDENT_LIMIT + WORKSTATION_RESERVE,
-            u64::MAX,
-        )
-        .unwrap();
-        assert_eq!(target, QaModelTarget::FlanT5Base);
         assert!(!state.path().join("qa-model-assets").exists());
 
         let small = targets.join("flan-t5-small.json");
@@ -1436,7 +1423,11 @@ mod tests {
             fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
         };
         write(&small, "/named-small");
-        for target in [target, QaModelTarget::Gpt2Small, QaModelTarget::Gpt2Medium] {
+        for target in [
+            QaModelTarget::FlanT5Base,
+            QaModelTarget::Gpt2Small,
+            QaModelTarget::Gpt2Medium,
+        ] {
             let named = targets.join(format!("{}.json", target.slug()));
             let found = || load_installed_pointer(state.path(), target).map(|pointer| pointer.root);
             assert_eq!(found().unwrap(), Path::new("/named-small"));
@@ -1453,6 +1444,13 @@ mod tests {
             assert!(!pointer_missing(&found().unwrap_err()));
             fs::remove_file(&generic).unwrap();
         }
+        write(&targets.join("gpt2-small.json"), "/named-gpt");
+        assert_eq!(
+            load_installed_pointer(state.path(), QaModelTarget::FlanT5Base)
+                .unwrap()
+                .root,
+            Path::new("/named-gpt")
+        );
     }
 
     #[tokio::test]

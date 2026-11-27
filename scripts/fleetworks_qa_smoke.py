@@ -27,8 +27,8 @@ import fleetworks_qa_pack as pack
 ROOT = Path(__file__).resolve().parents[1]
 TERMINAL = {"answered", "insufficient_context", "canceled", "failed"}
 SUMMARY_QUESTION = "What is the current workstation readiness?"
-CONTEXT_WINDOW_TOKENS = 512
-FIXTURE_MODEL_MEMORY_MIB = 1536
+CONTEXT_WINDOW_TOKENS = 896
+FIXTURE_MODEL_MEMORY_MIB = 2048
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 DIAGNOSTIC = re.compile(r'\b(qa_(?:warm|replica|queue|turn|settings)_stage)="?([a-z0-9_]{1,40})\b')
 CONTEXT_DIAGNOSTIC = re.compile(r'\bcode="?(embedded_workstation_context_(?:path_)?unavailable)\b')
@@ -346,6 +346,7 @@ def exercise(request, registration, model, readiness, running_jobs):
     """Run the QA lifecycle over the packaged companion's private socket."""
     before = request("settings")
     require(not before["enabled"] and before["phase"] == "off", "QA did not default to Off")
+    require(before["generator"]["preference"] == "gpt2_small", "QA did not default to GPT-2 Small")
     require(not model(), "Off retained a live model process")
     require(request("latest") is None, "Off exposes an exchange")
     turn = {"request_id": "inbox-qa-smoke-1", "context": authorize(registration), "question": SUMMARY_QUESTION}
@@ -356,7 +357,7 @@ def exercise(request, registration, model, readiness, running_jobs):
     updated = request("settings", {"context": authorize(registration), "expected_revision": revision, "enabled": True})
     stages = set()
     try:
-        current = ready_model(request, "flan-t5-small", updated=updated, stages=stages)
+        current = ready_model(request, "gpt2-small", updated=updated, stages=stages)
     except TimeoutError:
         current = request("settings")
         phase = current.get("phase")
@@ -541,10 +542,10 @@ def exercise(request, registration, model, readiness, running_jobs):
     require(help_turn.get("conversation") == "help" and not help_turn["findings"],
             "the assistant did not explain how to start a task")
     general = settled_turn(
-        request, context, "general-knowledge", "What is the capital of Japan?", mode="dialogue",
+        request, context, "general-knowledge", "Who is Obama?", mode="dialogue",
         source={"kind": "job", "id": "missing-stale-job-attachment"},
     )
-    require(not general["findings"] and "tokyo" in general["reply"].casefold(),
+    require(not general["findings"] and "obama" in general["reply"].casefold(),
             "the stale job attachment overrode the general question")
 
     history = request("history")
@@ -565,15 +566,15 @@ def exercise(request, registration, model, readiness, running_jobs):
     # clarification after Off clears those turns and opens a fresh generation.
     reset = request("settings", {"context": context, "expected_revision": request("settings")["revision"],
                                  "enabled": True})
-    ready = ready_model(request, "flan-t5-small", updated=reset)
+    ready = ready_model(request, "gpt2-small", updated=reset)
     when = ask("time-clarification", "Is actor search ready since last week?", mode="dialogue")
     require(when["reply"].endswith("?") and "time" in when["reply"].casefold(),
             "the generator did not ask for the ambiguous time range")
     general_with_readiness = settled_turn(
-        request, context, "general-with-readiness", "What is the capital of Japan?", mode="dialogue",
+        request, context, "general-with-readiness", "Who is Obama?", mode="dialogue",
         source={"kind": "readiness", "id": "registration"},
     )
-    require("tokyo" in general_with_readiness["reply"].casefold(),
+    require("obama" in general_with_readiness["reply"].casefold(),
             "the stale readiness attachment overrode the general question")
     mixed = ask("general-with-memory", "What is the current memory usage, and what is RAM?")
     require(mixed["findings"][0]["source"] == {"kind": "host_metric", "id": "memory"},
@@ -601,7 +602,7 @@ def exercise(request, registration, model, readiness, running_jobs):
             "generated_time_clarification": True,
             "general_with_workstation_context": True, "notification_context": True,
             "generated_dialogue": True, "startup_stages": sorted(stages),
-            "automatic_model_target": current["model_target"], "worker_reused": True,
+            "default_model_target": current["model_target"], "worker_reused": True,
             "local_dialogue_rss_bytes": dialogue_rss_bytes,
             "frozen_samples": readings}
 
@@ -1465,53 +1466,49 @@ def verify_explicit_base_unavailable(request, registration, model, reason, *, en
     stop_model(request, registration, model, unavailable)
 
 
-def named_small_startup(args, binary, digests):
+def named_default_startup(args, binary, digests):
     with tempfile.TemporaryDirectory(prefix="fleetworks-embedded-qa-named-") as temporary:
         root = Path(temporary)
         state = root / "state"
         state.mkdir(mode=0o700)
         pack.install(argparse.Namespace(archive=args.archive, output=root / "pack", state_dir=state,
                                         target=digests["target"], archive_sha256=digests["archive_sha256"],
-                                        manifest_sha256=digests["manifest_sha256"], chat_model="flan-t5-small"))
-        require((state / "qa-model-packs/flan-t5-small.json").is_file()
+                                        manifest_sha256=digests["manifest_sha256"], chat_model="gpt2-small"))
+        require((state / "qa-model-packs/gpt2-small.json").is_file()
                 and not (state / "qa-pack.json").exists()
                 and not (state / "qa-model-assets").exists(),
-                "Named Small fallback requires only the named pack and an empty model cache")
+                "Named GPT startup requires only the named pack and an empty model cache")
         with embedded_qa_session(binary, state, qa_memory_mib=None) as (session, registration, request):
             context = authorize(registration)
-            before = request("settings")
-            enabled = request("settings", {"context": context, "expected_revision": before["revision"],
-                                           "enabled": True})
-            ready = ready_model(request, "flan-t5-small", updated=enabled)
-            require("base_model_provision" in session.stderr_excerpt(),
-                    "The offline fixture did not attempt Base with the available memory headroom")
-            answer = settled_turn(request, context, "named-small-fallback", SUMMARY_QUESTION)
+            enabled = select_generator(request, context, "automatic", enable=True)
+            ready = ready_model(request, "gpt2-small", updated=enabled)
+            answer = settled_turn(request, context, "named-default-automatic", SUMMARY_QUESTION)
             require(all(finding["source"]["kind"] == "readiness" for finding in answer["findings"]),
-                    "Named Small fallback did not preserve grounded readiness citations")
+                    "The named GPT worker did not preserve grounded readiness citations")
             require(ready["generator"]["preference"] == "automatic"
-                    and ready["generator"]["effective"] == "flan-t5-small",
-                    "Automatic did not describe its verified Small fallback")
+                    and ready["generator"]["effective"] == "gpt2-small",
+                    "The legacy Automatic preference did not select GPT-2 Small")
 
             def model():
                 return embedded_tree(session.proc.pid)
 
             auto_worker, = model()
-            explicit = select_generator(request, context, "flan_t5_small")
-            ready = ready_model(request, "flan-t5-small", updated=explicit)
-            small_worker, = model()
+            explicit = select_generator(request, context, "gpt2_small")
+            ready = ready_model(request, "gpt2-small", updated=explicit)
+            gpt_worker, = model()
             require(ready["generation"] == explicit["generation"]
-                    and ready["generator"]["preference"] == "flan_t5_small"
-                    and ready["generator"]["effective"] == "flan-t5-small"
-                    and small_worker != auto_worker,
-                    "Explicit Small did not warm its own generation on a Base-capable workstation")
+                    and ready["generator"]["preference"] == "gpt2_small"
+                    and ready["generator"]["effective"] == "gpt2-small"
+                    and gpt_worker != auto_worker,
+                    "Changing from Automatic to GPT did not warm the new generation")
             retained = request("events", query={"turn_id": answer["turn_id"], "after": answer["cursor"],
                                                 "wait_seconds": 0})
             require(retained["turn"] == answer and not retained["events"],
                     "Changing generator cleared a completed exchange or duplicated its terminal event")
-            explicit_answer = settled_turn(request, context, "explicit-small", SUMMARY_QUESTION)
-            require(explicit_answer["model_target"] == "flan-t5-small"
+            explicit_answer = settled_turn(request, context, "explicit-gpt", SUMMARY_QUESTION)
+            require(explicit_answer["model_target"] == "gpt2-small"
                     and explicit_answer["model_generation"] == ready["generation"],
-                    "Turn provenance did not identify the actual explicit Small worker and generation")
+                    "Turn provenance did not identify the explicit GPT worker and generation")
 
             for preference in ("julia1_q8", "vllm_d3_edge_q8", "rules_only"):
                 updated = request("settings", {"context": context, "expected_revision": ready["revision"],
@@ -1521,18 +1518,18 @@ def named_small_startup(args, binary, digests):
                 require(decision["preference"] == preference and decision["effective"] == "rules_only"
                         and decision.get("reason") == (None if preference == "rules_only" else "awaiting_qualification")
                         and updated["generation"] == explicit_answer["model_generation"]
-                        and ready["generator"]["effective"] == "flan-t5-small" and model() == [small_worker],
+                        and ready["generator"]["effective"] == "gpt2-small" and model() == [gpt_worker],
                         "Changing Decision displaced the generator or activated an unqualified scorer")
 
             still_warm = settled_turn(request, context, "decision-changes-kept-generator", "hi", mode="dialogue")
             require(still_warm["model_generation"] == explicit_answer["model_generation"]
-                    and model() == [small_worker],
+                    and model() == [gpt_worker],
                     "The generator failed to complete a turn on its existing worker after Decision edits")
 
             exercise_contextual_status(request, context)
             verify_explicit_base_unavailable(request, registration, model, "model_provision_failed")
-        return {"base_provision_attempted": True, "selected_model": "flan-t5-small",
-                "grounded_answer": True, "explicit_small_worker": True,
+        return {"selected_model": "gpt2-small",
+                "grounded_answer": True, "explicit_gpt_worker": True,
                 "decision_changes_kept_generator": True, "base_provision_error_preserved": True,
                 "contextual_status_used_generator": True}
 
@@ -1583,7 +1580,7 @@ def run_embedded(args):
             attestation = session.transport_attestation
 
     if linux:
-        result["named_small_fallback"] = named_small_startup(args, binary, digests)
+        result["named_default_startup"] = named_default_startup(args, binary, digests)
 
     with tempfile.TemporaryDirectory(prefix="fleetworks-embedded-qa-stop-") as temporary:
         root = Path(temporary)

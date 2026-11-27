@@ -451,8 +451,9 @@ def probe(target, chat_model, runtime, manifest_sha256, assets=None):
             "runtime_manifest_sha256": manifest_sha256, "checkpoint_smoke": result}
 
 
-def build(target, directory, chat_model=pack.DEFAULT_CHAT_MODEL):
+def build(target, directory, requested_model=None):
     readonly_toolchain(target)
+    chat_model = requested_model or pack.DEFAULT_CHAT_MODEL
     directory = directory.resolve()
     directory.mkdir(parents=True, exist_ok=False)
     staging = directory / "staging"
@@ -484,10 +485,10 @@ def build(target, directory, chat_model=pack.DEFAULT_CHAT_MODEL):
     archive = directory / f"Fleetworks-Inbox-QA-Pack-{target}.tar.gz"
     digests = pack.build(argparse.Namespace(model=model, worker=binary, listener=listener,
                                            lib=native, license=notices, output=archive, target=target,
-                                           chat_model=chat_model))
+                                           chat_model=requested_model))
     installed = directory / "installed"
     pack.install(argparse.Namespace(archive=archive, output=installed, state_dir=None, target=target,
-                                    chat_model=chat_model, archive_sha256=digests["archive_sha256"],
+                                    chat_model=requested_model, archive_sha256=digests["archive_sha256"],
                                     manifest_sha256=digests["manifest_sha256"]))
     if target not in DARWIN_WHEELS:
         linux_libraries(installed / pack.WORKER, installed / "lib",
@@ -505,7 +506,8 @@ def main():
     command = commands.add_parser("build")
     command.add_argument("--target", required=True, choices=pack.TARGETS)
     command.add_argument("--output", type=Path, required=True)
-    command.add_argument("--chat-model", choices=pack.CHAT_MODELS, default=pack.DEFAULT_CHAT_MODEL)
+    command.add_argument("--chat-model", choices=pack.CHAT_MODELS,
+                         help=f"Select a pinned generator pack (default: {pack.DEFAULT_CHAT_MODEL})")
     command = commands.add_parser("probe")
     command.add_argument("--target", required=True, choices=pack.TARGETS)
     command.add_argument("--chat-model", required=True, choices=pack.CHAT_MODELS)

@@ -713,9 +713,9 @@ async fn settings_value(
     }
     settings.startup_stage = startup_stage;
     let model = availability.and_then(|availability| availability.model(setting.generation));
-    if let Some(model) = model {
-        settings.model_target = model;
-    }
+    settings.model_target = model
+        .or_else(|| setting.generator_preference.explicit_target())
+        .unwrap_or_default();
     settings.generator = Some(QaGeneratorSettings::new(
         setting.generator_preference,
         ready_model.filter(|_| phase == QaPhase::Ready),

@@ -52,7 +52,7 @@ PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=1 \
   --inbox-artifact "$QA_ARTIFACT_ID"
 ```
 
-The script registers the verified pack in the Quick Start profile. In the app it opens, enable **Backend inference** under **Settings → Connection**, then check **Settings → Assistant**. The pack includes FLAN-T5 Small and the native worker. The companion provisions Base separately when selected and resources allow. Model assets and previous pack installations persist across app rebuilds. [Offline setup and resource requirements](../../deploy/inbox-qa.md)
+The script registers the verified pack in the Quick Start profile. In the app it opens, enable **Backend inference** under **Settings → Connection** and open the Inbox Assistant. The pack includes GPT-2 Small and the native worker. Model assets and previous pack installations persist across app rebuilds. [Offline setup and resource requirements](../../deploy/inbox-qa.md)
 
 If an older copy of the launcher reports `Select the root of a Fleetworks checkout` from the repository root, run `git --version`. Older Git versions such as 2.30 can trigger this error on either Mac architecture. The current launcher resolves Git's checkout paths on both older and newer versions. To run an older copy, use Apple Git by prepending `/usr/bin` to `PATH` for that command.
 

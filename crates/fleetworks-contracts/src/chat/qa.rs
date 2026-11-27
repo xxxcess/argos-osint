@@ -103,12 +103,26 @@ pub enum QaAvailabilityReason {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum QaGeneratorPreference {
-    #[default]
     Automatic,
     FlanT5Small,
     FlanT5Base,
+    #[default]
     Gpt2Small,
     Gpt2Medium,
+}
+
+impl QaGeneratorPreference {
+    /// The configured target for a named choice, independent of worker readiness.
+    #[must_use]
+    pub const fn explicit_target(self) -> Option<QaModelTarget> {
+        match self {
+            Self::Automatic => None,
+            Self::FlanT5Small => Some(QaModelTarget::FlanT5Small),
+            Self::FlanT5Base => Some(QaModelTarget::FlanT5Base),
+            Self::Gpt2Small => Some(QaModelTarget::Gpt2Small),
+            Self::Gpt2Medium => Some(QaModelTarget::Gpt2Medium),
+        }
+    }
 }
 
 /// Saved decision policy, as well as the effective rules or local scorer.
@@ -911,6 +925,17 @@ impl QaEventPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_configured_generator_default_preserves_legacy_wire_fallbacks() {
+        let preference = QaGeneratorPreference::default();
+        assert_eq!(preference, QaGeneratorPreference::Gpt2Small);
+        assert_eq!(preference.explicit_target(), Some(QaModelTarget::Gpt2Small));
+        let automatic: QaGeneratorPreference = serde_json::from_str(r#""automatic""#).unwrap();
+        assert_eq!(automatic, QaGeneratorPreference::Automatic);
+        assert_eq!(automatic.explicit_target(), None);
+        assert_eq!(QaModelTarget::default(), QaModelTarget::FlanT5Small);
+    }
 
     #[test]
     fn assistant_preferences_are_independent_of_legacy_toggles() {

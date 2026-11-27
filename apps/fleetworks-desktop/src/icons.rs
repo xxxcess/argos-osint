@@ -170,6 +170,13 @@ pub static STOPWATCH: Icon = Icon {
     body: r#"<circle cx="8" cy="9.5" r="4.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 5V2.25M6.5 2.25h3m2.2 4.3 1.3-1.3M8 7.25V9.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>"#,
 };
 
+/// Attachment indicator for the Assistant composer.
+pub static PAPERCLIP: Icon = Icon {
+    name: "fw-paperclip",
+    view: 16.0,
+    body: r#"<path d="m6 8.8 4-4a1.6 1.6 0 0 1 2.3 2.3L7.7 11.7a2.7 2.7 0 0 1-3.8-3.8L9.2 2.6a3.5 3.5 0 0 1 5 5l-5.4 5.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
 /// Expanded record disclosure.
 pub static CHEVRON_DOWN: Icon = Icon {
     name: "fw-chevron-down",

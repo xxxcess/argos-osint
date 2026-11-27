@@ -463,18 +463,37 @@ async fn qa_generator_replacement_fences_leased_output_and_leaves_decision_indep
         context.clone(),
     );
     let db = repo.db();
+    assert_eq!(
+        qa::setting(&repo).await.unwrap().generator_preference,
+        QaGeneratorPreference::Gpt2Small
+    );
     db.query("CREATE inbox_qa_settings:current SET enabled=false, revision=4, generation=3, epoch='', model_target='flan_t5_base' RETURN NONE")
         .await.unwrap().check().unwrap();
     let migrated = qa::setting(&repo).await.unwrap();
     assert_eq!(
         migrated.generator_preference,
-        QaGeneratorPreference::Automatic
+        QaGeneratorPreference::Gpt2Small
     );
     assert_eq!(
         migrated.decision_preference,
         QaDecisionPreference::RulesOnly
     );
-    let enabled = qa::set(&repo, &actor, migrated.revision, true)
+    let automatic = qa::update(
+        &repo,
+        &actor,
+        migrated.revision,
+        qa::SettingUpdate {
+            generator_preference: Some(QaGeneratorPreference::Automatic),
+            ..qa::SettingUpdate::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        qa::setting(&repo).await.unwrap().generator_preference,
+        QaGeneratorPreference::Automatic
+    );
+    let enabled = qa::set(&repo, &actor, automatic.revision, true)
         .await
         .unwrap();
 
@@ -518,6 +537,10 @@ async fn qa_generator_replacement_fences_leased_output_and_leaves_decision_indep
     )
     .await
     .unwrap();
+    assert_eq!(
+        generator.generator_preference,
+        QaGeneratorPreference::FlanT5Small
+    );
     assert_eq!(generator.decision_generation, decision.decision_generation);
     assert!(
         !qa::beat(&repo, QA_PLACEMENT, QA_WORKER, enabled.generation, true)

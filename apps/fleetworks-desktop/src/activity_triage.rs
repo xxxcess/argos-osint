@@ -45,11 +45,6 @@ enum Outcome {
     Settled(QaRelatedActivity),
 }
 
-pub(crate) enum RelatedLocation {
-    Job,
-    Assistant,
-}
-
 impl Lookup {
     fn visible(&self, state: &State) -> bool {
         self.epoch == state.connection.epoch
@@ -240,11 +235,17 @@ impl State {
     }
 }
 
-pub(crate) fn explain_notice_button(state: &State, notice_id: u64, kit: &Kit) -> Option<El> {
+pub(crate) fn explain_notice_button(
+    state: &State,
+    notice_id: u64,
+    title: &str,
+    kit: &Kit,
+) -> Option<El> {
     if !state.permission(Permission::SubmitInteractive) {
         return None;
     }
     let source = state.explain_notice_source(notice_id)?;
+    let title = title.to_owned();
     Some(
         IconButton::new(&icons::ASSISTANT_EXPLAIN)
             .variant(IconButtonVariant::Ghost)
@@ -254,7 +255,7 @@ pub(crate) fn explain_notice_button(state: &State, notice_id: u64, kit: &Kit) ->
             .disabled(!state.can_prefill_inbox_question())
             .on_press_tx(move |state: &mut State, tx| {
                 if state.explain_notice_source(notice_id).as_ref() == Some(&source) {
-                    state.prefill_inbox_question(&source, SourceOrigin::Notification, tx);
+                    state.prefill_inbox_question(&source, &title, SourceOrigin::Notification, tx);
                 }
             })
             .build(kit)
@@ -287,8 +288,12 @@ pub(crate) fn job_actions(state: &State, kit: &Kit, preferences: ViewPreferences
                 .finish(MetalFinish::Gunmetal)
                 .disabled(!state.can_prefill_inbox_question())
                 .on_press_tx(move |state: &mut State, tx| {
+                    let Load::Ready(detail) = &state.backend.detail else {
+                        return;
+                    };
                     if state.triage_job_source().as_ref() == Some(&source) {
-                        state.prefill_inbox_question(&source, SourceOrigin::Selection, tx);
+                        let title = detail.job.title.clone();
+                        state.prefill_inbox_question(&source, &title, SourceOrigin::Selection, tx);
                     }
                 })
                 .build(kit, preferences, None),
@@ -296,9 +301,7 @@ pub(crate) fn job_actions(state: &State, kit: &Kit, preferences: ViewPreferences
     }
     let result = lookup.map(|lookup| match &lookup.outcome {
         Outcome::Pending { .. } => triage_status("Finding related activity…", kit),
-        Outcome::Settled(result) => {
-            result_view(state, result, RelatedLocation::Job, kit, preferences)
-        }
+        Outcome::Settled(result) => result_view(state, result, kit, preferences),
     });
     Some(
         rune::col()
@@ -310,10 +313,9 @@ pub(crate) fn job_actions(state: &State, kit: &Kit, preferences: ViewPreferences
     )
 }
 
-pub(crate) fn result_view(
+fn result_view(
     state: &State,
     result: &QaRelatedActivity,
-    location: RelatedLocation,
     kit: &Kit,
     preferences: ViewPreferences,
 ) -> El {
@@ -335,10 +337,6 @@ pub(crate) fn result_view(
             };
             let target = target.clone();
             let reason = *reason;
-            let key = match location {
-                RelatedLocation::Job => "triage-open-related",
-                RelatedLocation::Assistant => "inbox-qa-open-related",
-            };
             rune::row()
                 .key("triage-result")
                 .w_full()
@@ -352,21 +350,15 @@ pub(crate) fn result_view(
                 )
                 .child(
                     ActionButton::new(label)
-                        .key(key)
+                        .key("triage-open-related")
                         .finish(MetalFinish::Gunmetal)
                         .on_press_tx(move |state: &mut State, tx| {
-                            let active = match location {
-                                RelatedLocation::Job => state.activity_triage.lookup.as_ref().is_some_and(|lookup| {
-                                    lookup.visible(state)
-                                        && matches!(&lookup.outcome, Outcome::Settled(
-                                            QaRelatedActivity::Found { target: current, reason: current_reason }
-                                        ) if current == &target && *current_reason == reason)
-                                }),
-                                RelatedLocation::Assistant => matches!(state.canonical_related_activity(),
-                                    Some(QaRelatedActivity::Found { target: current, reason: current_reason })
-                                        if current == &target && *current_reason == reason
-                                ),
-                            };
+                            let active = state.activity_triage.lookup.as_ref().is_some_and(|lookup| {
+                                lookup.visible(state)
+                                    && matches!(&lookup.outcome, Outcome::Settled(
+                                        QaRelatedActivity::Found { target: current, reason: current_reason }
+                                    ) if current == &target && *current_reason == reason)
+                            });
                             if active {
                                 state.open_related_activity(&target, tx);
                             }
@@ -486,10 +478,19 @@ mod tests {
         press(&mut runtime, EXPLAIN, 1.0);
         let tree = runtime.accessibility_json().to_string();
         assert!(tree.contains("What happened with this readiness check?"));
-        assert!(tree.contains("Remove readiness source"));
+        assert!(tree.contains("Attached evidence: Readiness · Actor search was unavailable"));
+        assert!(tree.contains("Remove readiness source: Readiness · Actor search was unavailable"));
+        assert!(runtime.find("inbox-qa-attached-source").is_some());
         assert!(runtime.find("inbox-item-1-detail").is_none());
         assert!(runtime.find("inbox-qa-exchange").is_none());
         assert_eq!(runtime.state.inbox.unread(), unread);
+
+        press(&mut runtime, "inbox-qa-clear-source", 1.25);
+        assert!(runtime.find("inbox-qa-attached-source").is_none());
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("What happened with this readiness check?"));
     }
 
     fn private_job_state() -> State {

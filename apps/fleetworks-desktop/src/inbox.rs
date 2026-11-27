@@ -149,7 +149,6 @@ pub struct Inbox {
     seen_job_events: VecDeque<String>,
     pub(crate) open: bool,
     pub(crate) at_bottom: bool,
-    pub(crate) generator_picker_open: bool,
     focus_return: Option<&'static str>,
     query: TextEdit,
     expanded: BTreeSet<Topic>,
@@ -295,7 +294,6 @@ impl Inbox {
 
     pub(crate) fn close(&mut self) {
         self.open = false;
-        self.generator_picker_open = false;
         self.query = TextEdit::new("");
         self.selected = None;
         self.focus_return = None;
@@ -311,7 +309,6 @@ impl Inbox {
 
     fn reset(&mut self) {
         self.items.clear();
-        self.generator_picker_open = false;
         self.query = TextEdit::new("");
         self.link = Link::Unknown;
         self.known_jobs.clear();
@@ -909,8 +906,7 @@ pub(crate) fn drawer(
         return None;
     }
     let window_width = cx.layout_size("app-shell").map_or(640.0, |size| size[0]);
-    let mut menus = Vec::new();
-    let mut panel = body(state, kit, preferences, &mut menus)
+    let mut panel = body(state, kit, preferences)
         .w(DRAWER_WIDTH)
         .max_w(DRAWER_WIDTH)
         .h_full()
@@ -949,8 +945,7 @@ pub(crate) fn drawer(
                     .h_full()
                     .child(dismiss_area("inbox-backdrop-left").grow(1.0).h_full())
                     .child(panel),
-            )
-            .children(menus),
+            ),
     )
 }
 
@@ -978,7 +973,7 @@ fn enter(el: El, preferences: ViewPreferences, transition: rune::Transition) -> 
         .transition(transition)
 }
 
-fn body(state: &State, kit: &Kit, preferences: ViewPreferences, menus: &mut Vec<El>) -> El {
+fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
     let inbox = &state.inbox;
     let close = rune_kit::Button::new("Close")
         .variant(rune_kit::ButtonVariant::Ghost)
@@ -1098,7 +1093,7 @@ fn body(state: &State, kit: &Kit, preferences: ViewPreferences, menus: &mut Vec<
                 .on_at_bottom(|state: &mut State, at_bottom| state.inbox.at_bottom = at_bottom)
                 .child(list),
         )
-        .children(crate::inbox_qa::footer(state, kit, preferences, menus))
+        .children(crate::inbox_qa::footer(state, kit, preferences))
 }
 
 fn group_view(group: &Group<'_>, state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
@@ -1382,7 +1377,10 @@ fn row(item: &Item, state: &State, kit: &Kit, preferences: ViewPreferences) -> E
                 .child(trigger)
                 .children(action)
                 .children(crate::activity_triage::explain_notice_button(
-                    state, id, kit,
+                    state,
+                    id,
+                    &item.title,
+                    kit,
                 )),
         );
     if !expanded {

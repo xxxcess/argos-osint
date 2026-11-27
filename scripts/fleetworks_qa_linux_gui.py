@@ -203,10 +203,11 @@ def event_pages(records, turn_id):
     return [row for row in records if row.get("op") == "qa_events" and row.get("turn_id") == turn_id]
 
 
-def settled_turn(pages, first, expected_state):
+def settled_turn(pages, first, expected_state, *, timing=""):
     require(pages and all(not row["gap"] for row in pages), "fixture IPC event stream contained a cursor gap")
     final = pages[-1]
-    require(final["state"] == expected_state, f"same IPC turn did not finish {expected_state}")
+    require(final["state"] == expected_state,
+            f"same IPC turn expected {expected_state}, got {final['state']} at cursor {final['cursor']}{timing}")
     events = {}
     for page in pages:
         for event in page["events"]:
@@ -242,6 +243,25 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
                 return node
         return None
 
+    def find_many(keys, buttons):
+        # The streaming assertion needs several nodes from the same live frame.
+        found = {}
+        for window in app_roots(app, registry):
+            for node in descendants(window):
+                key = node.get_accessible_id()
+                if key not in keys or key in found:
+                    continue
+                state = node.getState()
+                if state.contains(atspi.STATE_DEFUNCT):
+                    continue
+                if key in buttons and (node.getRole() != atspi.ROLE_PUSH_BUTTON
+                                       or not state.contains(atspi.STATE_ENABLED)):
+                    continue
+                found[key] = node
+                if len(found) == len(keys):
+                    return found
+        return found
+
     def button(key, label=None, *, timeout=90):
         def activate():
             node = find(key, label=label, button=True)
@@ -262,11 +282,15 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
             return node.name
         return None
 
-    def sources_ready(turn_id, *, expanded):
-        sources = find(SOURCES_CONTENT)
-        citation = find_citation(turn_id, 0)
-        back = find(SOURCES_BACK, button=True)
-        toggle = find(SOURCES_TOGGLE, button=True)
+    def sources_ready(turn_id, *, expanded, nodes=None):
+        citation_key = f"chat-citation-{turn_id}-0"
+        if nodes is None:
+            nodes = find_many({SOURCES_CONTENT, SOURCES_BACK, SOURCES_TOGGLE, citation_key},
+                              {SOURCES_BACK, SOURCES_TOGGLE})
+        sources = nodes.get(SOURCES_CONTENT)
+        citation = nodes.get(citation_key)
+        back = nodes.get(SOURCES_BACK)
+        toggle = nodes.get(SOURCES_TOGGLE)
         if expanded:
             # The full-width panel replaces the reply, including its Sources trigger.
             if toggle is not None or any(screen_bounds(node, atspi) is None for node in (sources, back, citation)):
@@ -404,30 +428,34 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
                 "the turn finished before the barrier was released")
         if not pages or pages[-1]["state"] != "running" or len(pages[-1]["findings"]) != 1:
             return None
-        stop = find("inbox-qa-stop", button=True)
-        if screen_bounds(stop, atspi) is None:
+        stop_key = "inbox-qa-stop"
+        first_key, second_key = (f"chat-citation-{turn_id}-{index}" for index in range(2))
+        nodes = find_many({stop_key, SOURCES_TOGGLE, SOURCES_CONTENT, SOURCES_BACK, first_key, second_key},
+                          {stop_key, SOURCES_TOGGLE, SOURCES_BACK})
+        stop = screen_bounds(nodes.get(stop_key), atspi)
+        if stop is None:
             return None
-        sources = sources_ready(turn_id, expanded=expanded)
+        sources = sources_ready(turn_id, expanded=expanded, nodes=nodes)
         if sources is None:
             return None
-        require(find_citation(turn_id, 1) is None, "the drawer showed another citation before release")
+        require(second_key not in nodes, "the drawer showed another citation before release")
         companions = [row["companion_pid"] for row in records if "companion_pid" in row]
         require(len(companions) == 1, "expected one IPC companion")
-        return pages[-1], companions[0], citation_details(sources) if expanded else None
+        return pages[-1], companions[0], sources, stop
 
-    wait_for(lambda: first_frame(1, expanded=False), app,
-             "collapsed Sources for the first finding and enabled Stop", timeout=16)
+    _, _, toggle, _ = wait_for(lambda: first_frame(1, expanded=False), app,
+                               "collapsed Sources for the first finding and enabled Stop", timeout=16)
     first_ms = round((time.monotonic() - started) * 1000, 1)
     subprocess.run(["scrot", "--overwrite", str(output / "first-finding-sources-collapsed.png")], check=True, timeout=5)
-    button(SOURCES_TOGGLE)
-    early, companion, early_citation = wait_for(lambda: first_frame(1, expanded=True), app,
-                                                 "an early citation and enabled Stop", timeout=4)
+    require(toggle.queryAction().doAction(0), "Fleetworks could not activate Sources")
+    early, companion, citation, _ = wait_for(lambda: first_frame(1, expanded=True), app,
+                                            "an early citation and enabled Stop", timeout=4)
+    early_citation = citation_details(citation)
     require(len(early_citation) == 3 and early_citation[2].startswith("Observed "),
             "the early citation omitted its title, text, or observation time")
     subprocess.run(["scrot", "--overwrite", str(output / "first-finding.png")], check=True, timeout=5)
-    wait_for(lambda: first_frame(1, expanded=True), app,
-             "the early citation and enabled Stop while completion is held", timeout=2)
     release_gate(companion, worker)
+    released_ms = round((time.monotonic() - started) * 1000, 1)
 
     def completed_frame():
         records = read_journal(journal)
@@ -436,7 +464,12 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
             return None
         require(len([row for row in records if row.get("op") == "qa_turn_submit"]) == 1,
                 "the UI admitted another turn during completion")
-        final = settled_turn(pages, early, "answered")
+        terminal_ms = (time.monotonic() - started) * 1000
+        final = settled_turn(
+            pages, early, "answered",
+            timing=(f"; first finding {first_ms:.1f} ms, gate released {released_ms:.1f} ms, "
+                    f"terminal observed {terminal_ms:.1f} ms after submit"),
+        )
         if find("inbox-qa-stop") is not None:
             return None
         citation = sources_ready(final["turn_id"], expanded=True)
@@ -467,7 +500,7 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
     subprocess.run(["scrot", "--overwrite", str(output / "completed-turn.png")], check=True, timeout=5)
 
     submit(MEMORY_QUESTION)
-    _, metric_companion, _ = wait_for(
+    _, metric_companion, _, _ = wait_for(
         lambda: first_frame(2, expanded=False), app,
         "first generated memory finding at the worker barrier", timeout=16,
     )
@@ -567,17 +600,16 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
             "browsing the transcript submitted another turn")
 
     submit(SUMMARY_QUESTION)
-    wait_for(lambda: first_frame(3, expanded=False), app,
-             "a separate Running turn with collapsed Sources", timeout=16)
-    button(SOURCES_TOGGLE)
-    pending, cancel_companion, cancel_citation = wait_for(
+    _, _, toggle, _ = wait_for(lambda: first_frame(3, expanded=False), app,
+                               "a separate Running turn with collapsed Sources", timeout=16)
+    require(toggle.queryAction().doAction(0), "Fleetworks could not activate Sources")
+    pending, cancel_companion, citation, position = wait_for(
         lambda: first_frame(3, expanded=True), app,
         "a separate Running turn with its first citation", timeout=4,
     )
+    cancel_citation = citation_details(citation)
     require(cancel_companion == companion and pending["turn_id"] != final["turn_id"],
             "Stop used a different companion or the completed turn")
-    position = wait_for(lambda: screen_bounds(find("inbox-qa-stop", button=True), atspi), app,
-                        "enabled Stop on the held turn", timeout=2)
     subprocess.run(["scrot", "--overwrite", str(output / "before-stop.png")], check=True, timeout=5)
     x, y, width, height = position
     subprocess.run(["xdotool", "mousemove", str(x + width // 2), str(y + height // 2), "click", "1"],
@@ -633,7 +665,7 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         "stop_while_running": True, "cancelled_terminal_state": canceled["state"],
         "cancelled_terminal_events": canceled["terminal_events"],
         "finding_count": len(final["findings"]), "duplicate_findings": 0,
-        "first_finding_ms": first_ms, "completion_ms": completion_ms,
+        "first_finding_ms": first_ms, "gate_release_ms": released_ms, "completion_ms": completion_ms,
         "grounded_memory": memory,
         "startup_actor_validated_rows": BUNDLED_ACTOR_ROWS, "startup_actor_seed_accepted": False,
     }

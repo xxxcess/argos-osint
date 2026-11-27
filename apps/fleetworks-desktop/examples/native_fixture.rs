@@ -1065,6 +1065,7 @@ mod native {
                 }),
                 ("workstation-status-checks-mixed-matte", |state| {
                     review_appearance(state, workstation_status, ReviewAppearance::Matte);
+                    state.fixture_show_workstation_diagnostics();
                 }),
                 ("workstation-status-checks-mixed-reduced-motion", |state| {
                     review_appearance(state, workstation_status, ReviewAppearance::ReducedMotion);

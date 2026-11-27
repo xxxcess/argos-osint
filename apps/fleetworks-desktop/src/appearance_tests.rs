@@ -261,6 +261,7 @@ fn status_checks_count_only_applicable_observations_and_keep_real_failures() {
         let mut state = crate::tests::registered_fixture();
         state.backend_kind = backend;
         state.workstation_status_checks_open = true;
+        state.workstation_diagnostics_open = true;
         state.readiness = Load::Ready(WorkstationReadiness::new(
             "synthetic-deployment".into(),
             observed.into(),

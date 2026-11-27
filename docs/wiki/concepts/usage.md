@@ -19,7 +19,7 @@ Intel Web opens at `/connect`. **Bulletin** browses retained articles; **Focus B
 | Surface | Use it for | Contract |
 | --- | --- | --- |
 | DB Seed & Train | Configured actor seed/index/Natural candidate triggers; no picker or activation | [Readiness and maintenance](../code/native-connections.md#readiness-and-maintenance) |
-| Brain Search | One search field, bounded canonical results, selected dossier; no native graph | [Actor discovery](../code/actor-search.md) |
+| Search | One search field, bounded canonical results, selected dossier; no native graph | [Actor discovery](../code/actor-search.md) |
 | OSINT Tools | Service/provider cards and protected key modal; no manual tool execution | [Keys and choices](../code/native-connections.md#configuration-and-model-choices) |
 | Model Assignments | Configured provider keys, supported routing/variants and ordered fallbacks | [Providers](providers.md) |
 | Jobs & Logs | Workstation queue and selected-job safe summaries, without tabs/filters/action toolbars | [Activity/privacy](../code/native-connections.md#durable-requests-and-activity) |

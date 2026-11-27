@@ -92,7 +92,7 @@ Provision provider credentials, the Atlas worker, private NLP and a Rust-BERT mo
 | Area | What you can do |
 | --- | --- |
 | DB Setup | Confirm actor seeding and search-index build. Follow the job through reader-visible completion. |
-| Brain Search | Discover actors and read dossiers. |
+| Search | Discover actors and read dossiers. |
 | OSINT Tools and Model Assignments | Read service/provider cards, provision keys and edit supported model routing with confirmed revisions. |
 | Workstation Status and Setup Gateway | Inspect identity, readiness and backend resources. Start Embedded or pair and reconnect to Distributed. |
 | Jobs & Logs | Read the bounded workstation queue and selected-job safe operational summaries. |

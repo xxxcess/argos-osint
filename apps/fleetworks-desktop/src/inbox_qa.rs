@@ -3338,7 +3338,7 @@ mod tests {
         });
         runtime.frame(2.5);
         assert!(runtime.find(SHORTCUT).is_some());
-        assert!(runtime.find("workstation-health").is_some());
+        assert!(runtime.find("workstation-health").is_none());
         assert!(runtime.find("status-checks-toggle/trigger").is_some());
         assert!(runtime.find("workstation-diagnostics/trigger").is_some());
     }

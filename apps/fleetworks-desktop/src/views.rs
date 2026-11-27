@@ -104,33 +104,6 @@ pub(crate) fn page(state: &State, cx: &mut Cx<State>, kit: &Kit, layers: &mut Ve
     }
 }
 
-fn connection_status(state: &State) -> String {
-    match &state.connection.status {
-        ConnectionStatus::Disconnected => {
-            if state.is_local_backend() {
-                "Embedded backend is stopped".into()
-            } else {
-                "Distributed gateway is disconnected".into()
-            }
-        }
-        ConnectionStatus::Connecting => {
-            if state.is_local_backend() {
-                "Starting the embedded backend…".into()
-            } else {
-                "Checking distributed gateway authentication and compatibility…".into()
-            }
-        }
-        ConnectionStatus::Connected => {
-            if state.is_local_backend() {
-                "Connected to the embedded backend".into()
-            } else {
-                "Connected to a compatible distributed gateway".into()
-            }
-        }
-        ConnectionStatus::Failed(error) => error.clone(),
-    }
-}
-
 fn backend_mode_card(
     state: &State,
     compact: bool,
@@ -214,15 +187,8 @@ fn local_capabilities_summary(
     kit: &Kit,
 ) -> El {
     let assessment = assess_local_capabilities(capabilities);
-    let features_label = if capabilities.features.is_empty() {
-        "none advertised".to_owned()
-    } else {
-        capabilities.features.join(", ")
-    };
-    let build_label = capabilities.build.as_ref().map_or_else(
-        || "unknown build".to_owned(),
-        |build| format!("{} ({})", build.version, build.revision),
-    );
+    let features_label = advertised_features(capabilities);
+    let build_label = backend_build_label(capabilities);
     let mut section = rune::col()
         .key("local-capabilities-card")
         .gap(8.0)
@@ -267,21 +233,46 @@ fn local_capabilities_summary(
                     kit,
                 )),
         );
-    if !assessment.warnings.is_empty() {
-        section = section.child(
-            ui_components::async_status_strip(
-                "local-capability-warnings",
-                "Optional capabilities unavailable",
-                assessment.warnings.join(" "),
-                false,
-                StatusTone::Warn,
-                preferences,
-                kit,
-            )
-            .role("status"),
-        );
-    }
+    section = section.children(local_capability_warnings(
+        &assessment.warnings,
+        preferences,
+        kit,
+    ));
     section
+}
+
+fn advertised_features(capabilities: &Capabilities) -> String {
+    if capabilities.features.is_empty() {
+        "None advertised".to_owned()
+    } else {
+        capabilities.features.join(", ")
+    }
+}
+
+fn backend_build_label(capabilities: &Capabilities) -> String {
+    capabilities.build.as_ref().map_or_else(
+        || "Unknown build".to_owned(),
+        |build| format!("{} ({})", build.version, build.revision),
+    )
+}
+
+fn local_capability_warnings(
+    warnings: &[String],
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> Option<El> {
+    (!warnings.is_empty()).then(|| {
+        ui_components::async_status_strip(
+            "local-capability-warnings",
+            "Optional capabilities unavailable",
+            warnings.join(" "),
+            false,
+            StatusTone::Warn,
+            preferences,
+            kit,
+        )
+        .role("status")
+    })
 }
 
 fn local_runtime_diagnostics(
@@ -969,117 +960,17 @@ fn registration_status(state: &State, kit: &Kit) -> El {
     }
 }
 
-fn workstation_registration_tag(state: &State, kit: &Kit) -> El {
-    let (backend, icon) = if state.is_local_backend() {
-        ("Embedded", &icons::WORKSTATION)
-    } else {
-        ("Distributed", &icons::SERVER)
-    };
-    let registration = if state.connected() {
-        state.registration.context.as_ref()
-    } else {
-        None
-    };
-    let (label, tone) = if let Some(context) = registration {
-        (context.registration_id.as_str(), StatusTone::Ok)
-    } else if state.connected() {
-        match state.registration.receipt {
-            Load::Pending | Load::Loading => ("Registering…", StatusTone::Info),
-            Load::Failed(_) => ("Registration failed", StatusTone::Err),
-            _ => ("Unregistered", StatusTone::Neutral),
-        }
-    } else {
-        ("Unregistered", StatusTone::Neutral)
-    };
-    rune::row()
-        .key("workstation-registration-tag")
-        .role("status")
-        .label(if registration.is_some() {
-            format!("{backend} registration ID {label}")
-        } else {
-            format!("{backend} · {label}")
-        })
-        .min_w(0.0)
-        .max_w(520.0)
-        .shrink()
-        .min_h(22.0)
-        .center_y()
-        .gap(6.0)
-        .px(8.0)
-        .py(3.0)
-        .radius(6.0)
-        .fill(tone.bg().alpha(kit.c.bg_button_neutral.a))
-        .border(1.0, tone.border())
-        .child(rune::icon(icon, 14.0).color(tone.fg()).a11y_hidden())
-        .child(
-            rune::text(format!("{backend} · {label}"))
-                .min_w(0.0)
-                .shrink()
-                .font(kit.ty.small_medium)
-                .color(tone.fg())
-                .wrap_anywhere()
-                .selectable(registration.is_some())
-                .a11y_hidden(),
-        )
-}
-
 fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -> El {
     let preferences = state
         .accessibility
         .for_view(state.fixture, cx.is_reduced_motion());
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
 
-    let transport = match &state.connection.status {
-        ConnectionStatus::Connected => ("Connected", StatusTone::Ok),
-        ConnectionStatus::Connecting => ("Connecting", StatusTone::Warn),
-        ConnectionStatus::Failed(_) => ("Offline", StatusTone::Err),
-        ConnectionStatus::Disconnected => ("Disconnected", StatusTone::Neutral),
-    };
-    let deployment = state
-        .connection
-        .capabilities
-        .as_ref()
-        .and_then(|capabilities| capabilities.deployment_id.as_deref())
-        .filter(|id| state.connected() && !id.is_empty());
-    let transport_kind = if state.is_local_backend() {
-        "IPC"
-    } else if state.connection.origin.text.starts_with("https://") {
-        "HTTPS"
-    } else {
-        "HTTP"
-    };
-    let mut body = rune::col().gap(8.0).child(
-        rune::col()
-            .key("workstation-status-header")
-            .role("region")
-            .label("Workstation Status")
-            .w_full()
-            .child(
-                rune::row()
-                    .w_full()
-                    .min_w(0.0)
-                    .flex_wrap()
-                    .center_y()
-                    .gap(6.0)
-                    .child(workstation_registration_tag(state, kit))
-                    .child(
-                        ui_components::status_pill(
-                            format!("{transport_kind} · {}", transport.0),
-                            None,
-                            transport.1,
-                            kit,
-                        )
-                        .key("connection-status")
-                        .label(format!("Transport: {}", transport.0))
-                        .description(transport_kind),
-                    )
-                    .children(state.connected().then(|| {
-                        let (health, tone) = crate::readiness_cards::workstation_health(state);
-                        ui_components::status_pill(health, None, tone, kit)
-                            .key("workstation-health")
-                    })),
-            ),
-    );
+    let mut body = rune::col()
+        .key("workstation-status-content")
+        .role("region")
+        .label("Workstation Status")
+        .gap(8.0);
     if state.connected() {
         if state.registration.context.is_none() {
             if state.can_register() {
@@ -1140,53 +1031,174 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
         kit,
     ));
 
-    let mut diagnostics = rune::col()
-        .gap(8.0)
-        .key("gateway-backend-card")
-        .child(line(connection_status(state), kit))
-        .children(deployment.map(|id| quiet(format!("Deployment {id}"), kit)));
-    if let Load::Failed(error) = &state.registration.receipt {
-        diagnostics = diagnostics.child(quiet(error.clone(), kit).role("alert"));
-    }
-    if state.is_local_backend() {
-        diagnostics = diagnostics
-            .child(
-                quiet(
-                    format!("Private 0700 state dir: {}", state.local_state_dir_label()),
-                    kit,
-                )
-                .key("workstation-local-state-dir"),
-            )
-            .children(local_runtime_diagnostics(state, preferences, kit));
-        if state.connected() {
-            if let Some(capabilities) = &state.connection.capabilities {
-                diagnostics =
-                    diagnostics.child(local_capabilities_summary(capabilities, preferences, kit));
-            }
-            diagnostics = diagnostics.child(
-                ActionButton::new("Stop Embedded Backend")
-                    .key("workstation-stop-local-backend")
-                    .finish(MetalFinish::Gunmetal)
-                    .disabled(state.local_backend.stopping)
-                    .on_press(|state: &mut State| state.stop_local_backend())
-                    .build(kit, preferences, pointer_ref),
-            );
-        }
-    } else {
-        diagnostics = diagnostics.child(quiet(state.connection.origin.text.clone(), kit));
-    }
     scroll(
         body.child(
-            Collapsible::new("Diagnostics", state.workstation_diagnostics_open)
-                .on_toggle(|state: &mut State| {
-                    state.workstation_diagnostics_open = !state.workstation_diagnostics_open;
-                })
-                .child(diagnostics)
-                .build(kit)
-                .key("workstation-diagnostics"),
+            rune::col()
+                .key("workstation-diagnostics")
+                .w_full()
+                .gap(6.0)
+                .child(
+                    crate::readiness_cards::section_disclosure_trigger(
+                        "Diagnostics",
+                        state.workstation_diagnostics_open,
+                        kit,
+                    )
+                    .on_press(|state: &mut State| {
+                        state.workstation_diagnostics_open = !state.workstation_diagnostics_open;
+                    }),
+                )
+                .children(
+                    state
+                        .workstation_diagnostics_open
+                        .then(|| workstation_diagnostics(state, preferences, kit)),
+                ),
         ),
         "workstation-body",
     )
+}
+
+fn workstation_diagnostics(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    let local = state.is_local_backend();
+    let backend = if local { "Embedded" } else { "Distributed" };
+    let transport = if local {
+        "IPC"
+    } else if state.connection.origin.text.starts_with("https://") {
+        "HTTPS"
+    } else {
+        "HTTP"
+    };
+    let status = match state.connection.status {
+        ConnectionStatus::Connected => "Connected",
+        ConnectionStatus::Connecting => "Connecting",
+        ConnectionStatus::Failed(_) => "Offline",
+        ConnectionStatus::Disconnected => "Disconnected",
+    };
+    let registration = if state.connected() {
+        state.registration.context.as_ref().map_or_else(
+            || match state.registration.receipt {
+                Load::Pending | Load::Loading => "Registering…",
+                Load::Failed(_) => "Registration failed",
+                _ => "Unregistered",
+            },
+            |context| context.registration_id.as_str(),
+        )
+    } else {
+        "Unregistered"
+    };
+    let mut details = rune::col()
+        .key("workstation-connection-details")
+        .w_full()
+        .gap(6.0)
+        .child(heading("Backend connection", kit).role("heading"))
+        .child(diagnostic_field("Backend", backend, kit))
+        .child(diagnostic_field(
+            "Transport",
+            format!("{transport} · {status}"),
+            kit,
+        ))
+        .child(
+            diagnostic_field("Registration ID", registration, kit)
+                .key("workstation-registration-id"),
+        );
+    if state.connected() {
+        let (health, _) = crate::readiness_cards::workstation_health(state);
+        details = details.child(diagnostic_field("Health", health, kit));
+        if let Some(id) = state
+            .connection
+            .capabilities
+            .as_ref()
+            .and_then(|capabilities| capabilities.deployment_id.as_deref())
+            .filter(|id| !id.is_empty())
+        {
+            details = details.child(diagnostic_field("Deployment", id, kit));
+        }
+        if let Load::Failed(error) = &state.registration.receipt {
+            details = details.child(line(error.as_str(), kit).role("alert"));
+        }
+    }
+    if let ConnectionStatus::Failed(error) = &state.connection.status {
+        details = details.child(line(error.as_str(), kit).role("alert"));
+    }
+    details = if local {
+        details.child(
+            diagnostic_field("State directory", state.local_state_dir_label(), kit)
+                .key("workstation-local-state-dir"),
+        )
+    } else {
+        details.child(diagnostic_field(
+            "Gateway URL",
+            state.connection.origin.text.as_str(),
+            kit,
+        ))
+    };
+    let mut body = rune::col()
+        .key("gateway-backend-card")
+        .w_full()
+        .min_w(0.0)
+        .padding(8.0)
+        .gap(16.0)
+        .child(details);
+    if local {
+        if state.connected() {
+            if let Some(capabilities) = &state.connection.capabilities {
+                let assessment = assess_local_capabilities(capabilities);
+                body = body.child(
+                    rune::col()
+                        .key("workstation-advertised-capabilities")
+                        .w_full()
+                        .gap(6.0)
+                        .child(heading("Advertised capabilities", kit).role("heading"))
+                        .child(diagnostic_field(
+                            "API version",
+                            capabilities.api_version.to_string(),
+                            kit,
+                        ))
+                        .child(diagnostic_field(
+                            "Build",
+                            backend_build_label(capabilities),
+                            kit,
+                        ))
+                        .child(diagnostic_field(
+                            "Features",
+                            advertised_features(capabilities),
+                            kit,
+                        ))
+                        .children(local_capability_warnings(
+                            &assessment.warnings,
+                            preferences,
+                            kit,
+                        )),
+                );
+            }
+        }
+        body = body.children(local_runtime_diagnostics(state, preferences, kit));
+        if state.connected() {
+            body = body.child(
+                rune::row().child(
+                    ActionButton::new("Stop Embedded Backend")
+                        .key("workstation-stop-local-backend")
+                        .finish(MetalFinish::Gunmetal)
+                        .disabled(state.local_backend.stopping)
+                        .on_press(State::stop_local_backend)
+                        .build(
+                            kit,
+                            preferences,
+                            (!preferences.matte()).then_some(&state.pointer_offset),
+                        ),
+                ),
+            );
+        }
+    }
+    body
+}
+
+fn diagnostic_field(label: &str, value: impl Into<String>, kit: &Kit) -> El {
+    rune::row()
+        .w_full()
+        .min_w(0.0)
+        .gap(8.0)
+        .child(quiet(label, kit).w(112.0))
+        .child(line(value, kit).grow(1.0).min_w(0.0).wrap_anywhere())
 }
 
 /// Small, muted unsynced indicator for last-good data whose refresh is out of sync.
@@ -1702,12 +1714,7 @@ mod tests {
         for size in [(1180.0, 780.0), (640.0, 480.0)] {
             let runtime = runtime(Page::Workstation, false, size);
             let tree = runtime.accessibility_json().to_string();
-            for label in [
-                "Workstation Status",
-                "Transport: Disconnected",
-                "Unregistered",
-                "Status checks · offline",
-            ] {
+            for label in ["Workstation Status", "Status checks · offline"] {
                 assert!(tree.contains(label), "missing {label} at {size:?}");
             }
             assert!(runtime.find("workstation-diagnostics/trigger").is_some());
@@ -1754,7 +1761,7 @@ mod tests {
             guarded.frame(0.0);
             let guarded_tree = guarded.accessibility_json().to_string();
             assert!(guarded_tree.contains("Workstation Status"));
-            assert!(!guarded_tree.contains("Brain Search"));
+            assert!(guarded.find("nav-brain").is_none());
 
             let mut connected = Runtime::new(
                 crate::tests::registered_fixture(),
@@ -1767,18 +1774,15 @@ mod tests {
             );
             connected.frame(0.0);
             let connected_tree = connected.accessibility_json().to_string();
-            for label in [
-                "Workstation Status",
-                "Status checks",
-                "Distributed registration ID synthetic-registration",
-                "Transport: Connected",
-            ] {
+            for label in ["Workstation Status", "Status checks"] {
                 assert!(
                     connected_tree.contains(label),
                     "missing connected {label} at {size:?}"
                 );
             }
-            assert!(connected.find("workstation-status-header").is_some());
+            assert!(connected.find("workstation-status-header").is_none());
+            assert!(connected.find("workstation-registration-id").is_none());
+            assert!(connected.find("workstation-health").is_none());
             assert!(connected.find("workstation-services").is_none());
             assert!(connected.find("workstation-jobs-counts").is_none());
             assert!(connected.find("host-resources-card").is_none());
@@ -1813,10 +1817,21 @@ mod tests {
                 &mut clock,
             );
             assert!(connected.find("gateway-backend-card").is_some());
-            assert!(connected
-                .accessibility_json()
-                .to_string()
-                .contains("Deployment synthetic-deployment"));
+            let diagnostics_tree = connected.accessibility_json().to_string();
+            for label in [
+                "Backend connection",
+                "Registration ID",
+                "synthetic-registration",
+                "Deployment",
+                "synthetic-deployment",
+                "Gateway URL",
+            ] {
+                assert!(
+                    diagnostics_tree.contains(label),
+                    "missing {label} at {size:?}"
+                );
+            }
+            assert!(connected.find("workstation-stop-local-backend").is_none());
         }
     }
 

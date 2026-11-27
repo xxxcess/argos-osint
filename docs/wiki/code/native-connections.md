@@ -39,6 +39,8 @@ Both types use the shared native contract for registered identity, readiness, ac
 
 **Status checks** follows the connected backend. Embedded checks the IPC gateway, datastore, workstation registration, bundled language service, actor catalog and serving search index. Distributed also reports its standalone Jobs, Brain, Control and Classifier service checks and the verified Atlas BERT inference state. A Distributed service check shows Unknown when a configured or verified observation is missing. Embedded marks those standalone checks as inapplicable so they stay outside the checklist and its totals.
 
+Open **Diagnostics** below **Status checks** to see connection mode, health, transport and the current registration and deployment identifiers. Distributed shows its gateway origin. Embedded shows its private state directory, advertised capabilities and operational warnings. Use **Stop Embedded Backend** in Diagnostics to stop a connected companion.
+
 The [HTTP/IPC parity test](../../../services/api-host/tests/http_ipc_parity.rs) uses a real HTTP gateway and the Embedded companion with disposable storage. It verifies shared actor maintenance behavior and records transport-specific authority and shutdown behavior. Distributed Compose and installed GUI evidence are tracked as separate journeys. The [Linux CI guide](ci.md#nightly-gsd-order) describes how parity and visual evidence fit into the first pass.
 
 ## Inbox and Assistant dock

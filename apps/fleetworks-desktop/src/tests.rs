@@ -127,13 +127,16 @@ fn real_shell_navigation_works_offline_without_boundary_effects() {
     assert!(connected.find("gateway-status-header").is_none());
     assert!(connected.find("connection-editor").is_none());
     assert!(connected.find("connect-id").is_none());
-    assert!(connected.find("workstation-registration-tag").is_some());
+    assert!(connected.find("workstation-registration-tag").is_none());
     assert!(connected.find("nav-atlas").is_none());
     let connected_tree = connected.accessibility_json().to_string();
     assert!(!connected_tree.contains("News Cycles"));
     assert!(!connected_tree.contains("Connect ID"));
     assert!(!connected_tree.contains("Gateway connected"));
-    assert!(connected_tree.contains("Distributed registration ID synthetic-registration"));
+    assert!(!connected_tree.contains("synthetic-registration"));
+    assert!(connected.elements().iter().any(|element| {
+        element.key.as_deref() == Some("nav-brain") && element.label.as_deref() == Some("Search")
+    }));
     let hidden_connect_id = connected
         .state
         .registration
@@ -1296,7 +1299,7 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
 }
 
 #[test]
-fn workstation_tags_the_resolved_registration_and_keeps_metrics_in_the_toolbar() {
+fn workstation_diagnostics_expose_current_registration_and_keep_metrics_in_the_toolbar() {
     use crate::workstation_dashboard::HostMetrics;
     use fleetworks_workstation::native::BackendKind;
 
@@ -1318,11 +1321,12 @@ fn workstation_tags_the_resolved_registration_and_keeps_metrics_in_the_toolbar()
     runtime.reduced_motion = true;
     let mut frame = 0;
     tick_status_checks(&mut runtime, &mut frame);
-    let tag = assert_status_check_fully_visible(&runtime, "workstation-registration-tag");
-    assert_eq!(
-        tag.label.as_deref(),
-        Some("Embedded registration ID synthetic-registration")
-    );
+    assert!(runtime.find("workstation-registration-tag").is_none());
+    assert!(runtime.find("workstation-registration-id").is_none());
+    assert!(!runtime
+        .accessibility_json()
+        .to_string()
+        .contains("synthetic-registration"));
     assert!(runtime.find("workstation-services").is_none());
     assert!(runtime.find("workstation-jobs-counts").is_none());
     assert!(runtime.find("backend-readiness-checks").is_some());
@@ -1366,17 +1370,26 @@ fn workstation_tags_the_resolved_registration_and_keeps_metrics_in_the_toolbar()
         .unwrap()
         .contains("Latest refresh failed: gateway timed out"));
 
+    runtime.update(|_, tx| tx.focus("workstation-diagnostics/trigger", true));
+    tick_status_checks(&mut runtime, &mut frame);
+    runtime.key(rune::KeyEvent {
+        key: rune::Key::Enter,
+        mods: rune::Mods::default(),
+    });
+    tick_status_checks(&mut runtime, &mut frame);
+    assert!(runtime.state.workstation_diagnostics_open);
+    let details = runtime.accessibility_json().to_string();
+    assert!(details.contains("Registration ID") && details.contains("synthetic-registration"));
+
     runtime.update(|state, _| {
         state.registration.context = None;
         state.registration.receipt = Load::Loading;
     });
     tick_status_checks(&mut runtime, &mut frame);
-    assert_eq!(
-        status_check_element(&runtime, "workstation-registration-tag")
-            .label
-            .as_deref(),
-        Some("Embedded · Registering…")
-    );
+    assert!(runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Registering…"));
     assert!(runtime.find("workstation-jobs-counts").is_none());
 
     runtime.update(move |state, _| {
@@ -1384,12 +1397,9 @@ fn workstation_tags_the_resolved_registration_and_keeps_metrics_in_the_toolbar()
         state.connection.status = ConnectionStatus::Disconnected;
     });
     tick_status_checks(&mut runtime, &mut frame);
-    assert_eq!(
-        status_check_element(&runtime, "workstation-registration-tag")
-            .label
-            .as_deref(),
-        Some("Embedded · Unregistered")
-    );
+    let offline = runtime.accessibility_json().to_string();
+    assert!(offline.contains("Unregistered"));
+    assert!(!offline.contains("synthetic-registration"));
     assert!(runtime.find("toolbar-telemetry").is_none());
 }
 

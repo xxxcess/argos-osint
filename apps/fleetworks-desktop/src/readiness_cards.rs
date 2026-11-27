@@ -121,13 +121,9 @@ pub(crate) fn workstation_section(state: &State, preferences: ViewPreferences, k
         .w_full()
         .gap(6.0)
         .child(
-            disclosure_trigger("trigger", summary.clone(), open, kit)
-                .fill(kit.c.layer_01)
-                .child(disclosure_text(summary, kit))
-                .child(chevron(open, kit))
-                .on_press(|state: &mut State| {
-                    state.workstation_status_checks_open = !state.workstation_status_checks_open;
-                }),
+            section_disclosure_trigger(summary, open, kit).on_press(|state: &mut State| {
+                state.workstation_status_checks_open = !state.workstation_status_checks_open;
+            }),
         )
         .children(open.then(|| {
             if connected {
@@ -659,6 +655,14 @@ fn status_tag(status: CheckStatus, check_id: &str, tone: StatusTone, kit: &Kit) 
                 .color(tone.fg())
                 .a11y_hidden(),
         )
+}
+
+pub(crate) fn section_disclosure_trigger(title: impl Into<String>, open: bool, kit: &Kit) -> El {
+    let title = title.into();
+    disclosure_trigger("trigger", title.clone(), open, kit)
+        .fill(kit.c.layer_01)
+        .child(disclosure_text(title, kit))
+        .child(chevron(open, kit))
 }
 
 fn disclosure_trigger(key: impl Into<String>, label: String, expanded: bool, kit: &Kit) -> El {

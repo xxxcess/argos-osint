@@ -1,0 +1,5 @@
+{
+  "events": [
+    { "t": 0.25, "type": "click", "key": "workstation-diagnostics/trigger" }
+  ]
+}

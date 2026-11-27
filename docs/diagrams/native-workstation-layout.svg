@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="native-workstation-layout-title native-workstation-layout-desc">
 <title id="native-workstation-layout-title">Native workstation shell and settings composition</title>
-<desc id="native-workstation-layout-desc">A toolbar with telemetry, an Inbox bell and an optional Assistant toggle. The brand avatar opens Workstation Status from the rail. The central scroll area shows expanded status checks with row action icons, plus diagnostics. Operations pages can show a read-only context rail on wide windows. The optional Assistant can dock there with a pinned context, history and composer. The Inbox popover opens below the toolbar bell and preserves the selected destination and Assistant. Jobs and Logs opens the selected job in a separate log view. Workstation Settings opens a centered category and content dialog. Narrow windows hide the right panel while keeping the same controls.</desc>
+<desc id="native-workstation-layout-desc">A toolbar with telemetry, an Inbox bell and an optional Assistant toggle. The brand avatar opens Workstation Status from the rail. The central scroll area shows expanded Status checks with row action icons. The collapsed Diagnostics disclosure below contains backend connection details and Embedded capabilities. Operations pages can show a read-only context rail on wide windows. The optional Assistant can dock there with a pinned context, history and composer. The Inbox popover opens below the toolbar bell and preserves the selected destination and Assistant. Jobs and Logs opens the selected job in a separate log view. Workstation Settings opens a centered category and content dialog. Narrow windows hide the right panel while keeping the same controls.</desc>
 <style>text{font-family:Geist,Arial,sans-serif;fill:#242424}.zone{font-size:13px;letter-spacing:1.2px;fill:#666}.label{font-size:20px;font-weight:600}.note{font-size:15px;fill:#444}.small{font-size:13px;fill:#666}.node{fill:#fff;stroke:#aaa;stroke-width:1}.focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}.lane{fill:#fafafa;stroke:#ddd;stroke-width:1}.pill{fill:#f4f4f4;stroke:#ccc;stroke-width:1}</style>
 <rect width="1200" height="720" fill="#fff"/>
 <rect x="32" y="38" width="1136" height="624" rx="6" fill="#fff" stroke="#777"/>
@@ -10,30 +10,34 @@
 <rect x="48" y="144" width="196" height="36" rx="6" class="focus"/>
 <text x="60" y="168" class="note">Brand avatar · Home</text>
 <text x="52" y="209" class="zone">OPERATIONS</text>
-<text x="62" y="242" class="note">Brain Search</text>
+<text x="62" y="242" class="note">Search</text>
 <text x="62" y="279" class="note">Tool Box</text>
 <text x="62" y="316" class="note">Model Assignments</text>
 <text x="62" y="353" class="note">Jobs &amp; Logs</text>
 <path d="M 48 600 H 244" stroke="#ddd"/>
 <text x="62" y="632" class="note">Settings</text>
 <text x="290" y="129" class="zone">SELECTED DESTINATION · SCROLLS INDEPENDENTLY</text>
-<text x="302" y="177" class="note">Embedded · Registration ID</text>
-<rect x="282" y="198" width="640" height="204" rx="6" class="node"/>
-<text x="302" y="232" class="label">Status checks</text>
-<text x="302" y="261" class="small">Service</text>
-<text x="628" y="261" class="small">Status</text>
-<text x="798" y="261" class="small">Action</text>
-<path d="M 302 275 H 902 M 302 313 H 902 M 302 351 H 902" stroke="#ddd"/>
-<text x="302" y="300" class="note">Actor search</text>
-<text x="628" y="300" class="small">Ready</text>
-<circle cx="812" cy="292" r="5" fill="none" stroke="#444" stroke-width="1.5"/>
-<path d="M 816 296 L 821 301" stroke="#444" stroke-width="1.5"/>
-<text x="302" y="338" class="note">Gateway</text>
-<text x="628" y="338" class="small">Ready</text>
-<path d="M 801 332 Q 813 320 825 332 Q 813 344 801 332 Z" fill="none" stroke="#444" stroke-width="1.5"/>
-<circle cx="813" cy="332" r="2.5" fill="#444"/>
-<text x="302" y="379" class="small">Select a check for details or use its action icon</text>
-<text x="302" y="446" class="label">Diagnostics</text>
+<rect x="282" y="144" width="640" height="204" rx="6" class="node"/>
+<rect x="282" y="144" width="640" height="48" rx="6" class="pill"/>
+<text x="302" y="175" class="label">Status checks</text>
+<path d="M 888 163 L 894 169 L 900 163" fill="none" stroke="#555" stroke-width="2"/>
+<text x="302" y="207" class="small">Service</text>
+<text x="628" y="207" class="small">Status</text>
+<text x="798" y="207" class="small">Action</text>
+<path d="M 302 221 H 902 M 302 259 H 902 M 302 297 H 902" stroke="#ddd"/>
+<text x="302" y="246" class="note">Actor search</text>
+<text x="628" y="246" class="small">Ready</text>
+<circle cx="812" cy="238" r="5" fill="none" stroke="#444" stroke-width="1.5"/>
+<path d="M 816 242 L 821 247" stroke="#444" stroke-width="1.5"/>
+<text x="302" y="284" class="note">Gateway</text>
+<text x="628" y="284" class="small">Ready</text>
+<path d="M 801 278 Q 813 266 825 278 Q 813 290 801 278 Z" fill="none" stroke="#444" stroke-width="1.5"/>
+<circle cx="813" cy="278" r="2.5" fill="#444"/>
+<text x="302" y="325" class="small">Select a check for details or use its action icon</text>
+<rect x="282" y="366" width="640" height="48" rx="6" class="pill"/>
+<text x="302" y="397" class="label">Diagnostics</text>
+<path d="M 890 384 L 896 390 L 890 396" fill="none" stroke="#555" stroke-width="2"/>
+<text x="302" y="440" class="small">Open for backend connection details and Embedded capabilities</text>
 <text x="966" y="129" class="zone">OPTIONAL RIGHT PANEL</text>
 <rect x="958" y="144" width="194" height="280" rx="6" class="lane"/>
 <text x="974" y="178" class="label">Overview</text>

@@ -109,7 +109,7 @@ impl Page {
     pub fn title(self) -> &'static str {
         match self {
             Self::Seed => "Actor Maintenance",
-            Self::Brain => "Brain Search",
+            Self::Brain => "Search",
             Self::Tools => "Tool Box",
             Self::Models => "Model Assignments",
             Self::Profile => "Profile",
@@ -182,7 +182,7 @@ pub enum ModelsTab {
     Providers,
 }
 
-/// Active dossier tab on `Brain Search`.
+/// Active dossier tab on `Search`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DossierFacet {
     #[default]
@@ -434,6 +434,13 @@ impl State {
             fixture: true,
             setup_gateway: false,
             ..Self::default()
+        }
+    }
+
+    /// Capture expanded Home diagnostics in the synthetic native fixture.
+    pub fn fixture_show_workstation_diagnostics(&mut self) {
+        if self.fixture {
+            self.workstation_diagnostics_open = true;
         }
     }
 

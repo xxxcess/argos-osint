@@ -75,7 +75,9 @@ use crate::readiness::MaintenanceRequest;
 use crate::readiness::ACTOR_SEED_PATH;
 use crate::readiness::CLASSIFIER_TRAIN_PATH;
 use crate::readiness::WORKSTATION_READINESS_PATH;
+use crate::search::ActorBrowseQuery;
 use crate::search::ActorSearchQuery;
+use crate::search::ACTOR_BROWSE_PATH;
 use crate::search::ACTOR_DETAIL_PATH;
 use crate::search::ACTOR_REINDEX_PATH;
 use crate::search::ACTOR_SEARCH_PATH;
@@ -680,6 +682,7 @@ pub enum IpcOperation {
     ModelsDefaults,
     ProfileRead,
     ActorsSearch(ActorSearchQuery),
+    ActorsBrowse(ActorBrowseQuery),
     ActorDetail(ActorDetailQuery),
     ArticlesList(ArticlesListQuery),
     ArticlesSearch(ArticlesSearchQuery),
@@ -755,6 +758,7 @@ impl fmt::Debug for IpcOperation {
             Self::ModelsDefaults => f.write_str("ModelsDefaults"),
             Self::ProfileRead => f.write_str("ProfileRead"),
             Self::ActorsSearch(q) => f.debug_tuple("ActorsSearch").field(q).finish(),
+            Self::ActorsBrowse(_) => f.write_str("ActorsBrowse(..)"),
             Self::ActorDetail(q) => f.debug_tuple("ActorDetail").field(q).finish(),
             Self::ArticlesList(q) => f.debug_tuple("ArticlesList").field(q).finish(),
             Self::ArticlesSearch(q) => f.debug_tuple("ArticlesSearch").field(q).finish(),
@@ -855,6 +859,7 @@ impl IpcOperation {
         "models_defaults",
         "profile_read",
         "actors_search",
+        "actors_browse",
         "actor_detail",
         "articles_list",
         "articles_search",
@@ -916,6 +921,7 @@ impl IpcOperation {
             Self::ModelsDefaults => "models_defaults",
             Self::ProfileRead => "profile_read",
             Self::ActorsSearch(_) => "actors_search",
+            Self::ActorsBrowse(_) => "actors_browse",
             Self::ActorDetail(_) => "actor_detail",
             Self::ArticlesList(_) => "articles_list",
             Self::ArticlesSearch(_) => "articles_search",
@@ -979,6 +985,7 @@ impl IpcOperation {
             Self::ModelsDefaults => (IpcMethod::Get, MODELS_DEFAULTS_PATH),
             Self::ProfileRead => (IpcMethod::Get, PROFILE_PATH),
             Self::ActorsSearch(_) => (IpcMethod::Get, ACTOR_SEARCH_PATH),
+            Self::ActorsBrowse(_) => (IpcMethod::Get, ACTOR_BROWSE_PATH),
             Self::ActorDetail(_) => (IpcMethod::Get, ACTOR_DETAIL_PATH),
             Self::ArticlesList(_) => (IpcMethod::Get, ARTICLES_PATH),
             Self::ArticlesSearch(_) => (IpcMethod::Get, ARTICLES_SEARCH_PATH),
@@ -1059,6 +1066,7 @@ impl IpcOperation {
         let value = query_to_json_object(query)?;
         match route {
             ACTOR_SEARCH_PATH => decode_query(value).map(Self::ActorsSearch),
+            ACTOR_BROWSE_PATH => decode_query(value).map(Self::ActorsBrowse),
             ACTOR_DETAIL_PATH => decode_query(value).map(Self::ActorDetail),
             ARTICLES_PATH => decode_query(value).map(Self::ArticlesList),
             ARTICLES_SEARCH_PATH => decode_query(value).map(Self::ArticlesSearch),
@@ -2826,6 +2834,12 @@ mod tests {
         let op =
             IpcOperation::from_get_with_query(ACTOR_DETAIL_PATH, &[("id", "actor-1")]).unwrap();
         assert_eq!(op.into_typed_route(), (IpcMethod::Get, ACTOR_DETAIL_PATH));
+
+        let browse = ActorBrowseQuery::new(Some("actor-1".into()), 2).unwrap();
+        let op = IpcOperation::from_get_with_query(ACTOR_BROWSE_PATH, &browse).unwrap();
+        assert_eq!(op.into_typed_route(), (IpcMethod::Get, ACTOR_BROWSE_PATH));
+        assert_eq!(op.operation_name(), "actors_browse");
+        assert_eq!(op, IpcOperation::ActorsBrowse(browse));
 
         let op = IpcOperation::from_get_with_query(
             LOGS_PATH,

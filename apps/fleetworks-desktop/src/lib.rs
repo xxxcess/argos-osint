@@ -41,6 +41,8 @@ mod readiness_cards;
 pub mod rebind;
 pub mod registration;
 mod rock;
+pub mod search_articles;
+mod search_catalog;
 pub mod startup;
 mod startup_checks;
 mod startup_data;

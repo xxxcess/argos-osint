@@ -745,17 +745,17 @@ mod tests {
         // Rune must route the first character to the newly opened editor,
         // even when the shortcut and that character arrive in one frame.
         runtime.key(KeyEvent {
-            key: Key::Text("b".into()),
+            key: Key::Text("s".into()),
             mods: rune::Mods::default(),
         });
         runtime.frame(4.0 / 60.0);
-        assert_eq!(runtime.state.commands.query.text, "b");
+        assert_eq!(runtime.state.commands.query.text, "s");
         runtime.key(KeyEvent {
-            key: Key::Text("rain".into()),
+            key: Key::Text("earch".into()),
             mods: rune::Mods::default(),
         });
         runtime.frame(5.0 / 60.0);
-        assert_eq!(runtime.state.commands.query.text, "brain");
+        assert_eq!(runtime.state.commands.query.text, "search");
         assert!(runtime.find("command-0").is_some());
         assert!(runtime.find("command-1").is_none());
         runtime.key(KeyEvent {

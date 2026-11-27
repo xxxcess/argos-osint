@@ -1370,10 +1370,16 @@ fn workstation_diagnostics_expose_current_registration_and_keep_metrics_in_the_t
         .unwrap()
         .contains("Latest refresh failed: gateway timed out"));
 
-    runtime.update(|_, tx| tx.focus("workstation-diagnostics/trigger", true));
+    runtime.update(|_, tx| {
+        tx.scroll_into_view("workstation-diagnostics/trigger");
+        tx.focus("workstation-diagnostics", true);
+    });
     tick_status_checks(&mut runtime, &mut frame);
+    assert!(runtime.elements().iter().any(|element| {
+        element.focused && element.path.ends_with("/workstation-diagnostics/trigger")
+    }));
     runtime.key(rune::KeyEvent {
-        key: rune::Key::Enter,
+        key: rune::Key::Text(" ".into()),
         mods: rune::Mods::default(),
     });
     tick_status_checks(&mut runtime, &mut frame);

@@ -70,6 +70,8 @@ use crate::material;
 use crate::material::GlassSurface;
 use crate::rebind::Rebind;
 use crate::registration::Registration;
+use crate::search_catalog::ActorCatalog;
+use crate::search_catalog::SearchCategory;
 use crate::submission::SubmissionKind;
 use crate::submission::Submissions;
 use crate::theme;
@@ -148,7 +150,7 @@ impl Page {
     pub fn summary_hint(self) -> &'static str {
         match self {
             Self::Seed => "Stage seeds, classifier runs & maintenance",
-            Self::Brain => "Search actors and inspect intelligence dossiers",
+            Self::Brain => "Search actors and articles",
             Self::Tools => "Configure API tool providers & credentials",
             Self::Models => "Assign routing models & verify accounts",
             Self::Profile | Self::Workstation | Self::Workspaces => {
@@ -211,6 +213,7 @@ pub enum Intent {
     PairingSessionOnly,
     Readiness,
     Search { query: String },
+    BrowseActors,
     Dossier { actor_id: String },
     Workspace(WorkspaceCommand),
     Interfaces,
@@ -291,6 +294,9 @@ pub struct State {
     pub pairing: crate::pairing::Pairing,
     pub connection_profiles: ConnectionProfiles,
     pub brain: Brain,
+    pub(crate) search_category: Option<SearchCategory>,
+    pub(crate) actor_catalog: ActorCatalog,
+    pub search_articles: crate::search_articles::ArticlesSearch,
     pub backend: Backend,
     pub maintenance: Maintenance,
     pub configuration: Configuration,
@@ -370,6 +376,9 @@ impl Default for State {
             pairing: crate::pairing::Pairing::default(),
             connection_profiles: ConnectionProfiles::initial(),
             brain: Brain::default(),
+            search_category: None,
+            actor_catalog: ActorCatalog::default(),
+            search_articles: crate::search_articles::ArticlesSearch::default(),
             backend: Backend::default(),
             maintenance: Maintenance::default(),
             configuration: Configuration::default(),
@@ -481,6 +490,9 @@ impl State {
         if self.page == Page::Jobs {
             self.back_to_jobs();
         }
+        if self.search_category.is_some() {
+            self.close_search_category();
+        }
         self.sync_jobs_binding();
         self.sync_log_visibility();
         if self.connected() {
@@ -498,6 +510,9 @@ impl State {
         self.connection_profiles.cancel_tests();
         self.readiness_request = None;
         self.search_request = None;
+        self.actor_catalog.reset();
+        self.search_category = None;
+        self.search_articles.cancel_pending();
         self.dossier_request = None;
         self.registration.request = None;
         self.registration.interface_request = None;
@@ -1064,6 +1079,7 @@ impl State {
     pub fn query_edited(&mut self, tx: &mut Tx) {
         self.brain.edited(tx.clock());
         self.dossier_request = None;
+        self.edit_article_search(&self.brain.query.text.clone(), tx.clock());
         if self.brain.pending_at.is_some() {
             tx.wake_after(Duration::from_millis(200));
         }
@@ -1118,34 +1134,44 @@ impl State {
         let Load::Ready(response) = &self.brain.results else {
             return;
         };
-        let Some(hit) = response.rows.get(index) else {
-            return;
-        };
-        if self.brain.showing_detail && self.brain.selected_actor.as_deref() == Some(&hit.actor_id)
-        {
-            self.brain.showing_detail = false;
-            self.brain.selected_actor = None;
-            self.brain.dossier = Load::Idle;
-            self.brain.detail_revision = self.brain.detail_revision.wrapping_add(1);
-            self.dossier_request = None;
-        } else {
-            self.select_actor(index);
+        if let Some(hit) = response.rows.get(index) {
+            self.toggle_actor_record(hit.actor_id.clone(), Some(index));
         }
     }
 
-    pub fn retry_dossier(&mut self) {
-        let Load::Ready(response) = &self.brain.results else {
-            return;
-        };
-        if !self.brain.showing_detail {
-            return;
+    pub(crate) fn toggle_actor_record(&mut self, id: String, index: Option<usize>) {
+        if self.brain.showing_detail && self.brain.selected_actor.as_deref() == Some(id.as_str()) {
+            self.close_actor_record();
+        } else {
+            self.open_actor_record(id, index);
         }
-        if let Some(index) = response
-            .rows
-            .iter()
-            .position(|hit| Some(hit.actor_id.as_str()) == self.brain.selected_actor.as_deref())
+    }
+
+    fn close_actor_record(&mut self) {
+        self.brain.showing_detail = false;
+        self.brain.selected_actor = None;
+        self.brain.dossier = Load::Idle;
+        self.brain.detail_revision = self.brain.detail_revision.wrapping_add(1);
+        self.dossier_request = None;
+    }
+
+    pub(crate) fn close_search_category(&mut self) {
+        if self.search_category.take() == Some(SearchCategory::Articles) {
+            self.edit_article_search(&self.brain.query.text.clone(), self.clock);
+        }
+        self.actor_catalog.reset();
+        self.brain.highlighted = None;
+        self.close_actor_record();
+    }
+
+    pub fn retry_dossier(&mut self) {
+        if let Some(id) = self
+            .brain
+            .selected_actor
+            .clone()
+            .filter(|_| self.brain.showing_detail)
         {
-            self.select_actor(index);
+            self.open_actor_record(id, self.brain.highlighted);
         }
     }
 
@@ -1153,11 +1179,13 @@ impl State {
         let Load::Ready(response) = &self.brain.results else {
             return;
         };
-        let Some(hit) = response.rows.get(index) else {
-            return;
-        };
-        let id = hit.actor_id.clone();
-        self.brain.highlighted = Some(index);
+        if let Some(hit) = response.rows.get(index) {
+            self.open_actor_record(hit.actor_id.clone(), Some(index));
+        }
+    }
+
+    fn open_actor_record(&mut self, id: String, index: Option<usize>) {
+        self.brain.highlighted = index;
         self.brain.selected_actor = Some(id.clone());
         self.brain.detail_revision = self.brain.detail_revision.wrapping_add(1);
         self.brain.showing_detail = true;
@@ -1306,6 +1334,9 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
         tx.wake_after(Duration::from_secs(2));
     }
     changed |= poll_jobs(state, now, tx);
+    if state.page == Page::Brain {
+        changed |= state.poll_article_search(now);
+    }
     if state.page == Page::Workstation
         && !state.fixture
         && state.connected()
@@ -1404,6 +1435,9 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         }
     }
     if event.is_command('f') && state.page == Page::Brain {
+        if state.search_category.is_some() {
+            state.close_search_category();
+        }
         tx.focus("actor-search/value/input", true);
         return true;
     }

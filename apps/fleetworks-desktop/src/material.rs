@@ -509,10 +509,19 @@ pub(crate) fn skeleton_block(
     tone: StatusTone,
     preferences: ViewPreferences,
 ) -> El {
+    // Tint by feature context. Reserve success, warning, and error colors for resolved states.
+    let tint = match tone {
+        StatusTone::Accent | StatusTone::Cyan | StatusTone::Info | StatusTone::Violet => {
+            Some(tone.fg())
+        }
+        _ => None,
+    };
+    let base = theme::hex(SKELETON_BASE);
+    let sheen = theme::hex(SHEEN);
     let mut block = el()
         .h(height)
         .radius(radius)
-        .fill(theme::hex(SKELETON_BASE))
+        .fill(tint.map_or(base, |tint| base.mix(tint, 0.08)))
         .a11y_hidden();
     if let Some(frac) = width_frac {
         block = block.w_frac(frac);
@@ -524,8 +533,6 @@ pub(crate) fn skeleton_block(
     if preferences.reduced_motion {
         return block;
     }
-    // One sheen color for every tone: loading is not a status.
-    let _ = tone;
     let sweep = el()
         .key("skeleton-shimmer-band")
         .absolute(0.0, 0.0)
@@ -535,7 +542,11 @@ pub(crate) fn skeleton_block(
             PI * 0.5,
             [
                 (0.0, Color::TRANSPARENT),
-                (0.5, theme::hex(SHEEN).alpha(SHEEN_PEAK)),
+                (
+                    0.5,
+                    tint.map_or(sheen, |tint| sheen.mix(tint, 0.4))
+                        .alpha(SHEEN_PEAK),
+                ),
                 (1.0, Color::TRANSPARENT),
             ],
         )

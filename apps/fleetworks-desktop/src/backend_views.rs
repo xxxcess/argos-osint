@@ -51,42 +51,43 @@ fn card(state: &State, preferences: ViewPreferences, tone: StatusTone, body: El)
     )
 }
 
-fn load_message<T>(
+fn load_view<T>(
     load: &Load<T>,
     empty: &str,
-    preferences: ViewPreferences,
+    placeholder: impl FnOnce() -> El,
     kit: &Kit,
 ) -> Option<El> {
     match load {
-        Load::Idle => Some(quiet(empty.to_owned(), kit)),
-        Load::Pending | Load::Loading => Some(
-            ui_components::async_status_strip(
-                "backend-loading",
-                "Syncing with gateway",
-                "Loading from the selected gateway…",
-                true,
-                StatusTone::Accent,
-                preferences,
-                kit,
-            )
-            .role("status"),
-        ),
+        Load::Idle if !empty.is_empty() => Some(quiet(empty.to_owned(), kit)),
+        Load::Pending | Load::Loading => Some(placeholder().role("status")),
         Load::Failed(error) => Some(line(error.clone(), kit).role("alert")),
-        Load::Ready(_) => None,
+        Load::Idle | Load::Ready(_) => None,
     }
 }
 
-fn list_load_or_skeleton<T>(
-    load: &Load<T>,
-    empty: &str,
-    skeleton: El,
-    preferences: ViewPreferences,
-    kit: &Kit,
-) -> Option<El> {
-    match load {
-        Load::Pending | Load::Loading => Some(skeleton.role("status")),
-        _ => load_message(load, empty, preferences, kit),
-    }
+fn receipt_placeholder(key: &str, label: &str, preferences: ViewPreferences) -> El {
+    rune::col()
+        .key(key.to_owned())
+        .w_full()
+        .gap(7.0)
+        .py(3.0)
+        .label(label.to_owned())
+        .child(material::skeleton_block(
+            Some(0.42),
+            None,
+            12.0,
+            4.0,
+            StatusTone::Info,
+            preferences,
+        ))
+        .child(material::skeleton_block(
+            Some(0.62),
+            None,
+            10.0,
+            4.0,
+            StatusTone::Info,
+            preferences,
+        ))
 }
 
 fn state_tone(value: &str) -> StatusTone {
@@ -231,11 +232,10 @@ fn tools(
 
 fn tool_catalog(state: &State, wide: bool, preferences: ViewPreferences, kit: &Kit) -> El {
     let mut body = rune::col().w_full().min_w(0.0).gap(10.0);
-    if let Some(message) = list_load_or_skeleton(
+    if let Some(message) = load_view(
         &state.backend.tools,
         "Tool availability has not been observed.",
-        ui_components::skeleton_tool_catalog(preferences, kit),
-        preferences,
+        || ui_components::skeleton_tool_catalog(preferences, kit),
         kit,
     ) {
         body = body.child(message);
@@ -305,11 +305,10 @@ fn tools_overview(state: &State, preferences: ViewPreferences, kit: &Kit) -> El 
                 .key("tool-box-overview-title"),
         )
         .child(quiet("Provider API keys", kit));
-    if let Some(message) = list_load_or_skeleton(
+    if let Some(message) = load_view(
         &state.backend.profile,
         "Credential availability has not been observed.",
-        ui_components::skeleton_tool_credentials(preferences, kit),
-        preferences,
+        || ui_components::skeleton_tool_credentials(preferences, kit),
         kit,
     ) {
         body = body.child(message);
@@ -548,11 +547,10 @@ fn models(
     match active_tab {
         ModelsTab::Providers => {
             body = body.child(heading("Providers", kit));
-            if let Some(message) = list_load_or_skeleton(
+            if let Some(message) = load_view(
                 &state.backend.profile,
                 "Provider metadata has not been observed.",
-                ui_components::skeleton_provider_accounts(preferences, kit),
-                preferences,
+                || ui_components::skeleton_provider_accounts(preferences, kit),
                 kit,
             ) {
                 body = body.child(message);
@@ -677,11 +675,10 @@ fn models(
         }
         ModelsTab::Roles => {
             body = body.child(heading("Role assignments", kit));
-            if let Some(message) = list_load_or_skeleton(
+            if let Some(message) = load_view(
                 &state.backend.models,
                 "Role assignments have not been observed.",
-                ui_components::skeleton_model_roles(preferences, kit),
-                preferences,
+                || ui_components::skeleton_model_roles(preferences, kit),
                 kit,
             ) {
                 body = body.child(message);
@@ -809,10 +806,19 @@ fn configuration_status(state: &State, preferences: ViewPreferences, kit: &Kit) 
                     ),
             );
     }
-    if !matches!(state.configuration.result, Load::Idle) {
-        if let Some(message) = load_message(&state.configuration.result, "", preferences, kit) {
-            body = body.child(message);
-        }
+    if let Some(message) = load_view(
+        &state.configuration.result,
+        "",
+        || {
+            receipt_placeholder(
+                "configuration-receipt-loading",
+                "Saving configuration",
+                preferences,
+            )
+        },
+        kit,
+    ) {
+        body = body.child(message);
     }
     if let Load::Ready(saved) = &state.configuration.result {
         body = body.child(
@@ -958,11 +964,10 @@ fn jobs_list(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
             "jobs-body",
         );
     }
-    if let Some(message) = list_load_or_skeleton(
+    if let Some(message) = load_view(
         &state.backend.jobs,
         "Workstation activity has not been observed.",
-        ui_components::skeleton_job_list(preferences, kit),
-        preferences,
+        || ui_components::skeleton_job_list(preferences, kit),
         kit,
     ) {
         body = body.child(message);
@@ -1112,11 +1117,10 @@ fn job_logs(state: &State, preferences: ViewPreferences, kit: &Kit, detail_width
         })
         .build(kit, preferences, pointer_ref);
     let mut detail_col = rune::col().gap(12.0);
-    if let Some(message) = list_load_or_skeleton(
+    if let Some(message) = load_view(
         &state.backend.detail,
-        "Waiting for the selected job’s details.",
-        ui_components::skeleton_job_detail(preferences, kit),
-        preferences,
+        "No details have been observed for the selected job.",
+        || ui_components::skeleton_job_detail(preferences, kit),
         kit,
     ) {
         detail_col = detail_col.child(message);
@@ -2074,10 +2078,19 @@ pub(crate) fn maintenance(
             maintenance_confirmation_content(state, confirmation, preferences, kit),
         ));
     }
-    if !matches!(state.maintenance.receipt, Load::Idle) {
-        if let Some(message) = load_message(&state.maintenance.receipt, "", preferences, kit) {
-            body = body.child(message);
-        }
+    if let Some(message) = load_view(
+        &state.maintenance.receipt,
+        "",
+        || {
+            receipt_placeholder(
+                "maintenance-receipt-loading",
+                "Waiting for maintenance receipt",
+                preferences,
+            )
+        },
+        kit,
+    ) {
+        body = body.child(message);
     }
     if let Some(unresolved) = unresolved_actor_reindex_banner(state, preferences, kit) {
         body = body.child(unresolved);

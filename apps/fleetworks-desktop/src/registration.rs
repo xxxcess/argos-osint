@@ -53,6 +53,9 @@ impl State {
 
     pub(crate) fn invalidate_origin(&mut self) {
         self.origin_revision = self.origin_revision.wrapping_add(1);
+        self.search_category = None;
+        self.actor_catalog.reset();
+        self.search_articles.reset();
         self.reveal = None;
         self.tool_key_dialog = false;
         self.registration.request = None;

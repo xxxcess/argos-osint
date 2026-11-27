@@ -623,6 +623,30 @@ fn skeleton_card_shell(body: El, tone: StatusTone, preferences: ViewPreferences,
     body.w_full().fill(fill).border(1.0, border).radius(10.0)
 }
 
+/// Pending text value with the same accessible status in either motion mode.
+pub(crate) fn skeleton_text_value(
+    label: &str,
+    width: f32,
+    tone: StatusTone,
+    preferences: ViewPreferences,
+) -> El {
+    row()
+        .w_full()
+        .min_w(0.0)
+        .min_h(18.0)
+        .center_y()
+        .role("status")
+        .label(label)
+        .child(material::skeleton_block(
+            None,
+            Some(width),
+            11.0,
+            4.0,
+            tone,
+            preferences,
+        ))
+}
+
 /// Readiness check list skeleton mirroring gateway readiness rows.
 pub(crate) fn skeleton_readiness_list(preferences: ViewPreferences, kit: &Kit) -> El {
     let mut list = col()

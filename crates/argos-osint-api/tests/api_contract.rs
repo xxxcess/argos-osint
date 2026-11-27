@@ -1132,6 +1132,100 @@ async fn article_search_serves_the_discovery_page_contract() {
 }
 
 #[tokio::test]
+async fn actor_catalog_browse_pages_active_canonical_rows_without_a_search_index() {
+    use argos_osint_core::actor_catalog::SCOPE;
+    use fleetworks_contracts::search::ActorBrowsePage;
+    use fleetworks_contracts::search::ACTOR_BROWSE_PATH;
+
+    let (_dir, repo, app) = isolated_api().await;
+    for (id, label, scope, kind, lifecycle) in [
+        ("browsea", "Zulu first key", SCOPE, "actor", "active"),
+        ("browseb", "Deleted actor", SCOPE, "actor", "deleted"),
+        ("browsec", "Redirected actor", SCOPE, "actor", "active"),
+        ("browsed", "Unrelated actor", "unrelated", "actor", "active"),
+        ("browsee", "Claim-shaped record", SCOPE, "claim", "active"),
+        ("browsef", "Alpha last key", SCOPE, "actor", "active"),
+    ] {
+        repo.db()
+            .query(
+                "CREATE type::record('memory', $key)
+                     SET text = 'Internal fixture body', memory_kind = $kind, lifecycle = $state;
+                 CREATE type::record('brain_actor', $key)
+                     SET display_name = $label, subtype = 'organization', scope_key = $scope,
+                         created_at = '', updated_at = '';",
+            )
+            .bind(("key", id))
+            .bind(("label", label))
+            .bind(("scope", scope))
+            .bind(("kind", kind))
+            .bind(("state", lifecycle))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+    repo.db()
+        .query("CREATE brain_actor_redirect:browsec SET to_actor = 'browsef', created_at = '';")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    let (status, first) = call(
+        &app,
+        "GET",
+        &format!("{ACTOR_BROWSE_PATH}?limit=1"),
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert!(!first.to_string().contains("Internal fixture body"));
+    let first: ActorBrowsePage = serde_json::from_value(first).unwrap();
+    assert_eq!(first.rows.len(), 1);
+    let row = &first.rows[0];
+    assert_eq!(row.actor_id, "browsea");
+    assert_eq!(row.label, "Zulu first key");
+    assert_eq!(row.actor_type.as_deref(), Some("organization"));
+    assert!(
+        row.summary.is_none() && row.matched_field.is_none() && row.index_generation.is_empty()
+    );
+    let next = first.next_cursor.as_deref().expect("catalog continuation");
+    assert_eq!(next, "browsea");
+
+    let (status, second) = call(
+        &app,
+        "GET",
+        &format!("{ACTOR_BROWSE_PATH}?limit=1&cursor={next}"),
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let second: ActorBrowsePage = serde_json::from_value(second).unwrap();
+    assert_eq!(second.rows.len(), 1);
+    assert_eq!(second.rows[0].actor_id, "browsef");
+    assert!(second.next_cursor.is_none());
+
+    for invalid in [
+        "limit=0",
+        "limit=26",
+        "limit=1&cursor=",
+        "limit=1&cursor=%00",
+    ] {
+        let (status, _) = call(
+            &app,
+            "GET",
+            &format!("{ACTOR_BROWSE_PATH}?{invalid}"),
+            None,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}");
+    }
+}
+
+#[tokio::test]
 async fn missing_job_returns_public_error_without_internal_details() {
     let (_dir, _repo, app) = isolated_api().await;
     let (status, body) = call(

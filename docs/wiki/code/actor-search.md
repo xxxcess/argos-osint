@@ -12,6 +12,8 @@ no index origin, write token, filesystem path or engine document address.
 
 [![Source intent, private projection and canonical discovery](../../diagrams/actor-search.svg)](../../diagrams/actor-search.html)
 
+Native Search checks actor names, aliases and article text from one field. The **Actors** avatar opens a browse view that reads shared, active canonical actors in ID order through `GET /api/v1/actors/browse`. Both HTTP and Embedded IPC use the backend read permission. Browse results do not require a serving search index. Each page contains up to 25 projections and includes a continuation when more eligible records exist. The native list loads as the reader approaches its end and retains up to 480 actors. Return to the search field to narrow a larger catalog.
+
 ## Ownership and entry points
 
 | Source | Responsibility |

@@ -5,6 +5,7 @@ use argos_osint_core::storage::actor_catalog::{self, ActorAliasSearch, ActorName
 use axum::extract::{Query, State};
 use axum::Extension;
 use axum::Json;
+use fleetworks_contracts::search::ActorBrowseQuery;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -32,6 +33,24 @@ pub(crate) async fn read(
     Query(query): Query<ActorQuery>,
 ) -> ApiResult {
     Ok(Json(read_value(&state, &query.id).await?))
+}
+
+pub(crate) async fn browse_value(
+    state: &ApiState,
+    query: &ActorBrowseQuery,
+) -> Result<Value, ApiError> {
+    query.validate().map_err(|_| crate::bad())?;
+    let page = actor_catalog::browse(&state.repo, query)
+        .await
+        .map_err(crate::internal)?;
+    serde_json::to_value(page).map_err(crate::internal)
+}
+
+pub(crate) async fn browse(
+    State(state): State<ApiState>,
+    Query(query): Query<ActorBrowseQuery>,
+) -> ApiResult {
+    Ok(Json(browse_value(&state, &query).await?))
 }
 
 fn valid_actor_id(id: &str) -> bool {

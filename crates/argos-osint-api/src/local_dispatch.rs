@@ -339,6 +339,7 @@ impl LocalGateway {
             | IpcOperation::ModelsDefaults
             | IpcOperation::ProfileRead
             | IpcOperation::ActorsSearch(_)
+            | IpcOperation::ActorsBrowse(_)
             | IpcOperation::ActorDetail(_)
             | IpcOperation::ArticlesList(_)
             | IpcOperation::ArticlesSearch(_)
@@ -517,6 +518,12 @@ impl LocalGateway {
                         Some(principal),
                     )
                     .await?,
+                ))
+            }
+            IpcOperation::ActorsBrowse(query) => {
+                self.require_global_read(principal, registration).await?;
+                Ok(IpcPayload::Json(
+                    actor_dossier::browse_value(&self.state, &query).await?,
                 ))
             }
             IpcOperation::ActorDetail(query) => {

@@ -1277,20 +1277,39 @@ impl GatewayEffects {
     }
 }
 
-fn phase_label(state: &State) -> (&'static str, StatusTone) {
+fn phase_label(state: &State) -> Option<(&'static str, StatusTone)> {
     match state.inbox_qa.pending_inference {
-        Some(false) => return ("Stopping", StatusTone::Warn),
-        Some(true) => return ("Starting", StatusTone::Info),
+        Some(false) => return Some(("Stopping", StatusTone::Warn)),
+        Some(true) => return Some(("Starting", StatusTone::Info)),
         None => {}
     }
     if let Some(label) = startup_label(state) {
-        return (label, StatusTone::Info);
+        return Some((label, StatusTone::Info));
     }
     match state.inbox_qa_settings() {
-        Some(settings) => model_phase(settings.phase),
-        None if state.supports_inbox_qa() => ("Checking", StatusTone::Info),
-        None => ("Unavailable", StatusTone::Neutral),
+        Some(settings) => Some(model_phase(settings.phase)),
+        None if state.supports_inbox_qa() => None,
+        None => Some(("Unavailable", StatusTone::Neutral)),
     }
+}
+
+fn inference_loading(key: &'static str, label: &'static str, preferences: ViewPreferences) -> El {
+    rune::row()
+        .key(key)
+        .w_full()
+        .min_h(22.0)
+        .center_y()
+        .role("status")
+        .label(label)
+        .live_region(LiveRegion::Polite)
+        .child(material::skeleton_block(
+            Some(0.46),
+            None,
+            12.0,
+            4.0,
+            StatusTone::Info,
+            preferences,
+        ))
 }
 
 fn startup_label(state: &State) -> Option<&'static str> {
@@ -1395,8 +1414,21 @@ fn problem_content(state: &State, problem: EmbeddedProblem, kit: &Kit) -> El {
 }
 
 pub(crate) fn settings_content(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
-    let (phase, tone) = phase_label(state);
+    let phase = phase_label(state);
     let problem = embedded_problem(state);
+    let phase_view = match (problem.is_some(), phase) {
+        (false, Some((label, tone))) => Some(
+            crate::ui_components::status_pill(label, None, tone, kit)
+                .key("inbox-qa-settings-status")
+                .live_region(LiveRegion::Polite),
+        ),
+        (false, None) if state.inbox_qa.status.is_none() => Some(inference_loading(
+            "inbox-qa-settings-status",
+            "Checking backend inference",
+            preferences,
+        )),
+        _ => None,
+    };
     let mut content = rune::col()
         .w_full()
         .min_w(0.0)
@@ -1407,11 +1439,7 @@ pub(crate) fn settings_content(state: &State, kit: &Kit, preferences: ViewPrefer
         .flex_wrap()
         .center_y()
         .gap(8.0)
-        .children(problem.is_none().then(|| {
-            crate::ui_components::status_pill(phase, None, tone, kit)
-                .key("inbox-qa-settings-status")
-                .live_region(LiveRegion::Polite)
-        }));
+        .children(phase_view);
     if let Some(settings) = state.inbox_qa_settings() {
         if state.can_manage_inbox_qa() {
             let enable = !settings.enabled;
@@ -1439,7 +1467,7 @@ pub(crate) fn settings_content(state: &State, kit: &Kit, preferences: ViewPrefer
         content = content.child(problem_content(state, problem, kit));
     } else if let Some(status) = state.inbox_qa.status {
         content = content.child(hint(status, kit).role("status"));
-    } else if phase == "Unavailable" && state.supports_inbox_qa() {
+    } else if phase.is_some_and(|(label, _)| label == "Unavailable") && state.supports_inbox_qa() {
         content = content.child(hint(UNAVAILABLE_NUDGE, kit));
     }
     content.child(actions)
@@ -2254,7 +2282,7 @@ fn footer_content(state: &State, kit: &Kit, preferences: ViewPreferences) -> El 
     let ready = state.inbox_generator_ready();
     let mut content = rune::col().w_full().gap(7.0);
     if !ready {
-        content = content.child(composer_availability(state, progress, kit));
+        content = content.child(composer_availability(state, progress, kit, preferences));
     }
     if let Some(status) = qa.status {
         content = content.child(hint(status, kit).role("status"));
@@ -2404,16 +2432,26 @@ fn composer_startup_status(label: &str, kit: &Kit) -> El {
         .live_region(LiveRegion::Polite)
 }
 
-fn composer_availability(state: &State, progress: Option<&str>, kit: &Kit) -> El {
+fn composer_availability(
+    state: &State,
+    progress: Option<&str>,
+    kit: &Kit,
+    preferences: ViewPreferences,
+) -> El {
     if let Some(label) = progress {
         return composer_startup_status(label, kit);
     }
     let settings = state.inbox_qa_settings();
     let generator = settings.and_then(|settings| settings.generator);
     let qa = &state.inbox_qa;
-    let label = if qa.settings_refresh_required {
-        "Checking whether the selected Assistant generator is ready…"
-    } else if let Some(problem) = embedded_problem(state).or_else(|| {
+    if qa.settings_refresh_required {
+        return inference_loading(
+            "inbox-qa-generator-status",
+            "Checking whether the selected Assistant generator is ready",
+            preferences,
+        );
+    }
+    let label = if let Some(problem) = embedded_problem(state).or_else(|| {
         generator
             .and_then(|generator| generator.reason)
             .and_then(problem_for_reason)
@@ -2434,34 +2472,38 @@ fn composer_availability(state: &State, progress: Option<&str>, kit: &Kit) -> El
 
 fn nudge(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
     let text = if !state.connected() {
-        "Reconnect the selected backend to check inference."
+        Some("Reconnect the selected backend to check inference.")
     } else if !state.supports_inbox_qa() {
-        "Backend inference is unavailable for this selection."
+        Some("Backend inference is unavailable for this selection.")
     } else if state.inbox_qa.pending_inference == Some(false)
         || state
             .inbox_qa_settings()
             .is_some_and(|settings| settings.phase == QaPhase::Stopping)
     {
-        "Stopping"
+        Some("Stopping")
     } else if state.inbox_qa_settings().is_none() {
-        state
-            .inbox_qa
-            .status
-            .unwrap_or("Checking backend inference…")
+        state.inbox_qa.status
     } else if state
         .inbox_qa_settings()
         .is_some_and(|settings| settings.enabled)
     {
-        "This registration does not have access to Inbox answers."
+        Some("This registration does not have access to Inbox answers.")
     } else if state.can_manage_inbox_qa() {
-        "Enable backend inference in Connection settings to ask questions."
+        Some("Enable backend inference in Connection settings to ask questions.")
     } else {
-        OPERATOR_NUDGE
+        Some(OPERATOR_NUDGE)
     };
-    let mut content = rune::col()
-        .w_full()
-        .gap(7.0)
-        .child(hint(text, kit).role("status"));
+    let status = text.map_or_else(
+        || {
+            inference_loading(
+                "inbox-qa-inference-loading",
+                "Checking backend inference",
+                preferences,
+            )
+        },
+        |text| hint(text, kit).role("status"),
+    );
+    let mut content = rune::col().w_full().gap(7.0).child(status);
     if !state.connected() || state.can_manage_inbox_qa() {
         content = content.child(
             ActionButton::new("Connection settings")
@@ -3055,6 +3097,41 @@ mod tests {
         assert!(runtime.find("inbox-qa-generator-picker-trigger").is_none());
         assert!(runtime.find("inbox-qa-generator-status").is_none());
         assert!(runtime.find(HISTORY_NEXT).is_some());
+    }
+
+    #[test]
+    fn initial_inference_read_uses_an_accessible_placeholder_and_exposes_failure() {
+        let mut runtime = qa_drawer((640.0, 480.0), None);
+        runtime.update(|state, _| {
+            state.inbox_qa.settings_loaded = false;
+            state.inbox_qa.status = None;
+        });
+        runtime.frame(1.0);
+        let placeholder = runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("inbox-qa-inference-loading"))
+            .expect("initial inference loading status");
+        assert_eq!(placeholder.role, "status");
+        assert_eq!(
+            placeholder.label.as_deref(),
+            Some("Checking backend inference")
+        );
+        assert!(placeholder.text.is_none());
+        assert!(!runtime.elements().iter().any(|element| {
+            element.path.starts_with(&placeholder.path)
+                && element.key.as_deref() == Some("skeleton-shimmer")
+        }));
+
+        runtime.update(|state, _| {
+            state.inbox_qa.status = Some("Could not check backend inference.");
+        });
+        runtime.frame(1.25);
+        assert!(runtime.find("inbox-qa-inference-loading").is_none());
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("Could not check backend inference."));
     }
 
     #[test]

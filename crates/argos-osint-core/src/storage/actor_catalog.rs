@@ -1,13 +1,21 @@
 //! Durable catalog ingestion and identity lookup. @tag:brain-memory
+use std::ops::Bound;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
+use fleetworks_contracts::search::ActorBrowsePage;
+use fleetworks_contracts::search::ActorBrowseQuery;
+use fleetworks_contracts::search::ActorSearchHit;
+use fleetworks_contracts::search::MAX_ACTOR_BROWSE_CURSOR_BYTES;
 use serde::{Deserialize, Serialize};
 use surrealdb::engine::any::Any;
-use surrealdb::types::{RecordId, SurrealValue};
+use surrealdb::types::RecordId;
+use surrealdb::types::RecordIdKey;
+use surrealdb::types::RecordIdKeyRange;
+use surrealdb::types::SurrealValue;
 use surrealdb::Surreal;
 
 use super::jobs::{rid, run, take};
@@ -234,6 +242,74 @@ async fn backfill_curated_aliases(repo: &Repository, actors: &[Actor]) -> Result
     })
     .await?;
     Ok(pending.len())
+}
+
+#[derive(SurrealValue)]
+struct BrowseRow {
+    id: RecordId,
+    display_name: Option<String>,
+    subtype: Option<String>,
+}
+
+/// Read a keyset page of active, unredirected actors in the shared canonical catalog.
+/// The record range starts after the supplied key so later pages never revisit earlier keys.
+pub async fn browse(repo: &Repository, query: &ActorBrowseQuery) -> Result<ActorBrowsePage> {
+    query.validate()?;
+    let range = RecordId::new(
+        "brain_actor",
+        RecordIdKey::Range(Box::new(RecordIdKeyRange {
+            start: Bound::Excluded(query.cursor.as_deref().unwrap_or_default().into()),
+            end: Bound::Unbounded,
+        })),
+    );
+    let mut result = repo.db()
+        .query(
+            "SELECT id,
+                 IF bytes::len(type::bytes(display_name)) <= 1024 { display_name } ELSE { NONE } AS display_name,
+                 IF bytes::len(type::bytes(subtype)) <= 64 { subtype } ELSE { NONE } AS subtype
+             FROM $actors
+             WHERE scope_key = $scope AND type::is_string(record::id(id))
+                 AND bytes::len(type::bytes(record::id(id))) <= $cursor_bytes
+                 AND string::trim(record::id(id)) != ''
+                 AND !string::matches(record::id(id), $control_pattern)
+                 AND type::record('memory', record::id(id)).lifecycle = 'active'
+                 AND type::record('memory', record::id(id)).memory_kind = 'actor'
+                 AND !record::exists(type::record('brain_actor_redirect', record::id(id)))
+             ORDER BY id LIMIT $limit",
+        )
+        .bind(("actors", range))
+        .bind(("scope", actor_catalog::SCOPE))
+        .bind(("cursor_bytes", MAX_ACTOR_BROWSE_CURSOR_BYTES as i64))
+        .bind(("control_pattern", r"\p{Cc}"))
+        .bind(("limit", i64::from(query.limit) + 1))
+        .await?
+        .check()?;
+    let records: Vec<BrowseRow> = result.take(0usize)?;
+    let limit = usize::from(query.limit);
+    let has_more = records.len() > limit;
+    let mut rows = Vec::with_capacity(records.len().min(limit));
+    for record in records.into_iter().take(limit) {
+        let RecordIdKey::String(actor_id) = record.id.key else {
+            bail!("catalog browser returned a non-string actor ID");
+        };
+        let clean = |value: String| {
+            let value = value.trim();
+            (!value.is_empty() && !value.chars().any(char::is_control)).then(|| value.to_owned())
+        };
+        let label = record
+            .display_name
+            .and_then(clean)
+            .unwrap_or_else(|| actor_id.clone());
+        let mut hit = ActorSearchHit::new(actor_id, label, 0, String::new());
+        hit.actor_type = record.subtype.and_then(clean);
+        rows.push(hit);
+    }
+    let next_cursor = if has_more {
+        rows.last().map(|row| row.actor_id.clone())
+    } else {
+        None
+    };
+    Ok(ActorBrowsePage::new(rows, next_cursor))
 }
 
 // ---- Brain discovery: search_actor_names / search_actor_aliases ----------

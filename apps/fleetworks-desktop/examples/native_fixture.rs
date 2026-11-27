@@ -433,6 +433,17 @@ mod native {
         }
         match intent {
             Intent::Dossier { .. } => populate_dossier(state),
+            Intent::BrowseActors => {
+                use fleetworks_contracts::search::ActorBrowsePage;
+                let rows = [
+                    ("synthetic-actor-1", "Harbor Union"),
+                    ("synthetic-actor-2", "Harbor Planning Council"),
+                    ("synthetic-actor-3", "Harbor Transit Office"),
+                ]
+                .map(|(id, label)| ActorSearchHit::new(id.into(), label.into(), 0, String::new()))
+                .to_vec();
+                state.fixture_actor_catalog(ActorBrowsePage::new(rows, None));
+            }
             Intent::Search { .. } => {
                 let revision = state.brain.query_revision();
                 let mut index = IndexStatus::unknown("2026-01-01T00:00:00Z".into());

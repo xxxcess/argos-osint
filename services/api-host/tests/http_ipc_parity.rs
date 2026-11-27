@@ -1254,6 +1254,19 @@ async fn run_shared_flow(
         "actor detail parity",
     );
 
+    let browse: fleetworks_contracts::search::ActorBrowsePage = client
+        .get_with_query(
+            fleetworks_contracts::search::ACTOR_BROWSE_PATH,
+            &fleetworks_contracts::search::ActorBrowseQuery::new(None, 25).expect("browse query"),
+        )
+        .await
+        .expect("browse actor catalog");
+    assert!(browse
+        .rows
+        .iter()
+        .any(|actor| actor.actor_id == canonical_actor_id));
+    assert!(browse.rows.len() <= 25);
+
     let readiness: WorkstationReadiness = client
         .workstation_readiness()
         .await

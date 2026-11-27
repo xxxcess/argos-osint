@@ -31,6 +31,7 @@ use crate::material;
 use crate::material::MetalFinish;
 use crate::pairing::PairingFailure;
 use crate::pairing::PairingStage;
+use crate::search_catalog::SearchCategory;
 use crate::theme;
 use crate::theme::StatusTone;
 use crate::ui_components;
@@ -464,7 +465,7 @@ fn local_backend_setup_card(
                 preferences,
                 kit,
             ))
-            .child(registration_status(state, kit));
+            .child(registration_status(state, preferences, kit));
         if let Some(capabilities) = &state.connection.capabilities {
             body = body.child(local_capabilities_summary(capabilities, preferences, kit));
         }
@@ -747,7 +748,7 @@ fn pairing_status(
                 preferences,
                 kit,
             ))
-            .child(registration_status(state, kit))
+            .child(registration_status(state, preferences, kit))
             .child(crate::readiness_cards::setup_section(
                 state,
                 preferences,
@@ -937,7 +938,7 @@ fn pairing_status(
     material::luminous_card(body, card_tone, false, preferences, pointer_ref, shadow_ref)
 }
 
-fn registration_status(state: &State, kit: &Kit) -> El {
+fn registration_status(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
     if !state.connected() {
         return quiet("Connect to a gateway to register this workstation.", kit);
     }
@@ -951,7 +952,12 @@ fn registration_status(state: &State, kit: &Kit) -> El {
         .key("workstation-registered");
     }
     match &state.registration.receipt {
-        Load::Pending | Load::Loading => quiet("Registering this workstation…", kit).role("status"),
+        Load::Pending | Load::Loading => ui_components::skeleton_text_value(
+            "Registering this workstation…",
+            132.0,
+            StatusTone::Info,
+            preferences,
+        ),
         Load::Failed(error) => line(error.clone(), kit).role("alert"),
         _ => quiet(
             "Workstation registration unavailable. Permitted shared backend reads remain usable.",
@@ -1085,24 +1091,38 @@ fn workstation_diagnostics(state: &State, preferences: ViewPreferences, kit: &Ki
     } else {
         "Unregistered"
     };
+    let registration_value = if state.connected()
+        && state.registration.context.is_none()
+        && matches!(state.registration.receipt, Load::Pending | Load::Loading)
+    {
+        ui_components::skeleton_text_value("Registering…", 130.0, StatusTone::Info, preferences)
+    } else {
+        line(registration, kit).wrap_anywhere()
+    };
+    let transport_value = if matches!(state.connection.status, ConnectionStatus::Connecting) {
+        ui_components::skeleton_text_value("Connecting…", 122.0, StatusTone::Cyan, preferences)
+    } else {
+        line(format!("{transport} · {status}"), kit)
+    };
     let mut details = rune::col()
         .key("workstation-connection-details")
         .w_full()
-        .gap(6.0)
+        .gap(3.0)
         .child(heading("Backend connection", kit).role("heading"))
         .child(diagnostic_field("Backend", backend, kit))
-        .child(diagnostic_field(
-            "Transport",
-            format!("{transport} · {status}"),
-            kit,
-        ))
+        .child(diagnostic_row("Transport", transport_value, kit))
         .child(
-            diagnostic_field("Registration ID", registration, kit)
+            diagnostic_row("Registration ID", registration_value, kit)
                 .key("workstation-registration-id"),
         );
     if state.connected() {
         let (health, _) = crate::readiness_cards::workstation_health(state);
-        details = details.child(diagnostic_field("Health", health, kit));
+        let value = if matches!(state.readiness, Load::Pending | Load::Loading) {
+            ui_components::skeleton_text_value(health, 116.0, StatusTone::Info, preferences)
+        } else {
+            line(health, kit)
+        };
+        details = details.child(diagnostic_row("Health", value, kit));
         if let Some(id) = state
             .connection
             .capabilities
@@ -1193,12 +1213,20 @@ fn workstation_diagnostics(state: &State, preferences: ViewPreferences, kit: &Ki
 }
 
 fn diagnostic_field(label: &str, value: impl Into<String>, kit: &Kit) -> El {
+    diagnostic_row(label, line(value, kit).wrap_anywhere(), kit)
+}
+
+fn diagnostic_row(label: &str, value: El, kit: &Kit) -> El {
     rune::row()
         .w_full()
         .min_w(0.0)
+        .min_h(32.0)
         .gap(8.0)
-        .child(quiet(label, kit).w(112.0))
-        .child(line(value, kit).grow(1.0).min_w(0.0).wrap_anywhere())
+        .px(8.0)
+        .py(4.0)
+        .center_y()
+        .child(quiet(label, kit).w(132.0))
+        .child(rune::col().grow(1.0).min_w(0.0).child(value))
 }
 
 /// Small, muted unsynced indicator for last-good data whose refresh is out of sync.
@@ -1319,11 +1347,36 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
     let preferences = state
         .accessibility
         .for_view(state.fixture, cx.is_reduced_motion());
-    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
-    let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
+    if let Some(category) = state.search_category {
+        let back = ActionButton::new("Back to search")
+            .key("search-back")
+            .icon(&icons::CHEVRON_LEFT)
+            .finish(MetalFinish::Gunmetal)
+            .on_press_tx(move |state: &mut State, tx| {
+                state.close_search_category();
+                tx.wake_after(std::time::Duration::from_millis(200));
+                tx.focus(search_category_key(category), tx.focus_visible());
+            })
+            .build(kit, preferences, None);
+        let records = match category {
+            SearchCategory::Actors => actor_catalog_records(state, preferences, kit),
+            SearchCategory::Articles => article_records(state, true, preferences, kit),
+        };
+        let body = rune::col()
+            .child(
+                rune::row()
+                    .center_y()
+                    .gap(12.0)
+                    .child(back)
+                    .child(heading(search_category_title(category), kit).role("heading")),
+            )
+            .child(records);
+        return scroll(body, "search-category-results");
+    }
+
     let search = TextInput::new(&state.brain.query)
-        .label("Search actors")
-        .placeholder("Search actors")
+        .label("Search")
+        .placeholder("Search actors and articles")
         .width(None)
         .on_edit(|state: &mut State| &mut state.brain.query)
         .on_change(|state: &mut State, tx| state.query_edited(tx))
@@ -1331,27 +1384,107 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
         .on_submit(|state: &mut State, _| state.search_now())
         .build(kit)
         .key("actor-search");
-    let mut list = rune::col()
-        .gap(8.0)
-        .child(ui_components::section_header(
-            &icons::BRAIN,
-            "Search actors",
-            Some("Type a name or alias to inspect intelligence dossiers"),
-            None,
-            None,
-            kit,
-        ))
-        .child(search);
-    match &state.brain.results {
-        Load::Idle => {
-            list = list.child(
-                quiet(
-                    "Enter a name or alias to search the shared actor catalog.",
+    let mut landing = rune::col()
+        .w_full()
+        .items_center()
+        .pt(32.0)
+        .gap(18.0)
+        .child(
+            rune::col()
+                .key("search-landing-bar")
+                .w_frac(0.5)
+                .child(search),
+        )
+        .child(
+            rune::row()
+                .gap(20.0)
+                .justify_center()
+                .child(category_avatar(SearchCategory::Actors, &icons::BRAIN, kit))
+                .child(category_avatar(
+                    SearchCategory::Articles,
+                    &icons::SOURCES,
                     kit,
-                )
-                .key("search-prompt"),
-            );
-        }
+                )),
+        );
+    if !matches!(state.brain.results, Load::Idle) {
+        landing = landing.child(
+            rune::col()
+                .w_full()
+                .gap(8.0)
+                .child(heading("Actors", kit).role("heading"))
+                .child(actor_search_results(state, preferences, kit)),
+        );
+    }
+    if !matches!(state.search_articles.status, Load::Idle) {
+        landing = landing.child(
+            rune::col()
+                .w_full()
+                .gap(8.0)
+                .child(heading("Articles", kit).role("heading"))
+                .child(article_records(state, false, preferences, kit)),
+        );
+    }
+    scroll(landing, "actor-results")
+}
+
+fn search_category_title(category: SearchCategory) -> &'static str {
+    match category {
+        SearchCategory::Actors => "Actors",
+        SearchCategory::Articles => "Articles",
+    }
+}
+
+fn search_category_key(category: SearchCategory) -> &'static str {
+    match category {
+        SearchCategory::Actors => "search-category-actors",
+        SearchCategory::Articles => "search-category-articles",
+    }
+}
+
+fn category_avatar(category: SearchCategory, icon: &'static rune::Icon, kit: &Kit) -> El {
+    let title = search_category_title(category);
+    rune::col()
+        .key(search_category_key(category))
+        .role("button")
+        .label(title)
+        .focusable(true)
+        .focus_ring(2.0, 2.0, kit.c.border_focus)
+        .items_center()
+        .w(86.0)
+        .gap(6.0)
+        .padding(6.0)
+        .radius(8.0)
+        .hover(kit.c.layer_02)
+        .child(
+            rune::row()
+                .size(46.0, 46.0)
+                .radius(23.0)
+                .center()
+                .fill(kit.c.layer_01)
+                .border(1.0, StatusTone::Accent.border())
+                .child(
+                    rune::icon(icon, 20.0)
+                        .color(StatusTone::Accent.fg())
+                        .a11y_hidden(),
+                ),
+        )
+        .child(heading(title, kit).a11y_hidden())
+        .on_press_tx(move |state: &mut State, tx| {
+            state.close_search_category();
+            state.search_category = Some(category);
+            match category {
+                SearchCategory::Actors => state.load_actor_catalog(),
+                SearchCategory::Articles => state.browse_articles(),
+            }
+            tx.focus("search-back", tx.focus_visible());
+        })
+}
+
+fn actor_search_results(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
+    let mut list = rune::col().w_full().gap(8.0);
+    match &state.brain.results {
+        Load::Idle => {}
         Load::Pending | Load::Loading => {
             // Debounce and the first fetch share one results-shaped skeleton: no narration, no
             // layout change when the request starts.
@@ -1390,86 +1523,7 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
                 list = list.child(quiet("No matching actors.", kit).key("search-empty"));
             }
             for (index, hit) in response.rows.iter().enumerate() {
-                let selected = state.brain.highlighted == Some(index);
-                let expanded = state.brain.showing_detail
-                    && state.brain.selected_actor.as_deref() == Some(hit.actor_id.as_str());
-                let tile = material::interactive_tile(
-                    rune::row()
-                        .w_full()
-                        .padding(8.0)
-                        .gap(8.0)
-                        .center_y()
-                        .child(ui_components::status_dot(
-                            if selected {
-                                StatusTone::Accent
-                            } else {
-                                StatusTone::Violet
-                            },
-                            preferences,
-                        ))
-                        .child(
-                            rune::col()
-                                .grow(1.0)
-                                .gap(2.0)
-                                .child(
-                                    rune::text(hit.label.clone())
-                                        .font(kit.ty.ui_medium)
-                                        .color(theme::hex(theme::TEXT_PRIMARY)),
-                                )
-                                .child(quiet(
-                                    hit.summary.clone().unwrap_or_else(|| hit.actor_id.clone()),
-                                    kit,
-                                )),
-                        )
-                        .child(
-                            rune::icon(
-                                if expanded {
-                                    &icons::CHEVRON_DOWN
-                                } else {
-                                    &icons::CHEVRON_RIGHT
-                                },
-                                14.0,
-                            )
-                            .color(kit.c.icon_muted)
-                            .a11y_hidden(),
-                        ),
-                    selected,
-                    if selected {
-                        StatusTone::Accent
-                    } else {
-                        StatusTone::Violet
-                    },
-                    preferences,
-                    pointer_ref,
-                    shadow_ref,
-                )
-                .key(format!("actor-hit-{}", hit.actor_id))
-                .role("button")
-                .label(hit.label.clone())
-                .expanded(expanded)
-                .focusable(true)
-                .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT))
-                .press(theme::hex(theme::SELECTION_SURFACE))
-                .on_press(move |state: &mut State| state.toggle_actor(index))
-                .on_key(move |state: &mut State, event, tx| {
-                    if event.key == rune::Key::Enter && event.mods == rune::Mods::default() {
-                        if !tx.key_repeat() {
-                            state.toggle_actor(index);
-                        }
-                        true
-                    } else {
-                        false
-                    }
-                });
-                let mut record = rune::col()
-                    .key(format!("actor-record-{}", hit.actor_id))
-                    .w_full()
-                    .gap(8.0)
-                    .child(tile);
-                if expanded {
-                    record = record.child(dossier(state, preferences, kit));
-                }
-                list = list.child(record);
+                list = list.child(actor_record(state, hit, Some(index), preferences, kit));
             }
             if response.truncated {
                 list = list.child(quiet(
@@ -1479,7 +1533,308 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
             }
         }
     }
-    scroll(list, "actor-results")
+    list
+}
+
+fn actor_record(
+    state: &State,
+    hit: &fleetworks_contracts::search::ActorSearchHit,
+    index: Option<usize>,
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> El {
+    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
+    let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
+    let selected = index.is_some() && state.brain.highlighted == index;
+    let expanded = state.brain.showing_detail
+        && state.brain.selected_actor.as_deref() == Some(hit.actor_id.as_str());
+    let id = hit.actor_id.clone();
+    let key_id = id.clone();
+    let tile = material::interactive_tile(
+        rune::row()
+            .w_full()
+            .padding(8.0)
+            .gap(8.0)
+            .center_y()
+            .child(ui_components::status_dot(
+                if selected {
+                    StatusTone::Accent
+                } else {
+                    StatusTone::Violet
+                },
+                preferences,
+            ))
+            .child(
+                rune::col()
+                    .grow(1.0)
+                    .gap(2.0)
+                    .child(
+                        rune::text(hit.label.clone())
+                            .font(kit.ty.ui_medium)
+                            .color(theme::hex(theme::TEXT_PRIMARY)),
+                    )
+                    .child(quiet(
+                        hit.summary
+                            .clone()
+                            .or_else(|| hit.actor_type.clone())
+                            .unwrap_or_else(|| hit.actor_id.clone()),
+                        kit,
+                    )),
+            )
+            .child(
+                rune::icon(
+                    if expanded {
+                        &icons::CHEVRON_DOWN
+                    } else {
+                        &icons::CHEVRON_RIGHT
+                    },
+                    14.0,
+                )
+                .color(kit.c.icon_muted)
+                .a11y_hidden(),
+            ),
+        selected,
+        if selected {
+            StatusTone::Accent
+        } else {
+            StatusTone::Violet
+        },
+        preferences,
+        pointer_ref,
+        shadow_ref,
+    )
+    .key(format!("actor-hit-{}", hit.actor_id))
+    .role("button")
+    .label(hit.label.clone())
+    .expanded(expanded)
+    .focusable(true)
+    .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT))
+    .press(theme::hex(theme::SELECTION_SURFACE))
+    .on_press(move |state: &mut State| state.toggle_actor_record(id.clone(), index))
+    .on_key(move |state: &mut State, event, tx| {
+        if event.key == rune::Key::Enter && event.mods == rune::Mods::default() {
+            if !tx.key_repeat() {
+                state.toggle_actor_record(key_id.clone(), index);
+            }
+            true
+        } else {
+            false
+        }
+    });
+    let mut record = rune::col()
+        .key(format!("actor-record-{}", hit.actor_id))
+        .w_full()
+        .gap(8.0)
+        .child(tile);
+    if expanded {
+        record = record.child(dossier(state, preferences, kit));
+    }
+    record
+}
+
+fn actor_catalog_records(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    let catalog = &state.actor_catalog;
+    let mut list = rune::col().w_full().gap(8.0);
+    for hit in &catalog.rows {
+        list = list.child(actor_record(state, hit, None, preferences, kit));
+    }
+    if let Some(error) = &catalog.error {
+        list = list.child(line(error, kit).role("alert"));
+    } else if catalog.busy && catalog.rows.is_empty() {
+        return list.child(ui_components::skeleton_actor_results(preferences, kit));
+    } else if catalog.rows.is_empty() {
+        return list.child(quiet("No actors in the catalog.", kit));
+    }
+    if catalog.at_limit() && catalog.next.is_some() {
+        return list.child(quiet(
+            "Browse limit reached. Use Search to find a specific actor.",
+            kit,
+        ));
+    }
+    if catalog.busy || catalog.next.is_some() || catalog.error.is_some() {
+        list = list.child(
+            ActionButton::new(if catalog.error.is_some() {
+                "Retry"
+            } else {
+                "Load more"
+            })
+            .key("actor-catalog-more")
+            .finish(MetalFinish::Gunmetal)
+            .busy(catalog.busy)
+            .disabled(catalog.busy)
+            .on_press(State::load_actor_catalog)
+            .build(kit, preferences, None),
+        );
+    }
+    if catalog.continue_automatically() {
+        list = list.child(
+            rune::el()
+                .key(format!("actor-catalog-tail-{}", catalog.rows.len()))
+                .size(1.0, 1.0)
+                .a11y_hidden()
+                .on_visible(|state: &mut State, visible, _| {
+                    if visible && state.actor_catalog.continue_automatically() {
+                        state.load_actor_catalog();
+                    }
+                }),
+        );
+    }
+    list
+}
+
+fn article_records(state: &State, browse: bool, preferences: ViewPreferences, kit: &Kit) -> El {
+    let articles = &state.search_articles;
+    let mut list = rune::col().w_full().gap(8.0);
+    if browse {
+        let day = TextInput::new(&articles.browse_day)
+            .label("Article date (UTC)")
+            .placeholder("YYYY-MM-DD")
+            .on_edit(|state: &mut State| &mut state.search_articles.browse_day)
+            .on_submit(|state: &mut State, _| state.browse_articles())
+            .build(kit);
+        list = list.child(
+            rune::row()
+                .gap(8.0)
+                .center_y()
+                .flex_wrap()
+                .child(day)
+                .child(
+                    ActionButton::new("Show date")
+                        .finish(MetalFinish::Gunmetal)
+                        .on_press(State::browse_articles)
+                        .build(kit, preferences, None),
+                ),
+        );
+    }
+    if browse {
+        list = list.children(
+            articles
+                .applied_day()
+                .map(|day| quiet(format!("UTC date · {day}"), kit)),
+        );
+    }
+    match &articles.status {
+        Load::Idle => {}
+        Load::Pending | Load::Loading => {
+            let mut pending = rune::col()
+                .role("status")
+                .label("Loading articles")
+                .gap(8.0);
+            for _ in 0..3 {
+                pending = pending.child(
+                    rune::col()
+                        .w_full()
+                        .padding(8.0)
+                        .gap(4.0)
+                        .radius(6.0)
+                        .fill(kit.c.layer_01)
+                        .child(material::skeleton_block(
+                            Some(0.55),
+                            None,
+                            13.0,
+                            4.0,
+                            StatusTone::Accent,
+                            preferences,
+                        ))
+                        .child(material::skeleton_block(
+                            Some(0.28),
+                            None,
+                            10.0,
+                            4.0,
+                            StatusTone::Accent,
+                            preferences,
+                        )),
+                );
+            }
+            list = list.child(pending);
+        }
+        Load::Failed(error) => {
+            list = list.child(line(error, kit).role("alert")).child(
+                ActionButton::new("Retry articles")
+                    .disabled(!articles.can_retry())
+                    .finish(MetalFinish::Gunmetal)
+                    .on_press(State::retry_articles)
+                    .build(kit, preferences, None),
+            );
+        }
+        Load::Ready(results) => {
+            if results.rows.is_empty() {
+                return list.child(quiet(
+                    if browse {
+                        "No articles for this date."
+                    } else {
+                        "No matching articles."
+                    },
+                    kit,
+                ));
+            }
+            for article in &results.rows {
+                let mut entry = rune::col()
+                    .key(format!("search-article-{}-{}", article.run_id, article.id))
+                    .w_full()
+                    .padding(8.0)
+                    .gap(4.0)
+                    .radius(6.0)
+                    .fill(kit.c.layer_01)
+                    .child(heading(&article.title, kit))
+                    .child(quiet(
+                        format!("{} · {}", article.source_name, article.published_at),
+                        kit,
+                    ));
+                if let Some(excerpt) = &article.excerpt {
+                    entry = entry.child(quiet(excerpt.as_str(), kit));
+                }
+                list = list.child(entry);
+            }
+            if let Some(error) = articles.tail_error() {
+                list = list.child(line(error, kit).role("alert"));
+            } else if results.truncated {
+                list = list.child(quiet(
+                    "Article results are bounded. Narrow the search to see other matches.",
+                    kit,
+                ));
+            }
+            if articles.tail_loading()
+                || articles.can_load_more()
+                || articles.tail_error().is_some()
+            {
+                list = list.child(
+                    ActionButton::new(if articles.tail_error().is_some() {
+                        "Retry"
+                    } else {
+                        "Load more"
+                    })
+                    .key("search-articles-more")
+                    .finish(MetalFinish::Gunmetal)
+                    .busy(articles.tail_loading())
+                    .disabled(articles.tail_loading())
+                    .on_press(State::load_more_articles)
+                    .build(kit, preferences, None),
+                );
+            }
+            if browse
+                && articles.can_load_more()
+                && articles.tail_error().is_none()
+                && !articles.tail_loading()
+            {
+                list = list.child(
+                    rune::el()
+                        .key(format!("search-articles-tail-{}", results.rows.len()))
+                        .size(1.0, 1.0)
+                        .a11y_hidden()
+                        .on_visible(|state: &mut State, visible, _| {
+                            if visible
+                                && state.search_category == Some(SearchCategory::Articles)
+                                && state.search_articles.tail_error().is_none()
+                            {
+                                state.load_more_articles();
+                            }
+                        }),
+                );
+            }
+        }
+    }
+    list
 }
 
 fn dossier(state: &State, preferences: crate::accessibility::ViewPreferences, kit: &Kit) -> El {

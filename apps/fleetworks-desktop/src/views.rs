@@ -1,7 +1,6 @@
 //! Selected native workstation destinations. Topology presentation belongs to Intel Web.
 
 use fleetworks_contracts::capabilities::Capabilities;
-use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use fleetworks_contracts::readiness::ReadinessCheck;
 use fleetworks_contracts::readiness::ReadinessCheckId;
@@ -22,7 +21,6 @@ use crate::accessibility::ViewPreferences;
 use crate::app::DossierFacet;
 use crate::app::Load;
 use crate::app::Page;
-use crate::app::SeedStage;
 use crate::app::State;
 use crate::brain::Association;
 use crate::connection::ConnectionStatus;
@@ -1080,15 +1078,10 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                     })),
             ),
     );
-    let mut services = rune::col()
-        .key("workstation-services")
-        .w_full()
-        .gap(8.0)
-        .child(heading("Services", kit).role("heading"));
     if state.connected() {
         if state.registration.context.is_none() {
             if state.can_register() {
-                services = services.child(
+                body = body.child(
                     ActionButton::new("Retry registration")
                         .key("workstation-register")
                         .finish(MetalFinish::Gunmetal)
@@ -1097,44 +1090,14 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                 );
             }
         } else {
-            let actor = summarize_actor_search(state);
-            let prefer_actor = actor.needs_seed
-                || actor.building
-                || actor.background_indexing
-                || actor.status_label == "Queued"
-                || state.maintenance.pending_reindex.is_some()
-                || state
-                    .maintenance_disabled_reason(MaintenanceOperation::ReindexActors)
-                    .is_none()
-                    && !actor.can_search;
-            let active_operation = workstation_active_operation(state, preferences, kit);
-            let issue = crate::readiness_cards::primary_issue(
+            body = body.children(crate::readiness_cards::primary_issue(
                 state,
                 crate::readiness_cards::PrimaryIssueScope::Workstation {
-                    include_other_blockers: !prefer_actor && active_operation.is_none(),
+                    include_other_blockers: false,
                 },
                 preferences,
                 kit,
-            );
-            let show_actor_action = issue.is_none() && active_operation.is_none();
-            let trailing_operation = if issue.is_none() {
-                active_operation
-            } else {
-                None
-            };
-            services = services
-                .children(issue)
-                .child(actor_search_summary_card(
-                    state,
-                    preferences,
-                    kit,
-                    actor,
-                    show_actor_action,
-                ))
-                .children(trailing_operation);
-            if state.permission(Permission::ReadWorkstationActivity) {
-                services = services.child(workstation_job_counts(state, preferences, kit));
-            }
+            ));
         }
         if state.confirm_maintenance_dialog {
             if let Some(confirmation) = &state.maintenance.confirmation {
@@ -1160,7 +1123,7 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
             }
         }
     } else {
-        services = services.child(
+        body = body.child(
             ActionButton::new("Setup Gateway")
                 .key("workstation-setup-gateway")
                 .icon(&icons::KEY)
@@ -1169,7 +1132,6 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                 .build(kit, preferences, pointer_ref),
         );
     }
-    body = body.child(services);
     body = body.child(crate::readiness_cards::workstation_section(
         state,
         preferences,
@@ -1225,143 +1187,6 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
     )
 }
 
-fn workstation_job_counts(
-    state: &State,
-    preferences: crate::accessibility::ViewPreferences,
-    kit: &Kit,
-) -> El {
-    let counts = state.registration.context.as_ref().and_then(|context| {
-        state.scoped_jobs.page.as_ref().and_then(|page| {
-            let scope = &page.activity_scope;
-            (state.permission(Permission::ReadWorkstationActivity)
-                && page.dashboard_counts_scope == "unfiltered_top_level_workstation_activity"
-                && scope.deployment_id == context.deployment_id
-                && scope.workstation_id == context.workstation_id
-                && scope.scope_revision == context.scope_revision)
-                .then_some(page.counts.as_ref())
-                .flatten()
-        })
-    });
-    let last_known = counts.is_some() && state.scoped_jobs.message.is_some();
-    let mut tiles = rune::row().w_full().gap(6.0);
-    for (key, name, count) in [
-        (
-            "workstation-jobs-queued",
-            "Queued",
-            counts.map(|counts| counts.queued),
-        ),
-        (
-            "workstation-jobs-running",
-            "Running",
-            counts.map(|counts| counts.active),
-        ),
-        (
-            "workstation-jobs-retrying",
-            "Retrying",
-            counts.map(|counts| counts.retrying),
-        ),
-    ] {
-        let value = count.map(|count| count.to_string());
-        let label = format!("{name}: {}", value.as_deref().unwrap_or("Unavailable"));
-        let description = if last_known {
-            "Last known workstation job count. Open Jobs & Logs."
-        } else {
-            "Workstation job count. Open Jobs & Logs."
-        };
-        tiles = tiles.child(material::canvas_tile(
-            rune::row()
-                .key(key)
-                .role("button")
-                .label(label)
-                .description(description)
-                .focusable(true)
-                .focus_ring(2.0, 0.0, kit.c.border_focus)
-                .min_w(0.0)
-                .min_h(32.0)
-                .grow(1.0)
-                .padding(6.0)
-                .center_y()
-                .flex_wrap()
-                .gap(4.0)
-                .child(quiet(name, kit).selectable(false).a11y_hidden())
-                .child(
-                    rune::text(value.unwrap_or_else(|| "—".to_owned()))
-                        .font(kit.ty.body_medium)
-                        .color(kit.c.text_base)
-                        .a11y_hidden(),
-                )
-                .on_press(|state: &mut State| {
-                    state.select_activity_tab(crate::logs::ActivityTab::Jobs);
-                    state.navigate(Page::Jobs);
-                }),
-            false,
-            preferences,
-        ));
-    }
-    rune::col()
-        .key("workstation-jobs-counts")
-        .role("group")
-        .label("Workstation jobs")
-        .min_w(0.0)
-        .gap(4.0)
-        .children(last_known.then(|| {
-            unsynced_glyph(
-                "workstation-jobs-unsynced",
-                "Last known workstation job counts. Open Jobs & Logs for details.",
-                kit,
-            )
-        }))
-        .child(tiles)
-}
-
-fn workstation_active_operation(
-    state: &State,
-    preferences: ViewPreferences,
-    kit: &Kit,
-) -> Option<El> {
-    let record = state
-        .maintenance
-        .operation_job(MaintenanceOperation::SeedActors)?;
-    if record
-        .detail
-        .as_ref()
-        .is_some_and(|detail| !crate::backend::job_is_active(&detail.job.state))
-    {
-        return None;
-    }
-    let (label, phase) = record.detail.as_ref().map_or(("Queued", ""), |detail| {
-        let label = if detail.job.state == "running" {
-            "Running"
-        } else {
-            "Queued"
-        };
-        (label, detail.job.phase.as_str())
-    });
-    let job_id = record.job_id.clone();
-    Some(
-        rune::row()
-            .key("workstation-active-operation")
-            .flex_wrap()
-            .center_y()
-            .gap(6.0)
-            .child(heading("Seed actors", kit))
-            .child(ui_components::status_pill(
-                label,
-                None,
-                StatusTone::Info,
-                kit,
-            ))
-            .children((!phase.is_empty()).then(|| quiet(phase.to_owned(), kit)))
-            .child(
-                ActionButton::new("View job")
-                    .key("workstation-active-job")
-                    .icon(&icons::JOBS)
-                    .on_press(move |state: &mut State| state.open_job(&job_id))
-                    .build(kit, preferences, None),
-            ),
-    )
-}
-
 /// Small, muted unsynced indicator for last-good data whose refresh is out of sync.
 /// Distinct from the offline gateway indicator; exposes age/reason on demand via accessibility.
 pub(crate) fn unsynced_glyph(key: &str, reason: impl Into<String>, kit: &Kit) -> El {
@@ -1380,203 +1205,6 @@ pub(crate) fn unsynced_glyph(key: &str, reason: impl Into<String>, kit: &Kit) ->
                 .color(kit.c.text_muted)
                 .a11y_hidden(),
         )
-}
-
-struct ActorSearchSummary {
-    status_label: &'static str,
-    tone: StatusTone,
-    next_action: String,
-    unsynced_reason: Option<&'static str>,
-    can_search: bool,
-    building: bool,
-    background_indexing: bool,
-    stage: Option<String>,
-    scanned: Option<u64>,
-    total: Option<u64>,
-    needs_seed: bool,
-}
-
-fn summarize_actor_search(state: &State) -> ActorSearchSummary {
-    let reindex_job = active_actor_reindex(state);
-    let receipt_job = queued_actor_reindex_id(state);
-    let (catalog_check, search_check, observed_at) = match &state.readiness {
-        Load::Ready(readiness) => (
-            readiness
-                .checks
-                .iter()
-                .find(|check| check.id == ReadinessCheckId::ActorCatalog),
-            readiness
-                .checks
-                .iter()
-                .find(|check| check.id == ReadinessCheckId::ActorSearch),
-            Some(readiness.observed_at.as_str()),
-        ),
-        _ => (None, None, None),
-    };
-    let search_fresh = search_check.is_some_and(|check| state.readiness_check_fresh(check));
-    let capability_ready = state
-        .connection
-        .capabilities
-        .as_ref()
-        .is_some_and(|capabilities| capabilities.require_actor_search().is_ok());
-
-    let unsynced_reason = (observed_at.is_some()
-        && (!search_fresh || state.readiness_error.is_some()))
-    .then_some("Actor search observation unsynced. Open Status checks for details.");
-
-    let paused = search_check.is_some_and(actor_search_is_paused);
-    let catalog_needs_data =
-        catalog_check.is_some_and(|check| actor_catalog_needs_data(state, check));
-    let background_indexing =
-        search_check.is_some_and(|check| actor_search_is_background_indexing(state, check));
-    let can_query_current_index = capability_ready
-        && search_fresh
-        && search_check.is_some_and(|check| check.state == ReadinessState::Ready);
-
-    let (status_label, tone, next_action, can_search, building, needs_seed) = if state
-        .maintenance
-        .pending_reindex
-        .is_some()
-    {
-        (
-            "Needs attention",
-            StatusTone::Warn,
-            "Check request status or clear the unresolved actor index attempt before rebuilding."
-                .to_owned(),
-            false,
-            false,
-            false,
-        )
-    } else if let Some(job) = reindex_job {
-        let (label, guidance) = match job.state.as_str() {
-            "queued" | "pending" => ("Queued", "The actor index request is queued."),
-            "retry_scheduled" => ("Retrying", "The actor index job is scheduled to retry."),
-            _ => ("Building", "The actor index job is running."),
-        };
-        (
-            label,
-            StatusTone::Info,
-            guidance.to_owned(),
-            can_query_current_index,
-            true,
-            false,
-        )
-    } else if receipt_job.is_some() {
-        (
-            "Queued",
-            StatusTone::Info,
-            "Actor index request is queued on the backend; follow progress in Jobs.".to_owned(),
-            can_query_current_index,
-            false,
-            false,
-        )
-    } else if background_indexing {
-        (
-            "Background indexing",
-            StatusTone::Info,
-            crate::readiness_cards::ACTOR_INDEX_CATCH_UP.to_owned(),
-            false,
-            false,
-            false,
-        )
-    } else if catalog_needs_data {
-        (
-            "Needs data",
-            StatusTone::Warn,
-            "Seed an actor CSV catalog before building the search index.".to_owned(),
-            false,
-            false,
-            true,
-        )
-    } else if let Some(check) = search_check {
-        if check.state == ReadinessState::Ready && search_fresh {
-            (
-                "Ready",
-                StatusTone::Ok,
-                "Actor search is ready; open Search actors to query the catalog.".to_owned(),
-                can_query_current_index,
-                false,
-                false,
-            )
-        } else if paused {
-            (
-                "Paused",
-                StatusTone::Warn,
-                "Indexing is paused or write-paced on the backend. Open Status checks for details."
-                    .to_owned(),
-                false,
-                false,
-                false,
-            )
-        } else if check.state == ReadinessState::NotReady {
-            (
-                "Not built",
-                StatusTone::Warn,
-                "Click Build actor index to generate the shared backend search projection."
-                    .to_owned(),
-                false,
-                false,
-                false,
-            )
-        } else if check.state == ReadinessState::Degraded || !search_fresh {
-            (
-                "Needs attention",
-                StatusTone::Warn,
-                "Refresh checks or open Status checks for details on actor search.".to_owned(),
-                false,
-                false,
-                false,
-            )
-        } else {
-            (
-                    "Unavailable",
-                    StatusTone::Err,
-                    "Actor search status is unavailable. Refresh checks or open Status checks for details."
-                        .to_owned(),
-                    false,
-                    false,
-                    false,
-                )
-        }
-    } else {
-        (
-            if matches!(state.readiness, Load::Pending | Load::Loading) {
-                "Checking"
-            } else {
-                "Unavailable"
-            },
-            StatusTone::Neutral,
-            "Refresh checks to inspect actor catalog and search index readiness.".to_owned(),
-            false,
-            false,
-            false,
-        )
-    };
-
-    let (stage, scanned, total) = match reindex_job {
-        Some(job) => (
-            (!job.phase.is_empty()).then(|| job.phase.clone()),
-            job.progress_done
-                .and_then(|value| u64::try_from(value).ok()),
-            job.progress_total
-                .and_then(|value| u64::try_from(value).ok()),
-        ),
-        None => (None, None, None),
-    };
-
-    ActorSearchSummary {
-        status_label,
-        tone,
-        next_action,
-        unsynced_reason,
-        can_search,
-        building,
-        background_indexing,
-        stage,
-        scanned,
-        total,
-        needs_seed,
-    }
 }
 
 pub(crate) fn actor_search_is_background_indexing(state: &State, check: &ReadinessCheck) -> bool {
@@ -1657,190 +1285,6 @@ pub(crate) fn queued_actor_reindex_id(state: &State) -> Option<&str> {
     let observed = matches!(&state.backend.jobs, Load::Ready(jobs) if jobs.rows.iter().any(|job| job.id == id))
         || matches!(&state.backend.detail, Load::Ready(detail) if detail.job.id == id);
     (!observed && !id.trim().is_empty()).then_some(id)
-}
-
-fn open_workstation_seed(state: &mut State) {
-    if summarize_actor_search(state).needs_seed {
-        state.seed_stage = SeedStage::Seed;
-        state.navigate(Page::Seed);
-    }
-}
-
-fn workstation_search_action() -> ActionButton {
-    ActionButton::new("Search actors")
-        .key("workstation-search-actors")
-        .icon(&icons::BRAIN)
-        .on_press(|state: &mut State| {
-            if summarize_actor_search(state).can_search {
-                state.navigate(Page::Brain);
-            }
-        })
-}
-
-fn actor_search_summary_card(
-    state: &State,
-    preferences: ViewPreferences,
-    kit: &Kit,
-    summary: ActorSearchSummary,
-    show_actor_action: bool,
-) -> El {
-    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
-    let disabled_reason = state.maintenance_disabled_reason(MaintenanceOperation::ReindexActors);
-    let refreshing =
-        state.readiness_pending() || matches!(state.readiness, Load::Pending | Load::Loading);
-    let busy_submit =
-        state.maintenance.busy() || matches!(state.maintenance.receipt, Load::Loading);
-
-    let (status_label, tone) =
-        if summary.status_label == "Ready" && summary.unsynced_reason.is_some() {
-            ("Unsynced", StatusTone::Warn)
-        } else {
-            (summary.status_label, summary.tone)
-        };
-    let status_slot = rune::row().w(132.0).center_y().child(
-        ui_components::status_pill(status_label, None, tone, kit).key("actor-search-status-tag"),
-    );
-
-    let relevant_job = active_actor_reindex(state)
-        .map(|job| job.id.as_str())
-        .or_else(|| queued_actor_reindex_id(state));
-    let primary = if state.maintenance.pending_reindex.is_some() {
-        ActionButton::new("Check request")
-            .key("workstation-check-index-request")
-            .icon(&icons::REFRESH)
-            .disabled(state.maintenance.busy())
-            .on_press(|state: &mut State| state.reconcile_actor_reindex())
-    } else if summary.needs_seed {
-        ActionButton::new("Seed actors…")
-            .key("workstation-open-seed")
-            .icon(&icons::SEED)
-            .on_press(open_workstation_seed)
-    } else if let Some(job_id) = relevant_job {
-        let id = job_id.to_owned();
-        ActionButton::new("View job")
-            .key("workstation-view-index-job")
-            .icon(&icons::JOBS)
-            .on_press(move |state: &mut State| state.open_job(&id))
-    } else if summary.can_search {
-        workstation_search_action()
-    } else if disabled_reason.is_none() && !busy_submit && !summary.background_indexing {
-        ActionButton::new("Build actor index")
-            .key(crate::maintenance::WORKSTATION_REINDEX_ACTION_KEY)
-            .icon(&icons::BRAIN)
-            .on_press(|state: &mut State| {
-                state.preview_maintenance(MaintenanceOperation::ReindexActors)
-            })
-    } else {
-        let failed = matches!(state.readiness, Load::Failed(_));
-        ActionButton::new(if failed { "Retry" } else { "Refresh checks" })
-            .key(if failed {
-                "workstation-readiness-retry"
-            } else {
-                "workstation-refresh-readiness"
-            })
-            .icon(&icons::REFRESH)
-            .busy(refreshing)
-            .disabled(refreshing)
-            .on_press(|state: &mut State| state.refresh_readiness())
-    };
-    let primary = primary
-        .finish(MetalFinish::Gunmetal)
-        .build(kit, preferences, pointer_ref)
-        .w(146.0);
-    let primary = if summary.needs_seed {
-        primary.on_key(|state: &mut State, event, tx| {
-            if event.key != rune::Key::Enter || event.mods != rune::Mods::default() {
-                return false;
-            }
-            if !tx.key_repeat() {
-                open_workstation_seed(state);
-            }
-            true
-        })
-    } else {
-        primary
-    };
-    let details_toggle = ActionButton::new(if state.maintenance.reindex_details_open {
-        "Hide details"
-    } else {
-        "Details"
-    })
-    .key("workstation-index-details-toggle")
-    .finish(MetalFinish::ObsidianPill)
-    .on_press(|state: &mut State| {
-        state.maintenance.reindex_details_open = !state.maintenance.reindex_details_open;
-    })
-    .build(kit, preferences, pointer_ref)
-    .w(96.0);
-    let mut card_body = rune::col()
-        .padding(10.0)
-        .gap(6.0)
-        .key("actor-search-summary-card")
-        .child(
-            rune::row()
-                .w_full()
-                .gap(6.0)
-                .center_y()
-                .flex_wrap()
-                .child(heading("Actor search", kit).min_w(104.0))
-                .child(status_slot)
-                .child(
-                    rune::row()
-                        .w(146.0)
-                        .h(32.0)
-                        .children(show_actor_action.then_some(primary)),
-                )
-                .child(details_toggle),
-        );
-    if state.maintenance.reindex_details_open {
-        let mut details_col = rune::col().gap(4.0).child(quiet(summary.next_action, kit));
-        if summary.building {
-            let stage = summary.stage.as_deref().unwrap_or(summary.status_label);
-            let progress = match (summary.scanned, summary.total) {
-                (Some(done), Some(total)) if total > 0 => {
-                    format!("{stage} · {done} / {total} scanned")
-                }
-                (Some(done), _) => format!("{stage} · {done} scanned"),
-                (None, _) => stage.to_owned(),
-            };
-            details_col = details_col.child(quiet(progress, kit));
-        }
-        if let Some(pending) = &state.maintenance.pending_reindex {
-            details_col = details_col.child(quiet(
-                format!("Pending request: {}", pending.request.request_id),
-                kit,
-            ));
-        }
-        if let Some(reason) = disabled_reason {
-            details_col = details_col.child(quiet(reason, kit));
-        }
-        if let Some(reason) = summary.unsynced_reason {
-            details_col = details_col.child(quiet(reason.to_owned(), kit));
-        }
-        card_body = card_body.child(
-            details_col
-                .children(
-                    (summary.can_search && relevant_job.is_some())
-                        .then(|| workstation_search_action().build(kit, preferences, pointer_ref)),
-                )
-                .children(crate::backend_views::actor_index_receipt_banner(
-                    state,
-                    preferences,
-                    kit,
-                ))
-                .children(crate::backend_views::unresolved_actor_reindex_banner(
-                    state,
-                    preferences,
-                    kit,
-                )),
-        );
-    }
-
-    material::glass(
-        card_body.radius(12.0),
-        material::GlassSurface::Panel,
-        preferences,
-    )
 }
 
 fn index_state_label(state: IndexState) -> (&'static str, StatusTone) {
@@ -2268,7 +1712,7 @@ mod tests {
             assert!(runtime.find("status-checks-toggle/trigger").is_some());
             assert!(runtime.find("backend-readiness-checks").is_none());
             assert!(runtime.find("gateway-backend-card").is_none());
-            assert!(runtime.find("workstation-services").is_some());
+            assert!(runtime.find("workstation-services").is_none());
             assert!(runtime.find("workstation-jobs-counts").is_none());
             assert!(!tree.contains("6 checks"));
             assert!(!tree.contains("Workstation activity: registration required"));
@@ -2323,7 +1767,7 @@ mod tests {
             let connected_tree = connected.accessibility_json().to_string();
             for label in [
                 "Workstation Status",
-                "Services",
+                "Status checks",
                 "Distributed registration ID synthetic-registration",
                 "Transport: Connected",
             ] {
@@ -2333,8 +1777,8 @@ mod tests {
                 );
             }
             assert!(connected.find("workstation-status-header").is_some());
-            assert!(connected.find("workstation-services").is_some());
-            assert!(connected.find("workstation-jobs-counts").is_some());
+            assert!(connected.find("workstation-services").is_none());
+            assert!(connected.find("workstation-jobs-counts").is_none());
             assert!(connected.find("host-resources-card").is_none());
             assert!(connected.find("toolbar-telemetry").is_some());
 
@@ -2751,7 +2195,7 @@ mod tests {
             );
             runtime.frame(0.0);
             runtime.frame(1.0 / 60.0);
-            let key = "workstation-open-seed";
+            let key = "readiness-action-actor_catalog-SeedActors";
             let elements = runtime.elements();
             let action = elements
                 .iter()
@@ -2785,7 +2229,7 @@ mod tests {
             assert_eq!(after.scrolled, action.scrolled);
             assert_eq!(after.visible, after.rect);
             runtime.key(KeyEvent {
-                key: Key::Enter,
+                key: Key::Text(" ".into()),
                 mods: Mods::default(),
             });
             runtime.frame(4.0 / 60.0);
@@ -2795,7 +2239,7 @@ mod tests {
     }
 
     #[test]
-    fn workstation_hero_card_covers_actor_search_states_details_and_confirmation_escape() {
+    fn workstation_actor_search_row_exposes_details_and_guarded_actions() {
         use fleetworks_contracts::context::Permission;
         use fleetworks_contracts::readiness::{
             ReadinessAction, ReadinessActionId, ReadinessCheck, ReadinessCheckId, ReadinessState,
@@ -2868,240 +2312,28 @@ mod tests {
         clock += 1.0 / 60.0;
         rt.frame(clock);
 
-        // Toggle bounded Details disclosure on the Workstation hero card.
-        assert!(rt.find("actor-search-summary-card").is_some());
-        click_within(
-            &mut rt,
-            "workstation-index-details-toggle",
-            (1280.0, 800.0),
-            &mut clock,
-        );
-        assert!(rt.state.maintenance.reindex_details_open);
-        click_within(
-            &mut rt,
-            "workstation-index-details-toggle",
-            (1280.0, 800.0),
-            &mut clock,
-        );
-        assert!(!rt.state.maintenance.reindex_details_open);
-
-        let details_position = rt.find("workstation-index-details-toggle").unwrap();
-        let scenarios = [
-            (
-                ReadinessState::NotReady,
-                ReadinessState::NotReady,
-                "not_seeded",
-                "Needs data",
-            ),
-            (
-                ReadinessState::NotReady,
-                ReadinessState::Running,
-                "index_catching_up",
-                "Needs data",
-            ),
-            (
-                ReadinessState::Ready,
-                ReadinessState::NotReady,
-                "not_built",
-                "Not built",
-            ),
-            (
-                ReadinessState::Ready,
-                ReadinessState::Running,
-                "index_catching_up",
-                "Background indexing",
-            ),
-            (
-                ReadinessState::Ready,
-                ReadinessState::NotReady,
-                "paused",
-                "Paused",
-            ),
-            (
-                ReadinessState::Ready,
-                ReadinessState::Degraded,
-                "failed",
-                "Needs attention",
-            ),
-            (
-                ReadinessState::Ready,
-                ReadinessState::Unavailable,
-                "unavailable",
-                "Unavailable",
-            ),
-        ];
-        for (cat_state, search_state, reason, label) in scenarios {
-            rt.update(move |state, _| {
-                if let crate::app::Load::Ready(readiness) = &mut state.readiness {
-                    readiness.checks.retain(|c| {
-                        !matches!(
-                            c.id,
-                            ReadinessCheckId::ActorCatalog | ReadinessCheckId::ActorSearch
-                        )
-                    });
-                    let mut cat = ReadinessCheck::new(
-                        ReadinessCheckId::ActorCatalog,
-                        cat_state,
-                        "cat".into(),
-                        "Catalog check".into(),
-                        "2026-11-14T22:00:00Z".into(),
-                    );
-                    cat.fresh_for_ms = 30_000;
-                    let mut search = ReadinessCheck::new(
-                        ReadinessCheckId::ActorSearch,
-                        search_state,
-                        reason.into(),
-                        format!("Explanation for {label}"),
-                        "2026-11-14T22:00:00Z".into(),
-                    );
-                    search.fresh_for_ms = 30_000;
-                    search.actions.push(ReadinessAction::new(
-                        ReadinessActionId::RebuildActorIndex,
-                        Permission::MaintainBackend,
-                        true,
-                    ));
-                    readiness.checks.push(cat);
-                    readiness.checks.push(search);
-                }
-            });
-            clock += 1.0 / 60.0;
-            rt.frame(clock);
-            let tree = rt.accessibility_json().to_string();
-            assert!(tree.contains("Connected"));
-            let status = rt
-                .elements()
-                .into_iter()
-                .find(|element| element.path.ends_with("actor-search-status-tag"))
-                .expect("actor search status tag");
-            assert_eq!(status.label.as_deref(), Some(label));
-            let position = rt.find("workstation-index-details-toggle").unwrap();
-            assert!((position.0 - details_position.0).abs() < 0.5);
-            assert!((position.1 - details_position.1).abs() < 0.5);
-            if cat_state == ReadinessState::NotReady {
-                assert!(rt.find("workstation-open-seed").is_some());
-                assert!(rt.find("workstation-build-actor-index").is_none());
-            }
-            if search_state == ReadinessState::Running {
-                assert!(rt.find("workstation-view-index-job").is_none());
-                assert!(rt.find("workstation-build-actor-index").is_none());
-                assert!(
-                    app::sidebar_row_badge(&rt.state, Page::Jobs).is_none(),
-                    "readiness alone must not contribute to the jobs badge",
-                );
-                if cat_state == ReadinessState::Ready {
-                    click_within(
-                        &mut rt,
-                        "workstation-index-details-toggle",
-                        (1280.0, 800.0),
-                        &mut clock,
-                    );
-                    assert!(rt
-                        .accessibility_json()
-                        .to_string()
-                        .contains(crate::readiness_cards::ACTOR_INDEX_CATCH_UP));
-                    click_within(
-                        &mut rt,
-                        "workstation-index-details-toggle",
-                        (1280.0, 800.0),
-                        &mut clock,
-                    );
-                }
-            }
-        }
-
-        // Building state with an unknown total exposes a phase and the observed count.
-        rt.update(|state, _| {
-            if let crate::app::Load::Ready(readiness) = &mut state.readiness {
-                if let Some(c) = readiness
-                    .checks
-                    .iter_mut()
-                    .find(|c| c.id == ReadinessCheckId::ActorSearch)
-                {
-                    c.state = ReadinessState::NotReady;
-                    c.reason_code = "building".into();
-                }
-            }
-            let job: crate::backend::ActivityJob = serde_json::from_value(serde_json::json!({
-                "id": "job-build-1",
-                "app": "worker",
-                "operation": "actor_reindex",
-                "title": "Actor index",
-                "state": "running",
-                "phase": "scanning",
-                "progress_done": 128,
-                "progress_total": null,
-                "error_summary": "",
-                "private_details_available": false,
-                "activity_actions_available": false,
-                "status_only": false
-            }))
-            .unwrap();
-            state.backend.jobs = crate::app::Load::Ready(crate::backend::ActivityJobs {
-                rows: vec![job],
-                activity_scope: fleetworks_contracts::context::ActivityScope::for_workstation(
-                    state.registration.context.as_ref().unwrap(),
-                ),
-                relation_counts_available: false,
-                activity_actions_available: false,
-            });
-        });
-        clock += 1.0 / 60.0;
-        rt.frame(clock);
-        let building_tree = rt.accessibility_json().to_string();
-        assert!(building_tree.contains("Building"));
-        assert!(!building_tree.contains("scanning · 128 scanned"));
-        assert!(rt.find("workstation-view-index-job").is_some());
-        assert!(rt.find("workstation-build-actor-index").is_none());
-        click_within(
-            &mut rt,
-            "workstation-index-details-toggle",
-            (1280.0, 800.0),
-            &mut clock,
-        );
-        let details = rt.accessibility_json().to_string();
-        assert!(details.contains("scanning · 128 scanned"));
-        assert!(!details.contains('%'));
-
-        rt.update(|state, _| {
-            if let Load::Ready(readiness) = &mut state.readiness {
+        const SIZE: (f32, f32) = (1280.0, 800.0);
+        const BUILD: &str = "workstation-build-actor-index";
+        const DETAILS: &str = "readiness-action-actor_search";
+        const SEARCH: &str = "workstation-search-actors";
+        let set_search = |rt: &mut Runtime<State>, value, reason: &str| {
+            rt.update(|state, _| {
+                let Load::Ready(readiness) = &mut state.readiness else {
+                    panic!("expected readiness");
+                };
                 let check = readiness
                     .checks
                     .iter_mut()
                     .find(|check| check.id == ReadinessCheckId::ActorSearch)
                     .expect("actor search check");
-                check.state = ReadinessState::Ready;
-                check.reason_code = "index_reader_visible".into();
-            }
-        });
-        clock += 1.0 / 60.0;
-        rt.frame(clock);
-        assert!(rt.find("workstation-view-index-job").is_some());
-        assert!(rt.find("workstation-search-actors").is_some());
+                check.state = value;
+                check.reason_code = reason.into();
+            });
+        };
 
-        rt.update(|state, _| {
-            state.backend.jobs = Load::Idle;
-            if let Load::Ready(readiness) = &mut state.readiness {
-                let check = readiness
-                    .checks
-                    .iter_mut()
-                    .find(|check| check.id == ReadinessCheckId::ActorSearch)
-                    .expect("actor search check");
-                check.state = ReadinessState::NotReady;
-                check.reason_code = "not_built".into();
-            }
-        });
-        clock += 1.0 / 60.0;
-        rt.frame(clock);
-        // The single actionable build control still opens its confirmation.
-        click_within(
-            &mut rt,
-            "workstation-build-actor-index",
-            (1280.0, 800.0),
-            &mut clock,
-        );
+        assert!(rt.find("actor-search-summary-card").is_none());
+        click_within(&mut rt, BUILD, SIZE, &mut clock);
         assert!(rt.state.confirm_maintenance_dialog);
-        let dialog_tree = rt.accessibility_json().to_string();
-        assert!(dialog_tree.contains("Shared backend catalog"));
         assert!(rt.find("maintenance-confirm").is_some());
         assert!(rt.find("maintenance-cancel").is_some());
         rt.key(KeyEvent {
@@ -3113,36 +2345,21 @@ mod tests {
         assert!(!rt.state.confirm_maintenance_dialog);
         assert!(rt.state.maintenance.confirmation.is_none());
 
-        // Ready state offers Search actors which navigates directly to Page::Brain.
-        rt.update(|state, _| {
-            if let crate::app::Load::Ready(readiness) = &mut state.readiness {
-                if let Some(c) = readiness
-                    .checks
-                    .iter_mut()
-                    .find(|c| c.id == ReadinessCheckId::ActorSearch)
-                {
-                    c.state = ReadinessState::Ready;
-                    c.reason_code = "ready".into();
-                }
-            }
-        });
+        set_search(&mut rt, ReadinessState::Running, "index_catching_up");
         clock += 1.0 / 60.0;
         rt.frame(clock);
-        assert!(rt.find("workstation-index-details-toggle").is_some());
-        click_within(
-            &mut rt,
-            "workstation-index-details-toggle",
-            (1280.0, 800.0),
-            &mut clock,
-        );
-        assert!(rt.find("workstation-index-details-toggle").is_some());
-        assert!(!rt.state.maintenance.reindex_details_open);
-        click_within(
-            &mut rt,
-            "workstation-search-actors",
-            (1280.0, 800.0),
-            &mut clock,
-        );
+        assert!(rt.find(BUILD).is_none());
+        click_within(&mut rt, DETAILS, SIZE, &mut clock);
+        assert!(rt.find("readiness-details-actor_search").is_some());
+        assert!(rt
+            .accessibility_json()
+            .to_string()
+            .contains(crate::readiness_cards::ACTOR_INDEX_CATCH_UP));
+
+        set_search(&mut rt, ReadinessState::Ready, "index_reader_visible");
+        clock += 1.0 / 60.0;
+        rt.frame(clock);
+        click_within(&mut rt, SEARCH, SIZE, &mut clock);
         assert_eq!(rt.state.page, Page::Brain);
     }
 

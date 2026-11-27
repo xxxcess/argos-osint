@@ -103,9 +103,9 @@ and the shared **Status checks** table label automatic catch-up as background
 indexing. The Jobs & Logs rail badge follows the registered workstation’s active
 tracked jobs, including a
 queued, running or retrying actor reindex, while another destination is open.
-From Workstation Status's **Actor search** hero card, **Build actor index** /
-**Rebuild actor index** opens an inline confirmation modal (`Escape` cancels and
-restores button focus). Before issuing the HTTP POST, the native client
+In Workstation Status, the **Actor search** row’s **Build actor index** icon
+opens a confirmation dialog when the backend admits the action. `Escape` cancels
+and restores focus to the icon. Before issuing the HTTP POST, the native client
 persists the pending `reindex_actors` request ID and `original_registration_id`
 so uncertain delivery or network drops reconcile read-only via
 `GET /api/v1/workstation/requests/detail`, clearing the durable journal on

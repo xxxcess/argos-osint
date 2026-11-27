@@ -203,7 +203,6 @@ pub struct Maintenance {
     pub(crate) last_request: Option<MaintenanceRequest>,
     pub(crate) pending_reindex: Option<PendingActorReindex>,
     pub(crate) reindex_association: Option<JobRequestAssociation>,
-    pub(crate) reindex_details_open: bool,
     pub(crate) upload_revision: u64,
     pub(crate) datasets_revision: u64,
     pub(crate) operation_revision: u64,
@@ -236,7 +235,6 @@ impl Default for Maintenance {
             last_request: None,
             pending_reindex: None,
             reindex_association: None,
-            reindex_details_open: false,
             upload_revision: 0,
             datasets_revision: 0,
             operation_revision: 0,
@@ -356,7 +354,6 @@ impl Maintenance {
         self.last_request = None;
         self.pending_reindex = None;
         self.reindex_association = None;
-        self.reindex_details_open = false;
         self.operation_request = None;
         self.receipt_poll_requests = [None, None];
         for revision in &mut self.receipt_poll_revisions {

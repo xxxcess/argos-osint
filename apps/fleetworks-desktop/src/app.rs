@@ -360,7 +360,7 @@ impl Default for State {
             tool_key_dialog: false,
             setup_advanced_open: false,
             workstation_diagnostics_open: false,
-            workstation_status_checks_open: false,
+            workstation_status_checks_open: true,
             seed_stage: SeedStage::Seed,
             models_tab: ModelsTab::Roles,
             models_provider_dialog: false,
@@ -652,7 +652,7 @@ impl State {
         self.startup.data_checks = false;
         self.startup.data_reset.fill(false);
         self.workstation_diagnostics_open = false;
-        self.workstation_status_checks_open = false;
+        self.workstation_status_checks_open = true;
         self.setup_advanced_open = false;
         self.tool_key_dialog = false;
         self.expanded_readiness.clear();

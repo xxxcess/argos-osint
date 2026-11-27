@@ -187,25 +187,30 @@ fn actual_readiness_view_distinguishes_stale_ready_and_unverified_inference() {
         vec![ready, inference],
     ));
     runtime.state.readiness_received_at = Some(0.0);
+    runtime.reduced_motion = true;
     runtime.frame(0.0);
-    let collapsed = runtime.accessibility_json().to_string();
-    assert!(collapsed.contains("Status checks · 2 unresolved"));
-    assert!(!collapsed.contains("passed"));
-    assert!(runtime.find("readiness-trigger-gateway").is_none());
+    assert!(runtime.find("readiness-trigger-gateway").is_some());
     assert!(runtime
         .find("readiness-trigger-classifier_inference")
-        .is_none());
+        .is_some());
 
     runtime.update(|_, tx| tx.focus("status-checks-toggle", true));
     runtime.frame(1.0 / 60.0);
     assert!(runtime.elements().iter().any(|element| {
         element.focused && element.path.ends_with("/status-checks-toggle/trigger")
     }));
-    runtime.key(KeyEvent {
+    let space = || KeyEvent {
         key: Key::Text(" ".into()),
         mods: Mods::default(),
-    });
+    };
+    runtime.key(space());
     runtime.frame(2.0 / 60.0);
+    let collapsed = runtime.accessibility_json().to_string();
+    assert!(collapsed.contains("Status checks · 2 unresolved"));
+    assert!(!collapsed.contains("passed"));
+    assert!(runtime.find("readiness-trigger-gateway").is_none());
+    runtime.key(space());
+    runtime.frame(3.0 / 60.0);
 
     let tree = runtime.accessibility_json().to_string();
     let unsynced_glyph = runtime
@@ -229,7 +234,7 @@ fn actual_readiness_view_distinguishes_stale_ready_and_unverified_inference() {
     runtime.update(|state, _| {
         state.connection.status = crate::connection::ConnectionStatus::Disconnected;
     });
-    runtime.frame(3.0 / 60.0);
+    runtime.frame(4.0 / 60.0);
     let offline = runtime.accessibility_json().to_string();
     assert!(offline.contains("Status checks · offline"));
     assert!(offline.contains("Connect a backend to see status checks."));

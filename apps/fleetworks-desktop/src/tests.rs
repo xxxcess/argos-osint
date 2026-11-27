@@ -717,6 +717,7 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
     const SETUP_SWITCH: &str = "setup-advanced-toggle/switch";
     const FAILED_ROW: &str = "readiness-trigger-jobs";
     const FAILED_DETAIL: &str = "readiness-details-jobs";
+    const FAILED_ACTION: &str = "readiness-action-jobs";
     const ACTOR_ROW: &str = "readiness-trigger-actor_search";
     const PASSED_ROW: &str = "readiness-trigger-gateway";
 
@@ -799,12 +800,8 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
         assert!(summary.contains("Status checks"), "{summary}");
         assert!(summary.contains("1 passed"), "{summary}");
         assert!(summary.contains("1 failed"), "{summary}");
-        assert!(runtime.find(FAILED_ROW).is_none());
+        assert_eq!(runtime.find(FAILED_ROW).is_some(), !setup);
         assert!(runtime.find(FAILED_DETAIL).is_none());
-
-        if !setup {
-            assert!(runtime.find("actor-search-summary-card").is_some());
-        }
 
         // The blocker must be visible in the initial viewport on all three surfaces.
         let critical = assert_status_check_fully_visible(&runtime, CRITICAL);
@@ -815,10 +812,12 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
         runtime.state.intents.clear();
         press_status_check(&mut runtime, &mut frame);
         assert!(runtime.state.intents.contains(&Intent::Readiness));
-        assert!(runtime.find(FAILED_ROW).is_none());
+        assert_eq!(runtime.find(FAILED_ROW).is_some(), !setup);
 
         focus_status_check(&mut runtime, disclosure, &mut frame);
-        press_status_check(&mut runtime, &mut frame);
+        if setup {
+            press_status_check(&mut runtime, &mut frame);
+        }
         assert!(runtime.find("backend-readiness-checks").is_some());
         assert!(runtime.find(FAILED_DETAIL).is_none());
 
@@ -831,6 +830,14 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
             Some("Actor search: Background indexing")
         );
         assert_eq!(passed.label.as_deref(), Some("Gateway: Ready"));
+        let action = status_check_element(&runtime, FAILED_ACTION);
+        assert_eq!(action.role, "button");
+        assert_eq!(action.label.as_deref(), Some("View Jobs details"));
+        assert!(action.target[0] > failed.target[0]);
+        assert_eq!(
+            action.target[0],
+            status_check_element(&runtime, "readiness-action-gateway").target[0]
+        );
         assert!(failed.target[1] < actor.target[1], "{kind:?}");
         assert!(actor.target[1] < passed.target[1], "{kind:?}");
         for key in ["readiness-icon-jobs", "readiness-icon-gateway"] {
@@ -852,9 +859,12 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
         });
         tick_status_checks(&mut runtime, &mut frame);
         assert!(assert_status_check_fully_visible(&runtime, FAILED_ROW).focused);
+        focus_status_check(&mut runtime, FAILED_ACTION, &mut frame);
         press_status_check(&mut runtime, &mut frame);
         assert!(runtime.find(FAILED_DETAIL).is_some());
-        assert!(status_check_element(&runtime, FAILED_ROW).focused);
+        let action = status_check_element(&runtime, FAILED_ACTION);
+        assert!(action.focused);
+        assert_eq!(action.label.as_deref(), Some("Hide Jobs details"));
         let tree = runtime.accessibility_json().to_string();
         assert!(tree.contains("process_not_ready"));
         assert!(tree.contains("The Jobs service reported that its dispatcher was not ready."));
@@ -874,7 +884,7 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
             state.complete_readiness(Ok(next));
         });
         tick_status_checks(&mut runtime, &mut frame);
-        assert!(status_check_element(&runtime, FAILED_ROW).focused);
+        assert!(status_check_element(&runtime, FAILED_ACTION).focused);
         assert!(runtime.find(FAILED_DETAIL).is_some());
         assert!(runtime
             .accessibility_json()
@@ -919,7 +929,6 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
 
 #[test]
 fn desktop_status_table_aligns_columns_and_exposes_the_granted_row_action() {
-    use fleetworks_contracts::readiness::DatasetKind;
     use fleetworks_contracts::readiness::ReadinessAction;
     use fleetworks_contracts::readiness::ReadinessActionId;
     use fleetworks_contracts::readiness::ReadinessCheck;
@@ -995,11 +1004,7 @@ fn desktop_status_table_aligns_columns_and_exposes_the_granted_row_action() {
     let blocker = status_check_element(&runtime, "readiness-critical-action");
     assert_eq!(blocker.visible, blocker.rect);
     assert_eq!(blocker.label.as_deref(), Some("Refresh checks"));
-    assert!(runtime.find("workstation-open-seed").is_none());
-    assert!(runtime.find(SEED).is_none());
-    runtime.update(|_, tx| tx.focus("status-checks-toggle", true));
-    tick_status_checks(&mut runtime, &mut frame);
-    press_status_check(&mut runtime, &mut frame);
+    assert!(runtime.find("workstation-services").is_none());
     let header = status_check_element(&runtime, "readiness-status-table-header");
     let column_labels: Vec<_> = runtime
         .elements()
@@ -1017,6 +1022,7 @@ fn desktop_status_table_aligns_columns_and_exposes_the_granted_row_action() {
     assert!(runtime.find("readiness-details-actor_catalog").is_none());
     let seed = status_check_element(&runtime, SEED);
     assert!(seed.focusable);
+    assert_eq!(seed.label.as_deref(), Some("Open actor seed setup"));
     assert!(seed.target[0] > catalog_status.target[0]);
     runtime.update(|_, tx| {
         tx.scroll_into_view(SEED);
@@ -1024,14 +1030,12 @@ fn desktop_status_table_aligns_columns_and_exposes_the_granted_row_action() {
     });
     tick_status_checks(&mut runtime, &mut frame);
     assert!(status_check_element(&runtime, SEED).focused);
-    runtime.state.intents.clear();
     press_status_check(&mut runtime, &mut frame);
-    assert!(runtime.state.intents.contains(&Intent::ChooseDataset {
-        kind: DatasetKind::ActorCatalog,
-    }));
-    assert!(runtime.find("readiness-details-actor_catalog").is_none());
+    assert_eq!(runtime.state.page, Page::Seed);
+    assert_eq!(runtime.state.seed_stage, crate::app::SeedStage::Seed);
 
     runtime.update(|state, _| {
+        state.navigate(Page::Workstation);
         let Load::Ready(readiness) = &state.readiness else {
             panic!("expected the previous observation");
         };
@@ -1274,8 +1278,9 @@ fn workstation_tags_the_resolved_registration_and_keeps_metrics_in_the_toolbar()
         tag.label.as_deref(),
         Some("Embedded registration ID synthetic-registration")
     );
-    assert!(runtime.find("workstation-services").is_some());
-    assert!(runtime.find("workstation-jobs-counts").is_some());
+    assert!(runtime.find("workstation-services").is_none());
+    assert!(runtime.find("workstation-jobs-counts").is_none());
+    assert!(runtime.find("backend-readiness-checks").is_some());
     assert!(runtime.find("status-checks-toggle/trigger").is_some());
     assert!(runtime.find("workstation-diagnostics/trigger").is_some());
     assert!(runtime.find("host-resources-card").is_none());

@@ -1266,6 +1266,12 @@ async fn run_shared_flow(
         .iter()
         .any(|actor| actor.actor_id == canonical_actor_id));
     assert!(browse.rows.len() <= 25);
+    record(
+        &mut *report,
+        "actors_browse",
+        "live_parity",
+        "bounded canonical actor catalog page on both transports",
+    );
 
     let readiness: WorkstationReadiness = client
         .workstation_readiness()

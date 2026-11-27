@@ -64,6 +64,7 @@ pub enum ChatInputError {
     InvalidLimit,
     InvalidWait,
     InvalidInboxNotifications,
+    InvalidJobNotification,
 }
 
 impl fmt::Display for ChatInputError {
@@ -82,6 +83,7 @@ impl fmt::Display for ChatInputError {
             Self::InvalidLimit => "Invalid chat page limit",
             Self::InvalidWait => "Invalid chat wait",
             Self::InvalidInboxNotifications => "Invalid Inbox notification summary",
+            Self::InvalidJobNotification => "A job notification needs a job source",
         })
     }
 }

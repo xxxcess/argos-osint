@@ -468,6 +468,7 @@ fn operational_prompt(
     options: &[OperationalOption],
     labels: &[OptionLabel],
     plan: Option<&QaWorkerPlan>,
+    passage_limit: usize,
 ) -> Result<String> {
     let mut menu = String::from("Options:\n");
     let mut fact_indices = Vec::new();
@@ -478,7 +479,13 @@ fn operational_prompt(
         } else {
             write!(menu, "{label}. {} Then present facts", option.introduction)?;
         }
-        for (position, &index) in option.indices.iter().enumerate() {
+        for (position, index) in option
+            .indices
+            .iter()
+            .copied()
+            .filter(|&index| index < passage_limit)
+            .enumerate()
+        {
             let separator = if position == 0 { " " } else { ", " };
             let number = match fact_indices
                 .iter()
@@ -540,19 +547,66 @@ fn fit_operational_prompt(
     passages: &[QaPassage],
     labels: &[OptionLabel],
     plan: Option<&QaWorkerPlan>,
+    log_token_budget: usize,
     mut bounded_input: impl FnMut(&str) -> Option<Vec<i64>>,
 ) -> Result<Option<(Vec<i64>, Vec<OperationalOption>)>> {
-    let mut options = operational_options(passages, plan);
-    options.truncate(labels.len());
-    while !options.is_empty() {
-        let prompt = operational_prompt(question, passages, &options, labels, plan)?;
-        if let Some(ids) = bounded_input(&prompt) {
-            return Ok(Some((ids, options)));
+    let primary_count = passages
+        .iter()
+        .take_while(|passage| !passage.job_log_tail)
+        .count();
+    let mut primary = operational_options(passages, plan);
+    let first_log = primary.partition_point(|option| {
+        option
+            .indices
+            .last()
+            .is_none_or(|&index| index < primary_count)
+    });
+    let supplemental = primary.split_off(first_log);
+    let primary_input_len = if supplemental.is_empty() {
+        None
+    } else {
+        let menu = &primary[..primary.len().min(labels.len())];
+        let prompt = operational_prompt(question, passages, menu, labels, plan, primary_count)?;
+        bounded_input(&prompt).map(|ids| ids.len())
+    };
+    let mut fit = |mut options: Vec<OperationalOption>, include_logs| {
+        options.truncate(labels.len());
+        while !options.is_empty() {
+            let prompt =
+                operational_prompt(question, passages, &options, labels, plan, passages.len())?;
+            if let Some(ids) = bounded_input(&prompt) {
+                let fits_log_budget = if include_logs {
+                    // Tokenize the same labelled menu without the supplemental evidence.
+                    // The difference includes the excerpts, their labels and menu references.
+                    let without_logs = operational_prompt(
+                        question,
+                        passages,
+                        &options,
+                        labels,
+                        plan,
+                        primary_count,
+                    )?;
+                    bounded_input(&without_logs).is_some_and(|primary_ids| {
+                        let baseline = primary_input_len
+                            .map_or(primary_ids.len(), |length| length.min(primary_ids.len()));
+                        ids.len().saturating_sub(baseline) <= log_token_budget
+                    })
+                } else {
+                    true
+                };
+                if fits_log_budget {
+                    return Ok(Some((ids, options)));
+                }
+            }
+            // Removing the final option can drop an older detail without losing the primary facts.
+            options.pop();
         }
-        // The final option is the lowest-priority detail. Keep the leading facts intact.
-        options.pop();
+        Ok::<_, anyhow::Error>(None)
+    };
+    if let Some(with_logs) = fit(supplemental, true)? {
+        return Ok(Some(with_logs));
     }
-    Ok(None)
+    fit(primary, false)
 }
 
 pub(super) enum Generation {
@@ -706,6 +760,7 @@ fn prepare_input(
             request.passages,
             labels,
             request.plan,
+            usize::from(window_tokens / 2),
             |prompt| {
                 tried = true;
                 bounded_ids(tokenizer, prompt, window_tokens, eos)
@@ -1204,11 +1259,12 @@ mod tests {
         let fact = format!("{}ready", "gateway ".repeat(QA_MAX_VISIBLE_WORDS - 1));
         let passages = [QaPassage::new("one".into(), fact.clone())];
         let labels = test_labels();
-        let (_, options) = fit_operational_prompt("Who's ready?", &passages, &labels, None, |_| {
-            Some(vec![1, 2])
-        })
-        .unwrap()
-        .unwrap();
+        let (_, options) =
+            fit_operational_prompt("Who's ready?", &passages, &labels, None, 0, |_| {
+                Some(vec![1, 2])
+            })
+            .unwrap()
+            .unwrap();
         assert_eq!(options.len(), 1);
         assert_eq!(options[0].reply, fact);
         assert_eq!(
@@ -1408,6 +1464,7 @@ mod tests {
             &options,
             &test_labels(),
             None,
+            request.passages.len(),
         )
         .unwrap();
         assert_eq!(options.len(), 3);
@@ -1446,8 +1503,15 @@ mod tests {
             assert!(option.indices.len() <= QA_MAX_FINDINGS);
             assert!(valid_dialogue_reply(&option.reply));
         }
-        let prompt =
-            operational_prompt("What's ready?", &passages, &options, &test_labels(), None).unwrap();
+        let prompt = operational_prompt(
+            "What's ready?",
+            &passages,
+            &options,
+            &test_labels(),
+            None,
+            passages.len(),
+        )
+        .unwrap();
         assert!(!prompt.contains(passages[2].text.as_str()));
         assert!(prompt.contains("3. \"Jobs are ready.\"\nOptions:\n"));
         assert!(prompt.contains("C. Here are the current checks. Then present facts 1, 2, 3"));
@@ -1487,13 +1551,13 @@ mod tests {
             (!prompt.contains("Jobs service is ready.")).then_some(vec![1])
         };
         let (_, options) =
-            fit_operational_prompt("What's ready?", &passages, &labels, None, encode)
+            fit_operational_prompt("What's ready?", &passages, &labels, None, 0, encode)
                 .unwrap()
                 .unwrap();
         assert_eq!(options.len(), 3);
         assert_eq!(options[2].indices, [0, 1, 2]);
         assert!(
-            fit_operational_prompt("What's ready?", &passages, &labels, None, |_| None)
+            fit_operational_prompt("What's ready?", &passages, &labels, None, 0, |_| None)
                 .unwrap()
                 .is_none()
         );
@@ -1515,8 +1579,13 @@ mod tests {
             Some(QaGuidance::CheckResourceUsage),
         );
         let guidance = QaGuidance::CheckResourceUsage.text();
-        let (_, options) =
-            fit_operational_prompt(question, &passages, &test_labels(), Some(&plan), |prompt| {
+        let (_, options) = fit_operational_prompt(
+            question,
+            &passages,
+            &test_labels(),
+            Some(&plan),
+            0,
+            |prompt| {
                 assert!(prompt.contains(question));
                 assert!(prompt.contains(&plan.focus));
                 assert_eq!(prompt.matches(&plan.note).count(), 1);
@@ -1524,15 +1593,66 @@ mod tests {
                 assert!(prompt.contains(&passages[0].text));
                 assert!(prompt.contains(&passages[1].text));
                 (!prompt.contains(&passages[2].text)).then_some(vec![1])
-            })
-            .unwrap()
-            .unwrap();
+            },
+        )
+        .unwrap()
+        .unwrap();
         assert!(!options.is_empty());
         for option in options {
             assert_eq!(option.indices, [0, 1]);
             assert!(option.reply.ends_with(guidance));
             assert!(verified_operational_reply(&passages, &option.reply, Some(&plan)).is_some());
         }
+    }
+
+    #[test]
+    fn log_tail_fits_the_half_window_and_keeps_status_when_no_log_fits() {
+        let mut passages = [
+            QaPassage::new("job".into(), "The actor catalog seed failed.".into()),
+            QaPassage::new(
+                "newer".into(),
+                "Newest job log reported that the actor catalog seed exhausted its retry budget."
+                    .into(),
+            ),
+            QaPassage::new(
+                "older".into(),
+                format!("Earlier job log contained code {}.", "x".repeat(220)),
+            ),
+        ];
+        passages[1].job_log_tail = true;
+        passages[2].job_log_tail = true;
+        let plan = QaWorkerPlan::new(
+            "actor catalog seed".into(),
+            "Explain the selected job status using its recent logs.".into(),
+            vec!["job".into()],
+            None,
+        );
+        let labels = test_labels();
+        let check = |log_budget, expected: &[usize]| {
+            let (_, options) = fit_operational_prompt(
+                "What happened with this job?",
+                &passages,
+                &labels,
+                Some(&plan),
+                log_budget,
+                // Use one token per byte so the menu and excerpt overhead are observable.
+                |prompt| Some(vec![0; prompt.len()]),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(options.last().unwrap().indices, expected);
+            for option in &options {
+                assert!(option
+                    .indices
+                    .starts_with(&expected[..expected.len().min(2)]));
+                assert!(
+                    verified_operational_reply(&passages, &option.reply, Some(&plan)).is_some()
+                );
+            }
+        };
+        check(512 / 2, &[0, 1]);
+        check(896 / 2, &[0, 1, 2]);
+        check(0, &[0]);
     }
 
     #[test]

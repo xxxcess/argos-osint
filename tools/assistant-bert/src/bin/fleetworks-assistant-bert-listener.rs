@@ -48,6 +48,7 @@ use protocol::QA_CONTEXT_USAGE_ENV;
 use protocol::QA_DECODED_CLARIFICATION_ENV;
 use protocol::QA_DIALOGUE_ENV;
 use protocol::QA_GENERAL_DIALOGUE_ENV;
+use protocol::QA_JOB_LOG_CONTEXT_ENV;
 use protocol::QA_MAX_FRAME_BYTES;
 use protocol::QA_MODEL_CONTEXT_ENV;
 use protocol::QA_MODEL_REVISION;
@@ -381,6 +382,11 @@ fn relay(
                             protocol,
                             model_revision,
                             ..
+                        }
+                        | QaWorkerReply::ReadyWithJobLogContext {
+                            protocol,
+                            model_revision,
+                            ..
                         },
                         Phase::Starting | Phase::Pinging,
                     ) if protocol == QA_WORKER_PROTOCOL
@@ -507,6 +513,9 @@ fn serve(stream: UnixStream, worker: &Path, model: &Path, libraries: &Path) -> R
                 command.env(QA_DECODED_CLARIFICATION_ENV, "1");
                 if env::var_os(QA_GENERAL_DIALOGUE_ENV).as_deref() == Some("1".as_ref()) {
                     command.env(QA_GENERAL_DIALOGUE_ENV, "1");
+                    if env::var_os(QA_JOB_LOG_CONTEXT_ENV).as_deref() == Some("1".as_ref()) {
+                        command.env(QA_JOB_LOG_CONTEXT_ENV, "1");
+                    }
                 }
             }
         }

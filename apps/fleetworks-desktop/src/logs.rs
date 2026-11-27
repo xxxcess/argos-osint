@@ -147,6 +147,7 @@ pub struct LogCopy {
 
 /// The log table's element key, for scroll requests.
 pub const TABLE_KEY: &str = "scoped-logs-table";
+pub(crate) const SECTION_KEY: &str = "scoped-operational-logs";
 
 #[derive(Default)]
 pub struct LogState {

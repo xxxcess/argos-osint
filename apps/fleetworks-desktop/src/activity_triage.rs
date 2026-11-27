@@ -19,6 +19,7 @@ use crate::app::Load;
 use crate::app::Page;
 use crate::connection::RequestTask;
 use crate::icons;
+use crate::inbox_qa::SourceOrigin;
 use crate::logs::ActivityTab;
 use crate::material::MetalFinish;
 use crate::ui_components::ActionButton;
@@ -245,7 +246,7 @@ pub(crate) fn explain_notice_button(state: &State, notice_id: u64, kit: &Kit) ->
     }
     let source = state.explain_notice_source(notice_id)?;
     Some(
-        IconButton::new(&icons::ASSISTANT)
+        IconButton::new(&icons::ASSISTANT_EXPLAIN)
             .variant(IconButtonVariant::Ghost)
             .control_size(ControlSize::Large)
             .label("Explain in Assistant")
@@ -253,7 +254,7 @@ pub(crate) fn explain_notice_button(state: &State, notice_id: u64, kit: &Kit) ->
             .disabled(!state.can_prefill_inbox_question())
             .on_press_tx(move |state: &mut State, tx| {
                 if state.explain_notice_source(notice_id).as_ref() == Some(&source) {
-                    state.prefill_inbox_question(&source, tx);
+                    state.prefill_inbox_question(&source, SourceOrigin::Notification, tx);
                 }
             })
             .build(kit)
@@ -287,7 +288,7 @@ pub(crate) fn job_actions(state: &State, kit: &Kit, preferences: ViewPreferences
                 .disabled(!state.can_prefill_inbox_question())
                 .on_press_tx(move |state: &mut State, tx| {
                     if state.triage_job_source().as_ref() == Some(&source) {
-                        state.prefill_inbox_question(&source, tx);
+                        state.prefill_inbox_question(&source, SourceOrigin::Selection, tx);
                     }
                 })
                 .build(kit, preferences, None),

@@ -438,6 +438,8 @@ impl ResponsePlan {
                     .collect::<Option<Vec<_>>>()?;
                 request.plan = Some(worker.clone());
             }
+        } else {
+            request.passages.retain(|passage| !passage.job_log_tail);
         }
         request.validate().ok()?;
         Some(request)
@@ -459,6 +461,8 @@ pub struct AdmissionMetadata {
 struct Exchange {
     actor: Actor,
     source: Option<ChatSourceReference>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    job_notification: bool,
     turn: QaTurn,
     #[serde(skip)]
     accepted_at_ms: i64,
@@ -1058,6 +1062,7 @@ async fn exchange_in(tx: &Tx, turn_id: &str) -> Result<Option<ExchangeRow>, TxEr
 fn matching_request(existing: &Exchange, request: &QaTurnRequest) -> bool {
     existing.turn.question == request.question
         && existing.source == request.source
+        && existing.job_notification == request.job_notification
         && existing.conversation.inbox_notifications == request.inbox_notifications
 }
 
@@ -1307,6 +1312,7 @@ pub async fn admit(
             let mut exchange = Exchange {
                 actor: actor.clone(),
                 source: request.source.clone(),
+                job_notification: request.job_notification,
                 turn: QaTurn::queued(id.to_owned(), request.request_id.clone(), request.question.clone()),
                 accepted_at_ms: timestamp,
                 response_started_at_ms: metadata.response_started_at_ms.filter(|started_at| *started_at <= timestamp),

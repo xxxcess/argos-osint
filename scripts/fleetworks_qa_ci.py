@@ -169,11 +169,10 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
     model_env = {loader_key: str(root / "lib"), "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
                  "RAYON_NUM_THREADS": "1", "FLEETWORKS_QA_DIALOGUE": "1",
                  "FLEETWORKS_QA_CONTEXT_USAGE": "1", "FLEETWORKS_QA_STREAMING": "1",
+                 "FLEETWORKS_QA_RESPONSE_PLAN": "1", "FLEETWORKS_QA_DECODED_CLARIFICATION": "1",
+                 "FLEETWORKS_QA_GENERAL_DIALOGUE": "1", "FLEETWORKS_QA_JOB_LOG_CONTEXT": "1",
                  "FLEETWORKS_QA_MODEL_TARGET": chat_model}
     extended_context = chat_model in GPT2_MODELS
-    if extended_context:
-        model_env.update(FLEETWORKS_QA_RESPONSE_PLAN="1", FLEETWORKS_QA_DECODED_CLARIFICATION="1",
-                         FLEETWORKS_QA_GENERAL_DIALOGUE="1")
     window = GPT2_INPUT_WINDOW if extended_context else FLAN_INPUT_WINDOW
     started = time.monotonic()
     worker = root / pack.WORKER
@@ -285,28 +284,33 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
                    "generator did not report its bounded input window")
         return usage, reply
 
-    def probe_operational(turn_id, question):
+    def probe_operational(turn_id, question, *, facts=None, plan=None):
         nonlocal deadline
-        facts = [
-            {"source_id": "actor-search", "text": "Actor search is ready."},
-            {"source_id": "gateway", "text": "Gateway reported “ready” for local requests."},
-        ]
+        if facts is None:
+            facts = [
+                {"source_id": "actor-search", "text": "Actor search is ready."},
+                {"source_id": "gateway", "text": "Gateway reported “ready” for local requests."},
+            ]
         request = {
             "turn_id": turn_id, "snapshot_id": turn_id, "question": question, "passages": facts,
             "dialogue": {"kind": "operational", "history": []},
         }
+        if plan is not None:
+            request["plan"] = plan
         turn_started = time.monotonic()
         deadline = turn_started + 25
         send({"command": "ask", "request": request})
         event, first_finding, draft, _ = read_drafts(request)
         for sequence, fact in enumerate(facts, first_finding):
             pack.check(event == {"kind": "finding", "turn_id": turn_id, "sequence": sequence,
-                                 "start": 0, "end": len(fact["text"]), **fact},
+                                 "start": 0, "end": len(fact["text"]),
+                                 "source_id": fact["source_id"], "text": fact["text"]},
                        "operational turn did not cite an exact frozen fact in order")
             event = receive_event(request, sequence + 1)
         context, reply = complete_turn(event)
         body = " ".join(fact["text"] for fact in facts)
-        pack.check(reply in (body, f"Here is the current status. {body}", f"Here are the current checks. {body}"),
+        pack.check(reply in (body, f"Here is the current status. {body}", f"Here are the current checks. {body}",
+                             f"Here are the recorded observations. {body}"),
                    "operational reply did not preserve all approved facts")
         pack.check(draft == reply, "operational turn did not stream its verified reply before completion")
         turn_finished = time.monotonic()
@@ -318,7 +322,7 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
         nonlocal deadline
         # Pinned GPT-2 tokenizes each space-prefixed x into one token. Keep the
         # question within the wire byte limit while exercising the tokenizer limit.
-        summary = "Registration, warning (1 unread of 1)."
+        summary = "Registration."
         request = {
             "turn_id": turn_id, "snapshot_id": turn_id,
             "question": "Fixture labels:" + " x" * padding + ". What are my notifications?",
@@ -339,10 +343,8 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
         return context
 
     try:
-        ready = {"reply": "ready_with_streaming", "protocol": 1,
+        ready = {"reply": "ready_with_job_log_context", "protocol": 1, "window_tokens": window,
                  "model_revision": pack.CHAT_MODELS[chat_model]["revision"]}
-        if extended_context:
-            ready.update(reply="ready_with_general_dialogue", window_tokens=window)
         pack.check(receive() == ready, "chat checkpoint did not become ready with streaming")
         warm = time.monotonic()
         if extended_context:
@@ -373,6 +375,15 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
 
         question = "How are actor search and the gateway doing?"
         operational = probe_operational("pack-operational-probe", question)
+        log_context = probe_operational(
+            "pack-job-log-probe", "What happened with this job?",
+            facts=[
+                {"source_id": "job", "text": "The import job completed."},
+                {"source_id": "log", "text": "Recent job log reported 12 imported records.", "job_log_tail": True},
+            ],
+            plan={"focus": "Selected import job", "note": "Explain the selected job.",
+                  "required_passages": ["job"]},
+        )
         extended = {}
         if extended_context:
             # Each " test" is one token in the pinned GPT-2 vocabulary. The
@@ -402,6 +413,7 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
                 "operational_delta_events": operational["delta_events"],
                 "operational_reply_ms": operational["reply_ms"],
                 "dialogue_context": greeting_context, "operational_context": operational["context"],
+                "job_log_context": log_context["context"],
                 "operational_composed": operational["composed"], "peak_sampled_rss_bytes": peak_rss,
                 "rss_samples": rss_samples, **extended}
     except Exception:

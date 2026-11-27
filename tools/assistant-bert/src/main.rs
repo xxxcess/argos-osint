@@ -61,6 +61,7 @@ use protocol::QA_CONTEXT_WINDOW_TOKENS;
 use protocol::QA_DECODED_CLARIFICATION_ENV;
 use protocol::QA_DIALOGUE_ENV;
 use protocol::QA_GENERAL_DIALOGUE_ENV;
+use protocol::QA_JOB_LOG_CONTEXT_ENV;
 use protocol::QA_LEGACY_STREAMING_WINDOW_TOKENS;
 use protocol::QA_MAX_FINDINGS;
 use protocol::QA_MAX_FRAME_BYTES;
@@ -671,23 +672,40 @@ fn receive_commands(stopping: Arc<AtomicBool>) -> io::Result<mpsc::Receiver<QaWo
     Ok(receiver)
 }
 
+#[derive(Clone, Copy)]
+enum GeneralSupport {
+    Disabled,
+    Dialogue,
+    JobLogs,
+}
+
 fn ready(
     dialogue: bool,
     streaming: bool,
     response_plan: bool,
     decoded_clarification: bool,
-    general_dialogue: bool,
+    general_support: GeneralSupport,
     model_revision: &str,
     window_tokens: u16,
 ) -> QaWorkerReply {
     let model_revision = model_revision.into();
     if dialogue && streaming && response_plan {
-        if general_dialogue {
-            return QaWorkerReply::ReadyWithGeneralDialogue {
-                protocol: QA_WORKER_PROTOCOL,
-                model_revision,
-                window_tokens,
-            };
+        match general_support {
+            GeneralSupport::JobLogs => {
+                return QaWorkerReply::ReadyWithJobLogContext {
+                    protocol: QA_WORKER_PROTOCOL,
+                    model_revision,
+                    window_tokens,
+                }
+            }
+            GeneralSupport::Dialogue => {
+                return QaWorkerReply::ReadyWithGeneralDialogue {
+                    protocol: QA_WORKER_PROTOCOL,
+                    model_revision,
+                    window_tokens,
+                }
+            }
+            GeneralSupport::Disabled => {}
         }
         if decoded_clarification {
             return QaWorkerReply::ReadyWithDecodedClarification {
@@ -751,6 +769,13 @@ pub(crate) fn run(
         response_plan && env::var_os(QA_DECODED_CLARIFICATION_ENV).as_deref() == Some("1".as_ref());
     let general_dialogue = decoded_clarification
         && env::var_os(QA_GENERAL_DIALOGUE_ENV).as_deref() == Some("1".as_ref());
+    let job_log_context =
+        general_dialogue && env::var_os(QA_JOB_LOG_CONTEXT_ENV).as_deref() == Some("1".as_ref());
+    let general_support = match (general_dialogue, job_log_context) {
+        (true, true) => GeneralSupport::JobLogs,
+        (true, false) => GeneralSupport::Dialogue,
+        _ => GeneralSupport::Disabled,
+    };
     let target = match env::var_os(QA_MODEL_TARGET_ENV) {
         None => QaModelTarget::default(),
         Some(value) => value
@@ -795,7 +820,7 @@ pub(crate) fn run(
             streaming,
             response_plan,
             decoded_clarification,
-            general_dialogue,
+            general_support,
             model_revision,
             window_tokens,
         ),
@@ -812,7 +837,7 @@ pub(crate) fn run(
                     streaming,
                     response_plan,
                     decoded_clarification,
-                    general_dialogue,
+                    general_support,
                     model_revision,
                     window_tokens,
                 ),
@@ -829,6 +854,10 @@ pub(crate) fn run(
                 ensure!(
                     general_dialogue || !kind.is_some_and(QaDialogueKind::needs_general_support),
                     "QA general dialogue support was not negotiated"
+                );
+                ensure!(
+                    job_log_context || !request.passages.iter().any(|passage| passage.job_log_tail),
+                    "QA job log context support was not negotiated"
                 );
                 let mut output = |reply| send(reply, kind);
                 if let Some(dialogue) = &request.dialogue {

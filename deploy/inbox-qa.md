@@ -42,6 +42,8 @@ The offline package smoke uses a 1,536 MiB ceiling and verifies Small without ne
 
 The local generator answers general questions. For mixed questions, exact workstation observations appear alongside the model's separate explanation. Inbox notification answers preserve the priority and counts supplied by the desktop. These capabilities require a compatible worker pack. Quick Start selects a compatible smoke-verified pack when available.
 
+Explaining an Inbox job notification can cite up to two short excerpts from that job’s authorized recent logs. The worker limits the extra prompt content to half the active input window. Use **Open Job Logs** on the notification to inspect the selected job’s scoped log view.
+
 The Embedded companion writes allowlisted observations to `context/workstation-context.sqlite3` under the selected `--state-dir`. Ordinary authorized readiness and job reads can contribute while Backend inference is off. The journal adds no polling, and entries reflect observed changes. Assistant history can be incomplete due to retention, collection gaps or resource visibility changes.
 
 Keep the journal and its sidecars inside the owner-only Embedded state directory. The companion checks its deployment identity and protects it with the existing state lock. Turning Backend inference off stops execution and clears conversations, choices and response plans. The separate observation journal follows its seven-day and 10,000-event retention policy. Distributed deployments keep their existing notification path. [Storage and coverage](../docs/wiki/code/storage.md#embedded-workstation-observation-journal)

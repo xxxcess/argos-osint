@@ -8,6 +8,7 @@ use chrono::DateTime;
 use chrono::Local;
 use chrono::Utc;
 use fleetworks_contracts::chat::is_inbox_notification_question;
+use fleetworks_contracts::chat::ChatInputError;
 use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::chat::QaAvailabilityReason;
@@ -36,6 +37,7 @@ use fleetworks_contracts::chat::MAX_INPUT_BYTES;
 use fleetworks_contracts::chat::QA_GPT2_GENERATORS_FEATURE;
 use fleetworks_contracts::chat::QA_HISTORY_FEATURE;
 use fleetworks_contracts::chat::QA_INBOX_NOTIFICATIONS_FEATURE;
+use fleetworks_contracts::chat::QA_JOB_NOTIFICATION_LOGS_FEATURE;
 use fleetworks_contracts::chat::QA_MAX_RETAINED_TURNS;
 use fleetworks_contracts::chat::QA_MODEL_SETTINGS_FEATURE;
 use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
@@ -245,6 +247,16 @@ impl HistoryDirection {
     }
 }
 
+pub(crate) enum SourceOrigin {
+    Selection,
+    Notification,
+}
+
+struct SelectedSource {
+    reference: ChatSourceReference,
+    origin: SourceOrigin,
+}
+
 pub(crate) struct InboxQa {
     binding: Option<Binding>,
     settings: Option<QaSettings>,
@@ -252,7 +264,7 @@ pub(crate) struct InboxQa {
     history: TranscriptHistory,
     pending: Option<Pending>,
     draft: TextEdit,
-    source: Option<ChatSourceReference>,
+    source: Option<SelectedSource>,
     status: Option<&'static str>,
     settings_loaded: bool,
     details_open: bool,
@@ -304,6 +316,17 @@ impl Default for InboxQa {
 }
 
 impl InboxQa {
+    fn begin_submission(&mut self, request: QaTurnRequest) {
+        // Transport retries reuse the submitted request. Later questions can
+        // keep using the selected source without inheriting the notice action.
+        self.pending = Some(Pending::new(request));
+        if let Some(source) = &mut self.source {
+            source.origin = SourceOrigin::Selection;
+        }
+        self.history.select(None);
+        self.status = None;
+    }
+
     /// An ordinary disconnect hides the exchange until the same authority is confirmed again.
     pub(crate) fn detach(&mut self) {
         self.request = None;
@@ -749,7 +772,12 @@ impl State {
             && self.inbox_qa.active().is_none()
     }
 
-    pub(crate) fn prefill_inbox_question(&mut self, source: &ChatSourceReference, tx: &mut Tx) {
+    pub(crate) fn prefill_inbox_question(
+        &mut self,
+        source: &ChatSourceReference,
+        origin: SourceOrigin,
+        tx: &mut Tx,
+    ) {
         if !self.can_prefill_inbox_question() {
             return;
         }
@@ -768,7 +796,10 @@ impl State {
         if self.inbox_qa.draft.text.trim().is_empty() {
             self.inbox_qa.draft = TextEdit::new(prompt);
         }
-        self.inbox_qa.source = Some(source.clone());
+        self.inbox_qa.source = Some(SelectedSource {
+            reference: source.clone(),
+            origin,
+        });
         self.inbox_qa.status = None;
         tx.focus(COMPOSER, true);
     }
@@ -1176,38 +1207,48 @@ impl State {
             self.inbox_qa.status = Some("Could not prepare the question. Try again.");
             return;
         };
-        let source = self.inbox_qa.source.clone();
-        let request = QaTurnRequest::new(
-            request_id,
-            MutationContext::new(context),
-            question.to_owned(),
-            source,
-        )
-        .and_then(|request| {
-            let supports_notifications =
-                self.connection.capabilities.as_ref().is_some_and(|caps| {
-                    caps.features
-                        .iter()
-                        .any(|feature| feature == QA_INBOX_NOTIFICATIONS_FEATURE)
-                });
-            if supports_notifications
-                && request.source.is_none()
-                && is_inbox_notification_question(question)
-            {
-                request.with_inbox_notifications(self.inbox.assistant_notifications())
-            } else {
-                Ok(request)
-            }
-        });
-        let Ok(request) = request else {
+        let Ok(request) = self.inbox_question_request(request_id, context, question) else {
             self.inbox_qa.status = Some("Check the question and selected source, then try again.");
             return;
         };
         if self.dispatch_inbox_qa(Request::Submit(request.clone())) {
-            self.inbox_qa.pending = Some(Pending::new(request));
-            self.inbox_qa.history.select(None);
-            self.inbox_qa.status = None;
+            self.inbox_qa.begin_submission(request);
             tx.scroll_to_bottom_instant(crate::inbox::SCROLL);
+        }
+    }
+
+    fn inbox_question_request(
+        &self,
+        request_id: String,
+        context: &RegisteredContext,
+        question: &str,
+    ) -> Result<QaTurnRequest, ChatInputError> {
+        let source = self.inbox_qa.source.as_ref();
+        let request = QaTurnRequest::new(
+            request_id,
+            MutationContext::new(context),
+            question.to_owned(),
+            source.map(|source| source.reference.clone()),
+        )?;
+        let has_feature = |name: &str| {
+            self.connection
+                .capabilities
+                .as_ref()
+                .is_some_and(|caps| caps.features.iter().any(|feature| feature == name))
+        };
+        if source.is_some_and(|source| {
+            source.reference.kind == ChatSourceKind::Job
+                && matches!(source.origin, SourceOrigin::Notification)
+        }) && has_feature(QA_JOB_NOTIFICATION_LOGS_FEATURE)
+        {
+            request.with_job_notification()
+        } else if source.is_none()
+            && is_inbox_notification_question(question)
+            && has_feature(QA_INBOX_NOTIFICATIONS_FEATURE)
+        {
+            request.with_inbox_notifications(self.inbox.assistant_notifications())
+        } else {
+            Ok(request)
         }
     }
 
@@ -2464,7 +2505,7 @@ fn source_control(
         return Some(
             ActionButton::new(format!(
                 "Remove {} source",
-                citation_kind(source.kind).to_lowercase()
+                citation_kind(source.reference.kind).to_lowercase()
             ))
             .key("inbox-qa-clear-source")
             .finish(MetalFinish::Gunmetal)
@@ -2480,7 +2521,12 @@ fn source_control(
             .key("inbox-qa-pin-source")
             .finish(MetalFinish::Gunmetal)
             .disabled(disabled)
-            .on_press(move |state: &mut State| state.inbox_qa.source = Some(source.clone()))
+            .on_press(move |state: &mut State| {
+                state.inbox_qa.source = Some(SelectedSource {
+                    reference: source.clone(),
+                    origin: SourceOrigin::Selection,
+                });
+            })
             .build(kit, preferences, None),
     )
 }
@@ -2745,6 +2791,52 @@ mod tests {
             .accessibility_json()
             .to_string()
             .contains("Include readiness"));
+    }
+
+    #[test]
+    fn job_notice_explain_opts_in_once_and_preserves_the_retry_payload() {
+        let mut runtime = qa_drawer((640.0, 480.0), None);
+        runtime.update(|state, _| {
+            state.inbox = crate::inbox::Inbox::default();
+            state.fixture_show_triage_job_notice();
+            let capabilities = state.connection.capabilities.as_mut().unwrap();
+            capabilities.features.push(QA_TRIAGE_FEATURE.into());
+        });
+        press_disclosure(&mut runtime, "inbox-item-1-explain", 1.0);
+        assert_eq!(
+            runtime.state.inbox_qa.draft.text,
+            "What happened with this job?"
+        );
+        let prepare = |state: &State, request_id: &str| {
+            state
+                .inbox_question_request(
+                    request_id.into(),
+                    state.registration.context.as_ref().unwrap(),
+                    &state.inbox_qa.draft.text,
+                )
+                .unwrap()
+        };
+        let legacy = prepare(&runtime.state, "fixture-job-notice");
+        assert!(!legacy.job_notification);
+        assert_eq!(legacy.source.as_ref().unwrap().id, "fixture-failed-job");
+
+        runtime.update(|state, _| {
+            state
+                .connection
+                .capabilities
+                .as_mut()
+                .unwrap()
+                .features
+                .push(QA_JOB_NOTIFICATION_LOGS_FEATURE.into());
+            let submitted = prepare(state, "fixture-job-notice");
+            assert!(submitted.job_notification);
+            assert_eq!(submitted.source, legacy.source);
+            state.inbox_qa.begin_submission(submitted.clone());
+            assert_eq!(state.inbox_qa.pending.as_ref().unwrap().request, submitted);
+            let follow_up = prepare(state, "fixture-job-follow-up");
+            assert_eq!(follow_up.source, submitted.source);
+            assert!(!follow_up.job_notification);
+        });
     }
 
     #[test]

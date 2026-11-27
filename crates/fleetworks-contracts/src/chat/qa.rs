@@ -36,6 +36,8 @@ pub const QA_GPT2_GENERATORS_FEATURE: &str = "inbox-qa-gpt2-v1";
 pub const QA_HISTORY_FEATURE: &str = "inbox-qa-history-v1";
 /// Embedded capability for accepting a bounded summary of native Inbox notices.
 pub const QA_INBOX_NOTIFICATIONS_FEATURE: &str = "inbox-qa-notifications-v1";
+/// Embedded capability for attaching recent job logs to an Inbox notification explanation.
+pub const QA_JOB_NOTIFICATION_LOGS_FEATURE: &str = "inbox-qa-job-notification-logs-v1";
 /// Read-only related activity lookup over private Embedded IPC.
 pub const QA_RELATED_ACTIVITY_PATH: &str = "/api/v2/workstation/chat/related-activity";
 
@@ -457,6 +459,9 @@ pub struct QaTurnRequest {
     /// A summary of the submitting desktop's Inbox for an explicit notification question.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inbox_notifications: Option<Vec<QaInboxNotificationGroup>>,
+    /// The operator opened this job source from an Inbox notification.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub job_notification: bool,
 }
 
 impl fmt::Debug for QaTurnRequest {
@@ -479,6 +484,7 @@ impl QaTurnRequest {
             question,
             source,
             inbox_notifications: None,
+            job_notification: false,
         };
         request.validate()?;
         Ok(request)
@@ -494,6 +500,13 @@ impl QaTurnRequest {
         Ok(self)
     }
 
+    /// Request recent authorized log excerpts for an explicitly selected job notification.
+    pub fn with_job_notification(mut self) -> Result<Self, ChatInputError> {
+        self.job_notification = true;
+        self.validate()?;
+        Ok(self)
+    }
+
     /// Validate the shape and bounds before resolving evidence or reserving worker capacity.
     pub fn validate(&self) -> Result<(), ChatInputError> {
         if !request_id(&self.request_id) {
@@ -501,6 +514,14 @@ impl QaTurnRequest {
         }
         if let Some(source) = &self.source {
             source.validate()?;
+        }
+        if self.job_notification
+            && self
+                .source
+                .as_ref()
+                .is_none_or(|source| source.kind != ChatSourceKind::Job)
+        {
+            return Err(ChatInputError::InvalidJobNotification);
         }
         if self.question.trim().is_empty() {
             return Err(ChatInputError::EmptyInput);
@@ -1026,6 +1047,41 @@ mod tests {
         let mut injected = valid;
         injected["inbox_notifications"][0]["title"] = serde_json::json!("untrusted text");
         assert!(serde_json::from_value::<QaTurnRequest>(injected).is_err());
+    }
+
+    #[test]
+    fn job_notification_requires_an_explicit_job_and_cannot_supply_its_logs() {
+        let legacy = serde_json::json!({
+            "request_id": "notification-1",
+            "context": {
+                "registration_id": "registration-1",
+                "expected_registration_revision": 1,
+                "expected_context_revision": 1,
+            },
+            "question": "What happened with this job?",
+        });
+        let mut request = serde_json::from_value::<QaTurnRequest>(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&request).unwrap(), legacy);
+        assert_eq!(
+            request.clone().with_job_notification(),
+            Err(ChatInputError::InvalidJobNotification)
+        );
+        request.source =
+            Some(ChatSourceReference::new(ChatSourceKind::Readiness, "jobs".into()).unwrap());
+        assert_eq!(
+            request.clone().with_job_notification(),
+            Err(ChatInputError::InvalidJobNotification)
+        );
+        request.source =
+            Some(ChatSourceReference::new(ChatSourceKind::Job, "import-42".into()).unwrap());
+        let request = request.with_job_notification().unwrap();
+        let mut wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            serde_json::from_value::<QaTurnRequest>(wire.clone()).unwrap(),
+            request
+        );
+        wire["job_log_tail"] = serde_json::json!(["An invented message."]);
+        assert!(serde_json::from_value::<QaTurnRequest>(wire).is_err());
     }
 
     #[test]

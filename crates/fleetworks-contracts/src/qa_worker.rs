@@ -19,6 +19,7 @@ pub const QA_MODEL_CONTEXT_ENV: &str = "FLEETWORKS_QA_MODEL_CONTEXT";
 pub const QA_RESPONSE_PLAN_ENV: &str = "FLEETWORKS_QA_RESPONSE_PLAN";
 pub const QA_DECODED_CLARIFICATION_ENV: &str = "FLEETWORKS_QA_DECODED_CLARIFICATION";
 pub const QA_GENERAL_DIALOGUE_ENV: &str = "FLEETWORKS_QA_GENERAL_DIALOGUE";
+pub const QA_JOB_LOG_CONTEXT_ENV: &str = "FLEETWORKS_QA_JOB_LOG_CONTEXT";
 pub const QA_REPORTED_INBOX_PREFIX: &str = "Inbox notification groups reported by the desktop.";
 pub const QA_MODEL_PINS: &str = include_str!("qa_models.json");
 pub const QA_MODEL_TARGET_ENV: &str = "FLEETWORKS_QA_MODEL_TARGET";
@@ -197,11 +198,18 @@ impl QaContextUsage {
 pub struct QaPassage {
     pub source_id: String,
     pub text: String,
+    /// A supplemental job log excerpt subject to the worker's half-window limit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub job_log_tail: bool,
 }
 
 impl QaPassage {
     pub fn new(source_id: String, text: String) -> Self {
-        Self { source_id, text }
+        Self {
+            source_id,
+            text,
+            job_log_tail: false,
+        }
     }
 }
 
@@ -268,7 +276,27 @@ impl QaWorkerRequest {
         }
         let mut ids = BTreeSet::new();
         let mut bytes = 0;
-        for passage in &self.passages {
+        let mut log_count = 0;
+        for (index, passage) in self.passages.iter().enumerate() {
+            if passage.job_log_tail {
+                log_count += 1;
+                if index == 0
+                    || log_count >= QA_MAX_FINDINGS
+                    || self
+                        .dialogue
+                        .as_ref()
+                        .is_none_or(|dialogue| dialogue.kind != QaDialogueKind::Operational)
+                    || !valid_dialogue_reply(&passage.text)
+                    || self
+                        .plan
+                        .as_ref()
+                        .is_some_and(|plan| plan.required_passages.len() > index)
+                {
+                    return Err(invalid("invalid supplemental QA job log"));
+                }
+            } else if log_count != 0 {
+                return Err(invalid("QA job logs must follow primary evidence"));
+            }
             if !opaque_id(&passage.source_id)
                 || !ids.insert(passage.source_id.as_str())
                 || !bounded_text(&passage.text, QA_MAX_EVIDENCE_BYTES)
@@ -697,6 +725,11 @@ pub enum QaWorkerReply {
         window_tokens: u16,
     },
     ReadyWithGeneralDialogue {
+        protocol: u16,
+        model_revision: String,
+        window_tokens: u16,
+    },
+    ReadyWithJobLogContext {
         protocol: u16,
         model_revision: String,
         window_tokens: u16,

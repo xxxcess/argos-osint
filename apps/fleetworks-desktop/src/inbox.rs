@@ -15,6 +15,7 @@ use fleetworks_contracts::chat::QaInboxNotificationSeverity;
 use fleetworks_contracts::chat::QaInboxNotificationTopic;
 use fleetworks_contracts::chat::QA_MAX_INBOX_NOTIFICATION_GROUPS;
 use fleetworks_contracts::chat::QA_MAX_INBOX_NOTIFICATION_ITEMS;
+use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
 use rune::Cx;
@@ -721,6 +722,22 @@ impl State {
         self.inbox.open = true;
     }
 
+    #[cfg(test)]
+    pub(crate) fn fixture_show_triage_job_notice(&mut self) {
+        let id = "fixture-failed-job".to_owned();
+        self.inbox.record_known_job(id.clone(), "running".into());
+        self.inbox.observe_job_update(
+            self.clock,
+            id.clone(),
+            "Fixture job",
+            "failed".into(),
+            None,
+            true,
+        );
+        self.inbox.expanded.insert(Topic::Job(id));
+        self.inbox.open = true;
+    }
+
     pub(crate) fn open_readiness_notice(&mut self, id: ReadinessCheckId, tx: &mut Tx) {
         self.navigate(crate::app::Page::Workstation);
         if let crate::app::Load::Ready(readiness) = &self.readiness {
@@ -1248,6 +1265,31 @@ fn view_status_button(notice_id: u64, check: ReadinessCheckId, kit: &Kit) -> El 
         .key(format!("inbox-item-{notice_id}-action"))
 }
 
+fn open_job_logs_button(notice_id: u64, job: String, kit: &Kit) -> El {
+    IconButton::new(&rune_kit::glyphs::FILE_TEXT)
+        .variant(IconButtonVariant::Ghost)
+        .control_size(ControlSize::Large)
+        .label("Open job logs")
+        .help("View this job’s operational logs")
+        .on_press_tx(move |state: &mut State, tx| {
+            if !state.inbox.open
+                || state.registration.context.is_none()
+                || !state.permission(Permission::ReadWorkstationActivity)
+                || !state.inbox.items.iter().any(|item| {
+                    item.id == notice_id && matches!(&item.topic, Topic::Job(id) if id == &job)
+                })
+            {
+                return;
+            }
+            state.close_inbox(tx);
+            state.setup_gateway = false;
+            state.open_job(&job);
+            state.reveal_operational_logs();
+        })
+        .build(kit)
+        .key(format!("inbox-item-{notice_id}-action"))
+}
+
 fn row(item: &Item, state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
     let id = item.id;
     let expanded = state.inbox.selected == Some(id);
@@ -1259,8 +1301,14 @@ fn row(item: &Item, state: &State, kit: &Kit, preferences: ViewPreferences) -> E
         .w_full()
         .px(10.0)
         .border_sides([1.0, 0.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE));
-    let status = match item.topic {
-        Topic::Readiness(check) => Some(view_status_button(id, check, kit)),
+    let action = match &item.topic {
+        Topic::Readiness(check) => Some(view_status_button(id, *check, kit)),
+        Topic::Job(job)
+            if state.registration.context.is_some()
+                && state.permission(Permission::ReadWorkstationActivity) =>
+        {
+            Some(open_job_logs_button(id, job.clone(), kit))
+        }
         _ => None,
     };
     let trigger = rune::row()
@@ -1324,7 +1372,7 @@ fn row(item: &Item, state: &State, kit: &Kit, preferences: ViewPreferences) -> E
                 .w_full()
                 .center_y()
                 .child(trigger)
-                .children(status)
+                .children(action)
                 .children(crate::activity_triage::explain_notice_button(
                     state, id, kit,
                 )),
@@ -1332,30 +1380,6 @@ fn row(item: &Item, state: &State, kit: &Kit, preferences: ViewPreferences) -> E
     if !expanded {
         return enter_from_below(entry.child(content), preferences);
     }
-    let open_job = match &item.topic {
-        Topic::Job(job) if state.connected() && state.registration.context.is_some() => {
-            let job = job.clone();
-            Some(
-                rune::row().child(
-                    rune_kit::Button::new("Open job")
-                        .variant(rune_kit::ButtonVariant::Ghost)
-                        .label_with(|font, _| {
-                            rune::text("Open job")
-                                .font(font)
-                                .color(theme::hex(theme::MOLTEN_ACCENT))
-                        })
-                        .on_press_tx(move |state: &mut State, tx| {
-                            state.close_inbox(tx);
-                            state.setup_gateway = false;
-                            state.open_job(&job);
-                        })
-                        .build(kit)
-                        .key(format!("inbox-item-{id}-action")),
-                ),
-            )
-        }
-        _ => None,
-    };
     content = content.child(
         rune::col()
             .key(format!("inbox-item-{id}-detail"))
@@ -1367,8 +1391,7 @@ fn row(item: &Item, state: &State, kit: &Kit, preferences: ViewPreferences) -> E
                     .font(kit.ty.small)
                     .color(theme::hex(theme::TEXT_SECONDARY))
                     .wrap(),
-            )
-            .children(open_job),
+            ),
     );
     enter_from_below(entry.child(content), preferences)
 }
@@ -2032,6 +2055,86 @@ mod tests {
             element.key.as_deref() == Some("readiness-trigger-actor_search") && element.focused
         }));
         assert_eq!(runtime.state.inbox.unread(), 3);
+    }
+
+    #[test]
+    fn job_notice_opens_its_scoped_logs_after_the_matching_detail_arrives() {
+        use crate::app::Intent;
+        use crate::app::Page;
+        use crate::backend::JobDetail;
+        use crate::backend::ReadKind;
+        use crate::backend::ReadResult;
+        use crate::logs::ActivityTab;
+        use crate::logs::LogAction;
+        use crate::logs::LogTarget;
+
+        const JOB: &str = "fixture-index-job";
+        const ACTION: &str = "inbox-item-3-action";
+        let mut state = crate::tests::registered_fixture();
+        state.page = Page::Tools;
+        state.backend.selected_job = Some("prior-job".into());
+        state.scoped_logs.window_focused = true;
+        seed_drawer(&mut state.inbox, 900.0);
+        let mut runtime = runtime(state, (640.0, 480.0));
+        runtime.update(|_, tx| tx.scroll_into_view(ACTION));
+        runtime.frame(0.8);
+        assert!(runtime.elements().iter().any(|element| {
+            element.key.as_deref() == Some(ACTION)
+                && element.label.as_deref() == Some("Open job logs")
+                && element.visible == element.rect
+        }));
+        click(&mut runtime, ACTION, 1.0);
+
+        let state = &runtime.state;
+        assert!(!state.inbox.open);
+        assert_eq!(state.page, Page::Jobs);
+        assert_eq!(state.activity_tab, ActivityTab::Logs);
+        assert_eq!(state.backend.selected_job.as_deref(), Some(JOB));
+        assert_eq!(
+            state.scoped_logs.target,
+            LogTarget::Job {
+                id: JOB.into(),
+                descendants: false,
+            }
+        );
+        assert!(state.intents.contains(&Intent::OperationalLogs {
+            action: LogAction::Refresh
+        }));
+
+        let detail: JobDetail = serde_json::from_value(serde_json::json!({
+            "job": {
+                "id": JOB,
+                "app": "Workstation",
+                "title": "Fixture index job",
+                "operation": "actor_reindex",
+                "state": "completed",
+                "phase": "completed",
+                "error_summary": "",
+                "private_details_available": true,
+                "activity_actions_available": false,
+                "status_only": false,
+            },
+            "stages": [],
+            "private_details_available": true,
+            "activity_actions_available": false,
+        }))
+        .unwrap();
+        runtime.update(|state, _| {
+            state.backend.revisions.insert(ReadKind::JobDetail, 1);
+            state.complete_backend_read(
+                ReadKind::JobDetail,
+                1,
+                Ok(ReadResult::JobDetail(Box::new(detail))),
+            );
+            assert_eq!(state.reveal.as_deref(), Some(crate::logs::SECTION_KEY));
+        });
+        runtime.poll = crate::app::spec().poll;
+        runtime.frame(1.25);
+        runtime.frame(1.75);
+        assert!(runtime.elements().iter().any(|element| {
+            element.key.as_deref() == Some(crate::logs::SECTION_KEY)
+                && element.visible == element.rect
+        }));
     }
 
     #[test]

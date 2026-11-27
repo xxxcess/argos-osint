@@ -666,6 +666,9 @@ impl State {
             }
             Ok(ReadResult::JobDetail(detail)) => {
                 if self.backend.selected_job.as_deref() == Some(&detail.job.id) {
+                    let reveal_logs = self.page == Page::Jobs
+                        && self.activity_tab == crate::logs::ActivityTab::Logs
+                        && !matches!(&self.backend.detail, Load::Ready(_));
                     let (transitioned, finished_active) = match &self.backend.detail {
                         Load::Ready(previous) if previous.job.id == detail.job.id => {
                             let changed = previous.job.state != detail.job.state
@@ -693,6 +696,9 @@ impl State {
                     }
                     self.backend.detail = Load::Ready(*detail);
                     self.sync_operational_logs_with_selected_job(transitioned);
+                    if reveal_logs {
+                        self.reveal_control(crate::logs::SECTION_KEY);
+                    }
                     if finished_active && !self.fixture {
                         self.refresh_readiness();
                     }

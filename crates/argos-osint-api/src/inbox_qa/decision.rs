@@ -159,7 +159,13 @@ pub fn response_plan(evidence: &FrozenEvidence, context: &PlanContext) -> Respon
         || historical
         || evidence.sources.iter().any(|source| !source.whole_passage)
     {
-        ordered_passages.len()
+        evidence
+            .request
+            .passages
+            .iter()
+            .take(ordered_passages.len())
+            .take_while(|passage| !passage.job_log_tail)
+            .count()
     } else {
         usize::from(operational)
     };
@@ -273,10 +279,69 @@ pub async fn select_response_plan(
 #[cfg(test)]
 mod tests {
     use argos_osint_core::nlp::conversation::PendingClarification;
+    use argos_osint_core::storage::inbox_qa::Source;
+    use fleetworks_contracts::chat::ChatSourceKind;
+    use fleetworks_contracts::chat::ChatSourceReference;
+    use fleetworks_contracts::qa_worker::QaPassage;
     use fleetworks_contracts::qa_worker::QaWorkerDialogue;
     use fleetworks_contracts::qa_worker::QaWorkerRequest;
 
     use super::*;
+
+    #[test]
+    fn job_explanation_keeps_current_status_required_and_recent_logs_optional() {
+        let reference = ChatSourceReference::new(ChatSourceKind::Job, "test-job".into()).unwrap();
+        let status = QaPassage::new("status".into(), "Selected job is running.".into());
+        let mut log = QaPassage::new("log".into(), "Recent job log (info): Working.".into());
+        log.job_log_tail = true;
+        let mut request = QaWorkerRequest::new(
+            "turn".into(),
+            "snapshot".into(),
+            "What happened with this job?".into(),
+            vec![status, log],
+        );
+        request.dialogue = Some(QaWorkerDialogue {
+            kind: QaDialogueKind::Operational,
+            history: Vec::new(),
+        });
+        let status_source = Source {
+            opaque_id: "status".into(),
+            reference,
+            label: "Selected job".into(),
+            observed_at: "2026-11-27T00:00:00Z".into(),
+            provenance: Some(QaEvidenceProvenance::Current),
+            measurement: None,
+            whole_passage: false,
+        };
+        let log_source = Source {
+            opaque_id: "log".into(),
+            label: "Recent job log".into(),
+            whole_passage: true,
+            ..status_source.clone()
+        };
+        let evidence = FrozenEvidence {
+            request,
+            sources: vec![status_source, log_source],
+            sampled_at_ms: 1,
+        };
+        let context = PlanContext {
+            focus: None,
+            pending: None,
+            guidance: None,
+            history_requested: false,
+            inbox_notifications: None,
+            decision_preference: QaDecisionPreference::RulesOnly,
+            decision_generation: 1,
+        };
+        let mut plan = response_plan(&evidence, &context);
+        assert_eq!(plan.ordered_passages, ["status", "log"]);
+        assert_eq!(plan.worker.as_ref().unwrap().required_passages, ["status"]);
+        let legacy = plan.request(&evidence).unwrap();
+        assert_eq!(legacy.passages.len(), 1);
+        assert!(legacy.plan.is_none());
+        plan.negotiated = true;
+        assert!(plan.request(&evidence).unwrap().passages[1].job_log_tail);
+    }
 
     #[test]
     fn ambiguous_time_requires_a_worker_that_understands_time_clarification() {

@@ -9,6 +9,7 @@ use rune::FileDialogOptions;
 use rune::Tx;
 
 use crate::app::Intent;
+use crate::app::Load;
 use crate::app::Page;
 use crate::app::State;
 use crate::connection::GatewayEffects;
@@ -24,8 +25,9 @@ impl State {
     pub fn reveal_operational_logs(&mut self) {
         self.page = Page::Jobs;
         self.select_activity_tab(ActivityTab::Logs);
-        self.sync_log_binding();
-        self.reveal_control("scoped-operational-logs");
+        if matches!(&self.backend.detail, Load::Ready(_)) {
+            self.reveal_control(logs::SECTION_KEY);
+        }
     }
 
     pub fn select_activity_tab(&mut self, tab: ActivityTab) {

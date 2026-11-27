@@ -38,7 +38,7 @@ use fleetworks_contracts::chat::{
 use fleetworks_contracts::context::{CredentialPurpose, MutationContext, Permission};
 use fleetworks_contracts::qa_worker::{
     QaDialogueKind, QaPassage, QaWorkerDialogue, QaWorkerEvent, QaWorkerRequest,
-    QA_MAX_DIALOGUE_MESSAGE_BYTES, QA_MAX_VISIBLE_WORDS,
+    QA_MAX_DIALOGUE_MESSAGE_BYTES, QA_MAX_VISIBLE_WORDS, QA_OPERATIONAL_OBSERVATIONS_INTRODUCTION,
 };
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use futures_util::StreamExt;
@@ -57,6 +57,7 @@ pub(crate) const FEATURE: &str = "inbox-qa-v2";
 const MAX_ADMISSION_FRESHNESS_RETRIES: usize = 4;
 const ADMISSION_FRESHNESS_BACKOFF: Duration = Duration::from_millis(50);
 const MAX_SUMMARY_PASSAGES: usize = 6;
+const JOB_NOTIFICATION_LOG_DEADLINE: Duration = Duration::from_secs(1);
 
 /// Cancellation remains observable to subscribers that join after it was raised.
 #[derive(Clone)]
@@ -939,6 +940,10 @@ pub(crate) async fn submit_request(
         }
     }
     require_evidence_permission(context, intent, routed_request.source.as_ref())?;
+    routed_request.job_notification &= intent == Question::ExplainSelected
+        && !used_previous
+        && !contextual
+        && routed_request.source == request.source;
     let runtime = SnapshotRuntime {
         intent,
         contextual,
@@ -1182,6 +1187,45 @@ fn limit_contextual_evidence(passages: &mut Vec<QaPassage>, sources: &mut Vec<st
     sources.truncate(retained);
 }
 
+fn append_job_log_tail(
+    passages: &mut Vec<QaPassage>,
+    sources: &mut Vec<store::Source>,
+    source: &ChatSourceReference,
+    observed_at: chrono::DateTime<chrono::Utc>,
+    excerpts: Vec<String>,
+) {
+    let introduction = QA_OPERATIONAL_OBSERVATIONS_INTRODUCTION;
+    let mut words = introduction.split_whitespace().count();
+    let mut bytes = introduction.len();
+    for passage in passages.iter() {
+        words += passage.text.split_whitespace().count();
+        bytes += passage.text.len() + 1;
+    }
+    for excerpt in excerpts
+        .into_iter()
+        .take(QA_MAX_FINDINGS.saturating_sub(passages.len()))
+    {
+        words += excerpt.split_whitespace().count();
+        bytes += excerpt.len() + 1;
+        if words > QA_MAX_VISIBLE_WORDS || bytes > QA_MAX_DIALOGUE_MESSAGE_BYTES {
+            break;
+        }
+        let opaque_id = format!("passage-{}", passages.len());
+        let mut passage = QaPassage::new(opaque_id.clone(), excerpt);
+        passage.job_log_tail = true;
+        passages.push(passage);
+        sources.push(store::Source {
+            opaque_id,
+            reference: source.clone(),
+            label: "Recent job log".into(),
+            observed_at: observed_at.to_rfc3339(),
+            provenance: Some(QaEvidenceProvenance::Current),
+            measurement: None,
+            whole_passage: true,
+        });
+    }
+}
+
 async fn snapshot(
     state: &ApiState,
     context: &ResolvedRequest,
@@ -1322,6 +1366,7 @@ async fn snapshot(
     let mut observed_state = None;
     let mut guidance = None;
     let mut status_check_tally = None;
+    let mut job_log_tail = None;
     match intent {
         Question::Readiness(check) | Question::ReadinessExplanation(check) => {
             let explanation = matches!(intent, Question::ReadinessExplanation(_));
@@ -1556,18 +1601,42 @@ async fn snapshot(
                         false,
                     );
                 }
-                if context.permits(Permission::ReadBackend) {
-                    if let Some(check) = activity.check {
-                        related_activity = triage::current_status(
-                            target,
-                            state,
-                            runtime.generation,
-                            check.as_str(),
-                            deadline,
-                        )
-                        .await;
+                let collect_job_logs = async {
+                    if !request.job_notification
+                        || source.kind != ChatSourceKind::Job
+                        || observed_state.is_none()
+                    {
+                        return None;
                     }
-                }
+                    let model = runtime.availability.ready_model(runtime.generation)?;
+                    let observed_at = observation_start(boundary).await;
+                    let log_deadline = deadline.min(Instant::now() + JOB_NOTIFICATION_LOG_DEADLINE);
+                    let read = crate::operational_logs::qa_job_tail(
+                        state,
+                        context,
+                        &source.id,
+                        model.input_tokens(),
+                    );
+                    let excerpts = tokio::time::timeout_at(log_deadline, read)
+                        .await
+                        .ok()?
+                        .ok()?;
+                    (!excerpts.is_empty()).then_some((source, observed_at, excerpts))
+                };
+                let related_status = async {
+                    let check = activity
+                        .check
+                        .filter(|_| context.permits(Permission::ReadBackend))?;
+                    triage::current_status(
+                        target,
+                        state,
+                        runtime.generation,
+                        check.as_str(),
+                        deadline,
+                    )
+                    .await
+                };
+                (job_log_tail, related_activity) = tokio::join!(collect_job_logs, related_status);
             }
         }
         Question::Summary => {
@@ -1619,6 +1688,11 @@ async fn snapshot(
         if runtime.contextual {
             limit_contextual_evidence(&mut passages, &mut sources);
         }
+    }
+    // Keep the lifecycle observation available for follow-ups. The supporting
+    // logs are supplemental evidence only for this explicit notification turn.
+    if let Some((source, observed_at, excerpts)) = job_log_tail {
+        append_job_log_tail(&mut passages, &mut sources, source, observed_at, excerpts);
     }
     let sampled_at_ms = match earliest {
         Some(observed_at) => observed_at,

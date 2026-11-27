@@ -2038,7 +2038,11 @@ fn jobs(
                         .w_full()
                         .center_y()
                         .gap(8.0)
-                        .child(heading("Operational logs", kit).grow(1.0))
+                        .child(
+                            heading("Operational logs", kit)
+                                .key(crate::logs::SECTION_KEY)
+                                .grow(1.0),
+                        )
                         .child(ui_components::status_pill(
                             if worker_summary.is_empty() {
                                 detail.job.state.clone()

@@ -748,10 +748,20 @@ impl Executor {
                 .dialogue
                 .as_ref()
                 .is_some_and(|dialogue| dialogue.kind.needs_general_support());
-            plan.negotiated = self
+            let (plan_supported, job_logs_supported) = self
                 .model
-                .response_plan_supported(needs_decoded_clarification, needs_general_dialogue)
+                .response_plan_support(needs_decoded_clarification, needs_general_dialogue)
                 .await;
+            plan.negotiated = plan_supported;
+            if !job_logs_supported {
+                plan.ordered_passages.retain(|id| {
+                    evidence
+                        .request
+                        .passages
+                        .iter()
+                        .any(|passage| &passage.source_id == id && !passage.job_log_tail)
+                });
+            }
             if (plan.requires_worker_support || needs_general_dialogue) && !plan.negotiated {
                 return Ok(
                     if store::publish_unavailable(

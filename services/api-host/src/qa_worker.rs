@@ -52,6 +52,7 @@ use fleetworks_contracts::qa_worker::QA_CONTEXT_USAGE_ENV;
 use fleetworks_contracts::qa_worker::QA_DECODED_CLARIFICATION_ENV;
 use fleetworks_contracts::qa_worker::QA_DIALOGUE_ENV;
 use fleetworks_contracts::qa_worker::QA_GENERAL_DIALOGUE_ENV;
+use fleetworks_contracts::qa_worker::QA_JOB_LOG_CONTEXT_ENV;
 use fleetworks_contracts::qa_worker::QA_LEGACY_STREAMING_WINDOW_TOKENS;
 use fleetworks_contracts::qa_worker::QA_MODEL_CONTEXT_ENV;
 use fleetworks_contracts::qa_worker::QA_MODEL_FILES;
@@ -410,17 +411,28 @@ impl QaWorkerSupervisor {
             .map(|session| session.model_target)
     }
 
-    pub(crate) async fn response_plan_supported(
+    pub(crate) async fn response_plan_support(
         &self,
         needs_decoded_clarification: bool,
         needs_general_dialogue: bool,
-    ) -> bool {
-        self.session.lock().await.as_ref().is_some_and(|session| {
-            session.lifecycle == WorkerLifecycle::Ready
-                && session.response_plan.supports(needs_decoded_clarification)
+    ) -> (bool, bool) {
+        let session = self.session.lock().await;
+        let Some(session) = session
+            .as_ref()
+            .filter(|session| session.lifecycle == WorkerLifecycle::Ready)
+        else {
+            return (false, false);
+        };
+        let support = session.response_plan;
+        (
+            support.supports(needs_decoded_clarification)
                 && (!needs_general_dialogue
-                    || session.response_plan == ResponsePlanSupport::GeneralDialogue)
-        })
+                    || matches!(
+                        support,
+                        ResponsePlanSupport::GeneralDialogue | ResponsePlanSupport::JobLogContext
+                    )),
+            support == ResponsePlanSupport::JobLogContext,
+        )
     }
 
     pub(crate) async fn check_ready(&self) -> Result<()> {
@@ -536,6 +548,7 @@ enum ResponsePlanSupport {
     Legacy,
     DecodedClarification,
     GeneralDialogue,
+    JobLogContext,
 }
 
 impl ResponsePlanSupport {
@@ -543,7 +556,7 @@ impl ResponsePlanSupport {
         match self {
             Self::Unavailable => false,
             Self::Legacy => !needs_decoded_clarification,
-            Self::DecodedClarification | Self::GeneralDialogue => true,
+            Self::DecodedClarification | Self::GeneralDialogue | Self::JobLogContext => true,
         }
     }
 }
@@ -576,6 +589,7 @@ impl WorkerSession {
             .env(QA_RESPONSE_PLAN_ENV, "1")
             .env(QA_DECODED_CLARIFICATION_ENV, "1")
             .env(QA_GENERAL_DIALOGUE_ENV, "1")
+            .env(QA_JOB_LOG_CONTEXT_ENV, "1")
             .env(QA_MODEL_TARGET_ENV, target.slug())
             .env("OMP_NUM_THREADS", &threads)
             .env("MKL_NUM_THREADS", &threads)
@@ -708,6 +722,16 @@ impl WorkerSession {
             {
                 (Some(window_tokens), ResponsePlanSupport::GeneralDialogue)
             }
+            QaWorkerReply::ReadyWithJobLogContext {
+                protocol,
+                model_revision,
+                window_tokens,
+            } if protocol == QA_WORKER_PROTOCOL
+                && model_revision == self.model_target.revision()
+                && window_tokens == self.model_target.input_tokens() =>
+            {
+                (Some(window_tokens), ResponsePlanSupport::JobLogContext)
+            }
             QaWorkerReply::StartupFailed {
                 source,
                 line,
@@ -749,6 +773,11 @@ impl WorkerSession {
         request: QaWorkerRequest,
         events: mpsc::Sender<QaWorkerEvent>,
     ) -> Result<()> {
+        ensure!(
+            self.response_plan == ResponsePlanSupport::JobLogContext
+                || !request.passages.iter().any(|passage| passage.job_log_tail),
+            "QA job log context support was not negotiated"
+        );
         self.send(&QaWorkerCommand::Ask {
             request: Box::new(request.clone()),
         })

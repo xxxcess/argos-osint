@@ -149,6 +149,13 @@ pub static ASSISTANT: Icon = Icon {
     body: r#"<rect x="2" y="2.5" width="12" height="11" rx="1.8" stroke="currentColor" stroke-width="1.4" fill="none"/><path d="M10 2.5v11" stroke="currentColor" stroke-width="1.4"/><path d="M12 6.2v1.6M11.2 7h1.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
 };
 
+/// Explain a notification with Assistant.
+pub static ASSISTANT_EXPLAIN: Icon = Icon {
+    name: "fw-assistant-explain",
+    view: 16.0,
+    body: r#"<path d="M4.1 3.1h7.8A2.1 2.1 0 0 1 14 5.2v4.2a2.1 2.1 0 0 1-2.1 2.1H8l-3.1 2v-2h-.8A2.1 2.1 0 0 1 2 9.4V5.2a2.1 2.1 0 0 1 2.1-2.1Z" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/><path d="M8 4.75 8.65 6.55 10.45 7.2 8.65 7.85 8 9.65 7.35 7.85 5.55 7.2 7.35 6.55Z" fill="currentColor"/>"#,
+};
+
 /// Expanded record disclosure.
 pub static CHEVRON_DOWN: Icon = Icon {
     name: "fw-chevron-down",

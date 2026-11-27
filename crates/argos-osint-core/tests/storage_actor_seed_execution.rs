@@ -14,8 +14,12 @@ use argos_osint_core::storage::actor_catalog;
 use argos_osint_core::storage::actor_search_outbox;
 use argos_osint_core::storage::connect_registry;
 use argos_osint_core::storage::connect_registry::RegistryAuthority;
+use argos_osint_core::storage::job_actions;
+use argos_osint_core::storage::job_actions::Action;
+use argos_osint_core::storage::job_context::InteractiveAdmission;
 use argos_osint_core::storage::job_dispatch;
 use argos_osint_core::storage::jobs::ClaimedTask;
+use argos_osint_core::storage::jobs::MAX_WORKER_RECOVERIES;
 use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::setup_jobs;
 use argos_osint_core::storage::tx;
@@ -670,5 +674,97 @@ async fn pressure_retry_reopens_and_resumes_only_uncommitted_rows() {
         revisions.take::<Vec<i64>>(0).expect("actor revisions"),
         [1, 1],
         "the resumed seed never writes the committed actor a second time"
+    );
+}
+
+#[tokio::test]
+async fn manual_retry_after_lease_expiry_preserves_seed_and_index_progress() {
+    let Some(server) = support::Server::start() else {
+        return;
+    };
+    let repo = server.repo("seed_execution", "expired_manual_retry").await;
+    let first = claim_seed_dataset(&repo, "expire", 'b').await;
+    let cancel = AtomicBool::new(false);
+    let execution = actor_catalog::SeedExecution::from_claimed(&repo, &first.task, &cancel)
+        .await
+        .expect("actual execution");
+    let batches = futures_util::stream::iter([
+        Ok(actors(1)),
+        Err(anyhow::anyhow!("fixture_stops_after_commit")),
+    ]);
+    actor_catalog::seed_actors_stream_claimed(&repo, 2, batches, &execution, &cancel, |_| {})
+        .await
+        .expect_err("leave one committed batch and its index child");
+    assert_eq!(support::count(repo.db(), "actor_search_event").await, 1);
+
+    // Simulate the last allowed recovery with the real reaper transition.
+    repo.db()
+        .query("UPDATE $task SET lease_until=time::now()-1s,recoveries=$recoveries RETURN NONE")
+        .bind(("task", RecordId::new("task", first.task.id.clone())))
+        .bind(("recoveries", MAX_WORKER_RECOVERIES - 1))
+        .await
+        .expect("expire worker lease")
+        .check()
+        .expect("expiry statement");
+    assert_eq!(
+        job_dispatch::recover_expired(repo.db(), setup_jobs::SEED_POOL, Utc::now())
+            .await
+            .expect("reap expired task"),
+        1
+    );
+
+    let job_id = &first.task.job_id;
+    let (authority, context) = seed_context(&repo).await;
+    let available = job_actions::availability(
+        &repo,
+        authority.scope_id(),
+        &context,
+        std::slice::from_ref(job_id),
+    )
+    .await
+    .expect("failed job action availability");
+    assert!(
+        available[0].can_retry,
+        "the original seed has a tracked index child"
+    );
+    let origin = JobOrigin::new(
+        &context,
+        OriginSource::Native,
+        "retry-expired-seed".into(),
+        Utc::now().to_rfc3339(),
+        1,
+        Vec::new(),
+    );
+    let admission =
+        InteractiveAdmission::native(authority, context, origin).expect("registered retry action");
+    let receipt = job_actions::perform(&repo, &admission, Action::Retry, job_id)
+        .await
+        .expect("retry the original seed");
+    assert_eq!(receipt.job_id, *job_id);
+    assert_eq!(receipt.state, "queued");
+    assert_eq!(
+        job_actions::perform(&repo, &admission, Action::Retry, job_id)
+            .await
+            .expect("retry replay"),
+        receipt
+    );
+
+    let resumed = claim_ready_seed(&repo, "after-expiry").await;
+    assert_eq!(resumed.task.id, first.task.id);
+    assert!(resumed.task.lease_epoch > first.task.lease_epoch);
+    let execution = actor_catalog::SeedExecution::from_claimed(&repo, &resumed.task, &cancel)
+        .await
+        .expect("execution under the new lease");
+    let result =
+        actor_catalog::seed_actors_pinned_claimed(&repo, actors(2), &execution, &cancel, |_| {})
+            .await
+            .expect("resume from the original checkpoint");
+    assert!(result.complete);
+    assert_eq!(result.processed, 2);
+    assert_eq!(support::count(repo.db(), "brain_actor").await, 2);
+    assert_eq!(
+        support::count(repo.db(), "actor_search_event").await,
+        2,
+        "the index still has one source event per committed actor"
     );
 }

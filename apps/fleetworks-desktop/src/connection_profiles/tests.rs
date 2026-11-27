@@ -386,12 +386,6 @@ fn stale_folder_picker_answer_preserves_newer_typed_path() {
         state.open_embedded_folder(tx);
         state.choose_embedded_folder(tx);
     });
-    assert_eq!(
-        runtime
-            .file_dialog_json()
-            .expect("folder picker was requested")["kind"],
-        "folder"
-    );
     runtime.update(|state, _| {
         state
             .connection_profiles

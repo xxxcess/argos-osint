@@ -1467,18 +1467,120 @@ fn decision_label(preference: QaDecisionPreference) -> &'static str {
     }
 }
 
-fn decision_reason(reason: QaDecisionAvailabilityReason) -> &'static str {
-    match reason {
-        QaDecisionAvailabilityReason::AwaitingQualification => {
-            "Awaiting qualification on this platform"
-        }
-        QaDecisionAvailabilityReason::InsufficientResources => {
-            "Not enough resources for the preferred decision model"
-        }
-        QaDecisionAvailabilityReason::PackMissing => "Decision model pack is unavailable",
-        QaDecisionAvailabilityReason::WorkerStartFailed => "Decision model could not start",
-        _ => "Decision model unavailable",
+const QUALIFICATION_RUNS_URL: &str =
+    "https://github.com/xxxcess/argos-osint/actions/workflows/fleetworks.yml";
+const QUALIFICATION_RUNS: &str = "assistant-decision-qualification-runs";
+
+fn qualification_runs_link(state: &State, kit: &Kit) -> El {
+    let link = rune::row()
+        .key(QUALIFICATION_RUNS)
+        .href(QUALIFICATION_RUNS_URL)
+        .label("View qualification runs")
+        .focusable(true)
+        .on_key(|state: &mut State, event, tx| {
+            if event.key != Key::Enter || event.mods != Default::default() {
+                return false;
+            }
+            if !state.fixture && !tx.key_repeat() {
+                let _ = tx.open_url(QUALIFICATION_RUNS_URL);
+            }
+            true
+        })
+        .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT))
+        .hover(theme::hex(theme::SURFACE_ELEVATED))
+        .radius(6.0)
+        .px(8.0)
+        .py(4.0)
+        .child(
+            rune::text("View qualification runs")
+                .font(kit.ty.small_medium)
+                .color(kit.c.text_accent)
+                .a11y_hidden(),
+        );
+    if state.fixture {
+        link.on_press(|_: &mut State| {})
+    } else {
+        link
     }
+}
+
+fn decision_stage(state: &State, decision: QaDecisionSettings, kit: &Kit) -> Option<El> {
+    use QaDecisionAvailabilityReason as Reason;
+    if decision.preference == QaDecisionPreference::RulesOnly {
+        return None;
+    }
+    let (title, detail, tone) = match decision.reason {
+        Some(Reason::AwaitingQualification) => (
+            "Platform qualification",
+            "Awaiting qualification on this platform. An approved build is required.",
+            StatusTone::Warn,
+        ),
+        Some(Reason::PackMissing) => (
+            "Decision model pack",
+            "The preferred decision model pack is unavailable.",
+            StatusTone::Warn,
+        ),
+        Some(Reason::InsufficientResources) => (
+            "Resource check",
+            "Not enough resources for the preferred decision model.",
+            StatusTone::Warn,
+        ),
+        Some(Reason::WorkerStartFailed) => (
+            "Worker startup",
+            "The preferred decision model could not start.",
+            StatusTone::Warn,
+        ),
+        None if decision.phase == QaPhase::Starting => (
+            "Waiting for a decision request",
+            "The qualified scorer starts when there is an eligible request.",
+            StatusTone::Neutral,
+        ),
+        None if decision.phase == QaPhase::Ready && decision.effective == decision.preference => (
+            "Decision model ready",
+            "The preferred scorer is ready for the current request.",
+            StatusTone::Ok,
+        ),
+        None if decision.phase == QaPhase::Off => (
+            "Decision model off",
+            "The preferred scorer is off.",
+            StatusTone::Neutral,
+        ),
+        None if decision.phase == QaPhase::Stopping => (
+            "Decision model stopping",
+            "The decision worker is stopping.",
+            StatusTone::Neutral,
+        ),
+        _ => (
+            "Decision model unavailable",
+            "The companion cannot use the preferred scorer.",
+            StatusTone::Warn,
+        ),
+    };
+    Some(
+        rune::col()
+            .key("assistant-decision-status")
+            .w_full()
+            .min_w(0.0)
+            .gap(4.0)
+            .child(
+                rune::col()
+                    .gap(4.0)
+                    .role("status")
+                    .live_region(LiveRegion::Polite)
+                    .child(
+                        rune::text(title)
+                            .role("heading")
+                            .font(kit.ty.small_medium)
+                            .color(tone.fg())
+                            .wrap(),
+                    )
+                    .child(hint(detail, kit)),
+            )
+            .children(
+                (decision.reason == Some(Reason::AwaitingQualification))
+                    .then(|| rune::row().child(qualification_runs_link(state, kit))),
+            ),
+    )
 }
 
 fn model_phase(phase: QaPhase) -> (&'static str, StatusTone) {
@@ -1507,7 +1609,7 @@ fn decision_preference_status(state: &State, kit: &Kit) -> Option<El> {
     )
 }
 
-fn role_summary(preferred: &str, effective: &str, reason: Option<&str>, kit: &Kit) -> El {
+fn role_summary(preferred: &str, effective: &str, kit: &Kit) -> El {
     rune::col()
         .w_full()
         .gap(4.0)
@@ -1515,7 +1617,6 @@ fn role_summary(preferred: &str, effective: &str, reason: Option<&str>, kit: &Ki
         .live_region(LiveRegion::Polite)
         .child(hint(&format!("Preferred · {preferred}"), kit))
         .child(hint(&format!("In use · {effective}"), kit))
-        .children(reason.map(|reason| hint(reason, kit)))
 }
 
 fn model_selector(
@@ -1561,12 +1662,6 @@ fn decision_settings_content(state: &State, decision: QaDecisionSettings, kit: &
                 .key(key)
                 .position_in_set(index + 1, DECISION_CHOICES.len())
         });
-    let phase = match (decision.effective, decision.phase) {
-        (QaDecisionPreference::RulesOnly, QaPhase::Off | QaPhase::Ready | QaPhase::Unavailable) => {
-            None
-        }
-        (_, phase) => Some(model_phase(phase)),
-    };
     rune::col()
         .key("assistant-decision-section")
         .w_full()
@@ -1582,14 +1677,9 @@ fn decision_settings_content(state: &State, decision: QaDecisionSettings, kit: &
         .child(role_summary(
             decision_label(decision.preference),
             decision_label(decision.effective),
-            decision.reason.map(decision_reason),
             kit,
         ))
-        .children(phase.map(|(label, tone)| {
-            crate::ui_components::status_pill(label, None, tone, kit)
-                .key("assistant-decision-status")
-                .live_region(LiveRegion::Polite)
-        }))
+        .children(decision_stage(state, decision, kit))
         .children(decision_preference_status(state, kit))
 }
 
@@ -2806,7 +2896,11 @@ mod tests {
         settings.decision = Some(QaDecisionSettings::new(
             decision,
             QaDecisionPreference::RulesOnly,
-            QaPhase::Off,
+            if decision == QaDecisionPreference::RulesOnly {
+                QaPhase::Ready
+            } else {
+                QaPhase::Unavailable
+            },
             (decision != QaDecisionPreference::RulesOnly)
                 .then_some(QaDecisionAvailabilityReason::AwaitingQualification),
         ));
@@ -3043,6 +3137,107 @@ mod tests {
             .elements()
             .into_iter()
             .any(|element| { element.path == decision && !element.focusable }));
+    }
+
+    #[test]
+    fn assistant_settings_report_observed_decision_stages() {
+        use QaDecisionAvailabilityReason as Reason;
+        use QaDecisionPreference::{Julia1Q8, RulesOnly};
+
+        let mut runtime = model_settings_runtime();
+        assert!(runtime.find("assistant-decision-status").is_none());
+
+        for (index, (effective, phase, reason, title)) in [
+            (
+                RulesOnly,
+                QaPhase::Unavailable,
+                Some(Reason::AwaitingQualification),
+                "Platform qualification",
+            ),
+            (
+                RulesOnly,
+                QaPhase::Starting,
+                None,
+                "Waiting for a decision request",
+            ),
+            (
+                RulesOnly,
+                QaPhase::Unavailable,
+                Some(Reason::PackMissing),
+                "Decision model pack",
+            ),
+            (
+                RulesOnly,
+                QaPhase::Unavailable,
+                Some(Reason::InsufficientResources),
+                "Resource check",
+            ),
+            (
+                RulesOnly,
+                QaPhase::Unavailable,
+                Some(Reason::WorkerStartFailed),
+                "Worker startup",
+            ),
+            (Julia1Q8, QaPhase::Ready, None, "Decision model ready"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            runtime.update(move |state, _| {
+                state.inbox_qa.settings.as_mut().unwrap().decision =
+                    Some(QaDecisionSettings::new(Julia1Q8, effective, phase, reason));
+            });
+            runtime.frame(2.0 + index as f64);
+            let tree = runtime.accessibility_json().to_string();
+            assert!(tree.contains(title), "{title}");
+            assert!(tree.contains("Preferred · Julia-1 Q8"));
+            assert!(tree.contains(&format!("In use · {}", decision_label(effective))));
+            assert_eq!(
+                runtime.find(QUALIFICATION_RUNS).is_some(),
+                reason == Some(Reason::AwaitingQualification),
+            );
+        }
+    }
+
+    #[test]
+    fn qualification_runs_link_uses_fixed_url_and_keeps_fixtures_inert() {
+        let mut runtime = model_settings_runtime();
+        runtime.update(|state, _| {
+            let settings = state.inbox_qa.settings.as_mut().unwrap();
+            settings.can_manage = false;
+            settings.decision = Some(QaDecisionSettings::new(
+                QaDecisionPreference::Julia1Q8,
+                QaDecisionPreference::RulesOnly,
+                QaPhase::Unavailable,
+                Some(QaDecisionAvailabilityReason::AwaitingQualification),
+            ));
+        });
+        runtime.frame(2.0);
+        assert!(runtime.elements().iter().any(|element| {
+            element.key.as_deref() == Some(QUALIFICATION_RUNS)
+                && element.role == "link"
+                && element.label.as_deref() == Some("View qualification runs")
+                && element.focusable
+        }));
+        press_disclosure(&mut runtime, QUALIFICATION_RUNS, 2.25);
+        assert!(runtime.take_url_requests().is_empty());
+
+        // Rune's headless runtime captures the production browser request without opening it.
+        runtime.update(|state, tx| {
+            state.fixture = false;
+            tx.scroll_into_view(QUALIFICATION_RUNS);
+            tx.focus(QUALIFICATION_RUNS, true);
+        });
+        runtime.frame(2.75);
+        assert!(runtime.elements().iter().any(|element| {
+            element.key.as_deref() == Some(QUALIFICATION_RUNS) && element.focused
+        }));
+        runtime.key(KeyEvent {
+            key: Key::Enter,
+            mods: Mods::default(),
+        });
+        runtime.frame(3.0);
+        assert_eq!(runtime.take_url_requests(), [QUALIFICATION_RUNS_URL]);
     }
 
     #[test]

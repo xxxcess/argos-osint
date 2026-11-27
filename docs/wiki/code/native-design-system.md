@@ -156,6 +156,8 @@ The native glass recipes use 10 pt same-window blur for shell chrome and the Ass
 
 ### Assistant conversation parts (`chat_ui.rs`)
 
+Assistant Settings shows the preferred and active decision engines alongside the companion’s current stage. Platform qualification offers **View qualification runs**. Qualified preferences show the next local check or the reported blocker.
+
 The Assistant pane has the parts for a conversation but no way to fill one yet. `Assistant::messages` stays empty, sending stays gated, and the dock stays off by default. Nothing in `chat_ui.rs` touches a network, transport or provider. The wire contract is in [assistant-chat-contract.md](assistant-chat-contract.md).
 
 | Part | Behavior |

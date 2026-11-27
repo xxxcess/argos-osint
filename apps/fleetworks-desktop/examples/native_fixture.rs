@@ -821,7 +821,7 @@ mod native {
         state.fixture_show_workstation_settings();
     }
 
-    fn assistant_settings(state: &mut State, provisioning: bool) {
+    fn assistant_settings(state: &mut State, qualified: bool) {
         registered(state);
         state.backend_kind = BackendKind::Local;
         state.connection.origin = TextEdit::new("local://embedded");
@@ -838,12 +838,12 @@ mod native {
         settings.decision = Some(QaDecisionSettings::new(
             QaDecisionPreference::Julia1Q8,
             QaDecisionPreference::RulesOnly,
-            if provisioning {
+            if qualified {
                 QaPhase::Starting
             } else {
-                QaPhase::Off
+                QaPhase::Unavailable
             },
-            (!provisioning).then_some(QaDecisionAvailabilityReason::AwaitingQualification),
+            (!qualified).then_some(QaDecisionAvailabilityReason::AwaitingQualification),
         ));
         state.seed_inbox_qa_fixture(settings, None);
         state.fixture_show_assistant_settings();

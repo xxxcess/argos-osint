@@ -1,10 +1,12 @@
 //! Read-only triage over the same private activity and health observations as Inbox QA.
 
+use std::borrow::Cow;
 use std::time::Duration;
 
 use argos_osint_core::jobs_view::JobFilter;
 use argos_osint_core::jobs_view::JobRow;
 use argos_osint_core::storage::inbox_qa as store;
+use argos_osint_core::storage::jobs::MAX_WORKER_RECOVERIES;
 use argos_osint_core::storage::jobs_view;
 use chrono::Utc;
 use fleetworks_contracts::chat::ChatSourceKind;
@@ -39,13 +41,13 @@ pub(super) struct ActivityFact {
     pub(super) label: &'static str,
     pub(super) status: &'static str,
     pub(super) check: Option<ReadinessCheckId>,
-    reason: Option<&'static str>,
+    reason: Option<Cow<'static, str>>,
 }
 
 impl ActivityFact {
     pub(super) fn explanation(&self) -> String {
         let mut text = format!("{} is {}.", self.label, self.status);
-        if let Some(reason) = self.reason {
+        if let Some(reason) = &self.reason {
             text.push(' ');
             text.push_str(reason);
         } else if self.status == "failed" {
@@ -113,8 +115,13 @@ fn activity_projection(job: &JobRow, label: &'static str) -> ActivityFact {
     }
 }
 
-fn public_reason(code: &str) -> Option<&'static str> {
-    Some(match code {
+fn public_reason(code: &str) -> Option<Cow<'static, str>> {
+    let reason = match code {
+        "lease_expired" | "Task lease expired after maximum worker recoveries" => {
+            return Some(Cow::Owned(format!(
+                "The task lease expired after reaching the worker recovery limit of {MAX_WORKER_RECOVERIES}."
+            )));
+        }
         "setup_worker_memory_pressure" => "The recorded reason was worker memory pressure.",
         "setup_worker_disk_pressure" => "The recorded reason was low workspace disk space.",
         "setup_worker_pressure_unavailable" => "The worker could not verify available resources.",
@@ -122,7 +129,8 @@ fn public_reason(code: &str) -> Option<&'static str> {
         "setup_dataset_resource_budget" => "The dataset exceeded an input resource limit.",
         "setup_interrupted" | "actor_reindex_interrupted" => "The worker recorded an interruption.",
         _ => return None,
-    })
+    };
+    Some(Cow::Borrowed(reason))
 }
 
 /// Resolve only a current observation of the cited check.
@@ -347,6 +355,28 @@ async fn jobs_for_check(
 mod tests {
     use super::activity_projection;
     use super::JobRow;
+
+    #[test]
+    fn explains_exhausted_worker_recoveries_from_the_recorded_failure() {
+        let mut job = JobRow {
+            operation: "actor_seed".into(),
+            state: "failed".into(),
+            error_category: "lease_expired".into(),
+            error_summary: "https://private.example/user/secret".into(),
+            ..JobRow::default()
+        };
+        let expected = format!(
+            "Actor catalog seed job is failed. The task lease expired after reaching the worker recovery limit of {}.",
+            super::MAX_WORKER_RECOVERIES,
+        );
+        let explanation =
+            |job: &JobRow| activity_projection(job, "Actor catalog seed job").explanation();
+        assert_eq!(explanation(&job), expected);
+
+        job.error_category.clear();
+        job.error_summary = "Task lease expired after maximum worker recoveries".into();
+        assert_eq!(explanation(&job), expected);
+    }
 
     #[test]
     fn projects_only_allowlisted_stage_evidence() {

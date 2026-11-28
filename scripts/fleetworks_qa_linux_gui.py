@@ -336,6 +336,9 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
                 "startup accepted an actor seed without operator confirmation")
 
     wait_for(embedded_checks_observed, app, "initial Embedded health checks")
+    # The new checklist is accessible while the outgoing registration slide is still fading.
+    time.sleep(0.5)
+    require(embedded_checks_observed() is not None, "Embedded health slide did not stay visible")
     subprocess.run(["scrot", "--overwrite", str(output / "startup-embedded-health.png")],
                    check=True, timeout=5)
     wait_for(bundled_actor_ready, app, "automatic validation of the bundled actor CSV", timeout=180)

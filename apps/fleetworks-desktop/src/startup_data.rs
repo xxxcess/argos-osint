@@ -340,8 +340,21 @@ fn active_tracked_job(state: &State, step: Step) -> Option<&backend::JobDetail> 
 }
 
 fn operation_active(state: &State, step: Step) -> bool {
-    current_check(state, step).is_some_and(|check| check.state == ReadinessState::Running)
-        || active_tracked_job(state, step).is_some()
+    active_tracked_job(state, step).is_some()
+        || readiness_reports_active_work(state, step, current_check(state, step))
+}
+
+fn readiness_reports_active_work(
+    state: &State,
+    step: Step,
+    observation: Option<&ReadinessCheck>,
+) -> bool {
+    // An empty search projection can report Running while it waits for the first seed.
+    observation.is_some_and(|check| check.state == ReadinessState::Running)
+        && (step == Step::Seed
+            || (current_check(state, Step::Seed)
+                .is_some_and(|check| check.state == ReadinessState::Ready)
+                && active_tracked_job(state, Step::Seed).is_none()))
 }
 
 fn saved_dataset(state: &State, step: Step) -> Option<&DatasetRef> {
@@ -429,6 +442,7 @@ fn catalog_hash(state: &State) -> Option<&str> {
 
 fn stage(state: &State, step: Step) -> Stage<'_> {
     let observation = current_check(state, step);
+    let observed_work = readiness_reports_active_work(state, step, observation);
     if step == Step::Index && state.maintenance.pending_reindex.is_some() {
         return Stage::Action;
     }
@@ -441,7 +455,7 @@ fn stage(state: &State, step: Step) -> Stage<'_> {
         if let Some(detail) = active_tracked_job(state, step) {
             return Stage::Working(Some(detail));
         }
-        if observation.is_some_and(|check| check.state == ReadinessState::Running) {
+        if observed_work {
             return Stage::ObservedWork;
         }
         if operation_active(state, Step::Seed) {
@@ -477,7 +491,7 @@ fn stage(state: &State, step: Step) -> Stage<'_> {
     }
     match observation {
         Some(check) if check.state == ReadinessState::Ready => Stage::Complete,
-        Some(check) if check.state == ReadinessState::Running => Stage::ObservedWork,
+        Some(_) if observed_work => Stage::ObservedWork,
         Some(_) => Stage::Action,
         None if state.readiness_pending()
             || matches!(state.readiness, Load::Idle | Load::Pending | Load::Loading) =>
@@ -1498,9 +1512,13 @@ fn job_progress(job: Option<&backend::ActivityJob>, preferences: ViewPreferences
 #[cfg(test)]
 mod tests {
     use fleetworks_contracts::connect::RegistrationReceipt;
+    use fleetworks_contracts::readiness::ReadinessAction;
+    use fleetworks_contracts::readiness::ReadinessActionId;
     use fleetworks_workstation::native::BackendKind;
     use rune::Env;
     use rune::Runtime;
+
+    use crate::app::Intent;
 
     use super::*;
 
@@ -1556,7 +1574,7 @@ mod tests {
         for (seed, index) in [
             (Running, NotReady),
             (Running, Ready),
-            (NotReady, Running),
+            (Ready, Running),
             (Running, Running),
         ] {
             let mut state = registered_data(seed, index);
@@ -1584,7 +1602,7 @@ mod tests {
             assert!(runtime.find(PRIMARY).is_none());
             assert!(runtime.find("startup-stage-index").is_some());
             let tree = runtime.accessibility_json().to_string();
-            if index == Running {
+            if seed == Ready && index == Running {
                 assert!(tree.contains("Index build: Checking"));
             } else {
                 assert!(tree.contains("Actor catalog: Checking"));
@@ -1605,10 +1623,92 @@ mod tests {
     }
 
     #[test]
-    fn startup_needs_scoped_current_evidence_to_skip_seed() {
+    fn empty_index_catch_up_keeps_first_seed_available_during_startup_and_refresh() {
         use ReadinessState::{NotReady, Running};
 
-        let mut state = registered_data(Running, Running);
+        for initial_index in [Running, NotReady] {
+            let mut state = registered_data(NotReady, initial_index);
+            state.fixture_show_embedded_health_checks();
+            state.seed_startup_bundled_dataset_fixture();
+            state.backend.profile = Load::Ready(backend::ProfileSnapshot {
+                configuration_revision: 0,
+                configuration_format: 1,
+                accounts: Vec::new(),
+                tool_credentials: Vec::new(),
+                setup_required: false,
+                portable_schema_version: 4,
+            });
+            let Load::Ready(readiness) = &mut state.readiness else {
+                panic!("registered fixture readiness");
+            };
+            readiness.checks[0].actions.push(ReadinessAction::new(
+                ReadinessActionId::SeedActors,
+                Permission::MaintainBackend,
+                true,
+            ));
+            readiness.checks[1].reason_code = if initial_index == Running {
+                "index_catching_up".into()
+            } else {
+                "index_source_not_started".into()
+            };
+            let mut runtime = Runtime::new(
+                state,
+                crate::app::view,
+                (640.0, 480.0),
+                Env {
+                    system_dark: true,
+                    scale: 1.0,
+                },
+            );
+            runtime.reduced_motion = true;
+            runtime.frame(0.0);
+            assert!(runtime.find(Step::Seed.key()).is_some());
+            runtime.update(|state, _| {
+                state.enter_startup_data();
+                state.drive_startup_dataset();
+            });
+            runtime.frame(0.02);
+            assert!(runtime.find("startup-stage-seed").is_some());
+            runtime.update(|state, _| {
+                let Load::Ready(readiness) = &mut state.readiness else {
+                    panic!("registered fixture readiness");
+                };
+                readiness.checks[1].state = Running;
+                readiness.checks[1].reason_code = "index_catching_up".into();
+                state.readiness_received_at = Some(state.clock);
+                state.drive_startup_dataset();
+            });
+            runtime.frame(0.04);
+            assert!(runtime.find("startup-stage-seed").is_some());
+            assert!(runtime.find("startup-stage-index").is_none());
+            assert!(runtime.find("startup-csv-progress").is_some());
+            assert_eq!(
+                runtime
+                    .state
+                    .intents
+                    .iter()
+                    .filter(|intent| {
+                        matches!(
+                            intent,
+                            Intent::UploadDataset {
+                                kind: DatasetKind::ActorCatalog
+                            }
+                        )
+                    })
+                    .count(),
+                1
+            );
+            assert!(!runtime.state.intents.contains(&Intent::Maintenance {
+                operation: MaintenanceOperation::SeedActors,
+            }));
+        }
+    }
+
+    #[test]
+    fn startup_needs_scoped_current_evidence_to_skip_seed() {
+        use ReadinessState::{NotReady, Ready, Running};
+
+        let mut state = registered_data(Ready, Running);
         state.readiness_received_at = None;
         state.enter_startup_data();
         assert_eq!(state.startup.data_step, Some(Step::Seed));
@@ -1621,6 +1721,14 @@ mod tests {
             .as_mut()
             .expect("fixture registration")
             .revision += 1;
+        state.enter_startup_data();
+        assert_eq!(state.startup.data_step, Some(Step::Seed));
+
+        let mut state = registered_data(Ready, Running);
+        let Load::Ready(readiness) = &mut state.readiness else {
+            panic!("registered fixture readiness");
+        };
+        readiness.checks[0].fresh_for_ms = 0;
         state.enter_startup_data();
         assert_eq!(state.startup.data_step, Some(Step::Seed));
 

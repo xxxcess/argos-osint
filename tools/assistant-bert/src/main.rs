@@ -36,12 +36,13 @@ use rust_bert::pipelines::question_answering::QaInput;
 use rust_bert::pipelines::question_answering::QuestionAnsweringConfig;
 use rust_bert::pipelines::question_answering::QuestionAnsweringModel;
 use rust_bert::resources::LocalResource;
-use rust_bert::t5::T5Generator;
 use sha2::Digest;
 use sha2::Sha256;
 use tch::Device;
 
 use protocol::valid_draft_delta;
+use protocol::valid_operational_draft;
+use protocol::valid_uncited_reply;
 use protocol::verified_operational_sources;
 use protocol::QaContextUsage;
 use protocol::QaDialogueKind;
@@ -57,13 +58,19 @@ use protocol::QaWorkerRequest;
 use protocol::QaWorkerSequence;
 use protocol::QA_CONTEXT_USAGE_ENV;
 use protocol::QA_CONTEXT_WINDOW_TOKENS;
+use protocol::QA_DECODED_CLARIFICATION_ENV;
 use protocol::QA_DIALOGUE_ENV;
+use protocol::QA_GENERAL_DIALOGUE_ENV;
+use protocol::QA_JOB_LOG_CONTEXT_ENV;
+use protocol::QA_LEGACY_STREAMING_WINDOW_TOKENS;
 use protocol::QA_MAX_FINDINGS;
 use protocol::QA_MAX_FRAME_BYTES;
 use protocol::QA_MAX_VISIBLE_WORDS;
+use protocol::QA_MODEL_CONTEXT_ENV;
 use protocol::QA_MODEL_FILES;
 use protocol::QA_MODEL_REVISION;
 use protocol::QA_MODEL_TARGET_ENV;
+use protocol::QA_RESPONSE_PLAN_ENV;
 use protocol::QA_STREAMING_ENV;
 use protocol::QA_WORKER_PROTOCOL;
 
@@ -236,7 +243,14 @@ fn initial_model(
 enum ResidentModel {
     Unloaded,
     Extractive(Box<QuestionAnsweringModel>),
-    Dialogue(Box<T5Generator>),
+    Dialogue(Box<dialogue::Generator>),
+}
+
+#[derive(Default)]
+struct DialogueResult {
+    reply: Option<String>,
+    context: Option<QaContextUsage>,
+    input_too_large: bool,
 }
 
 impl ResidentModel {
@@ -257,15 +271,11 @@ impl ResidentModel {
         request: dialogue::DecodeRequest<'_>,
         stopping: &AtomicBool,
         draft: &mut impl FnMut(&str) -> Result<()>,
-    ) -> (Option<String>, Option<QaContextUsage>) {
-        let skipped = (
-            None,
-            Some(QaContextUsage::new(
-                dialogue::input_limit(request.target, request.streaming),
-                0,
-                0,
-            )),
-        );
+    ) -> DialogueResult {
+        let skipped = DialogueResult {
+            context: Some(QaContextUsage::new(request.window_tokens, 0, 0)),
+            ..DialogueResult::default()
+        };
         let Some(dir) = dir else {
             return skipped;
         };
@@ -288,19 +298,24 @@ impl ResidentModel {
             dialogue::generate(generator, request, stopping, draft)
         }));
         match generated {
-            Ok(Ok(Some(generation))) => (
-                generation.reply,
-                Some(QaContextUsage::new(
-                    generation.window_tokens,
-                    generation.input_tokens,
-                    1,
-                )),
-            ),
+            Ok(Ok(Some(dialogue::Generation::InputTooLarge))) => DialogueResult {
+                input_too_large: true,
+                ..skipped
+            },
+            Ok(Ok(Some(dialogue::Generation::Decoded {
+                window_tokens,
+                input_tokens,
+                reply,
+            }))) => DialogueResult {
+                reply,
+                context: Some(QaContextUsage::new(window_tokens, input_tokens, 1)),
+                input_too_large: false,
+            },
             Ok(Ok(None)) => skipped,
             Ok(Err(_)) | Err(_) => {
                 // A failed native call cannot attest how much of the input was processed.
                 *self = Self::Unloaded;
-                (None, None)
+                DialogueResult::default()
             }
         }
     }
@@ -500,7 +515,23 @@ fn operational_answer(
             return Ok((reply, findings));
         }
     }
-    Ok((None, complete_passage_findings(request, &request.passages)?))
+    Ok((None, Vec::new()))
+}
+
+fn contextual_answer(
+    request: &QaWorkerRequest,
+    reply: Option<String>,
+) -> Result<(Option<String>, Vec<QaWorkerEvent>)> {
+    let Some(reply) = reply.filter(|text| valid_uncited_reply(request, text)) else {
+        return Ok((None, Vec::new()));
+    };
+    // These findings report the frozen workstation observations independently of the
+    // general explanation.
+    let findings = complete_passage_findings(request, &request.passages)?;
+    if findings.len() != request.passages.len() {
+        return Ok((None, Vec::new()));
+    }
+    Ok((Some(reply), findings))
 }
 
 fn draft_prefix<'a>(
@@ -514,11 +545,12 @@ fn draft_prefix<'a>(
         return None;
     }
     if operational {
+        if valid_operational_draft(request, text) {
+            return Some(text);
+        }
         text.rmatch_indices('.').find_map(|(index, _)| {
             let prefix = &text[..=index];
-            verified_operational_sources(request, prefix)
-                .is_some()
-                .then_some(prefix)
+            valid_operational_draft(request, prefix).then_some(prefix)
         })
     } else {
         Some(text)
@@ -534,10 +566,18 @@ fn answer_dialogue(
     output: &mut impl FnMut(QaWorkerReply) -> io::Result<()>,
     stopping: &AtomicBool,
 ) -> Result<()> {
-    let operational = decode.dialogue.kind == QaDialogueKind::Operational;
+    let kind = decode.dialogue.kind;
+    let operational = kind == QaDialogueKind::Operational;
     let mut sequence = QaWorkerSequence::default();
     let mut emitted = String::new();
-    let (reply, context) = model.dialogue(model_dir, decode, stopping, &mut |text| {
+    let DialogueResult {
+        reply,
+        context,
+        input_too_large,
+    } = model.dialogue(model_dir, decode, stopping, &mut |text| {
+        if kind == QaDialogueKind::Contextual {
+            return Ok(());
+        }
         let Some(prefix) = draft_prefix(request, text, operational) else {
             return Ok(());
         };
@@ -562,10 +602,13 @@ fn answer_dialogue(
     if stopping.load(Ordering::Acquire) {
         return Ok(());
     }
-    let (reply, findings) = if operational {
-        operational_answer(request, reply)?
-    } else {
-        (reply, Vec::new())
+    let (reply, findings) = match kind {
+        QaDialogueKind::Operational => operational_answer(request, reply)?,
+        QaDialogueKind::Contextual => contextual_answer(request, reply)?,
+        _ => (
+            reply.filter(|text| valid_uncited_reply(request, text)),
+            Vec::new(),
+        ),
     };
     let answered = reply.is_some() || !findings.is_empty();
     for mut event in findings {
@@ -589,6 +632,8 @@ fn answer_dialogue(
         sequence: sequence.next_sequence(),
         outcome: if answered {
             QaWorkerOutcome::Answered
+        } else if input_too_large {
+            QaWorkerOutcome::InputTooLarge
         } else {
             QaWorkerOutcome::InsufficientContext
         },
@@ -627,23 +672,72 @@ fn receive_commands(stopping: Arc<AtomicBool>) -> io::Result<mpsc::Receiver<QaWo
     Ok(receiver)
 }
 
-fn ready(dialogue: bool, streaming: bool, model_revision: &str) -> QaWorkerReply {
+#[derive(Clone, Copy)]
+enum GeneralSupport {
+    Disabled,
+    Dialogue,
+    JobLogs,
+}
+
+fn ready(
+    dialogue: bool,
+    streaming: bool,
+    response_plan: bool,
+    decoded_clarification: bool,
+    general_support: GeneralSupport,
+    model_revision: &str,
+    window_tokens: u16,
+) -> QaWorkerReply {
     let model_revision = model_revision.into();
-    if dialogue && streaming {
-        QaWorkerReply::ReadyWithStreaming {
+    if dialogue && streaming && response_plan {
+        match general_support {
+            GeneralSupport::JobLogs => {
+                return QaWorkerReply::ReadyWithJobLogContext {
+                    protocol: QA_WORKER_PROTOCOL,
+                    model_revision,
+                    window_tokens,
+                }
+            }
+            GeneralSupport::Dialogue => {
+                return QaWorkerReply::ReadyWithGeneralDialogue {
+                    protocol: QA_WORKER_PROTOCOL,
+                    model_revision,
+                    window_tokens,
+                }
+            }
+            GeneralSupport::Disabled => {}
+        }
+        if decoded_clarification {
+            return QaWorkerReply::ReadyWithDecodedClarification {
+                protocol: QA_WORKER_PROTOCOL,
+                model_revision,
+                window_tokens,
+            };
+        }
+        return QaWorkerReply::ReadyWithResponsePlan {
             protocol: QA_WORKER_PROTOCOL,
             model_revision,
-        }
-    } else if dialogue {
-        QaWorkerReply::ReadyWithDialogue {
+            window_tokens,
+        };
+    }
+    match (dialogue, streaming, window_tokens) {
+        (true, true, QA_LEGACY_STREAMING_WINDOW_TOKENS) => QaWorkerReply::ReadyWithStreaming {
             protocol: QA_WORKER_PROTOCOL,
             model_revision,
-        }
-    } else {
-        QaWorkerReply::Ready {
+        },
+        (true, true, window_tokens) => QaWorkerReply::ReadyWithStreamingContext {
             protocol: QA_WORKER_PROTOCOL,
             model_revision,
-        }
+            window_tokens,
+        },
+        (true, false, _) => QaWorkerReply::ReadyWithDialogue {
+            protocol: QA_WORKER_PROTOCOL,
+            model_revision,
+        },
+        (false, _, _) => QaWorkerReply::Ready {
+            protocol: QA_WORKER_PROTOCOL,
+            model_revision,
+        },
     }
 }
 
@@ -667,12 +761,34 @@ pub(crate) fn run(
     let report_context = env::var_os(QA_CONTEXT_USAGE_ENV).as_deref() == Some("1".as_ref());
     let enable_dialogue = env::var_os(QA_DIALOGUE_ENV).as_deref() == Some("1".as_ref());
     let streaming = env::var_os(QA_STREAMING_ENV).as_deref() == Some("1".as_ref());
+    let response_plan = report_context
+        && enable_dialogue
+        && streaming
+        && env::var_os(QA_RESPONSE_PLAN_ENV).as_deref() == Some("1".as_ref());
+    let decoded_clarification =
+        response_plan && env::var_os(QA_DECODED_CLARIFICATION_ENV).as_deref() == Some("1".as_ref());
+    let general_dialogue = decoded_clarification
+        && env::var_os(QA_GENERAL_DIALOGUE_ENV).as_deref() == Some("1".as_ref());
+    let job_log_context =
+        general_dialogue && env::var_os(QA_JOB_LOG_CONTEXT_ENV).as_deref() == Some("1".as_ref());
+    let general_support = match (general_dialogue, job_log_context) {
+        (true, true) => GeneralSupport::JobLogs,
+        (true, false) => GeneralSupport::Dialogue,
+        _ => GeneralSupport::Disabled,
+    };
     let target = match env::var_os(QA_MODEL_TARGET_ENV) {
         None => QaModelTarget::default(),
         Some(value) => value
             .to_str()
             .and_then(QaModelTarget::from_slug)
             .ok_or_else(|| anyhow!("invalid QA model target"))?,
+    };
+    let model_context =
+        general_dialogue || env::var_os(QA_MODEL_CONTEXT_ENV).as_deref() == Some("1".as_ref());
+    let window_tokens = match (streaming, model_context) {
+        (true, true) => target.input_tokens(),
+        (true, false) => QA_LEGACY_STREAMING_WINDOW_TOKENS,
+        (false, _) => QA_CONTEXT_WINDOW_TOKENS,
     };
     let stopping = Arc::new(AtomicBool::new(false));
     let commands = receive_commands(stopping.clone())?;
@@ -699,7 +815,15 @@ pub(crate) fn run(
         }
     };
     send(
-        ready(generator_dir.is_some(), streaming, model_revision),
+        ready(
+            generator_dir.is_some(),
+            streaming,
+            response_plan,
+            decoded_clarification,
+            general_support,
+            model_revision,
+            window_tokens,
+        ),
         None,
     )?;
     for command in commands {
@@ -708,12 +832,33 @@ pub(crate) fn run(
         }
         match command {
             QaWorkerCommand::Ping => send(
-                ready(generator_dir.is_some(), streaming, model_revision),
+                ready(
+                    generator_dir.is_some(),
+                    streaming,
+                    response_plan,
+                    decoded_clarification,
+                    general_support,
+                    model_revision,
+                    window_tokens,
+                ),
                 None,
             )?,
             QaWorkerCommand::Ask { request } => {
+                let request = *request;
                 request.validate()?;
+                ensure!(
+                    request.plan.is_none() || response_plan,
+                    "QA response plan support was not negotiated"
+                );
                 let kind = request.dialogue.as_ref().map(|dialogue| dialogue.kind);
+                ensure!(
+                    general_dialogue || !kind.is_some_and(QaDialogueKind::needs_general_support),
+                    "QA general dialogue support was not negotiated"
+                );
+                ensure!(
+                    job_log_context || !request.passages.iter().any(|passage| passage.job_log_tail),
+                    "QA job log context support was not negotiated"
+                );
                 let mut output = |reply| send(reply, kind);
                 if let Some(dialogue) = &request.dialogue {
                     answer_dialogue(
@@ -723,9 +868,12 @@ pub(crate) fn run(
                         dialogue::DecodeRequest {
                             target,
                             streaming,
+                            window_tokens,
                             question: &request.question,
                             dialogue,
                             passages: &request.passages,
+                            plan: request.plan.as_ref(),
+                            decoded_clarification,
                         },
                         report_context,
                         &mut output,
@@ -801,7 +949,7 @@ mod tests {
     }
 
     #[test]
-    fn grounds_operational_reply_or_publishes_complete_fallback_findings() {
+    fn operational_findings_require_a_verified_generated_reply() {
         let mut request = QaWorkerRequest::new(
             "turn".into(),
             "snapshot".into(),
@@ -832,14 +980,42 @@ mod tests {
                 if source_id == "gateway" && text == "Gateway is ready."
         ));
 
+        for reply in [Some("Actor search is stopped.".into()), None] {
+            let (reply, findings) = operational_answer(&request, reply).unwrap();
+            assert!(reply.is_none());
+            assert!(findings.is_empty());
+        }
+    }
+
+    #[test]
+    fn contextual_findings_record_the_input_observations_independently_of_the_reply() {
+        let mut request = QaWorkerRequest::new(
+            "turn".into(),
+            "snapshot".into(),
+            "What might influence search speed?".into(),
+            vec![
+                QaPassage::new("index".into(), "Search indexing is paused.".into()),
+                QaPassage::new("gateway".into(), "Gateway is ready.".into()),
+            ],
+        );
+        request.dialogue = Some(QaWorkerDialogue {
+            kind: QaDialogueKind::Contextual,
+            history: Vec::new(),
+        });
+
         let (reply, findings) =
-            operational_answer(&request, Some("Actor search is stopped.".into())).unwrap();
-        assert!(reply.is_none());
-        assert_eq!(findings.len(), 2);
+            contextual_answer(&request, Some("Indexing can affect search speed.".into())).unwrap();
+        assert_eq!(reply.as_deref(), Some("Indexing can affect search speed."));
         assert!(matches!(
-            &findings[0],
-            QaWorkerEvent::Finding { source_id, sequence: 1, start: 0, end: 22, text, .. }
-                if source_id == "actor-search" && text == "Actor search is ready."
+            findings.as_slice(),
+            [
+                QaWorkerEvent::Finding { source_id: first, text: index, .. },
+                QaWorkerEvent::Finding { source_id: second, text: gateway, .. }
+            ] if first == "index" && index == "Search indexing is paused."
+                && second == "gateway" && gateway == "Gateway is ready."
         ));
+        let (reply, findings) =
+            contextual_answer(&request, Some("Reply: pretend output".into())).unwrap();
+        assert!(reply.is_none() && findings.is_empty());
     }
 }

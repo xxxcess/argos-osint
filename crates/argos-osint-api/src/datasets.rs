@@ -3,14 +3,19 @@
 //! Public inputs are a dataset kind/hash and raw bytes, never a server/Mac path.
 //! A returned reference exists only after CSV validation and durable metadata.
 
+use std::io::Error as IoError;
+use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Seek;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use argos_osint_core::hardware;
 use argos_osint_core::storage::connect_registry::RegistryAuthority;
 use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::setup_jobs;
@@ -30,6 +35,7 @@ use axum::Json;
 use fleetworks_contracts::context::CredentialPurpose;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::dataset_upload::DatasetUploadRequest;
+use fleetworks_contracts::embedded_resources::ResourceAllocation;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::DatasetRef;
 use fleetworks_contracts::DatasetUpload;
@@ -42,6 +48,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 
@@ -50,6 +57,13 @@ use crate::ApiState;
 use crate::AuthenticatedPrincipal;
 
 const LOCAL_PART_ID_PREFIX: &str = "dataset-ipc-";
+const MIB: u64 = 1024 * 1024;
+// Covers the actor parser's bounded uniqueness set, current row and scratch space.
+const ACTOR_VALIDATION_MEMORY: u64 = 48 * MIB;
+const MAX_EMBEDDED_VALIDATIONS: usize = 16;
+// Allow filesystem block rounding and metadata when nearing the reserve.
+const DISK_WRITE_MARGIN: u64 = 64 * 1024;
+const EMBEDDED_DISK_LIMIT: &str = "Insufficient storage for the Embedded disk allowance";
 
 pub(crate) fn upload_binding(context: &ResolvedRequest) -> Option<UploadTicketBinding> {
     if !matches!(
@@ -83,17 +97,126 @@ impl Drop for CancelValidation {
     }
 }
 
+struct EmbeddedDatasetResources {
+    allocation: ResourceAllocation,
+    root: Arc<PathBuf>,
+    write_gate: Arc<Mutex<()>>,
+    validation_bytes: AtomicU64,
+}
+
+impl EmbeddedDatasetResources {
+    fn validation_reservation(
+        &self,
+        kind: DatasetKind,
+        size: u64,
+    ) -> anyhow::Result<ValidationReservation<'_>> {
+        let resident = hardware::process_resident_bytes()
+            .ok_or_else(|| anyhow::anyhow!("dataset validation memory measurement unavailable"))?;
+        let bytes = match kind {
+            DatasetKind::ActorCatalog => (8 * MIB + 2 * size).min(ACTOR_VALIDATION_MEMORY),
+            // The classifier builds a whole corpus and prepares derived hashes and splits.
+            DatasetKind::ClassifierTraining => 64 * MIB + 4 * size,
+            _ => anyhow::bail!("unsupported dataset kind"),
+        };
+        self.validation_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |reserved| {
+                let total = reserved.checked_add(bytes)?;
+                (resident.checked_add(total)? <= self.allocation.memory_budget_bytes)
+                    .then_some(total)
+            })
+            .map_err(|_| anyhow::anyhow!("dataset validation memory capacity unavailable"))?;
+        Ok(ValidationReservation {
+            charged: &self.validation_bytes,
+            bytes,
+        })
+    }
+}
+
+struct ValidationReservation<'a> {
+    charged: &'a AtomicU64,
+    bytes: u64,
+}
+
+impl Drop for ValidationReservation<'_> {
+    fn drop(&mut self) {
+        self.charged.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
+struct EmbeddedPartWriter {
+    file: Arc<std::fs::File>,
+    resources: Arc<EmbeddedDatasetResources>,
+    written: u64,
+}
+
+impl EmbeddedPartWriter {
+    fn new(file: std::fs::File, resources: Arc<EmbeddedDatasetResources>) -> Self {
+        Self {
+            file: Arc::new(file),
+            resources,
+            written: 0,
+        }
+    }
+
+    async fn write(&mut self, bytes: Bytes) -> std::io::Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let byte_count = bytes.len() as u64;
+        let written = self
+            .written
+            .checked_add(byte_count)
+            .filter(|written| *written <= self.resources.allocation.disk_budget_bytes)
+            .ok_or_else(|| IoError::new(ErrorKind::StorageFull, EMBEDDED_DISK_LIMIT))?;
+        let resources = Arc::clone(&self.resources);
+        let file = Arc::clone(&self.file);
+        let write_guard = Arc::clone(&resources.write_gate).lock_owned().await;
+        tokio::task::spawn_blocking(move || {
+            // The blocking write owns the gate through its filesystem write,
+            // including when its requesting future is canceled.
+            let required = resources
+                .allocation
+                .disk_reserve_bytes
+                .checked_add(byte_count + DISK_WRITE_MARGIN)
+                .ok_or_else(|| IoError::new(ErrorKind::StorageFull, EMBEDDED_DISK_LIMIT))?;
+            let available =
+                hardware::filesystem_available_bytes(&resources.root).ok_or_else(|| {
+                    IoError::new(
+                        ErrorKind::WouldBlock,
+                        "dataset staging disk measurement unavailable",
+                    )
+                })?;
+            if available < required {
+                return Err(IoError::new(ErrorKind::StorageFull, EMBEDDED_DISK_LIMIT));
+            }
+            let status = (&*file).write_all(&bytes);
+            drop(file);
+            drop(write_guard);
+            status
+        })
+        .await
+        .map_err(IoError::other)??;
+        self.written = written;
+        Ok(())
+    }
+}
+
 /// A companion-owned partial file. Only a live upload owns its writable handle.
 pub(crate) struct LocalDatasetPart {
     id: String,
     path: PathBuf,
     file: tokio::fs::File,
+    embedded_writer: Option<EmbeddedPartWriter>,
     preserve_link_identity: bool,
 }
 
 impl LocalDatasetPart {
     pub(crate) async fn write_chunk(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        self.file.write_all(bytes).await
+        if let Some(writer) = &mut self.embedded_writer {
+            writer.write(Bytes::copy_from_slice(bytes)).await
+        } else {
+            self.file.write_all(bytes).await
+        }
     }
 }
 
@@ -112,6 +235,7 @@ impl Drop for LocalDatasetPart {
 pub struct DatasetStore {
     root: Arc<PathBuf>,
     pub(crate) uploads: Arc<Semaphore>,
+    embedded: Option<Arc<EmbeddedDatasetResources>>,
     #[cfg(unix)]
     identity: (u64, u64),
 }
@@ -152,6 +276,7 @@ impl DatasetStore {
             Ok(Self {
                 root: Arc::new(root),
                 uploads: Arc::new(Semaphore::new(2)),
+                embedded: None,
                 identity: (metadata.dev(), metadata.ino()),
             })
         }
@@ -159,7 +284,47 @@ impl DatasetStore {
         Ok(Self {
             root: Arc::new(root),
             uploads: Arc::new(Semaphore::new(2)),
+            embedded: None,
         })
+    }
+
+    /// Apply the companion's shared CPU, memory and disk allocation to staging.
+    #[must_use]
+    pub fn with_embedded_resources(mut self, allocation: ResourceAllocation) -> Self {
+        let memory_slots = (allocation.memory_headroom_bytes / ACTOR_VALIDATION_MEMORY)
+            .clamp(1, MAX_EMBEDDED_VALIDATIONS as u64) as usize;
+        let slots = allocation.cpu_threads.clamp(1, memory_slots);
+        self.uploads = Arc::new(Semaphore::new(slots));
+        self.embedded = Some(Arc::new(EmbeddedDatasetResources {
+            allocation,
+            root: Arc::clone(&self.root),
+            write_gate: Arc::new(Mutex::new(())),
+            validation_bytes: AtomicU64::new(0),
+        }));
+        self
+    }
+
+    /// The startup allocation shared with Embedded bulk work, if configured.
+    #[must_use]
+    pub fn embedded_resources(&self) -> Option<ResourceAllocation> {
+        self.embedded.as_ref().map(|resources| resources.allocation)
+    }
+
+    fn check_embedded_transfer_size(&self, size: u64) -> std::io::Result<()> {
+        if self
+            .embedded_resources()
+            .is_some_and(|allocation| size > allocation.disk_budget_bytes)
+        {
+            return Err(IoError::new(ErrorKind::StorageFull, EMBEDDED_DISK_LIMIT));
+        }
+        Ok(())
+    }
+
+    fn embedded_disk_full(&self, error: &anyhow::Error) -> bool {
+        self.embedded.is_some()
+            && error
+                .downcast_ref::<IoError>()
+                .is_some_and(|error| error.kind() == ErrorKind::StorageFull)
     }
 
     pub(crate) async fn verify_root(&self) -> anyhow::Result<()> {
@@ -226,6 +391,7 @@ impl DatasetStore {
             metadata.is_file() && !metadata.file_type().is_symlink(),
             "configured dataset must be a real file"
         );
+        self.check_embedded_transfer_size(metadata.len())?;
         let file = tokio::fs::File::open(path).await?;
         let stream = futures_util::stream::unfold(file, |mut file| async move {
             let mut bytes = vec![0; 64 * 1024];
@@ -282,6 +448,7 @@ impl DatasetStore {
         setup_jobs::begin_upload(repo, authority, &id, kind).await?;
         let path = self.path(&id, "part")?;
         self.verify_root().await?;
+        let resources = self.embedded.clone();
         // Opening and constructing the guard in the same blocking task covers
         // cancellation while the operating system is still creating the file.
         tokio::task::spawn_blocking(move || {
@@ -292,13 +459,22 @@ impl DatasetStore {
                 use std::os::unix::fs::OpenOptionsExt;
                 options.mode(0o600);
             }
-            let file = tokio::fs::File::from_std(options.open(&path)?);
-            Ok(LocalDatasetPart {
+            let file = options.open(&path)?;
+            let writer = resources
+                .map(|resources| {
+                    file.try_clone()
+                        .map(|file| EmbeddedPartWriter::new(file, resources))
+                })
+                .transpose();
+            let mut part = LocalDatasetPart {
                 id,
                 path,
-                file,
+                file: tokio::fs::File::from_std(file),
+                embedded_writer: None,
                 preserve_link_identity: false,
-            })
+            };
+            part.embedded_writer = writer?;
+            Ok(part)
         })
         .await?
     }
@@ -334,10 +510,14 @@ impl DatasetStore {
         let validation_reference = reference.clone();
         let permit = Arc::new(permit);
         let cpu_cancel = Arc::clone(&cancelled);
-        let rows = spawn_validation(Arc::clone(&permit), move || {
-            validate_local_part(file, &path, &validation_reference, &cpu_cancel)
-        })
-        .await??;
+        let rows = self
+            .spawn_validation(
+                Arc::clone(&permit),
+                reference.kind,
+                reference.size_bytes,
+                move || validate_local_part(file, &path, &validation_reference, &cpu_cancel),
+            )
+            .await??;
         context
             .revalidate(repo)
             .await
@@ -388,6 +568,9 @@ impl DatasetStore {
     {
         let expected_size = expectation.size;
         let context = expectation.context;
+        if let Some(size) = expected_size {
+            self.check_embedded_transfer_size(size)?;
+        }
         anyhow::ensure!(
             expected_sha256.len() == 64
                 && expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()),
@@ -421,6 +604,13 @@ impl DatasetStore {
         }
         let mut file = options.open(&part).await?;
         let result = async {
+            let mut writer = match &self.embedded {
+                Some(resources) => Some(EmbeddedPartWriter::new(
+                    file.try_clone().await?.into_std().await,
+                    Arc::clone(resources),
+                )),
+                None => None,
+            };
             let mut sha = Sha256::new();
             let mut size = 0u64;
             futures_util::pin_mut!(stream);
@@ -436,7 +626,11 @@ impl DatasetStore {
                     "dataset declared size exceeded"
                 );
                 sha.update(&chunk);
-                file.write_all(&chunk).await?;
+                if let Some(writer) = &mut writer {
+                    writer.write(chunk).await?;
+                } else {
+                    file.write_all(&chunk).await?;
+                }
             }
             anyhow::ensure!(size > 0, "dataset bytes are empty");
             anyhow::ensure!(
@@ -452,10 +646,11 @@ impl DatasetStore {
             file.sync_data().await?;
             let validation_path = part.clone();
             let cpu_cancel = Arc::clone(&cancelled);
-            let row_count = spawn_validation(Arc::clone(&permit), move || {
-                validate_csv(&validation_path, kind, &cpu_cancel)
-            })
-            .await??;
+            let row_count = self
+                .spawn_validation(Arc::clone(&permit), kind, size, move || {
+                    validate_csv(&validation_path, kind, &cpu_cancel)
+                })
+                .await??;
             self.verify_root().await?;
             if let Some(context) = context {
                 context
@@ -483,6 +678,24 @@ impl DatasetStore {
             }
         }
         result
+    }
+
+    fn spawn_validation<T: Send + 'static>(
+        &self,
+        work_slot: Arc<OwnedSemaphorePermit>,
+        kind: DatasetKind,
+        size: u64,
+        work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+    ) -> tokio::task::JoinHandle<anyhow::Result<T>> {
+        let resources = self.embedded.clone();
+        tokio::task::spawn_blocking(move || {
+            let _work_slot = work_slot;
+            let _memory = resources
+                .as_ref()
+                .map(|resources| resources.validation_reservation(kind, size))
+                .transpose()?;
+            work()
+        })
     }
 
     /// Explicit worker/operator housekeeping, never called by a readiness GET.
@@ -649,16 +862,6 @@ fn validate_actor_csv(reader: impl Read, cancelled: &AtomicBool) -> anyhow::Resu
     .rows as u64)
 }
 
-fn spawn_validation<T: Send + 'static>(
-    work_slot: Arc<OwnedSemaphorePermit>,
-    work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
-) -> tokio::task::JoinHandle<anyhow::Result<T>> {
-    tokio::task::spawn_blocking(move || {
-        let _work_slot = work_slot;
-        work()
-    })
-}
-
 fn validate_csv(path: &Path, kind: DatasetKind, cancelled: &AtomicBool) -> anyhow::Result<u64> {
     anyhow::ensure!(
         !cancelled.load(Ordering::Acquire),
@@ -787,13 +990,12 @@ pub(crate) async fn upload(
         );
     }
     let limit = setup_jobs::dataset_limit(query.kind);
-    if request
+    let content_length = request
         .headers()
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .is_some_and(|length| length > limit)
-    {
+        .and_then(|value| value.parse::<u64>().ok());
+    if content_length.is_some_and(|length| length > limit) {
         return response(
             StatusCode::PAYLOAD_TOO_LARGE,
             json!({"error":"Dataset byte limit exceeded"}),
@@ -812,6 +1014,9 @@ pub(crate) async fn upload(
             )
         }
     };
+    if content_length.is_some_and(|size| store.check_embedded_transfer_size(size).is_err()) {
+        return insufficient_storage();
+    }
     match store
         .stage(
             &state.repo,
@@ -826,6 +1031,7 @@ pub(crate) async fn upload(
             StatusCode::CREATED,
             json!({"dataset":reference,"expires_in_seconds":setup_jobs::DATASET_TTL.as_secs()}),
         ),
+        Err(error) if store.embedded_disk_full(&error) => insufficient_storage(),
         Err(_) => response(
             StatusCode::UNPROCESSABLE_ENTITY,
             json!({"error":"Dataset upload, hash, schema or staging validation failed"}),
@@ -865,6 +1071,12 @@ pub(crate) async fn create_upload_ticket(
             StatusCode::SERVICE_UNAVAILABLE,
             "Dataset staging unavailable",
         ));
+    }
+    if store
+        .check_embedded_transfer_size(input.size_bytes)
+        .is_err()
+    {
+        return Err((StatusCode::INSUFFICIENT_STORAGE, EMBEDDED_DISK_LIMIT));
     }
     upload_ticket::issue(&state.repo, &binding, input)
         .await
@@ -995,6 +1207,7 @@ pub(crate) async fn put_upload(
             }
             response(StatusCode::CREATED, upload)
         }
+        Err(error) if store.embedded_disk_full(&error) => insufficient_storage(),
         Err(_) => response(
             StatusCode::UNPROCESSABLE_ENTITY,
             json!({"error":"Upload validation failed or staging capacity is unavailable; request a new destination"}),
@@ -1040,6 +1253,13 @@ fn ticket_failure(
 ) -> Response {
     let (status, message) = ticket_failure_status_message(error, unavailable);
     response(status, json!({"error":message}))
+}
+
+fn insufficient_storage() -> Response {
+    response(
+        StatusCode::INSUFFICIENT_STORAGE,
+        json!({"error":EMBEDDED_DISK_LIMIT}),
+    )
 }
 
 fn response<T: Serialize>(status: StatusCode, value: T) -> Response {
@@ -1116,6 +1336,74 @@ mod tests {
             &AtomicBool::new(false)
         )
         .is_err());
+    }
+
+    #[test]
+    fn embedded_validation_slots_follow_cpu_and_memory_headroom() {
+        let root = tempfile::tempdir().expect("temporary staging parent");
+        let parent = root
+            .path()
+            .canonicalize()
+            .expect("canonical staging parent");
+        let store = DatasetStore::open(parent.join("uploads")).expect("staging store");
+        assert_eq!(store.uploads.available_permits(), 2);
+        assert!(store.embedded_resources().is_none());
+        let mut allocation = ResourceAllocation {
+            cpu_threads: 4,
+            memory_budget_bytes: 8 * 1024 * MIB,
+            memory_headroom_bytes: 144 * MIB,
+            disk_budget_bytes: 1024 * MIB,
+            disk_reserve_bytes: 256 * MIB,
+        };
+        let memory_limited = store.clone().with_embedded_resources(allocation);
+        assert_eq!(memory_limited.embedded_resources(), Some(allocation));
+        assert_eq!(memory_limited.uploads.available_permits(), 3);
+        allocation.cpu_threads = 1;
+        let cpu_limited = store.with_embedded_resources(allocation);
+        assert_eq!(cpu_limited.uploads.available_permits(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn embedded_part_writes_reject_disk_pressure_and_cumulative_size() {
+        let root = tempfile::tempdir().expect("temporary staging parent");
+        let parent = root
+            .path()
+            .canonicalize()
+            .expect("canonical staging parent");
+        let store = DatasetStore::open(parent.join("uploads")).expect("staging store");
+        let mut allocation = ResourceAllocation {
+            cpu_threads: 2,
+            memory_budget_bytes: 512 * MIB,
+            memory_headroom_bytes: 64 * MIB,
+            disk_budget_bytes: 4,
+            disk_reserve_bytes: u64::MAX - DISK_WRITE_MARGIN - 4,
+        };
+        let resources = store
+            .clone()
+            .with_embedded_resources(allocation)
+            .embedded
+            .expect("Embedded resources");
+        let part = store.path("test", "part").expect("staging part path");
+        let file = std::fs::File::create(&part).expect("create staging part");
+        let mut writer = EmbeddedPartWriter::new(file, resources);
+        let full = writer.write(Bytes::from_static(b"ab")).await.unwrap_err();
+        assert_eq!(full.kind(), ErrorKind::StorageFull);
+        assert_eq!(std::fs::metadata(&part).unwrap().len(), 0);
+        drop(writer);
+
+        allocation.disk_reserve_bytes = 0;
+        let resources = store
+            .with_embedded_resources(allocation)
+            .embedded
+            .expect("Embedded resources");
+        let file = std::fs::File::create(&part).expect("reopen staging part");
+        let mut writer = EmbeddedPartWriter::new(file, resources);
+        writer.write(Bytes::from_static(b"ab")).await.unwrap();
+        writer.write(Bytes::from_static(b"cd")).await.unwrap();
+        let full = writer.write(Bytes::from_static(b"e")).await.unwrap_err();
+        assert_eq!(full.kind(), ErrorKind::StorageFull);
+        assert_eq!(std::fs::read(part).unwrap(), b"abcd");
     }
 
     #[test]

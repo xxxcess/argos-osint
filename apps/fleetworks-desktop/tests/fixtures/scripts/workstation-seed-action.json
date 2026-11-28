@@ -1,0 +1,6 @@
+{
+  "events": [
+    { "t": 0.2, "type": "click", "key": "readiness-action-actor_catalog-SeedActors" },
+    { "t": 0.65, "type": "click", "key": "maintenance-bundled-csv" }
+  ]
+}

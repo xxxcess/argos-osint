@@ -13,6 +13,7 @@ mod queue_types;
 mod read;
 pub mod scoped_logs;
 mod types;
+pub mod workstation_context;
 
 pub use types::{
     Attempt, Command, Event, Job, Lease, NewJob, NewTask, OutboxEntry, Request, Response, Task,

@@ -29,7 +29,7 @@
   },
   "startup": {
     "duration_ms": 3000,
-    "backend_choices_from_first_frame": true,
+    "folder_fade_ms": 440,
     "settled_pose": "hold the end of the opening; Back does not replay",
     "full_materials_from_first_frame": true,
     "replay_on_navigation": false,

@@ -30,7 +30,6 @@ use rune_kit::shell;
 use rune_kit::shell::PaneState;
 use rune_kit::shell::RowStatus;
 use rune_kit::shell::Sidebar;
-use rune_kit::shell::SidebarHeader;
 use rune_kit::shell::SidebarRow;
 use rune_kit::shell::SplitView;
 use rune_kit::shell::Toolbar;
@@ -70,6 +69,8 @@ use crate::material;
 use crate::material::GlassSurface;
 use crate::rebind::Rebind;
 use crate::registration::Registration;
+use crate::search_catalog::ActorCatalog;
+use crate::search_catalog::SearchCategory;
 use crate::submission::SubmissionKind;
 use crate::submission::Submissions;
 use crate::theme;
@@ -87,7 +88,6 @@ use fleetworks_contracts::readiness::MaintenanceOperation;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Page {
     Seed,
-    Atlas,
     Brain,
     Tools,
     Models,
@@ -99,9 +99,8 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 5] = [
         Self::Seed,
-        Self::Atlas,
         Self::Brain,
         Self::Tools,
         Self::Models,
@@ -111,8 +110,7 @@ impl Page {
     pub fn title(self) -> &'static str {
         match self {
             Self::Seed => "Actor Maintenance",
-            Self::Atlas => "News Cycles",
-            Self::Brain => "Brain Search",
+            Self::Brain => "Search",
             Self::Tools => "Tool Box",
             Self::Models => "Model Assignments",
             Self::Profile => "Profile",
@@ -125,7 +123,6 @@ impl Page {
     pub fn key(self) -> &'static str {
         match self {
             Self::Seed => "seed",
-            Self::Atlas => "atlas",
             Self::Brain => "brain",
             Self::Tools => "tools",
             Self::Models => "models",
@@ -140,7 +137,6 @@ impl Page {
     pub fn icon(self) -> &'static rune::Icon {
         match self {
             Self::Seed => &icons::SEED,
-            Self::Atlas => &icons::ATLAS,
             Self::Brain => &icons::BRAIN,
             Self::Tools => &icons::TOOLS,
             Self::Models => &icons::MODELS,
@@ -153,8 +149,7 @@ impl Page {
     pub fn summary_hint(self) -> &'static str {
         match self {
             Self::Seed => "Stage seeds, classifier runs & maintenance",
-            Self::Atlas => "Inspect news collection cycles & trigger runs",
-            Self::Brain => "Search actors and inspect intelligence dossiers",
+            Self::Brain => "Search actors and articles",
             Self::Tools => "Configure API tool providers & credentials",
             Self::Models => "Assign routing models & verify accounts",
             Self::Profile | Self::Workstation | Self::Workspaces => {
@@ -167,7 +162,7 @@ impl Page {
     pub fn is_backend(self) -> bool {
         matches!(
             self,
-            Self::Seed | Self::Atlas | Self::Brain | Self::Tools | Self::Models | Self::Profile
+            Self::Seed | Self::Brain | Self::Tools | Self::Models | Self::Profile
         )
     }
 }
@@ -188,7 +183,7 @@ pub enum ModelsTab {
     Providers,
 }
 
-/// Active dossier tab on `Brain Search`.
+/// Active dossier tab on `Search`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DossierFacet {
     #[default]
@@ -217,6 +212,7 @@ pub enum Intent {
     PairingSessionOnly,
     Readiness,
     Search { query: String },
+    BrowseActors,
     Dossier { actor_id: String },
     Workspace(WorkspaceCommand),
     Interfaces,
@@ -264,7 +260,6 @@ pub struct State {
     /// Observed job, readiness and connection transitions for this authority.
     pub inbox: crate::inbox::Inbox,
     pub(crate) inbox_qa: crate::inbox_qa::InboxQa,
-    pub(crate) activity_triage: crate::activity_triage::ActivityTriage,
     /// Cmd/Ctrl+K command panel over a fixed list of known actions.
     pub commands: crate::command_panel::CommandPanel,
     pub page: Page,
@@ -273,6 +268,7 @@ pub struct State {
     pub local_backend: LocalBackendState,
     pub(crate) settings_open: bool,
     pub(crate) settings_section: crate::workstation_settings::SettingsSection,
+    pub(crate) resource_settings: crate::resource_settings::ResourceSettings,
     pub tool_key_dialog: bool,
     pub setup_advanced_open: bool,
     pub(crate) workstation_diagnostics_open: bool,
@@ -284,13 +280,9 @@ pub struct State {
     pub brain_facet: DossierFacet,
     pub selected_readiness: Option<String>,
     pub(crate) expanded_readiness: BTreeSet<ReadinessCheckId>,
-    pub selected_cycle_id: Option<String>,
-    pub selected_job_id: Option<String>,
-    pub confirm_cycle_delete: bool,
     pub confirm_maintenance_dialog: bool,
     pub pointer_offset: Live<[f32; 2]>,
     pub shadow_offset: Live<[f32; 2]>,
-    pub cycles: crate::workstation_dashboard::Cycles,
     pub host_metrics: Load<crate::workstation_dashboard::HostMetrics>,
     pub(crate) host_metrics_request: Option<RequestTask>,
     /// UI clock reading when `host_metrics` last succeeded.
@@ -302,6 +294,9 @@ pub struct State {
     pub pairing: crate::pairing::Pairing,
     pub connection_profiles: ConnectionProfiles,
     pub brain: Brain,
+    pub(crate) search_category: Option<SearchCategory>,
+    pub(crate) actor_catalog: ActorCatalog,
+    pub search_articles: crate::search_articles::ArticlesSearch,
     pub backend: Backend,
     pub maintenance: Maintenance,
     pub configuration: Configuration,
@@ -340,7 +335,6 @@ pub struct State {
     pub(crate) jobs_discovery_at: f64,
     pub(crate) host_metrics_revision: u64,
     pub(crate) host_metrics_refresh_at: f64,
-    pub(crate) atlas_refresh_at: f64,
 }
 
 impl Default for State {
@@ -352,7 +346,6 @@ impl Default for State {
             fixture_catalog: false,
             inbox: crate::inbox::Inbox::default(),
             inbox_qa: crate::inbox_qa::InboxQa::default(),
-            activity_triage: crate::activity_triage::ActivityTriage::default(),
             commands: crate::command_panel::CommandPanel::default(),
             page: Page::Workstation,
             setup_gateway: false,
@@ -360,10 +353,11 @@ impl Default for State {
             local_backend: LocalBackendState::default(),
             settings_open: false,
             settings_section: Default::default(),
+            resource_settings: Default::default(),
             tool_key_dialog: false,
             setup_advanced_open: false,
             workstation_diagnostics_open: false,
-            workstation_status_checks_open: false,
+            workstation_status_checks_open: true,
             seed_stage: SeedStage::Seed,
             models_tab: ModelsTab::Roles,
             models_provider_dialog: false,
@@ -371,13 +365,9 @@ impl Default for State {
             brain_facet: DossierFacet::Overview,
             selected_readiness: None,
             expanded_readiness: BTreeSet::new(),
-            selected_cycle_id: None,
-            selected_job_id: None,
-            confirm_cycle_delete: false,
             confirm_maintenance_dialog: false,
             pointer_offset: Live::new([0.0, 0.0]),
             shadow_offset: Live::new([0.0, 0.0]),
-            cycles: crate::workstation_dashboard::Cycles::default(),
             host_metrics: Load::Idle,
             host_metrics_request: None,
             host_metrics_observed_at: None,
@@ -387,6 +377,9 @@ impl Default for State {
             pairing: crate::pairing::Pairing::default(),
             connection_profiles: ConnectionProfiles::initial(),
             brain: Brain::default(),
+            search_category: None,
+            actor_catalog: ActorCatalog::default(),
+            search_articles: crate::search_articles::ArticlesSearch::default(),
             backend: Backend::default(),
             maintenance: Maintenance::default(),
             configuration: Configuration::default(),
@@ -424,7 +417,6 @@ impl Default for State {
             jobs_discovery_at: 0.0,
             host_metrics_revision: 0,
             host_metrics_refresh_at: 0.0,
-            atlas_refresh_at: 0.0,
         }
     }
 }
@@ -455,7 +447,14 @@ impl State {
         }
     }
 
-    /// Use synthetic packaged resource paths for the startup fixture.
+    /// Capture expanded Home diagnostics in the synthetic native fixture.
+    pub fn fixture_show_workstation_diagnostics(&mut self) {
+        if self.fixture {
+            self.workstation_diagnostics_open = true;
+        }
+    }
+
+    /// Use a synthetic bundled actor CSV path in maintenance fixtures.
     pub fn seed_startup_bundled_dataset_fixture(&mut self) {
         if self.fixture {
             self.fixture_bundled_csv = true;
@@ -463,17 +462,13 @@ impl State {
     }
 
     pub fn with_services(services: Arc<GatewayEffects>) -> Self {
-        let mut state = Self {
+        Self {
             services: Some(services),
             ..Self::default()
-        };
-        state.backend.article_day =
-            rune::TextEdit::new(chrono::Utc::now().format("%Y-%m-%d").to_string());
-        state
+        }
     }
 
     pub fn navigate(&mut self, page: Page) {
-        self.cancel_activity_triage();
         if self.setup_gateway && self.pairing.busy() {
             self.disconnect();
         }
@@ -487,15 +482,18 @@ impl State {
         self.models_provider_dialog = false;
         self.models_role_dialog = false;
         self.selected_readiness = None;
-        self.selected_cycle_id = None;
-        self.selected_job_id = None;
-        self.confirm_cycle_delete = false;
         self.confirm_maintenance_dialog = false;
         self.page = if self.connected() || page == Page::Workstation {
             page
         } else {
             Page::Workstation
         };
+        if self.page == Page::Jobs {
+            self.back_to_jobs();
+        }
+        if self.search_category.is_some() {
+            self.close_search_category();
+        }
         self.sync_jobs_binding();
         self.sync_log_visibility();
         if self.connected() {
@@ -506,15 +504,16 @@ impl State {
     /// Drop ephemeral reads only. Accepted backend work has an independent lifetime.
     pub fn cancel_requests(&mut self) {
         self.inbox_qa.detach();
-        self.cancel_activity_triage();
         self.pairing.cancel();
         self.connection_request = None;
         self.host_metrics_request = None;
         self.host_metrics_revision = self.host_metrics_revision.wrapping_add(1);
-        self.cycles.invalidate();
         self.connection_profiles.cancel_tests();
         self.readiness_request = None;
         self.search_request = None;
+        self.actor_catalog.reset();
+        self.search_category = None;
+        self.search_articles.cancel_pending();
         self.dossier_request = None;
         self.registration.request = None;
         self.registration.interface_request = None;
@@ -655,11 +654,8 @@ impl State {
     fn reset_connection_state(&mut self) {
         self.cancel_requests();
         self.activity_tab = ActivityTab::Jobs;
-        self.startup.data_step = None;
-        self.startup.data_checks = false;
-        self.startup.data_reset.fill(false);
         self.workstation_diagnostics_open = false;
-        self.workstation_status_checks_open = false;
+        self.workstation_status_checks_open = true;
         self.setup_advanced_open = false;
         self.tool_key_dialog = false;
         self.expanded_readiness.clear();
@@ -684,11 +680,8 @@ impl State {
         self.host_metrics_observed_at = None;
         self.host_metrics_error = None;
         self.host_metrics_refresh_at = 0.0;
-        self.atlas_refresh_at = 0.0;
         self.brain = Brain::default();
         self.backend = Backend::default();
-        self.backend.article_day =
-            rune::TextEdit::new(chrono::Utc::now().format("%Y-%m-%d").to_string());
         self.maintenance = Maintenance::default();
         self.configuration = Configuration::default();
         self.transfer = Transfer::default();
@@ -721,6 +714,9 @@ impl State {
 
     /// Start or attach to the supervised local embedded companion backend over the private Unix socket.
     pub fn connect_local(&mut self) {
+        if self.resource_save_pending() {
+            return;
+        }
         self.backend_kind = BackendKind::Local;
         self.connection_profiles.initial_selection_applied = true;
         self.disconnect();
@@ -970,9 +966,7 @@ impl State {
 
     pub(crate) fn has_active_confirmation(&self) -> bool {
         self.confirm_maintenance_dialog
-            || self.confirm_cycle_delete
             || self.maintenance.confirmation.is_some()
-            || self.cycles.confirmation.is_some()
             || self.configuration.confirmation.is_some()
             || self.job_actions.confirmation.is_some()
             || self.transfer.confirmation.is_some()
@@ -981,19 +975,14 @@ impl State {
             || self.workspaces.confirmation.is_some()
             || self
                 .submissions
-                .lane(SubmissionKind::Atlas)
-                .confirmation
-                .is_some()
-            || self
-                .submissions
                 .lane(SubmissionKind::Tool)
                 .confirmation
                 .is_some()
     }
 
     pub(crate) fn maintenance_checks_due(&self, now: f64) -> bool {
-        if !(matches!(self.page, Page::Seed | Page::Workstation) && !self.setup_gateway
-            || self.startup.data_setup_active())
+        if !matches!(self.page, Page::Seed | Page::Workstation)
+            || self.setup_gateway
             || !self.connected()
             || !self.scoped_logs.window_focused
             || self.readiness_request.is_some()
@@ -1001,14 +990,13 @@ impl State {
         {
             return false;
         }
-        if self.startup_data_needs_observation() {
-            return true;
-        }
         match &self.readiness {
             Load::Ready(readiness) => readiness.checks.iter().any(|check| {
-                check.state == ReadinessState::Running || !self.readiness_check_fresh_at(check, now)
+                self.readiness_check_applies(check)
+                    && (check.state == ReadinessState::Running
+                        || !self.readiness_check_fresh_at(check, now))
             }),
-            Load::Idle | Load::Failed(_) => matches!(self.page, Page::Seed | Page::Workstation),
+            Load::Idle | Load::Failed(_) => true,
             Load::Pending | Load::Loading => false,
         }
     }
@@ -1044,10 +1032,7 @@ impl State {
             && !self.fixture
             && self.connected()
             && self.scoped_logs.window_focused
-            && (self.job_list_has_active()
-                || self.selected_job_is_active()
-                || (self.backend.selected_job.is_some()
-                    && self.scoped_logs.status == crate::logs::LogStatus::Unavailable))
+            && (self.job_list_has_active() || self.selected_job_is_active())
             && now >= self.jobs_refresh_at
     }
 
@@ -1077,23 +1062,6 @@ impl State {
         self.sync_operational_logs_with_selected_job(false);
     }
 
-    pub(crate) fn atlas_poll_active(&self) -> bool {
-        let lane = self
-            .submissions
-            .lane(crate::submission::SubmissionKind::Atlas);
-        if lane.busy() || lane.receipt.is_some() {
-            return true;
-        }
-        matches!(
-            &self.cycles.history,
-            Load::Ready(history)
-                if history
-                    .rows
-                    .iter()
-                    .any(|row| crate::backend::job_is_active(&row.state))
-        )
-    }
-
     pub fn search_available(&self) -> bool {
         self.connected()
             && self
@@ -1106,6 +1074,7 @@ impl State {
     pub fn query_edited(&mut self, tx: &mut Tx) {
         self.brain.edited(tx.clock());
         self.dossier_request = None;
+        self.edit_article_search(&self.brain.query.text.clone(), tx.clock());
         if self.brain.pending_at.is_some() {
             tx.wake_after(Duration::from_millis(200));
         }
@@ -1160,34 +1129,44 @@ impl State {
         let Load::Ready(response) = &self.brain.results else {
             return;
         };
-        let Some(hit) = response.rows.get(index) else {
-            return;
-        };
-        if self.brain.showing_detail && self.brain.selected_actor.as_deref() == Some(&hit.actor_id)
-        {
-            self.brain.showing_detail = false;
-            self.brain.selected_actor = None;
-            self.brain.dossier = Load::Idle;
-            self.brain.detail_revision = self.brain.detail_revision.wrapping_add(1);
-            self.dossier_request = None;
-        } else {
-            self.select_actor(index);
+        if let Some(hit) = response.rows.get(index) {
+            self.toggle_actor_record(hit.actor_id.clone(), Some(index));
         }
     }
 
-    pub fn retry_dossier(&mut self) {
-        let Load::Ready(response) = &self.brain.results else {
-            return;
-        };
-        if !self.brain.showing_detail {
-            return;
+    pub(crate) fn toggle_actor_record(&mut self, id: String, index: Option<usize>) {
+        if self.brain.showing_detail && self.brain.selected_actor.as_deref() == Some(id.as_str()) {
+            self.close_actor_record();
+        } else {
+            self.open_actor_record(id, index);
         }
-        if let Some(index) = response
-            .rows
-            .iter()
-            .position(|hit| Some(hit.actor_id.as_str()) == self.brain.selected_actor.as_deref())
+    }
+
+    fn close_actor_record(&mut self) {
+        self.brain.showing_detail = false;
+        self.brain.selected_actor = None;
+        self.brain.dossier = Load::Idle;
+        self.brain.detail_revision = self.brain.detail_revision.wrapping_add(1);
+        self.dossier_request = None;
+    }
+
+    pub(crate) fn close_search_category(&mut self) {
+        if self.search_category.take() == Some(SearchCategory::Articles) {
+            self.edit_article_search(&self.brain.query.text.clone(), self.clock);
+        }
+        self.actor_catalog.reset();
+        self.brain.highlighted = None;
+        self.close_actor_record();
+    }
+
+    pub fn retry_dossier(&mut self) {
+        if let Some(id) = self
+            .brain
+            .selected_actor
+            .clone()
+            .filter(|_| self.brain.showing_detail)
         {
-            self.select_actor(index);
+            self.open_actor_record(id, self.brain.highlighted);
         }
     }
 
@@ -1195,11 +1174,13 @@ impl State {
         let Load::Ready(response) = &self.brain.results else {
             return;
         };
-        let Some(hit) = response.rows.get(index) else {
-            return;
-        };
-        let id = hit.actor_id.clone();
-        self.brain.highlighted = Some(index);
+        if let Some(hit) = response.rows.get(index) {
+            self.open_actor_record(hit.actor_id.clone(), Some(index));
+        }
+    }
+
+    fn open_actor_record(&mut self, id: String, index: Option<usize>) {
+        self.brain.highlighted = index;
         self.brain.selected_actor = Some(id.clone());
         self.brain.detail_revision = self.brain.detail_revision.wrapping_add(1);
         self.brain.showing_detail = true;
@@ -1256,7 +1237,7 @@ const JOBS_DISCOVERY_SECS: f64 = 5.0;
 const JOBS_BACKGROUND_DISCOVERY_SECS: f64 = 15.0;
 
 /// Jobs scheduling. On the Jobs page, two independent loops share the tick:
-/// - follow known active work, or recover unavailable logs of the selected job;
+/// - follow known active work and recover its unavailable logs;
 /// - discover newly admitted work for the registered workstation.
 ///
 /// Off the Jobs page, refresh the shared registered job aggregate at a bounded low cadence
@@ -1287,11 +1268,7 @@ pub(crate) fn poll_jobs(state: &mut State, now: f64, tx: &mut Tx) -> bool {
         return false;
     }
     let mut changed = false;
-    if state.job_list_has_active()
-        || state.selected_job_is_active()
-        || (state.backend.selected_job.is_some()
-            && state.scoped_logs.status == crate::logs::LogStatus::Unavailable)
-    {
+    if state.job_list_has_active() || state.selected_job_is_active() {
         if state.jobs_poll_due(now) {
             state.refresh_active_job_status(now);
             changed = true;
@@ -1312,24 +1289,19 @@ pub(crate) fn poll_jobs(state: &mut State, now: f64, tx: &mut Tx) -> bool {
 fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
     state.clock = now;
     let mut changed = false;
-    if state.startup.active() && !state.setup_gateway {
-        state.startup.begin(now);
-        if let Some(wait) = state.startup.next_wake(now) {
-            tx.wake_after(Duration::from_secs_f64(wait));
-        }
-        // Redraw the orbit's final pose even when this poll schedules no subsequent frame.
+    if state.poll_startup_intro(now, tx) {
         return true;
     }
     changed |= state.startup.poll_flight(now, tx);
-    changed |= state.drive_startup_dataset();
+    changed |= state.poll_startup_wiring(now, tx);
     changed |= state.observe_inbox();
     changed |= state.poll_inbox_qa(now, tx);
-    changed |= state.poll_activity_triage();
+    changed |= state.poll_resource_settings();
     changed |= state.sync_assistant();
     changed |= state.poll_scoped_logs();
     changed |= state.sync_jobs_binding();
-    if (matches!(state.page, Page::Seed | Page::Workstation) && !state.setup_gateway
-        || state.startup.data_setup_active())
+    if matches!(state.page, Page::Seed | Page::Workstation)
+        && !state.setup_gateway
         && !state.fixture
         && state.connected()
         && state.scoped_logs.window_focused
@@ -1349,6 +1321,9 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
         tx.wake_after(Duration::from_secs(2));
     }
     changed |= poll_jobs(state, now, tx);
+    if state.page == Page::Brain {
+        changed |= state.poll_article_search(now);
+    }
     if state.page == Page::Workstation
         && !state.fixture
         && state.connected()
@@ -1361,30 +1336,6 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
             changed = true;
         }
         tx.wake_after(Duration::from_secs(2));
-    }
-    if state.page == Page::Atlas
-        && !state.fixture
-        && state.connected()
-        && state.scoped_logs.window_focused
-        && state.registration.context.is_some()
-    {
-        if !state.setup_gateway && state.atlas_preflight_due() {
-            state.refresh_readiness();
-            changed = true;
-        }
-        // Active work is read quickly. Otherwise a slower, bounded read still discovers cycles
-        // admitted after this page loaded, including from an empty or finished-only page.
-        let interval = if state.atlas_poll_active() { 3.0 } else { 10.0 };
-        if now >= state.atlas_refresh_at && !state.cycles.busy() {
-            state.atlas_refresh_at = now + interval;
-            if matches!(state.cycles.history, Load::Ready(_)) {
-                state.poll_cycles();
-            } else {
-                state.refresh_cycles();
-            }
-            changed = true;
-        }
-        tx.wake_after(Duration::from_secs(1));
     }
     if let Some(key) = state.reveal.take() {
         tx.scroll_into_view(key);
@@ -1405,25 +1356,19 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
 
 fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
     if state.startup.active() {
+        if event.key == Key::Escape && state.connection_profiles.embedded_folder.open {
+            state.close_embedded_folder(tx);
+            return true;
+        }
         if event.key == Key::Escape && state.setup_gateway {
-            if state.startup.data_setup_active() {
-                if state.maintenance.confirmation.is_some() {
-                    state.dismiss_maintenance_confirmation(tx);
-                } else if state.maintenance.csv_path_prompt.is_some() {
-                    state.cancel_csv_path_prompt(tx);
-                } else {
-                    return false;
-                }
-            } else {
-                state.return_to_startup_choice(tx);
-            }
+            state.return_to_startup_choice(tx);
             return true;
         }
         return false;
     }
     if state.inbox.open {
         if event.key == Key::Escape {
-            state.close_inbox(tx);
+            state.dismiss_inbox(tx);
             return true;
         }
         return false;
@@ -1471,6 +1416,9 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         }
     }
     if event.is_command('f') && state.page == Page::Brain {
+        if state.search_category.is_some() {
+            state.close_search_category();
+        }
         tx.focus("actor-search/value/input", true);
         return true;
     }
@@ -1552,11 +1500,6 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
             );
 
         if state.connected() {
-            sidebar = sidebar.child(
-                SidebarHeader::new("Operations")
-                    .build(&kit)
-                    .key("sidebar-operations-heading"),
-            );
             for page in Page::ALL.into_iter().filter(|page| *page != Page::Seed) {
                 let selected = !state.setup_gateway && state.page == page;
                 let mut row_builder = SidebarRow::new(page.title())
@@ -1589,9 +1532,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                 Button::new("Settings")
                     .variant(ButtonVariant::Ghost)
                     .icon(&icons::WORKSTATION)
-                    .on_press(|state: &mut State| {
-                        state.settings_open = true;
-                    })
+                    .on_press(State::open_workstation_settings)
                     .build(&kit)
                     .key("open-workstation-settings"),
             )
@@ -2093,7 +2034,7 @@ fn compact_icon_rail(
     }
     rail.child(rune::spacer()).child(
         nav_icon(&icons::WORKSTATION, "Settings", state.settings_open)
-            .on_press(|state: &mut State| state.settings_open = true)
+            .on_press(State::open_workstation_settings)
             .key("open-workstation-settings"),
     )
 }
@@ -2202,7 +2143,6 @@ fn context_rail(state: &State, kit: &rune_kit::Kit, connection_tone: StatusTone)
 fn sidebar_row_status(state: &State, page: Page) -> Option<RowStatus> {
     let busy = match page {
         Page::Seed => state.maintenance.busy(),
-        Page::Atlas => state.cycles.busy(),
         Page::Brain => state.brain.in_flight,
         Page::Tools => state.backend.busy(),
         Page::Models => state.configuration.request.is_some(),
@@ -2223,12 +2163,6 @@ pub(crate) fn sidebar_row_badge(state: &State, page: Page) -> Option<String> {
             .in_progress_count()
             .filter(|&count| count > 0)
             .map(|count| count.to_string()),
-        Page::Atlas => match &state.cycles.history {
-            Load::Ready(history) if !history.rows.is_empty() => {
-                Some(history.rows.len().to_string())
-            }
-            _ => None,
-        },
         _ => None,
     }
 }

@@ -4,6 +4,9 @@ use fleetworks_contracts::context::ActivityScope;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::context::RegisteredContext;
 use rune::Env;
+use rune::Key;
+use rune::KeyEvent;
+use rune::Mods;
 use rune::Runtime;
 
 use super::JobAction;
@@ -56,6 +59,8 @@ fn fixture() -> State {
         operation: "atlas_cycle".into(),
         state: "queued".into(),
         phase: "queued".into(),
+        active_since: String::new(),
+        finished_at: String::new(),
         progress_done: None,
         progress_total: None,
         error_summary: String::new(),
@@ -241,6 +246,7 @@ fn failed_retryable_job_exposes_confirmed_native_retry_flow() {
     assert!(runtime.find("job-action-confirmation").is_some());
     assert!(runtime.find("job-action-confirm").is_some());
 
+    assert!(runtime.find("job-retry-preview").is_some());
     click(&mut runtime, "job-action-confirm", &mut clock);
     assert!(matches!(runtime.state.job_actions.response, Load::Ready(_)));
     assert!(runtime.find("job-action-receipt").is_some());
@@ -250,6 +256,114 @@ fn failed_retryable_job_exposes_confirmed_native_retry_flow() {
             action: JobAction::Retry
         }
     )));
+}
+
+#[test]
+fn actor_seed_retry_replaces_the_button_and_keeps_one_row_through_preparation() {
+    const RETRY: &str = "job-retry-preview";
+    const ROW: &str = "job-action-confirmation";
+    const CONFIRM: &str = "job-action-confirm";
+    const CANCEL: &str = "job-action-cancel";
+    let element = |runtime: &Runtime<State>, key: &str| {
+        runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some(key) && !element.exiting)
+            .unwrap_or_else(|| panic!("expected {key}"))
+    };
+    for (size, operation) in [
+        ((1180.0, 780.0), "actor_seed"),
+        ((640.0, 480.0), "seed_actors"),
+    ] {
+        let mut state = fixture();
+        let Load::Ready(detail) = &mut state.backend.detail else {
+            panic!("fixture job detail");
+        };
+        detail.job.operation = operation.into();
+        detail.job.title = "Actor seed".into();
+        detail.job.state = "failed".into();
+        detail.job.can_cancel = false;
+        detail.job.can_retry = true;
+        state.fixture_effect = None;
+        let mut runtime = Runtime::new(
+            state,
+            app::view,
+            size,
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.reduced_motion = true;
+        let mut clock = 0.0;
+        runtime.frame(clock);
+
+        click(&mut runtime, RETRY, &mut clock);
+        assert!(runtime.find(ROW).is_some());
+        assert!(runtime.find(RETRY).is_none());
+        let confirm = element(&runtime, CONFIRM);
+        let cancel = element(&runtime, CANCEL);
+        let copy = element(&runtime, "actor-seed-retry-copy");
+        assert_eq!(confirm.role, "button");
+        assert_eq!(confirm.label.as_deref(), Some("Confirm retry"));
+        assert_eq!(cancel.role, "button");
+        assert_eq!(cancel.label.as_deref(), Some("Cancel retry"));
+        assert!(confirm.text.is_none() && cancel.text.is_none());
+        assert!(confirm.focused);
+        assert!(copy.target[0] + copy.target[2] <= confirm.target[0]);
+        assert!(confirm.target[0] < cancel.target[0]);
+        assert_eq!(confirm.target[1], cancel.target[1]);
+        assert!(cancel.target[0] + cancel.target[2] <= size.0);
+
+        click(&mut runtime, CANCEL, &mut clock);
+        assert!(runtime.find(ROW).is_none());
+        assert!(element(&runtime, RETRY).focused);
+
+        click(&mut runtime, RETRY, &mut clock);
+        runtime.key(KeyEvent {
+            key: Key::Escape,
+            mods: Mods::default(),
+        });
+        clock += 1.0 / 60.0;
+        runtime.frame(clock);
+        assert!(runtime.find(ROW).is_none());
+        assert!(element(&runtime, RETRY).focused);
+        assert!(runtime.state.intents.is_empty());
+
+        click(&mut runtime, RETRY, &mut clock);
+        click(&mut runtime, CONFIRM, &mut clock);
+        assert!(matches!(runtime.state.job_actions.response, Load::Loading));
+        assert!(runtime.find(ROW).is_some());
+        assert!(runtime.find(RETRY).is_none());
+        assert!(!element(&runtime, CONFIRM).focusable);
+        assert!(!element(&runtime, CANCEL).focusable);
+        assert_eq!(
+            runtime.state.intents,
+            [Intent::PrepareJobAction {
+                action: JobAction::Retry
+            }]
+        );
+
+        runtime.update(|state, _| {
+            state.fixture_effect = Some(reply);
+            reply(
+                state,
+                &Intent::PrepareJobAction {
+                    action: JobAction::Retry,
+                },
+            );
+        });
+        clock += 1.0 / 60.0;
+        runtime.frame(clock);
+        assert!(runtime.find(ROW).is_none());
+        assert!(runtime.find("job-action-receipt").is_some());
+        assert!(runtime.state.intents.iter().any(|intent| matches!(
+            intent,
+            Intent::PostJobAction {
+                action: JobAction::Retry
+            }
+        )));
+    }
 }
 
 #[test]

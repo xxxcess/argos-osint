@@ -10,6 +10,7 @@ pub mod connect;
 pub mod context;
 pub mod cycle_history;
 pub mod dataset_upload;
+pub mod embedded_resources;
 pub mod ipc;
 pub mod operational_logs;
 pub mod pairing;

@@ -2,8 +2,8 @@
 """Exercise the real Inbox QA pack through a packaged Embedded companion."""
 
 import argparse
-from contextlib import contextmanager
-from datetime import datetime
+from contextlib import contextmanager, suppress
+from datetime import datetime, timezone
 import hashlib
 from itertools import islice
 import json
@@ -27,10 +27,11 @@ import fleetworks_qa_pack as pack
 ROOT = Path(__file__).resolve().parents[1]
 TERMINAL = {"answered", "insufficient_context", "canceled", "failed"}
 SUMMARY_QUESTION = "What is the current workstation readiness?"
-CONTEXT_WINDOW_TOKENS = 512
-FIXTURE_MODEL_MEMORY_MIB = 1536
+CONTEXT_WINDOW_TOKENS = 896
+FIXTURE_MODEL_MEMORY_MIB = 2048
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 DIAGNOSTIC = re.compile(r'\b(qa_(?:warm|replica|queue|turn|settings)_stage)="?([a-z0-9_]{1,40})\b')
+CONTEXT_DIAGNOSTIC = re.compile(r'\bcode="?(embedded_workstation_context_(?:path_)?unavailable)\b')
 DIAGNOSTIC_DETAIL = re.compile(
     r'\b(qa_warm_reason|qa_warm_elapsed_ms|landlock_abi|sanitized_os_error|worker_exit_code|worker_signal)'
     r'="?(Some\(-?\d{1,9}\)|-?\d{1,9}|abandoned|landlock_abi)(?=["\s,|]|$)'
@@ -144,6 +145,8 @@ def report_diagnostics(logs):
     stages = set()
     lines = ANSI.sub("", logs).splitlines()
     for line in lines:
+        for code in CONTEXT_DIAGNOSTIC.findall(line):
+            stages.add(("workstation_context", code, ()))
         for stage, code in DIAGNOSTIC.findall(line):
             details = DIAGNOSTIC_DETAIL.findall(line) + FIXED_DIAGNOSTIC_DETAIL.findall(line)
             stages.add((stage, code, tuple(sorted(details))))
@@ -168,40 +171,38 @@ def cited_finding(turn, kind, source_id, *, count=1):
     return finding
 
 
-def require_context(turn, *, inferred, window=CONTEXT_WINDOW_TOKENS):
+def require_context(turn, *, window=CONTEXT_WINDOW_TOKENS):
     usage = turn.get("context")
     require(isinstance(usage, dict) and usage.get("window_tokens") == window,
             "terminal turn lacks its model context window")
     peak = usage.get("peak_input_tokens")
     windows = usage.get("model_windows")
     require(type(peak) is int and type(windows) is int
-            and (0 < peak <= window and 0 < windows <= 48 if inferred else peak == windows == 0),
+            and 0 < peak <= window and 0 < windows <= 48,
             "terminal turn has incorrect model context usage")
     return usage
 
 
-def settled_turn(request, context, case, question, *, source=None, mode="direct"):
+def settled_turn(request, context, case, question, *, source=None, inbox_notifications=None, mode="operational"):
     payload = {"request_id": f"inbox-qa-smoke-{case}", "context": context, "question": question}
     if source is not None:
         payload["source"] = source
+    if inbox_notifications is not None:
+        payload["inbox_notifications"] = inbox_notifications
     accepted = request("turns", payload, expected=(200, 201, 202))
     query = {"turn_id": accepted["turn_id"], "after": 0, "wait_seconds": 0}
-    inferred = mode != "direct"
-    if inferred:
-        accepted = until(lambda: request("events", query=query)["turn"],
-                         lambda turn: turn["state"] in TERMINAL,
-                         f"{case} did not complete the local inference turn", timeout=45)
-        if mode == "dialogue":
-            require(accepted["state"] == "answered" and accepted.get("reply") and not accepted["findings"],
-                    f"{case} did not produce bounded conversational text")
-        else:
-            require(accepted["state"] == "answered" and accepted["findings"],
-                    f"{case} did not produce a grounded explanation")
-    else:
-        require(accepted["state"] in TERMINAL, f"{case} did not finish within admission")
-    usage = require_context(accepted, inferred=inferred)
-    if inferred:
-        require(usage["model_windows"] == 1, f"{case} did not use a single model input window")
+    accepted = until(lambda: request("events", query=query)["turn"],
+                     lambda turn: turn["state"] in TERMINAL,
+                     f"{case} did not complete the local inference turn", timeout=45)
+    require(accepted["state"] == "answered" and accepted.get("reply"),
+            f"{case} did not return a generated reply")
+    require(bool(accepted["findings"]) == (mode != "dialogue"),
+            f"{case} did not match the expected grounding scope")
+    require(type(accepted.get("response_time_ms")) is int and accepted["response_time_ms"] >= 0,
+            f"{case} terminal turn omitted its response duration")
+    usage = require_context(accepted)
+    require(usage["model_windows"] == 1 and accepted.get("model_target") and accepted.get("model_generation"),
+            f"{case} did not use one input window on its selected generator")
     page = request("events", query=query)
     require(page["turn"] == accepted and not page["gap"], f"{case} admission differed from its event snapshot")
     require(not accepted.get("provisional_reply") and not any(event.get("provisional_delta") for event in page["events"]),
@@ -210,6 +211,9 @@ def settled_turn(request, context, case, question, *, source=None, mode="direct"
             f"{case} event cursor skipped a sequence")
     require([event["sequence"] for event in page["events"] if event["state"] in TERMINAL] == [accepted["cursor"]],
             f"{case} did not emit exactly one terminal event")
+    work_stages = list(dict.fromkeys(event["stage"] for event in page["events"] if "stage" in event))
+    require(work_stages == ["working", "thinking", "writing"] and "stage" not in accepted,
+            f"{case} did not retain the ordered execution stages")
     require([event["finding"] for event in page["events"] if event["finding"]] == accepted["findings"],
             f"{case} event evidence differs from the frozen answer")
     require(request("latest") == accepted, f"{case} latest changed the frozen answer")
@@ -314,6 +318,96 @@ def cancel_running_embedded_turn(request, registration, model, *, draft=False):
     return {"cancelled_terminal_events": len(terminal), "cancelled_terminal_state": canceled["state"]}
 
 
+@contextmanager
+def release_isolated_gate(model, worker):
+    # Linux pins the original process across both turns. The fixture callback also
+    # checks executable path and companion ancestry before signaling on either OS.
+    pidfd = os.pidfd_open(worker) if sys.platform == "linux" else None
+
+    def release():
+        require(model() == [worker], "The original isolated gated worker is no longer resident")
+        if pidfd is not None:
+            signal.pidfd_send_signal(pidfd, signal.SIGUSR1)
+        else:
+            os.kill(worker, signal.SIGUSR1)
+
+    try:
+        yield release
+    except Exception:
+        # Unblock the verified fixture before companion teardown, preserving the test failure.
+        with suppress(OSError, ValueError, subprocess.SubprocessError):
+            release()
+        raise
+    finally:
+        if pidfd is not None:
+            os.close(pidfd)
+
+
+def expired_operational_turn_keeps_generator(request, registration, model):
+    context = authorize(registration)
+    before = request("settings")
+    require(not before["enabled"] and before["phase"] == "off", "Expiry fixture must start with QA off")
+    updated = request("settings", {"context": context, "expected_revision": before["revision"], "enabled": True})
+    ready = ready_model(request, "gpt2-small", updated=updated)
+    workers = model()
+    require(len(workers) == 1, "Expected one isolated gated worker for evidence expiry")
+    worker, = workers
+
+    def submit(case, question):
+        turn = request("turns", {"request_id": f"inbox-qa-smoke-{case}", "context": context,
+                                 "question": question}, expected=(200, 201, 202))
+        return {"turn_id": turn["turn_id"], "after": 0, "wait_seconds": 0}
+
+    with release_isolated_gate(model, worker) as release:
+        started = time.monotonic()
+        query = submit("expired-operational-turn", SUMMARY_QUESTION)
+        held = until(lambda: request("events", query=query),
+                     lambda page: page["turn"]["findings"] or page["turn"]["state"] in TERMINAL,
+                     "Expiry gate did not produce a Running finding", timeout=8, interval=0.1)
+        require(not held["gap"] and held["turn"]["state"] == "running" and len(held["turn"]["findings"]) == 1,
+                "The operational turn did not reach the fixture gate before expiring")
+        expired = until(lambda: request("events", query=query), lambda page: page["turn"]["state"] in TERMINAL,
+                        "Held operational evidence did not expire", timeout=7, interval=0.1)
+        expired_at = time.monotonic()
+        turn = expired["turn"]
+        terminal = [event for event in expired["events"] if event["state"] in TERMINAL]
+        require(not expired["gap"] and turn["state"] == "insufficient_context" and not turn.get("reply")
+                and not turn.get("provisional_reply") and len(terminal) == 1
+                and not any(event.get("provisional_delta") for event in expired["events"])
+                and all(finding in held["turn"]["findings"] for finding in turn["findings"]),
+                "Expired evidence retained a stale reply or published a new finding")
+
+        # Hold through a full 12-second permit and beyond the former two-second drain,
+        # leaving headroom before the worker's existing 25-second Ask bound.
+        hold_seconds = 13
+        require(expired_at - started + hold_seconds < 21, "The expiry fixture exhausted its Ask deadline headroom")
+        time.sleep(hold_seconds)
+        require(request("events", query=query) == expired, "The expired current turn changed while the worker was held")
+        release()
+        held_ms = round((time.monotonic() - expired_at) * 1000)
+
+        next_query = submit("greeting-after-expiry", "hi")
+        draft = until(lambda: request("events", query=next_query),
+                      lambda page: page["turn"].get("provisional_reply") or page["turn"]["state"] in TERMINAL,
+                      "The original worker did not produce a greeting draft after expiry", timeout=20, interval=0.1)
+        require(not draft["gap"] and draft["turn"]["state"] == "running" and draft["turn"].get("provisional_reply"),
+                "The follow-up greeting did not reach the same worker's draft gate")
+        release()
+        follow_up = until(lambda: request("events", query=next_query)["turn"],
+                          lambda value: value["state"] in TERMINAL,
+                          "The greeting worker did not complete after release", timeout=15, interval=0.1)
+        require(follow_up["state"] == "answered" and follow_up.get("reply") and not follow_up["findings"]
+                and follow_up.get("model_generation") == ready["generation"] and model() == [worker],
+                "The greeting did not finish on the original warm generator after evidence expired")
+        require_context(follow_up)
+        retained = next((saved for saved in request("history") if saved["turn_id"] == turn["turn_id"]), None)
+        require(retained == turn, "Late worker frames changed the expired turn in history")
+
+    return {"expired_operational_terminal_state": turn["state"], "expired_operational_replay_stable": True,
+            "expired_operational_worker_reused": True, "expired_operational_held_after_terminal_ms": held_ms,
+            "post_expiry_greeting_state": follow_up["state"]}
+
+
 def ready_model(request, target, *, updated=None, stages=None):
     if stages is None:
         stages = set()
@@ -342,6 +436,7 @@ def exercise(request, registration, model, readiness, running_jobs):
     """Run the QA lifecycle over the packaged companion's private socket."""
     before = request("settings")
     require(not before["enabled"] and before["phase"] == "off", "QA did not default to Off")
+    require(before["generator"]["preference"] == "gpt2_small", "QA did not default to GPT-2 Small")
     require(not model(), "Off retained a live model process")
     require(request("latest") is None, "Off exposes an exchange")
     turn = {"request_id": "inbox-qa-smoke-1", "context": authorize(registration), "question": SUMMARY_QUESTION}
@@ -352,7 +447,7 @@ def exercise(request, registration, model, readiness, running_jobs):
     updated = request("settings", {"context": authorize(registration), "expected_revision": revision, "enabled": True})
     stages = set()
     try:
-        current = ready_model(request, "flan-t5-small", updated=updated, stages=stages)
+        current = ready_model(request, "gpt2-small", updated=updated, stages=stages)
     except TimeoutError:
         current = request("settings")
         phase = current.get("phase")
@@ -402,7 +497,7 @@ def exercise(request, registration, model, readiness, running_jobs):
     require(terminal_events == 1 and snapshot["cursor"] == cursor, "terminal delivery was not exactly once")
     require(snapshot["state"] == "answered" and first_finding_ms is not None and not snapshot.get("provisional_reply"),
             "real local checkpoint did not seal a cited answer")
-    model_context = require_context(snapshot, inferred=True)
+    model_context = require_context(snapshot)
     require(model_context["model_windows"] == 1, "operational reply did not use a single model input window")
     require(1 <= len(snapshot["findings"]) <= 3, "QA finding count exceeds its contract")
     for finding in snapshot["findings"]:
@@ -428,7 +523,7 @@ def exercise(request, registration, model, readiness, running_jobs):
         lambda: request("events", query={"turn_id": follow_up_id, "after": 0, "wait_seconds": 0})["turn"],
         lambda value: value["state"] in TERMINAL, "fresh-evidence turn did not finish")
     require(next_turn["state"] == "answered" and next_turn["findings"], "fresh evidence did not support the follow-up")
-    require_context(next_turn, inferred=True)
+    require_context(next_turn)
 
     def observed(finding):
         return datetime.fromisoformat(finding["observed_at"].replace("Z", "+00:00"))
@@ -438,7 +533,7 @@ def exercise(request, registration, model, readiness, running_jobs):
 
     context = authorize(registration)
 
-    def ask(case, question, *, mode="direct"):
+    def ask(case, question, *, mode="operational"):
         return settled_turn(request, context, case, question, mode=mode)
 
     def check_status_group(question, group, prior_observation):
@@ -461,17 +556,17 @@ def exercise(request, registration, model, readiness, running_jobs):
                     f"{group} status checks lacked fresh, valid readiness evidence")
         return findings
 
-    gateway = settled_turn(
-        request, context, "gateway", "What does this mean?",
-        source={"kind": "readiness", "id": "gateway"}, mode="grounded",
+    registration_turn = settled_turn(
+        request, context, "registration-notice", "What happened with this readiness check?",
+        source={"kind": "readiness", "id": "registration"},
     )
-    gateway_finding = cited_finding(gateway, "readiness", "gateway")
-    require(gateway_finding["text"]
-            == "Gateway is ready. An authenticated gateway request succeeded.",
-            "gateway answer did not report the observed ready state")
+    registration_finding = cited_finding(registration_turn, "readiness", "registration")
+    require(registration_finding["text"]
+            == "Registration is ready. The workstation registration was verified for this request.",
+            "selected registration answer did not cite the verified caller")
 
     unresolved = check_status_group(
-        "what are the current unresolved status checks about?", "unresolved", observed(gateway_finding),
+        "what are the current unresolved status checks about?", "unresolved", observed(registration_finding),
     )
     catalog_finding = next((finding for finding in unresolved[1:]
                             if finding["source"]["id"] == "actor_catalog"), None)
@@ -489,7 +584,7 @@ def exercise(request, registration, model, readiness, running_jobs):
             "passed status checks included the unseeded Actor catalog")
 
     active_jobs = running_jobs()
-    jobs = ask("jobs", "How many jobs are running?")
+    jobs = ask("jobs", "any jobs running?")
     cited_running_jobs(jobs, active_jobs)
     questions = (
         ("cpu", "What is the current CPU utilization?", "CPU usage"),
@@ -511,13 +606,22 @@ def exercise(request, registration, model, readiness, running_jobs):
     worker, = model()
     dialogue_rss_bytes = embedded.read_process_rss_bytes(worker)
     preceding = readings["memory_follow_up"]
-    for index, question in enumerate(("And now?", "Has that changed?"), start=1):
-        turn = ask(f"conversational-follow-up-{index}", question)
-        measured = cited_metric(turn, "memory", "memory usage", previous=preceding)
-        require(turn["question"] == question and observed(measured) > observed(preceding),
-                "a conversational follow-up changed the displayed prompt or reused a metric sample")
-        preceding = measured
-    resources = ask("resources", "What is our resource usage?")
+    follow_up = ask("conversational-follow-up-1", "And now?")
+    measured = cited_metric(follow_up, "memory", "memory usage", previous=preceding)
+    require(follow_up["question"] == "And now?" and follow_up["used_previous_exchange"]
+            and observed(measured) > observed(preceding),
+            "the follow-up did not retain its subject and refresh its observation")
+    history_started = datetime.now(timezone.utc)
+    recorded = ask("recorded-index", "Is actor search ready since yesterday?")
+    historical = [finding for finding in recorded["findings"]
+                  if finding.get("provenance", {}).get("kind") == "historical"]
+    require(historical and all(finding["source"] == {"kind": "readiness", "id": "actor_search"}
+                               and finding["provenance"]["has_gaps"]
+                               and finding["provenance"]["sequence"] > 0
+                               and observed(finding) < history_started
+                               for finding in historical),
+            "local history lost its original observation times or coverage")
+    resources = ask("resources", "what is the current resource consumption in workstation?")
     require(resources["state"] == "answered"
             and {part["source"]["id"] for part in resources["findings"]} == {"cpu", "memory", "disk"}
             and len(resources["findings"]) == 3
@@ -527,28 +631,68 @@ def exercise(request, registration, model, readiness, running_jobs):
     help_turn = ask("help", "What can you help with?", mode="dialogue")
     require(help_turn.get("conversation") == "help" and not help_turn["findings"],
             "the assistant did not explain how to start a task")
-    unsupported = ask("general-context", "What is the capital of Japan?")
-    require(unsupported["state"] == "insufficient_context" and not unsupported["findings"]
-            and unsupported.get("notice") == "out_of_scope"
-            and unsupported.get("conversation") == "context_needed",
-            "the assistant did not ask for grounding context")
+    general = settled_turn(
+        request, context, "general-knowledge", "Who is Obama?", mode="dialogue",
+        source={"kind": "job", "id": "missing-stale-job-attachment"},
+    )
+    require(not general["findings"] and "obama" in general["reply"].casefold(),
+            "the stale job attachment overrode the general question")
+
+    history = request("history")
+    require(1 < len(history) <= 16 and history[0] == general and jobs in history
+            and all(turn["state"] in TERMINAL and not turn.get("provisional_reply") for turn in history),
+            "Embedded history did not retain the current and earlier settled exchanges")
 
     require(model() == active, "Ordinary turns replaced or unloaded the resident model")
     started = time.monotonic()
     stop_model(request, registration, model, current)
+    unload_ms = round((time.monotonic() - started) * 1000, 1)
     require(request("latest") is None, "Off retained latest question and answer")
-    query = {"turn_id": unsupported["turn_id"], "after": 0, "wait_seconds": 0}
+    require(request("history") == [], "Off retained earlier questions or answers")
+    query = {"turn_id": general["turn_id"], "after": 0, "wait_seconds": 0}
     request("events", query=query, expected=404)
+
+    # The preceding conversation reaches the retained-turn limit. Check a typed
+    # clarification after Off clears those turns and opens a fresh generation.
+    reset = request("settings", {"context": context, "expected_revision": request("settings")["revision"],
+                                 "enabled": True})
+    ready = ready_model(request, "gpt2-small", updated=reset)
+    when = ask("time-clarification", "Is actor search ready since last week?", mode="dialogue")
+    require(when["reply"].endswith("?") and "time" in when["reply"].casefold(),
+            "the generator did not ask for the ambiguous time range")
+    general_with_readiness = settled_turn(
+        request, context, "general-with-readiness", "Who is Obama?", mode="dialogue",
+        source={"kind": "readiness", "id": "registration"},
+    )
+    require("obama" in general_with_readiness["reply"].casefold(),
+            "the stale readiness attachment overrode the general question")
+    mixed = ask("general-with-memory", "What is the current memory usage, and what is RAM?")
+    require(mixed["findings"][0]["source"] == {"kind": "host_metric", "id": "memory"},
+            "the general explanation lost its current memory observation")
+    inbox = settled_turn(
+        request, context, "general-with-inbox", "What are my most important notifications?", mode="dialogue",
+        inbox_notifications=[
+            {"topic": {"readiness": "registration"}, "severity": "warning", "unread": 1, "total": 1},
+            {"topic": "connection", "severity": "informational", "unread": 1, "total": 1},
+        ],
+    )
+    require(inbox["reply"] == "registration, warning (1 unread of 1). connection, informational (1 unread of 1).",
+            "the generator changed the reported Inbox priority, severity, or counts")
+    stop_model(request, registration, model, ready)
+
     return {"model_warm_ms": ready_ms, "admission_ms": admission_ms, "first_cited_finding_ms": first_finding_ms,
-            "completion_ms": completed_ms, "unload_ms": round((time.monotonic() - started) * 1000, 1),
+            "completion_ms": completed_ms, "unload_ms": unload_ms,
             "model_pid_count": len(active), "warm_model_rss_bytes": worker_rss_bytes,
             "model_context": model_context,
             "fresh_observation": True, "terminal_events": terminal_events, "terminal_state": snapshot["state"],
             "grounded_readiness": True, "unresolved_status_checks": True, "passed_status_checks": True,
-            "live_metrics": True, "unsupported_context": True,
+            "live_metrics": True, "general_knowledge": True,
             "resource_snapshot": True, "greeting": True, "conversational_follow_ups": True,
+            "local_observation_history": True, "ordered_turn_stages": True,
+            "generated_time_clarification": True,
+            "general_with_workstation_context": True, "notification_context": True,
             "generated_dialogue": True, "startup_stages": sorted(stages),
-            "automatic_model_target": current["model_target"], "worker_reused": True,
+            "default_model_target": current["model_target"], "worker_reused": True,
             "local_dialogue_rss_bytes": dialogue_rss_bytes,
             "frozen_samples": readings}
 
@@ -1289,9 +1433,10 @@ def run_catalog(args):
 
 
 @contextmanager
-def embedded_qa_session(binary, state, *, reject_model_target=False, qa_memory_mib=FIXTURE_MODEL_MEMORY_MIB):
+def embedded_qa_session(binary, state, *, reject_model_target=False, qa_memory_mib=FIXTURE_MODEL_MEMORY_MIB,
+                        isolated_root=None):
     session = embedded.LocalIpcSession(binary, state, client_name="fleetworks-qa-smoke",
-                                       qa_memory_mib=qa_memory_mib)
+                                       qa_memory_mib=qa_memory_mib, isolated_root=isolated_root)
     try:
         session.hello()
         ensured, _ = session.request_json({"op": "registration_ensure", "args": {
@@ -1305,7 +1450,7 @@ def embedded_qa_session(binary, state, *, reject_model_target=False, qa_memory_m
 
         def request(path, payload=None, *, query=None, expected=200):
             operation = {"settings": "qa_settings", "turns": "qa_turn_submit", "latest": "qa_latest",
-                         "events": "qa_events", "cancel": "qa_cancel"}[path]
+                         "history": "qa_history", "events": "qa_events", "cancel": "qa_cancel"}[path]
             if path == "settings" and payload is not None:
                 operation = "qa_settings_update"
             request = {"op": operation}
@@ -1353,6 +1498,45 @@ def select_generator(request, context, preference, *, enable=False):
     return request("settings", update)
 
 
+def exercise_contextual_status(request, context):
+    jobs = settled_turn(request, context, "running-jobs-list", "what jobs are running?")
+    require(jobs["state"] == "answered"
+            and any(finding["source"]["kind"] == "job_count" for finding in jobs["findings"]),
+            "The running-jobs list did not cite the active workstation's job count")
+
+    status = settled_turn(request, context, "status-check-shorthand", "status check?")
+    require(status["state"] == "answered" and status["findings"],
+            "The status shorthand did not return a readiness finding")
+    finding = status["findings"][0]
+    match = re.search(r"\b(\d+) failed, and ([1-9]\d*) unresolved\b", finding["text"])
+    require(match is not None
+            and finding["source"] == {"kind": "readiness", "id": "workstation_status_checks"},
+            "The status fixture did not report any unresolved checks")
+    followed_group = "failed" if match[1] != match[2] else "unresolved"
+    follow_up = settled_turn(request, context, "status-check-referent",
+                             f"what are the {match[2]} {followed_group} one?")
+    require(follow_up["state"] == "answered" and follow_up.get("used_previous_exchange") is True,
+            "The shorthand follow-up did not use the preceding status exchange")
+    summary = follow_up["findings"][0]
+    require(summary["source"] == finding["source"]
+            and "unresolved" in summary["text"].casefold()
+            and "actor catalog" in summary["text"].casefold(),
+            "The follow-up did not identify the unresolved checks from current evidence")
+    if followed_group == "failed":
+        require(f"The earlier count of {match[2]} was for unresolved checks." in summary["text"],
+                "The follow-up omitted the difference between failed and unresolved checks")
+    recap = settled_turn(request, context, "recap-last-answer", "What was your last answer?", mode="dialogue")
+    used_history = recap.get("used_previous_exchange") is True
+    recalled_status = any(word in recap["reply"].casefold()
+                          for word in ("unresolved", "status", "checks"))
+    if not used_history or not recalled_status:
+        print(json.dumps({"qa_smoke_stage": "retained_recall", "used_history": used_history,
+                          "recalled_status": recalled_status,
+                          "reply_words": len(recap["reply"].split())}), file=sys.stderr)
+    require(used_history and recalled_status,
+            "The generator could not report the previous answer from retained context")
+
+
 def verify_explicit_base_unavailable(request, registration, model, reason, *, enable=False):
     context = authorize(registration)
     updated = select_generator(request, context, "flan_t5_base", enable=enable)
@@ -1364,60 +1548,57 @@ def verify_explicit_base_unavailable(request, registration, model, reason, *, en
     require(generator["preference"] == "flan_t5_base" and generator.get("effective") is None
             and generator["reason"] == reason and not model(),
             "Explicit Base was replaced by Small or reported the wrong availability reason")
-    facts = settled_turn(request, context, f"explicit-base-{reason}", "What is the current memory usage?")
-    cited_metric(facts, "memory", "memory usage")
-    require(facts.get("model_target") is None and facts.get("model_generation") is None,
-            "Direct facts acquired generator provenance while Explicit Base was unavailable")
+    latest = request("latest")
+    request("turns", {"request_id": f"explicit-base-{reason}", "context": context,
+                      "question": "What is the current memory usage?"}, expected=503)
+    require(request("latest") == latest,
+            "An unavailable generator modified history when rejecting a new question")
     stop_model(request, registration, model, unavailable)
 
 
-def named_small_startup(args, binary, digests):
+def named_default_startup(args, binary, digests):
     with tempfile.TemporaryDirectory(prefix="fleetworks-embedded-qa-named-") as temporary:
         root = Path(temporary)
         state = root / "state"
         state.mkdir(mode=0o700)
         pack.install(argparse.Namespace(archive=args.archive, output=root / "pack", state_dir=state,
                                         target=digests["target"], archive_sha256=digests["archive_sha256"],
-                                        manifest_sha256=digests["manifest_sha256"], chat_model="flan-t5-small"))
-        require((state / "qa-model-packs/flan-t5-small.json").is_file()
+                                        manifest_sha256=digests["manifest_sha256"], chat_model="gpt2-small"))
+        require((state / "qa-model-packs/gpt2-small.json").is_file()
                 and not (state / "qa-pack.json").exists()
                 and not (state / "qa-model-assets").exists(),
-                "Named Small fallback requires only the named pack and an empty model cache")
+                "Named GPT startup requires only the named pack and an empty model cache")
         with embedded_qa_session(binary, state, qa_memory_mib=None) as (session, registration, request):
             context = authorize(registration)
-            before = request("settings")
-            enabled = request("settings", {"context": context, "expected_revision": before["revision"],
-                                           "enabled": True})
-            ready = ready_model(request, "flan-t5-small", updated=enabled)
-            require("base_model_provision" in session.stderr_excerpt(),
-                    "The offline fixture did not attempt Base with the available memory headroom")
-            answer = settled_turn(request, context, "named-small-fallback", SUMMARY_QUESTION, mode="operational")
+            enabled = select_generator(request, context, "automatic", enable=True)
+            ready = ready_model(request, "gpt2-small", updated=enabled)
+            answer = settled_turn(request, context, "named-default-automatic", SUMMARY_QUESTION)
             require(all(finding["source"]["kind"] == "readiness" for finding in answer["findings"]),
-                    "Named Small fallback did not preserve grounded readiness citations")
+                    "The named GPT worker did not preserve grounded readiness citations")
             require(ready["generator"]["preference"] == "automatic"
-                    and ready["generator"]["effective"] == "flan-t5-small",
-                    "Automatic did not describe its verified Small fallback")
+                    and ready["generator"]["effective"] == "gpt2-small",
+                    "The legacy Automatic preference did not select GPT-2 Small")
 
             def model():
                 return embedded_tree(session.proc.pid)
 
             auto_worker, = model()
-            explicit = select_generator(request, context, "flan_t5_small")
-            ready = ready_model(request, "flan-t5-small", updated=explicit)
-            small_worker, = model()
+            explicit = select_generator(request, context, "gpt2_small")
+            ready = ready_model(request, "gpt2-small", updated=explicit)
+            gpt_worker, = model()
             require(ready["generation"] == explicit["generation"]
-                    and ready["generator"]["preference"] == "flan_t5_small"
-                    and ready["generator"]["effective"] == "flan-t5-small"
-                    and small_worker != auto_worker,
-                    "Explicit Small did not warm its own generation on a Base-capable workstation")
+                    and ready["generator"]["preference"] == "gpt2_small"
+                    and ready["generator"]["effective"] == "gpt2-small"
+                    and gpt_worker != auto_worker,
+                    "Changing from Automatic to GPT did not warm the new generation")
             retained = request("events", query={"turn_id": answer["turn_id"], "after": answer["cursor"],
                                                 "wait_seconds": 0})
             require(retained["turn"] == answer and not retained["events"],
                     "Changing generator cleared a completed exchange or duplicated its terminal event")
-            explicit_answer = settled_turn(request, context, "explicit-small", SUMMARY_QUESTION, mode="operational")
-            require(explicit_answer["model_target"] == "flan-t5-small"
+            explicit_answer = settled_turn(request, context, "explicit-gpt", SUMMARY_QUESTION)
+            require(explicit_answer["model_target"] == "gpt2-small"
                     and explicit_answer["model_generation"] == ready["generation"],
-                    "Turn provenance did not identify the actual explicit Small worker and generation")
+                    "Turn provenance did not identify the explicit GPT worker and generation")
 
             for preference in ("julia1_q8", "vllm_d3_edge_q8", "rules_only"):
                 updated = request("settings", {"context": context, "expected_revision": ready["revision"],
@@ -1427,18 +1608,20 @@ def named_small_startup(args, binary, digests):
                 require(decision["preference"] == preference and decision["effective"] == "rules_only"
                         and decision.get("reason") == (None if preference == "rules_only" else "awaiting_qualification")
                         and updated["generation"] == explicit_answer["model_generation"]
-                        and ready["generator"]["effective"] == "flan-t5-small" and model() == [small_worker],
+                        and ready["generator"]["effective"] == "gpt2-small" and model() == [gpt_worker],
                         "Changing Decision displaced the generator or activated an unqualified scorer")
 
             still_warm = settled_turn(request, context, "decision-changes-kept-generator", "hi", mode="dialogue")
             require(still_warm["model_generation"] == explicit_answer["model_generation"]
-                    and model() == [small_worker],
+                    and model() == [gpt_worker],
                     "The generator failed to complete a turn on its existing worker after Decision edits")
 
+            exercise_contextual_status(request, context)
             verify_explicit_base_unavailable(request, registration, model, "model_provision_failed")
-        return {"base_provision_attempted": True, "selected_model": "flan-t5-small",
-                "grounded_answer": True, "explicit_small_worker": True,
-                "decision_changes_kept_generator": True, "base_provision_error_preserved": True}
+        return {"selected_model": "gpt2-small",
+                "grounded_answer": True, "explicit_gpt_worker": True,
+                "decision_changes_kept_generator": True, "base_provision_error_preserved": True,
+                "contextual_status_used_generator": True}
 
 
 def run_embedded(args):
@@ -1487,7 +1670,7 @@ def run_embedded(args):
             attestation = session.transport_attestation
 
     if linux:
-        result["named_small_fallback"] = named_small_startup(args, binary, digests)
+        result["named_default_startup"] = named_default_startup(args, binary, digests)
 
     with tempfile.TemporaryDirectory(prefix="fleetworks-embedded-qa-stop-") as temporary:
         root = Path(temporary)
@@ -1506,9 +1689,12 @@ def run_embedded(args):
             stop_model(request, registration, gated_model, request("settings"))
             cancellation.update(cancel_running_embedded_turn(request, registration, gated_model, draft=True))
             stop_model(request, registration, gated_model, request("settings"))
+            expiry = expired_operational_turn_keeps_generator(request, registration, gated_model)
+            stop_model(request, registration, gated_model, request("settings"))
 
     return {"runtime": attestation["transport"], "transport_attestation": attestation, "target": digests["target"],
-            "source_sha": digests["source_sha"], "manual_model_target_rejected": True, **result, **cancellation}
+            "source_sha": digests["source_sha"], "manual_model_target_rejected": True,
+            **result, **cancellation, **expiry}
 
 
 def main():

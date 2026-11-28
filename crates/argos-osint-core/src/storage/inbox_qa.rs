@@ -1,42 +1,60 @@
 //! Transactional Inbox state. Model processes never receive this repository.
 
+use std::collections::BTreeSet;
 use std::future::Future;
+use std::time::Duration;
 
+use chrono::DateTime;
 use chrono::Utc;
 use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::chat::QaConversationReply;
 use fleetworks_contracts::chat::QaDecisionPreference;
 use fleetworks_contracts::chat::QaEvent;
+use fleetworks_contracts::chat::QaEvidenceProvenance;
 use fleetworks_contracts::chat::QaFinding;
 use fleetworks_contracts::chat::QaGeneratorPreference;
+use fleetworks_contracts::chat::QaInboxNotificationGroup;
 use fleetworks_contracts::chat::QaMeasurement;
 use fleetworks_contracts::chat::QaModelTarget;
 use fleetworks_contracts::chat::QaRelatedActivity;
 use fleetworks_contracts::chat::QaTurn;
+use fleetworks_contracts::chat::QaTurnLimitation;
 use fleetworks_contracts::chat::QaTurnNotice;
 use fleetworks_contracts::chat::QaTurnRequest;
+use fleetworks_contracts::chat::QaTurnStage;
 use fleetworks_contracts::chat::QaTurnState;
 use fleetworks_contracts::chat::QA_MAX_FINDINGS;
+use fleetworks_contracts::chat::QA_MAX_RETAINED_TURNS;
 use fleetworks_contracts::chat::QA_MAX_WORDS;
 use fleetworks_contracts::context::RegisteredContext;
 use fleetworks_contracts::qa_worker::valid_dialogue_reply;
 use fleetworks_contracts::qa_worker::valid_draft_delta;
+use fleetworks_contracts::qa_worker::valid_operational_draft;
+use fleetworks_contracts::qa_worker::valid_uncited_reply;
 use fleetworks_contracts::qa_worker::verified_operational_sources;
 use fleetworks_contracts::qa_worker::QaContextUsage;
 use fleetworks_contracts::qa_worker::QaDialogueExchange;
 use fleetworks_contracts::qa_worker::QaDialogueKind;
+use fleetworks_contracts::qa_worker::QaGuidance;
+use fleetworks_contracts::qa_worker::QaWorkerPlan;
 use fleetworks_contracts::qa_worker::QaWorkerRequest;
 use fleetworks_contracts::qa_worker::QA_MAX_DIALOGUE_HISTORY;
 use fleetworks_contracts::qa_worker::QA_MAX_DIALOGUE_MESSAGE_BYTES;
 use fleetworks_contracts::qa_worker::QA_MAX_DRAFT_BYTES;
 use fleetworks_contracts::qa_worker::QA_MAX_DRAFT_EVENTS;
+use fleetworks_contracts::qa_worker::QA_REPORTED_INBOX_PREFIX;
 use futures_util::{Stream, StreamExt};
 use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
 use sha2::Sha256;
+use surrealdb::types::RecordId;
 use surrealdb::types::SurrealValue;
+
+use crate::nlp::conversation::Focus;
+use crate::nlp::conversation::PendingClarification;
+use crate::nlp::Status;
 
 use super::connect_registry;
 use super::connect_registry::RegistryAuthority;
@@ -52,11 +70,13 @@ use super::tx::TxError;
 
 /// Shared Jobs dispatch pool, dedicated to QA.
 pub const POOL: &str = "assistant_qa";
-const REPLICA_LEASE_MS: i64 = 12_000;
+/// Duration of a replica permit from the datastore's authorized claim or renewal.
+pub const REPLICA_LEASE: Duration = Duration::from_secs(12);
+const REPLICA_LEASE_MS: i64 = REPLICA_LEASE.as_millis() as i64;
 const EXCHANGE_TTL_MS: i64 = 15 * 60_000;
 const MAX_ACTIVE_AGE_MS: i64 = 90_000;
 const MAX_ACTIVE: i64 = 16;
-const MAX_PER_REGISTRATION: i64 = 16;
+const MAX_PER_REGISTRATION: i64 = QA_MAX_RETAINED_TURNS as i64;
 const MAX_RETAINED: i64 = 512;
 
 /// Apply after registry and durable Jobs dispatch schemas.
@@ -172,25 +192,14 @@ impl Actor {
 
 /// Maximum age of evidence admitted to an Inbox turn.
 pub const MAX_EVIDENCE_AGE_MS: i64 = 5_000;
-
-/// Decide whether a frozen request is answered from an exact fact or sent to the model.
-#[derive(Clone, Copy, Default, Deserialize, Serialize)]
-pub enum AnswerMode {
-    #[default]
-    Model,
-    /// Publish complete, measured facts without model selection.
-    Grounded,
-}
+/// Label for the approved historical side of an observation comparison.
+pub const PREVIOUS_OBSERVATION_LABEL: &str = "Previous observation";
+/// The cited aggregate for a Workstation Status check report.
+pub const STATUS_CHECKS_SOURCE_ID: &str = "workstation_status_checks";
 
 /// Frozen evidence and metadata retained inside the coordinator during execution.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct FrozenEvidence {
-    #[serde(default)]
-    pub answer_mode: AnswerMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notice: Option<QaTurnNotice>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conversation: Option<QaConversationReply>,
     pub request: QaWorkerRequest,
     pub sources: Vec<Source>,
     pub sampled_at_ms: i64,
@@ -204,6 +213,8 @@ pub struct Source {
     pub label: String,
     pub observed_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<QaEvidenceProvenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measurement: Option<QaMeasurement>,
     /// For summary selections, display the complete observed state from the chosen passage.
     #[serde(default)]
@@ -211,6 +222,26 @@ pub struct Source {
 }
 
 impl Source {
+    /// Verify timing without conflating source time with retrieval time.
+    #[must_use]
+    pub fn observation_is_valid(&self, sampled_at_ms: i64, now_ms: i64) -> bool {
+        DateTime::parse_from_rfc3339(&self.observed_at).is_ok_and(|at| {
+            let observed_ms = at.timestamp_millis();
+            match self.provenance {
+                Some(QaEvidenceProvenance::PreviousObservation) => observed_ms < sampled_at_ms,
+                Some(QaEvidenceProvenance::Historical {
+                    sequence,
+                    coverage_start_ms,
+                    ..
+                }) => sequence > 0 && (coverage_start_ms..=sampled_at_ms).contains(&observed_ms),
+                None | Some(QaEvidenceProvenance::Current) => {
+                    (0..=MAX_EVIDENCE_AGE_MS).contains(&now_ms.saturating_sub(observed_ms))
+                }
+                _ => false,
+            }
+        })
+    }
+
     /// Attach frozen, server-side citation metadata to an exact source span.
     #[must_use]
     pub fn finding(&self, text: String, start: u32, end: u32) -> QaFinding {
@@ -223,6 +254,7 @@ impl Source {
             self.observed_at.clone(),
         );
         finding.measurement = self.measurement.clone();
+        finding.provenance = self.provenance;
         finding
     }
 }
@@ -241,34 +273,262 @@ pub enum ObservationValue {
     Measurement(QaMeasurement),
 }
 
+/// Failed and unresolved checks in the authorized Workstation Status sample.
+#[derive(Clone, Copy, Deserialize, Serialize)]
+pub struct StatusCheckTally {
+    pub failed: usize,
+    pub unresolved: usize,
+}
+
+/// Proposed conversational state. Only verified terminal replies make it reusable.
+#[derive(Clone, Default, Deserialize, Serialize)]
+pub struct ConversationState {
+    pub focus: Option<Focus>,
+    pub pending: Option<PendingClarification>,
+    pub parser_status: Option<Status>,
+    pub guidance: Option<QaGuidance>,
+    pub history_requested: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbox_notifications: Option<Vec<QaInboxNotificationGroup>>,
+}
+
+impl ConversationState {
+    fn private_source_ids(&self) -> impl Iterator<Item = &str> {
+        self.focus
+            .iter()
+            .chain(self.pending.iter().flat_map(|pending| &pending.choices))
+            .filter_map(|focus| focus.source.as_ref())
+            .filter(|source| private_subject(source))
+            .map(|source| source.id.as_str())
+    }
+}
+
+/// Lease-scoped inputs for response planning. Facts remain in the frozen snapshot.
+pub struct PlanContext {
+    pub focus: Option<Focus>,
+    pub pending: Option<PendingClarification>,
+    pub guidance: Option<QaGuidance>,
+    pub history_requested: bool,
+    pub inbox_notifications: Option<Vec<QaInboxNotificationGroup>>,
+    pub decision_preference: QaDecisionPreference,
+    pub decision_generation: i64,
+}
+
+impl PlanContext {
+    /// Render the resolved focus and any display metadata supplied for this turn.
+    #[must_use]
+    pub fn worker_focus(&self) -> String {
+        worker_focus(self.focus.as_ref(), self.inbox_notifications.as_deref())
+    }
+}
+
+fn worker_focus(
+    focus: Option<&Focus>,
+    notifications: Option<&[QaInboxNotificationGroup]>,
+) -> String {
+    let Some(notifications) = notifications else {
+        return focus.map_or_else(String::new, Focus::compact);
+    };
+    if notifications.is_empty() {
+        return format!("{QA_REPORTED_INBOX_PREFIX} No groups were shared for this question.");
+    }
+    let groups = notifications
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(". ");
+    format!("{QA_REPORTED_INBOX_PREFIX} {groups}.")
+}
+
+/// The way the generator may respond to the admitted turn.
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseMode {
+    Conversation,
+    Current,
+    Historical,
+    Recheck,
+    Clarification,
+}
+
+/// Stable task discriminator for the retained response plan.
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseTask {
+    ResponsePlan,
+}
+
+/// Selected plan and exactly one instruction bound to the admitted snapshot.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct ResponsePlan {
+    pub task: ResponseTask,
+    pub version: u8,
+    pub snapshot: String,
+    pub decision_generation: i64,
+    pub mode: ResponseMode,
+    pub focus: Option<Focus>,
+    pub clarification: Option<PendingClarification>,
+    pub ordered_passages: Vec<String>,
+    pub worker: Option<QaWorkerPlan>,
+    pub requires_worker_support: bool,
+    pub negotiated: bool,
+    pub note: String,
+}
+
+impl FrozenEvidence {
+    /// Bind the plan to the exact serialized passages and citation metadata.
+    #[must_use]
+    pub fn binding(&self) -> Option<String> {
+        Some(format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(self).ok()?)
+        ))
+    }
+}
+
+impl ResponsePlan {
+    fn matches(&self, evidence: &FrozenEvidence, conversation: &ConversationState) -> bool {
+        if self.version != 1
+            || evidence.binding().as_deref() != Some(self.snapshot.as_str())
+            || self.focus != conversation.focus
+            || self.clarification != conversation.pending
+            || self.note.is_empty()
+            || self.note.len() > 256
+            || self.ordered_passages.len() > 3
+            || self.ordered_passages.iter().collect::<BTreeSet<_>>().len()
+                != self.ordered_passages.len()
+            || self.ordered_passages.iter().any(|id| {
+                !evidence.request.passages.iter().any(|p| &p.source_id == id)
+                    || !evidence.sources.iter().any(|s| &s.opaque_id == id)
+            })
+        {
+            return false;
+        }
+        if let Some(worker) = &self.worker {
+            let compact = worker_focus(
+                conversation.focus.as_ref(),
+                conversation.inbox_notifications.as_deref(),
+            );
+            if worker.note != self.note
+                || worker.focus != compact
+                || worker.guidance.is_some() && worker.guidance != conversation.guidance
+                || !self.ordered_passages.starts_with(&worker.required_passages)
+            {
+                return false;
+            }
+            return self.request(evidence).is_some();
+        }
+        !self.requires_worker_support && self.ordered_passages.is_empty()
+    }
+
+    /// Reconstruct the negotiated request without changing the frozen snapshot.
+    #[must_use]
+    pub fn request(&self, evidence: &FrozenEvidence) -> Option<QaWorkerRequest> {
+        let mut request = evidence.request.clone();
+        if self.negotiated {
+            if let Some(worker) = &self.worker {
+                request.passages = self
+                    .ordered_passages
+                    .iter()
+                    .map(|id| {
+                        evidence
+                            .request
+                            .passages
+                            .iter()
+                            .find(|p| &p.source_id == id)
+                            .cloned()
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                request.plan = Some(worker.clone());
+            }
+        } else {
+            request.passages.retain(|passage| !passage.job_log_tail);
+        }
+        request.validate().ok()?;
+        Some(request)
+    }
+}
+
 /// Trusted request metadata that is independent of any model reply.
 pub struct AdmissionMetadata {
     pub subject: Option<ChatSourceReference>,
     pub observation: Option<Observation>,
     pub related_activity: Option<QaRelatedActivity>,
+    pub status_check_tally: Option<StatusCheckTally>,
+    pub used_previous_exchange: bool,
+    pub response_started_at_ms: Option<i64>,
+    pub conversation: ConversationState,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
 struct Exchange {
     actor: Actor,
     source: Option<ChatSourceReference>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    job_notification: bool,
     turn: QaTurn,
+    #[serde(skip)]
+    accepted_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    response_started_at_ms: Option<i64>,
     events: Vec<QaEvent>,
     evidence: Option<FrozenEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resolved_question: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resolved_source: Option<ChatSourceReference>,
+    /// Keep the submitted source for replay matching when routing ignores it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    source_ignored: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     observation: Option<Observation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status_check_tally: Option<StatusCheckTally>,
     /// Older rows used the history generation for both the worker and transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     generator_generation: Option<i64>,
+    #[serde(default)]
+    conversation: ConversationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plan: Option<ResponsePlan>,
 }
 
 impl Exchange {
+    fn response_time_ms(&self, completed_at: i64) -> Option<u64> {
+        let started_at = self.response_started_at_ms.unwrap_or(self.accepted_at_ms);
+        u64::try_from(completed_at.checked_sub(started_at)?).ok()
+    }
+
     fn subject(&self) -> Option<&ChatSourceReference> {
-        self.resolved_source.as_ref().or(self.source.as_ref())
+        self.resolved_source
+            .as_ref()
+            .or_else(|| self.source.as_ref().filter(|_| !self.source_ignored))
+    }
+
+    fn private_citation_ids(&self) -> impl Iterator<Item = &str> {
+        let frozen = self
+            .evidence
+            .iter()
+            .flat_map(|evidence| &evidence.sources)
+            .map(|source| &source.reference);
+        self.subject()
+            .into_iter()
+            .chain(frozen)
+            .chain(self.turn.findings.iter().map(|finding| &finding.source))
+            .filter(|source| private_subject(source))
+            .map(|source| source.id.as_str())
+    }
+
+    fn private_subject_ids(&self) -> impl Iterator<Item = &str> {
+        let related = match &self.turn.related_activity {
+            Some(QaRelatedActivity::Found { target, .. }) => Some(target),
+            _ => None,
+        };
+        self.private_citation_ids().chain(
+            related
+                .filter(|source| private_subject(source))
+                .map(|source| source.id.as_str()),
+        )
     }
 }
 
@@ -276,16 +536,26 @@ fn private_subject(source: &ChatSourceReference) -> bool {
     matches!(source.kind, ChatSourceKind::Job | ChatSourceKind::Cycle)
 }
 
-async fn subject_visible_in(
+async fn private_subjects_visible_in<'a>(
     tx: &Tx,
     actor: &Actor,
-    source: Option<&ChatSourceReference>,
+    ids: impl Iterator<Item = &'a str>,
 ) -> Result<bool, TxError> {
-    let Some(source) = source.filter(|source| private_subject(source)) else {
-        return Ok(true);
-    };
+    let ids: BTreeSet<_> = ids.collect();
+    let jobs = ids.iter().map(|id| jobs::rid("job", id)).collect();
+    Ok(visible_private_subjects_in(tx, actor, jobs).await?.len() == ids.len())
+}
+
+async fn visible_private_subjects_in(
+    tx: &Tx,
+    actor: &Actor,
+    subjects: Vec<RecordId>,
+) -> Result<Vec<String>, TxError> {
+    if subjects.is_empty() {
+        return Ok(Vec::new());
+    }
     let query = format!(
-        "SELECT VALUE true FROM ONLY $job WHERE kind != 'service' AND {} AND ({}) AND ({})",
+        "SELECT VALUE record::id(id) FROM $subjects WHERE kind != 'service' AND {} AND ({}) AND ({})",
         jobs_view::ELIGIBLE,
         jobs_view::activity_membership(),
         jobs_view::activity_private()
@@ -293,7 +563,7 @@ async fn subject_visible_in(
     let mut result = jobs::run(
         tx,
         tx.query(query)
-            .bind(("job", jobs::rid("job", &source.id)))
+            .bind(("subjects", subjects))
             .bind(("activity_scope", actor.scope.clone()))
             .bind(("activity_deployment", actor.context.deployment_id.clone()))
             .bind(("activity_node", actor.context.workstation_id.clone()))
@@ -303,7 +573,7 @@ async fn subject_visible_in(
             )),
     )
     .await?;
-    Ok(jobs::take::<Option<bool>>(&mut result, 0)? == Some(true))
+    jobs::take(&mut result, 0)
 }
 
 #[derive(Clone, Debug, Default, SurrealValue)]
@@ -324,6 +594,7 @@ struct ExchangeRow {
     generation: i64,
     owner: String,
     active: bool,
+    accepted_at: i64,
     completed_at: i64,
     payload: String,
 }
@@ -347,9 +618,12 @@ pub struct Setting {
 impl SettingsRow {
     fn state(&self, epoch: &str) -> Result<Setting, TxError> {
         let generator_preference = match self.generator_preference.as_deref() {
-            None | Some("automatic") => QaGeneratorPreference::Automatic,
+            None => QaGeneratorPreference::default(),
+            Some("automatic") => QaGeneratorPreference::Automatic,
             Some("flan_t5_small") => QaGeneratorPreference::FlanT5Small,
             Some("flan_t5_base") => QaGeneratorPreference::FlanT5Base,
+            Some("gpt2_small") => QaGeneratorPreference::Gpt2Small,
+            Some("gpt2_medium") => QaGeneratorPreference::Gpt2Medium,
             Some(_) => return Err(abort("invalid_store")),
         };
         let decision_preference = match self.decision_preference.as_deref() {
@@ -379,8 +653,22 @@ fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
 
-fn decode(payload: &str) -> Result<Exchange, TxError> {
-    serde_json::from_str(payload).map_err(|_| abort("invalid_store"))
+impl ExchangeRow {
+    fn decode(&self) -> Result<Exchange, TxError> {
+        let mut exchange: Exchange =
+            serde_json::from_str(&self.payload).map_err(|_| abort("invalid_store"))?;
+        // Use row metadata so transcripts retained from earlier versions have the same times.
+        exchange.accepted_at_ms = self.accepted_at;
+        exchange.turn.accepted_at = Some(self.accepted_at.div_euclid(1_000));
+        if exchange.turn.state.is_terminal() && self.completed_at > 0 {
+            exchange.turn.completed_at = Some(self.completed_at.div_euclid(1_000));
+            exchange.turn.response_time_ms = exchange.response_time_ms(self.completed_at);
+        } else {
+            exchange.turn.completed_at = None;
+            exchange.turn.response_time_ms = None;
+        }
+        Ok(exchange)
+    }
 }
 
 async fn settings_row(tx: &Tx) -> Result<SettingsRow, TxError> {
@@ -388,7 +676,7 @@ async fn settings_row(tx: &Tx) -> Result<SettingsRow, TxError> {
         tx,
         tx.query(
             "SELECT enabled,revision,generation,epoch,changed_at,
-                    (generator_preference ?? 'automatic') AS generator_preference,
+                    (generator_preference ?? 'gpt2_small') AS generator_preference,
                     (decision_preference ?? 'rules_only') AS decision_preference,
                     (history_generation ?? generation) AS history_generation,
                     (decision_generation ?? generation) AS decision_generation
@@ -561,6 +849,8 @@ pub async fn update(
             QaGeneratorPreference::Automatic => "automatic",
             QaGeneratorPreference::FlanT5Small => "flan_t5_small",
             QaGeneratorPreference::FlanT5Base => "flan_t5_base",
+            QaGeneratorPreference::Gpt2Small => "gpt2_small",
+            QaGeneratorPreference::Gpt2Medium => "gpt2_medium",
             _ => return Err(abort("invalid_store")),
         };
         let decision_preference = match next.decision_preference {
@@ -605,7 +895,7 @@ async fn seal_replaced_generator_in(tx: &Tx) -> Result<(), TxError> {
     let active = jobs::take::<Vec<String>>(&mut response, 0)?;
     for id in &active {
         if let Some(row) = exchange_in(tx, id).await? {
-            let mut exchange = decode(&row.payload)?;
+            let mut exchange = row.decode()?;
             exchange.turn.findings.clear();
             exchange.turn.related_activity = None;
             exchange.events.clear();
@@ -771,7 +1061,7 @@ pub fn accepted_turn_id(
 async fn exchange_in(tx: &Tx, turn_id: &str) -> Result<Option<ExchangeRow>, TxError> {
     let mut reply = jobs::run(
         tx,
-        tx.query("SELECT generation,owner,active,completed_at,payload FROM ONLY $turn")
+        tx.query("SELECT generation,owner,active,accepted_at,completed_at,payload FROM ONLY $turn")
             .bind(("turn", jobs::rid("inbox_qa_exchange", turn_id))),
     )
     .await?;
@@ -779,7 +1069,10 @@ async fn exchange_in(tx: &Tx, turn_id: &str) -> Result<Option<ExchangeRow>, TxEr
 }
 
 fn matching_request(existing: &Exchange, request: &QaTurnRequest) -> bool {
-    existing.turn.question == request.question && existing.source == request.source
+    existing.turn.question == request.question
+        && existing.source == request.source
+        && existing.job_notification == request.job_notification
+        && existing.conversation.inbox_notifications == request.inbox_notifications
 }
 
 /// Resolve an accepted request before fetching evidence, including during a temporary outage.
@@ -807,11 +1100,11 @@ pub async fn replay(
             {
                 return Ok(None);
             }
-            let exchange = decode(&row.payload)?;
+            let exchange = row.decode()?;
             if !matching_request(&exchange, request) {
                 return Err(abort("id_conflict"));
             }
-            if !subject_visible_in(&tx, actor, exchange.subject()).await? {
+            if !private_subjects_visible_in(&tx, actor, exchange.private_citation_ids()).await? {
                 return Err(abort("missing"));
             }
             Ok(Some(exchange.turn))
@@ -852,58 +1145,6 @@ async fn boundary_in(tx: &Tx, key: &str, generation: i64) -> Result<i64, TxError
     Ok(own.max(jobs::take::<Option<i64>>(&mut global, 0)?.unwrap_or_default()))
 }
 
-fn grounded_findings(evidence: &FrozenEvidence) -> Result<Vec<QaFinding>, TxError> {
-    evidence
-        .request
-        .validate()
-        .map_err(|_| abort("invalid_part"))?;
-    let passages = &evidence.request.passages;
-    if passages.len() != evidence.sources.len() || passages.len() > QA_MAX_FINDINGS {
-        return Err(abort("invalid_part"));
-    }
-    passages
-        .iter()
-        .zip(&evidence.sources)
-        .map(|(passage, source)| {
-            if passage.source_id != source.opaque_id {
-                return Err(abort("invalid_part"));
-            }
-            let end =
-                u32::try_from(passage.text.chars().count()).map_err(|_| abort("invalid_part"))?;
-            Ok(source.finding(passage.text.clone(), 0, end))
-        })
-        .collect()
-}
-
-fn fallback_findings(evidence: &FrozenEvidence) -> Result<Vec<QaFinding>, TxError> {
-    evidence
-        .request
-        .validate()
-        .map_err(|_| abort("invalid_part"))?;
-    let passages = &evidence.request.passages;
-    if passages.len() != evidence.sources.len() {
-        return Err(abort("invalid_part"));
-    }
-    let mut remaining_words = QA_MAX_WORDS;
-    let mut findings = Vec::new();
-    for (passage, source) in passages.iter().zip(&evidence.sources) {
-        if passage.source_id != source.opaque_id {
-            return Err(abort("invalid_part"));
-        }
-        let Some(words) = remaining_words.checked_sub(passage.text.split_whitespace().count())
-        else {
-            continue;
-        };
-        let end = u32::try_from(passage.text.chars().count()).map_err(|_| abort("invalid_part"))?;
-        findings.push(source.finding(passage.text.clone(), 0, end));
-        remaining_words = words;
-        if findings.len() == QA_MAX_FINDINGS {
-            break;
-        }
-    }
-    Ok(findings)
-}
-
 fn dialogue_line(text: &str) -> &str {
     text[..text.floor_char_boundary(QA_MAX_DIALOGUE_MESSAGE_BYTES.min(text.len()))].trim()
 }
@@ -918,9 +1159,9 @@ async fn recent_completed_in(
     let mut reply = jobs::run(
         tx,
         tx.query(
-            "SELECT generation,owner,active,completed_at,payload FROM inbox_qa_exchange
+            "SELECT generation,owner,active,accepted_at,completed_at,payload FROM inbox_qa_exchange
          WHERE owner=$owner AND generation=$generation AND active=false AND completed_at>$cutoff
-         ORDER BY completed_at DESC LIMIT $limit;",
+         ORDER BY completed_at DESC, accepted_at DESC, id DESC LIMIT $limit;",
         )
         .bind(("owner", owner.to_owned()))
         .bind(("generation", generation))
@@ -929,6 +1170,23 @@ async fn recent_completed_in(
     )
     .await?;
     jobs::take(&mut reply, 0)
+}
+
+fn retained_generated_reply(turn: &QaTurn) -> Option<&str> {
+    // Earlier verified workers recorded usage before model metadata was added.
+    let model_used = turn.context.is_some_and(|usage| {
+        usage.model_windows > 0
+            && (1..=usage.window_tokens).contains(&usage.peak_input_tokens)
+            && QaModelTarget::ALL
+                .iter()
+                .any(|target| usage.window_tokens == target.input_tokens())
+    });
+    if turn.state != QaTurnState::Answered || !model_used {
+        return None;
+    }
+    turn.reply
+        .as_deref()
+        .filter(|reply| valid_dialogue_reply(reply))
 }
 
 async fn recent_dialogue_in(
@@ -940,7 +1198,7 @@ async fn recent_dialogue_in(
     let retained = recent_completed_in(tx, owner, generation, now, MAX_PER_REGISTRATION).await?;
     let mut history = Vec::with_capacity(QA_MAX_DIALOGUE_HISTORY);
     for row in retained {
-        let exchange = decode(&row.payload)?;
+        let exchange = row.decode()?;
         // Keep private job and cycle observations outside the model history.
         if exchange.subject().is_some_and(private_subject)
             || exchange.turn.findings.iter().any(|finding| {
@@ -949,32 +1207,12 @@ async fn recent_dialogue_in(
         {
             continue;
         }
-        let turn = exchange.turn;
-        let answer = if let Some(reply) = turn.reply {
-            reply
-        } else if turn.state == QaTurnState::Answered && !turn.findings.is_empty() {
-            turn.findings
-                .into_iter()
-                .map(|finding| finding.text)
-                .collect::<Vec<_>>()
-                .join(" ")
-        } else if turn.notice == Some(QaTurnNotice::Greeting) {
-            match turn.conversation {
-                Some(QaConversationReply::Acknowledgement) => {
-                    "Of course. What else can I help with?"
-                }
-                Some(QaConversationReply::Help) => {
-                    "I can answer questions about workstation status and resources."
-                }
-                _ => "Hi! How can I help?",
-            }
-            .to_owned()
-        } else {
+        let Some(reply) = retained_generated_reply(&exchange.turn) else {
             continue;
         };
         history.push(QaDialogueExchange {
-            question: dialogue_line(&turn.question).to_owned(),
-            reply: dialogue_line(&answer).to_owned(),
+            question: dialogue_line(&exchange.turn.question).to_owned(),
+            reply: reply.to_owned(),
         });
         if history.len() == QA_MAX_DIALOGUE_HISTORY {
             break;
@@ -1011,16 +1249,23 @@ pub async fn admit(
                 if row.owner != *key || row.generation != generation {
                     return Err(abort("id_conflict"));
                 }
-                let exchange = decode(&row.payload)?;
+                let exchange = row.decode()?;
                 if !matching_request(&exchange, request) {
                     return Err(abort("id_conflict"));
                 }
-                if !subject_visible_in(&tx, actor, exchange.subject()).await? {
+                if !private_subjects_visible_in(&tx, actor, exchange.private_citation_ids()).await? {
                     return Err(abort("missing"));
                 }
                 return Ok(exchange.turn);
             }
-            if !subject_visible_in(&tx, actor, metadata.subject.as_ref()).await? {
+            let private_sources = metadata
+                .subject
+                .iter()
+                .chain(evidence.sources.iter().map(|source| &source.reference))
+                .filter(|source| private_subject(source))
+                .map(|source| source.id.as_str())
+                .chain(metadata.conversation.private_source_ids());
+            if !private_subjects_visible_in(&tx, actor, private_sources).await? {
                 return Err(abort("missing"));
             }
             let boundary = boundary_in(&tx, key, generation).await?;
@@ -1028,6 +1273,9 @@ pub async fn admit(
             if evidence.sampled_at_ms <= boundary
                 || evidence.sampled_at_ms < now.timestamp_millis() - MAX_EVIDENCE_AGE_MS
                 || evidence.sampled_at_ms > now.timestamp_millis()
+                || evidence.sources.iter().any(|source| {
+                    !source.observation_is_valid(evidence.sampled_at_ms, now.timestamp_millis())
+                })
             {
                 return Err(abort("freshness"));
             }
@@ -1043,35 +1291,57 @@ pub async fn admit(
               .bind(("workstation", actor.workstation())).bind(("active_cap", MAX_ACTIVE)).bind(("owner_cap", MAX_PER_REGISTRATION))
               .bind(("retained_cap", MAX_RETAINED))).await?;
             let ready = jobs::take::<Vec<bool>>(&mut reply, 1)?.len() as i64;
-            let needs_model = matches!(evidence.answer_mode, AnswerMode::Model) && ready > 0;
+            if ready == 0 {
+                return Err(abort("generator_unavailable"));
+            }
             if !jobs::take::<Vec<bool>>(&mut reply, 2)?.is_empty() {
                 return Err(abort("active"));
             }
             let active = jobs::take::<Option<i64>>(&mut reply, 3)?.ok_or_else(|| abort("invalid_store"))?;
             let owner_retained = jobs::take::<Option<i64>>(&mut reply, 4)?.ok_or_else(|| abort("invalid_store"))?;
             let total_retained = jobs::take::<Option<i64>>(&mut reply, 5)?.ok_or_else(|| abort("invalid_store"))?;
-            if (needs_model && active >= MAX_ACTIVE.min(ready * 2))
+            if active >= MAX_ACTIVE.min(ready * 2)
                 || owner_retained >= MAX_PER_REGISTRATION
                 || total_retained >= MAX_RETAINED
             {
                 return Err(abort("busy"));
             }
             let mut frozen = evidence.clone();
-            if let Some(dialogue) = frozen.request.dialogue.as_mut().filter(|_| needs_model) {
+            let dialogue = frozen.request.dialogue.as_mut().ok_or_else(|| abort("invalid_part"))?;
+            if dialogue.kind == QaDialogueKind::Operational {
+                // The snapshot already resolves the approved subject and comparison.
+                frozen.request.question = request.question.clone();
+            } else if dialogue.kind == QaDialogueKind::Recall {
                 dialogue.history = recent_dialogue_in(&tx, key, generation, timestamp).await?;
+                if dialogue.history.is_empty() {
+                    dialogue.kind = QaDialogueKind::Clarification;
+                }
             }
+            frozen.request.validate().map_err(|_| abort("invalid_part"))?;
             let mut exchange = Exchange {
                 actor: actor.clone(),
                 source: request.source.clone(),
+                job_notification: request.job_notification,
                 turn: QaTurn::queued(id.to_owned(), request.request_id.clone(), request.question.clone()),
+                accepted_at_ms: timestamp,
+                response_started_at_ms: metadata.response_started_at_ms.filter(|started_at| *started_at <= timestamp),
                 events: Vec::new(),
                 evidence: Some(frozen),
                 resolved_question: (request.question != evidence.request.question)
                     .then(|| evidence.request.question.clone()),
                 resolved_source: metadata.subject.as_ref().filter(|source| Some(*source) != request.source.as_ref()).cloned(),
+                source_ignored: metadata.subject.is_none() && request.source.is_some(),
                 observation: metadata.observation.clone(),
+                status_check_tally: metadata.status_check_tally,
                 generator_generation: Some(state.generation),
+                conversation: ConversationState {
+                    inbox_notifications: request.inbox_notifications.clone(),
+                    ..metadata.conversation.clone()
+                },
+                plan: None,
             };
+            exchange.turn.accepted_at = Some(timestamp.div_euclid(1_000));
+            exchange.turn.used_previous_exchange = metadata.used_previous_exchange;
             exchange.turn.related_activity = metadata.related_activity.clone();
             let payload = serde_json::to_string(&exchange).map_err(|_| abort("invalid_store"))?;
             jobs::run(&tx, tx.query(
@@ -1080,34 +1350,6 @@ pub async fn admit(
             ).bind(("turn", jobs::rid("inbox_qa_exchange", id))).bind(("gen", generation))
               .bind(("owner", key.clone())).bind(("workstation", actor.workstation())).bind(("at", timestamp)).bind(("payload", payload))
               .bind(("latest", jobs::rid("inbox_qa_latest", key))).bind(("boundary", boundary))).await?;
-            if !needs_model {
-                // Exact facts need no worker lease. Publish the canonical turn and its
-                // events in the admission transaction so Off need not race settlement.
-                let findings = if (0..=MAX_EVIDENCE_AGE_MS)
-                    .contains(&now_ms().saturating_sub(evidence.sampled_at_ms))
-                {
-                    if matches!(evidence.answer_mode, AnswerMode::Grounded) {
-                        grounded_findings(evidence)?
-                    } else {
-                        fallback_findings(evidence)?
-                    }
-                } else {
-                    Vec::new()
-                };
-                let terminal = if findings.is_empty() {
-                    exchange.turn.notice = evidence.notice.or(Some(QaTurnNotice::ObservationUnavailable));
-                    exchange.turn.conversation = evidence.conversation;
-                    QaTurnState::InsufficientContext
-                } else {
-                    for finding in findings {
-                        append_in(&tx, key, generation, &mut exchange, QaTurnState::Running, Some(finding)).await?;
-                    }
-                    QaTurnState::Answered
-                };
-                exchange.turn.context = Some(QaContextUsage::new(QaModelTarget::default().input_tokens(), 0, 0));
-                append_in(&tx, key, generation, &mut exchange, terminal, None).await?;
-                return Ok(exchange.turn);
-            }
             job_dispatch::submit_in(&tx, &jobs::NewJob {
                 id, kind: POOL, operation: POOL, parent: None, created_at: now,
             }, &jobs::NewTask {
@@ -1138,11 +1380,72 @@ pub async fn latest(
         .map(|exchange| (exchange.turn, exchange.events)))
 }
 
+/// Read this registration's retained terminal exchanges, newest first.
+/// Private subjects and citations must still be visible to the caller.
+pub async fn history(repo: &Repository, actor: &Actor) -> Result<Vec<QaTurn>, TxError> {
+    let key = actor.key()?;
+    Ok(write(repo, |tx| {
+        let key = &key;
+        async move {
+            actor.validate_in(&tx).await?;
+            let setting = settings_in(&tx).await?;
+            if !setting.enabled {
+                return Ok(Vec::new());
+            }
+            let rows = recent_completed_in(
+                &tx,
+                key,
+                setting.history_generation,
+                now_ms(),
+                MAX_PER_REGISTRATION,
+            )
+            .await?;
+            let exchanges: Vec<Exchange> = rows
+                .into_iter()
+                .map(|row| row.decode())
+                .collect::<Result<_, _>>()?;
+            let subjects: BTreeSet<&str> = exchanges
+                .iter()
+                .flat_map(Exchange::private_subject_ids)
+                .collect();
+            let jobs = subjects
+                .into_iter()
+                .map(|id| jobs::rid("job", id))
+                .collect();
+            let visible: BTreeSet<String> = visible_private_subjects_in(&tx, actor, jobs)
+                .await?
+                .into_iter()
+                .collect();
+            Ok(exchanges
+                .into_iter()
+                .filter(|exchange| {
+                    exchange.turn.state.is_terminal()
+                        && exchange
+                            .private_subject_ids()
+                            .all(|id| visible.contains(id))
+                })
+                .map(|mut exchange| {
+                    exchange.turn.provisional_reply = None;
+                    exchange.turn
+                })
+                .collect())
+        }
+    })
+    .await?
+    .value)
+}
+
 /// The latest answered intent and its typed subject after registration validation.
 pub struct AnsweredPrompt {
     pub question: String,
     pub subject: Option<ChatSourceReference>,
     pub observation: Option<Observation>,
+    /// True when an intervening completed turn did not have an answer with citations.
+    pub intervening_turn: bool,
+    /// The cited aggregate for an answered status report, when present.
+    pub status_check_summary: Option<String>,
+    pub status_check_tally: Option<StatusCheckTally>,
+    pub focus: Option<Focus>,
 }
 
 /// Use the most recent cited topic within the short conversation window.
@@ -1159,7 +1462,7 @@ pub async fn last_answered_prompt(
             if !setting.enabled {
                 return Ok(None);
             }
-            for row in recent_completed_in(
+            for (index, row) in recent_completed_in(
                 &tx,
                 key,
                 setting.history_generation,
@@ -1167,12 +1470,16 @@ pub async fn last_answered_prompt(
                 QA_MAX_DIALOGUE_HISTORY as i64,
             )
             .await?
+            .into_iter()
+            .enumerate()
             {
-                let exchange = decode(&row.payload)?;
+                let exchange = row.decode()?;
                 if exchange.turn.state == QaTurnState::Answered
                     && !exchange.turn.findings.is_empty()
                 {
-                    if !subject_visible_in(&tx, actor, exchange.subject()).await? {
+                    if !private_subjects_visible_in(&tx, actor, exchange.private_subject_ids())
+                        .await?
+                    {
                         return Ok(None);
                     }
                     let subject = exchange.subject().cloned();
@@ -1182,12 +1489,69 @@ pub async fn last_answered_prompt(
                                 && finding.observed_at == observation.observed_at
                         })
                     });
+                    let status_check_summary = exchange.turn.findings.iter().find_map(|finding| {
+                        (finding.source.kind == ChatSourceKind::Readiness
+                            && finding.source.id == STATUS_CHECKS_SOURCE_ID)
+                            .then(|| finding.text.clone())
+                    });
                     return Ok(Some(AnsweredPrompt {
                         subject,
+                        intervening_turn: index > 0,
+                        status_check_summary,
+                        status_check_tally: exchange.status_check_tally,
+                        focus: exchange.conversation.focus,
                         observation,
                         question: exchange.resolved_question.unwrap_or(exchange.turn.question),
                     }));
                 }
+            }
+            Ok(None)
+        }
+    })
+    .await?
+    .value)
+}
+
+/// Recover an open clarification from the latest verified reply in this
+/// registration and conversation generation.
+pub async fn pending_clarification(
+    repo: &Repository,
+    actor: &Actor,
+) -> Result<Option<PendingClarification>, TxError> {
+    let key = actor.key()?;
+    Ok(write(repo, |tx| {
+        let key = &key;
+        async move {
+            actor.validate_in(&tx).await?;
+            let setting = settings_in(&tx).await?;
+            if !setting.enabled {
+                return Ok(None);
+            }
+            let completed = recent_completed_in(
+                &tx,
+                key,
+                setting.history_generation,
+                now_ms(),
+                MAX_PER_REGISTRATION,
+            )
+            .await?;
+            for row in completed {
+                let exchange = row.decode()?;
+                if exchange.turn.state != QaTurnState::Answered || exchange.turn.reply.is_none() {
+                    continue;
+                }
+                if !private_subjects_visible_in(
+                    &tx,
+                    actor,
+                    exchange.conversation.private_source_ids(),
+                )
+                .await?
+                {
+                    return Ok(None);
+                }
+                // A verified reply supersedes the previous question even when
+                // it did not open another clarification.
+                return Ok(exchange.conversation.pending);
             }
             Ok(None)
         }
@@ -1212,8 +1576,8 @@ async fn latest_exchange(repo: &Repository, actor: &Actor) -> Result<Option<Exch
             let Some(row) = exchange_in(&tx, &turn_id).await? else {
                 return Ok(None);
             };
-            let exchange = decode(&row.payload)?;
-            if !subject_visible_in(&tx, actor, exchange.subject()).await? {
+            let exchange = row.decode()?;
+            if !private_subjects_visible_in(&tx, actor, exchange.private_citation_ids()).await? {
                 return Ok(None);
             }
             Ok(Some(exchange))
@@ -1243,6 +1607,16 @@ async fn append_event_in(
     finding: Option<QaFinding>,
     provisional_delta: Option<String>,
 ) -> Result<(), TxError> {
+    record_event(exchange, state, finding, provisional_delta)?;
+    persist_events_in(tx, owner, generation, exchange).await
+}
+
+fn record_event(
+    exchange: &mut Exchange,
+    state: QaTurnState,
+    finding: Option<QaFinding>,
+    provisional_delta: Option<String>,
+) -> Result<(), TxError> {
     if let Some(part) = &finding {
         let words = exchange
             .turn
@@ -1258,33 +1632,59 @@ async fn append_event_in(
         }
         exchange.turn.findings.push(part.clone());
     }
-    // Serialize a publication with a generation transition or a placement handover.
-    jobs::run(
-        tx,
-        tx.query("UPDATE inbox_qa_settings:current SET admission += 1 RETURN NONE"),
-    )
-    .await?;
-    let terminal = state.is_terminal();
     exchange.turn.cursor += 1;
     exchange.turn.state = state;
-    if terminal {
+    if state.is_terminal() {
+        exchange.turn.stage = None;
+        if state != QaTurnState::Answered {
+            exchange.conversation.focus = None;
+            exchange.conversation.pending = None;
+        }
+        if exchange.plan.is_some()
+            && matches!(
+                state,
+                QaTurnState::Failed | QaTurnState::InsufficientContext
+            )
+        {
+            exchange.turn.findings.clear();
+            for event in &mut exchange.events {
+                event.finding = None;
+            }
+        }
+        exchange.evidence = None;
         exchange.turn.provisional_reply = None;
         for event in &mut exchange.events {
             event.provisional_delta = None;
         }
     }
     let mut event = QaEvent::new(exchange.turn.cursor, state, finding);
+    event.stage = exchange.turn.stage;
     event.provisional_delta = provisional_delta;
     exchange.events.push(event);
+    Ok(())
+}
+
+async fn persist_events_in(
+    tx: &Tx,
+    owner: &str,
+    generation: i64,
+    exchange: &mut Exchange,
+) -> Result<(), TxError> {
+    let terminal = exchange.turn.state.is_terminal();
     let at = if terminal { now_ms() } else { 0 };
-    if terminal {
-        exchange.evidence = None;
-    }
+    exchange.turn.completed_at = terminal.then(|| at.div_euclid(1_000));
+    exchange.turn.response_time_ms = if terminal {
+        exchange.response_time_ms(at)
+    } else {
+        None
+    };
     let payload = serde_json::to_string(exchange).map_err(|_| abort("invalid_store"))?;
     jobs::run(
         tx,
+        // Serialize the publication with a generation transition or placement handover.
         tx.query(
-            "UPDATE $turn SET payload=$payload, active=$active, completed_at=$at RETURN NONE;",
+            "UPDATE inbox_qa_settings:current SET admission += 1 RETURN NONE;
+             UPDATE $turn SET payload=$payload, active=$active, completed_at=$at RETURN NONE;",
         )
         .bind((
             "turn",
@@ -1327,8 +1727,8 @@ pub async fn cancel(repo: &Repository, actor: &Actor, id: &str) -> Result<QaTurn
                         && row.owner == *owner
                 })
                 .ok_or_else(|| abort("missing"))?;
-            let mut exchange = decode(&row.payload)?;
-            if !subject_visible_in(&tx, actor, exchange.subject()).await? {
+            let mut exchange = row.decode()?;
+            if !private_subjects_visible_in(&tx, actor, exchange.private_citation_ids()).await? {
                 return Err(abort("missing"));
             }
             if row.active {
@@ -1372,12 +1772,24 @@ async fn live_exchange_in(
     {
         return Ok(None);
     }
-    let mut exchange = decode(&row.payload)?;
+    let mut exchange = row.decode()?;
     if exchange.generator_generation.unwrap_or(row.generation) != state.generation {
         return Ok(None);
     }
     exchange.actor.validate_in(tx).await?;
-    if !subject_visible_in(tx, &exchange.actor, exchange.subject()).await? {
+    if exchange
+        .plan
+        .as_ref()
+        .is_some_and(|plan| plan.decision_generation != state.decision_generation)
+        || !private_subjects_visible_in(
+            tx,
+            &exchange.actor,
+            exchange
+                .private_citation_ids()
+                .chain(exchange.conversation.private_source_ids()),
+        )
+        .await?
+    {
         exchange.turn.findings.clear();
         exchange.turn.related_activity = None;
         exchange.events.clear();
@@ -1405,7 +1817,10 @@ pub async fn start(
         let Some((row, mut exchange)) = live_exchange_in(&tx, lease).await? else {
             return Ok(None);
         };
-        if !exchange.turn.findings.is_empty() || exchange.turn.provisional_reply.is_some() {
+        if exchange.plan.is_some()
+            || !exchange.turn.findings.is_empty()
+            || exchange.turn.provisional_reply.is_some()
+        {
             // A replacement process must not append to an interrupted stream.
             append_in(
                 &tx,
@@ -1419,6 +1834,7 @@ pub async fn start(
             return Ok(None);
         }
         if exchange.turn.state == QaTurnState::Queued {
+            exchange.turn.stage = Some(QaTurnStage::Working);
             append_in(
                 &tx,
                 &row.owner,
@@ -1430,6 +1846,120 @@ pub async fn start(
             .await?;
         }
         Ok(exchange.evidence)
+    })
+    .await?
+    .value)
+}
+
+/// Publish the planning stage under the same lease that owns the snapshot.
+pub async fn begin_planning(
+    repo: &Repository,
+    lease: &job_dispatch::DeliveryLease,
+) -> Result<Option<PlanContext>, TxError> {
+    Ok(write(repo, |tx| async move {
+        let Some((row, mut exchange)) = live_exchange_in(&tx, lease).await? else {
+            return Ok(None);
+        };
+        if exchange.turn.state != QaTurnState::Running || exchange.plan.is_some() {
+            return Ok(None);
+        }
+        if exchange.turn.stage != Some(QaTurnStage::Thinking) {
+            exchange.turn.stage = Some(QaTurnStage::Thinking);
+            append_in(
+                &tx,
+                &row.owner,
+                row.generation,
+                &mut exchange,
+                QaTurnState::Running,
+                None,
+            )
+            .await?;
+        }
+        let setting = settings_in(&tx).await?;
+        Ok(Some(PlanContext {
+            focus: exchange.conversation.focus,
+            pending: exchange.conversation.pending,
+            guidance: exchange.conversation.guidance,
+            history_requested: exchange.conversation.history_requested,
+            inbox_notifications: exchange.conversation.inbox_notifications,
+            decision_preference: setting.decision_preference,
+            decision_generation: setting.decision_generation,
+        }))
+    })
+    .await?
+    .value)
+}
+
+/// Accept exactly one bounded plan and move to generator work atomically.
+pub async fn accept_plan(
+    repo: &Repository,
+    lease: &job_dispatch::DeliveryLease,
+    plan: &ResponsePlan,
+) -> Result<bool, TxError> {
+    Ok(write(repo, |tx| async move {
+        let Some((row, mut exchange)) = live_exchange_in(&tx, lease).await? else {
+            return Ok(false);
+        };
+        if exchange.turn.stage != Some(QaTurnStage::Thinking) || exchange.plan.is_some() {
+            return Ok(false);
+        }
+        let evidence = exchange
+            .evidence
+            .as_ref()
+            .ok_or_else(|| abort("invalid_part"))?;
+        if plan.decision_generation != settings_in(&tx).await?.decision_generation
+            || !plan.matches(evidence, &exchange.conversation)
+            || plan.requires_worker_support && !plan.negotiated
+        {
+            return Err(abort("invalid_part"));
+        }
+        exchange.plan = Some(plan.clone());
+        exchange.turn.stage = Some(QaTurnStage::Writing);
+        append_in(
+            &tx,
+            &row.owner,
+            row.generation,
+            &mut exchange,
+            QaTurnState::Running,
+            None,
+        )
+        .await?;
+        Ok(true)
+    })
+    .await?
+    .value)
+}
+
+/// Record unavailable plan capability or context overflow as terminal status.
+pub async fn publish_unavailable(
+    repo: &Repository,
+    lease: &job_dispatch::DeliveryLease,
+    limitation: QaTurnLimitation,
+) -> Result<bool, TxError> {
+    Ok(write(repo, |tx| async move {
+        let Some((row, mut exchange)) = live_exchange_in(&tx, lease).await? else {
+            return Ok(false);
+        };
+        let expected_stage = match limitation {
+            QaTurnLimitation::CapabilityUnavailable => QaTurnStage::Thinking,
+            QaTurnLimitation::QuestionTooLong => QaTurnStage::Writing,
+            _ => return Err(abort("invalid_part")),
+        };
+        if exchange.turn.stage != Some(expected_stage) {
+            return Err(abort("invalid_part"));
+        }
+        exchange.turn.notice = Some(QaTurnNotice::ObservationUnavailable);
+        exchange.turn.limitation = Some(limitation);
+        append_in(
+            &tx,
+            &row.owner,
+            row.generation,
+            &mut exchange,
+            QaTurnState::InsufficientContext,
+            None,
+        )
+        .await?;
+        Ok(true)
     })
     .await?
     .value)
@@ -1475,6 +2005,11 @@ pub async fn publish_draft(
             let Some(dialogue) = evidence.request.dialogue.as_ref() else {
                 return Err(abort("invalid_part"));
             };
+            let planned_request = exchange
+                .plan
+                .as_ref()
+                .and_then(|plan| plan.request(evidence));
+            let request = planned_request.as_ref().unwrap_or(&evidence.request);
             let draft = exchange
                 .turn
                 .provisional_reply
@@ -1492,9 +2027,12 @@ pub async fn publish_draft(
                 return Err(abort("invalid_part"));
             }
             draft.push_str(&text);
-            if dialogue.kind == QaDialogueKind::Operational
-                && verified_operational_sources(&evidence.request, draft).is_none()
-            {
+            let valid = if dialogue.kind == QaDialogueKind::Operational {
+                valid_operational_draft(request, draft)
+            } else {
+                valid_uncited_reply(request, draft)
+            };
+            if !valid {
                 return Err(abort("invalid_part"));
             }
             append_event_in(
@@ -1530,63 +2068,188 @@ pub async fn publish_with_model_result(
     finding: Option<QaFinding>,
     result: ModelResult,
 ) -> Result<bool, TxError> {
+    publish_parts(repo, lease, state, finding, None, result).await
+}
+
+/// Commit generator-selected findings and the terminal state under the live lease.
+/// Rechecks operational freshness after acquiring the writer, before recording the batch.
+pub async fn publish_findings_and_complete(
+    repo: &Repository,
+    lease: &job_dispatch::DeliveryLease,
+    state: QaTurnState,
+    findings: &[QaFinding],
+    result: ModelResult,
+) -> Result<bool, TxError> {
+    if !state.is_terminal() || (state != QaTurnState::Answered && !findings.is_empty()) {
+        return Err(abort("invalid_part"));
+    }
+    publish_parts(repo, lease, state, None, Some(findings), result).await
+}
+
+async fn publish_parts(
+    repo: &Repository,
+    lease: &job_dispatch::DeliveryLease,
+    state: QaTurnState,
+    finding: Option<QaFinding>,
+    terminal_findings: Option<&[QaFinding]>,
+    result: ModelResult,
+) -> Result<bool, TxError> {
     Ok(write(repo, |tx| {
         let finding = finding.clone();
         let ModelResult {
             context,
-            reply,
+            mut reply,
             model_target,
         } = result.clone();
         async move {
             let Some((row, mut exchange)) = live_exchange_in(&tx, lease).await? else {
                 return Ok(false);
             };
-            let dialogue_evidence = exchange
+            let mut state = state;
+            if let Some(findings) = terminal_findings {
+                let expired = exchange.evidence.as_ref().is_some_and(|evidence| {
+                    evidence
+                        .request
+                        .dialogue
+                        .as_ref()
+                        .is_some_and(|dialogue| dialogue.kind.uses_evidence())
+                        && !(0..=MAX_EVIDENCE_AGE_MS)
+                            .contains(&now_ms().saturating_sub(evidence.sampled_at_ms))
+                });
+                if expired {
+                    reply = None;
+                    if state == QaTurnState::Answered {
+                        state = QaTurnState::InsufficientContext;
+                    }
+                } else {
+                    if !findings.is_empty() {
+                        let evidence = exchange
+                            .evidence
+                            .as_ref()
+                            .ok_or_else(|| abort("invalid_part"))?;
+                        if findings.iter().any(|finding| {
+                            !evidence.sources.iter().any(|source| {
+                                source.reference == finding.source
+                                    && source.observed_at == finding.observed_at
+                                    && source.provenance == finding.provenance
+                                    && source.observation_is_valid(evidence.sampled_at_ms, now_ms())
+                            })
+                        }) {
+                            return Err(abort("invalid_part"));
+                        }
+                    }
+                    for finding in findings {
+                        record_event(
+                            &mut exchange,
+                            QaTurnState::Running,
+                            Some(finding.clone()),
+                            None,
+                        )?;
+                    }
+                }
+            }
+            let dialogue = exchange
                 .evidence
                 .as_ref()
-                .filter(|evidence| evidence.request.dialogue.is_some());
-            if reply.as_deref().is_some_and(|text| {
-                dialogue_evidence.is_none()
-                    || state != QaTurnState::Answered
-                    || !valid_dialogue_reply(text)
-            }) || (state == QaTurnState::Answered
-                && exchange.turn.findings.is_empty()
-                && reply.is_none())
-            {
+                .and_then(|evidence| evidence.request.dialogue.as_ref());
+            let has_model_usage = context.is_some_and(|usage| usage.model_windows > 0);
+            if state == QaTurnState::Answered {
+                if dialogue.is_none()
+                    || !has_model_usage
+                    || model_target.is_none()
+                    || !reply.as_deref().is_some_and(valid_dialogue_reply)
+                    || (dialogue.is_some_and(|dialogue| dialogue.kind.needs_general_support())
+                        && exchange.plan.as_ref().is_none_or(|plan| !plan.negotiated))
+                {
+                    return Err(abort("invalid_part"));
+                }
+                if let Some((plan, evidence)) =
+                    exchange.plan.as_ref().zip(exchange.evidence.as_ref())
+                {
+                    let request = plan
+                        .request(evidence)
+                        .ok_or_else(|| abort("invalid_part"))?;
+                    let valid = reply.as_deref().is_some_and(|reply| {
+                        if dialogue.is_some_and(|dialogue| dialogue.kind.uses_evidence()) {
+                            let passages = if dialogue
+                                .is_some_and(|dialogue| dialogue.kind == QaDialogueKind::Contextual)
+                            {
+                                valid_uncited_reply(&request, reply)
+                                    .then(|| request.passages.iter().collect())
+                            } else {
+                                verified_operational_sources(&request, reply)
+                            };
+                            passages.is_some_and(|passages| {
+                                if !plan.negotiated {
+                                    return true;
+                                }
+                                passages.len() == exchange.turn.findings.len()
+                                    && passages.into_iter().zip(&exchange.turn.findings).all(
+                                        |(passage, finding)| {
+                                            evidence
+                                                .sources
+                                                .iter()
+                                                .find(|source| {
+                                                    source.opaque_id == passage.source_id
+                                                })
+                                                .is_some_and(|source| {
+                                                    source.observation_is_valid(
+                                                        evidence.sampled_at_ms,
+                                                        now_ms(),
+                                                    ) && *finding
+                                                        == source.finding(
+                                                            passage.text.clone(),
+                                                            0,
+                                                            passage.text.chars().count() as u32,
+                                                        )
+                                                })
+                                        },
+                                    )
+                            })
+                        } else {
+                            valid_uncited_reply(&request, reply)
+                        }
+                    });
+                    if plan.decision_generation != settings_in(&tx).await?.decision_generation
+                        || !valid
+                    {
+                        return Err(abort("invalid_part"));
+                    }
+                }
+            } else if reply.is_some() {
                 return Err(abort("invalid_part"));
             }
             if state.is_terminal() {
+                if exchange.plan.as_ref().is_none_or(|plan| !plan.negotiated) {
+                    exchange.conversation.pending = None;
+                }
+                if state == QaTurnState::Answered {
+                    match dialogue.map(|dialogue| dialogue.kind) {
+                        Some(QaDialogueKind::Greeting) => {
+                            exchange.turn.notice = Some(QaTurnNotice::Greeting);
+                        }
+                        Some(QaDialogueKind::Help) => {
+                            exchange.turn.conversation = Some(QaConversationReply::Help);
+                        }
+                        Some(QaDialogueKind::Acknowledgement) => {
+                            exchange.turn.conversation = Some(QaConversationReply::Acknowledgement);
+                        }
+                        _ => {}
+                    }
+                }
+                if state == QaTurnState::Answered
+                    && dialogue.is_some_and(|dialogue| {
+                        dialogue.kind == QaDialogueKind::Recall && !dialogue.history.is_empty()
+                    })
+                {
+                    exchange.turn.used_previous_exchange = true;
+                }
                 exchange.turn.context = context;
                 exchange.turn.reply = reply;
-                if let Some(target) =
-                    model_target.filter(|_| context.is_some_and(|usage| usage.model_windows > 0))
-                {
+                if let Some(target) = model_target.filter(|_| has_model_usage) {
                     exchange.turn.model_target = Some(target);
                     exchange.turn.model_generation =
                         u64::try_from(exchange.generator_generation.unwrap_or(row.generation)).ok();
-                }
-                if let Some(evidence) = dialogue_evidence.filter(|_| {
-                    matches!(
-                        state,
-                        QaTurnState::Answered | QaTurnState::InsufficientContext
-                    )
-                }) {
-                    exchange.turn.notice = evidence.notice;
-                    exchange.turn.conversation = evidence.conversation;
-                    if exchange.turn.reply.is_none() {
-                        if let Some(dialogue) = evidence
-                            .request
-                            .dialogue
-                            .as_ref()
-                            .filter(|dialogue| dialogue.kind == QaDialogueKind::Recall)
-                        {
-                            exchange.turn.reply = dialogue
-                                .history
-                                .last()
-                                .map(|exchange| format!("You asked “{}”", exchange.question))
-                                .filter(|text| valid_dialogue_reply(text));
-                        }
-                    }
                 }
             }
             append_in(
@@ -1749,7 +2412,7 @@ pub async fn cleanup(repo: &Repository) -> Result<(), TxError> {
         let mut retire = Vec::new();
         for id in jobs::take::<Vec<String>>(&mut expired, 0)? {
             if let Some(row) = exchange_in(&tx, &id).await?.filter(|row| row.active) {
-                let mut exchange = decode(&row.payload)?;
+                let mut exchange = row.decode()?;
                 append_in(&tx, &row.owner, row.generation, &mut exchange, QaTurnState::Failed, None).await?;
                 retire.push(id);
             }
@@ -1768,4 +2431,54 @@ pub async fn cleanup(repo: &Repository) -> Result<(), TxError> {
         Ok(())
     }).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{retained_generated_reply, ChatSourceKind, ChatSourceReference};
+    use super::{QaContextUsage, QaFinding, QaTurn, QaTurnNotice, QaTurnState};
+
+    #[test]
+    fn recall_requires_a_stored_answer_with_verified_generator_usage() {
+        let mut turn = QaTurn::queued("turn".into(), "request".into(), "Check the gateway.".into());
+        turn.state = QaTurnState::Answered;
+        turn.context = Some(QaContextUsage::new(512, 72, 1));
+
+        turn.notice = Some(QaTurnNotice::Greeting);
+        assert_eq!(retained_generated_reply(&turn), None);
+        turn.notice = None;
+        turn.findings.push(QaFinding::new(
+            ChatSourceReference::new(ChatSourceKind::Readiness, "gateway".into()).unwrap(),
+            "Gateway".into(),
+            "Gateway is ready.".into(),
+            0,
+            17,
+            "2026-11-26T00:00:00Z".into(),
+        ));
+        assert_eq!(retained_generated_reply(&turn), None);
+
+        turn.reply = Some("Gateway is ready.".into());
+        assert!(turn.model_target.is_none());
+        assert!(turn.model_generation.is_none());
+        assert_eq!(retained_generated_reply(&turn), Some("Gateway is ready."));
+
+        turn.state = QaTurnState::InsufficientContext;
+        assert_eq!(retained_generated_reply(&turn), None);
+        turn.state = QaTurnState::Answered;
+        for usage in [
+            None,
+            Some(QaContextUsage::new(512, 0, 0)),
+            Some(QaContextUsage::new(512, 0, 1)),
+            Some(QaContextUsage::new(512, 513, 1)),
+        ] {
+            turn.context = usage;
+            assert_eq!(retained_generated_reply(&turn), None);
+        }
+        turn.context = Some(QaContextUsage::new(896, 724, 1));
+        assert_eq!(retained_generated_reply(&turn), Some("Gateway is ready."));
+        for reply in ["", "  ", "Current user: Check the gateway."] {
+            turn.reply = Some(reply.into());
+            assert_eq!(retained_generated_reply(&turn), None);
+        }
+    }
 }

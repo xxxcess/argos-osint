@@ -119,6 +119,15 @@ pub enum ReadinessCheckId {
 }
 
 impl ReadinessCheckId {
+    /// Whether this check measures a standalone Distributed service.
+    #[must_use]
+    pub const fn requires_distributed_backend(self) -> bool {
+        matches!(
+            self,
+            Self::Jobs | Self::Brain | Self::Control | Self::Classifier | Self::ClassifierInference
+        )
+    }
+
     /// Stable check spelling shared by aggregate and presentation.
     #[must_use]
     pub const fn as_str(self) -> &'static str {

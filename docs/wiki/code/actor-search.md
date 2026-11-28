@@ -12,6 +12,10 @@ no index origin, write token, filesystem path or engine document address.
 
 [![Source intent, private projection and canonical discovery](../../diagrams/actor-search.svg)](../../diagrams/actor-search.html)
 
+Native Search checks actor names, aliases and article text from one field. The **Actors** avatar opens a browse view that reads shared, active canonical actors in ID order through `GET /api/v1/actors/browse`. Both HTTP and Embedded IPC use the backend read permission. Browse results are available before the search index is built. The API accepts up to 25 projections per page. The forward scan starts after the supplied cursor and applies eligibility before the page limit. One additional eligible row establishes whether to return a continuation.
+
+Native requests ten records on opening the list and uses the returned cursor to load ten more when the reader scrolls to the end. **Load more** offers the same continuation when the whole page fits on screen. The list retains up to 480 actors. Return to the search field to narrow a larger catalog.
+
 ## Ownership and entry points
 
 | Source | Responsibility |
@@ -103,9 +107,9 @@ and the shared **Status checks** table label automatic catch-up as background
 indexing. The Jobs & Logs rail badge follows the registered workstation’s active
 tracked jobs, including a
 queued, running or retrying actor reindex, while another destination is open.
-From Workstation Status's **Actor search** hero card, **Build actor index** /
-**Rebuild actor index** opens an inline confirmation modal (`Escape` cancels and
-restores button focus). Before issuing the HTTP POST, the native client
+In Workstation Status, the **Actor search** row’s **Build actor index** icon
+opens a confirmation dialog when the backend admits the action. `Escape` cancels
+and restores focus to the icon. Before issuing the HTTP POST, the native client
 persists the pending `reindex_actors` request ID and `original_registration_id`
 so uncertain delivery or network drops reconcile read-only via
 `GET /api/v1/workstation/requests/detail`, clearing the durable journal on
@@ -151,7 +155,8 @@ retirement paths preserve this shared corpus and index.
 ## Shared bounds and pressure
 
 The validated [ActorIndexLimits](../../../crates/fleetworks-contracts/src/actor_index.rs)
-policy applies to one backend resource, not once per native workstation.
+policy applies to one backend resource. The following defaults apply to Distributed.
+Embedded derives its writer, RSS, and disk limits from [Resources in native Settings](native-connections.md#embedded-resource-settings) at companion startup.
 
 | Control | Current starting policy |
 | --- | --- |
@@ -171,6 +176,13 @@ fail closed; stale service observations pause bulk source work. Retry-After is
 persisted without shortening a valid server delay to the local backoff cap.
 Transient failures back off and cool down; authentication, identity, schema or
 oversize conflicts preserve intent for correction.
+
+Embedded sizes the writer from memory headroom and CPU worker capacity, within
+the existing two-writer-thread and 256 MiB bounds. The source seed keeps one
+ordered transaction stream so canonical rows, index events, and checkpoint
+progress commit together. Raising the presets can reduce pressure pauses and
+let independent validation and index workers do more work. Transaction ordering,
+index start pacing, merge bounds, and foreground query latency still govern throughput.
 
 [NativeWorker local pressure](../../../services/api-host/src/native_bulk_pressure.rs)
 also gates bulk admission using its own RSS and workspace free disk. Its

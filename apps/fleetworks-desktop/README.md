@@ -2,17 +2,17 @@
 
 **Approved visual target:** [Glass Canvas design reference](../../docs/design/matte-canvas/README.md) (deep-space `#060709` backdrop, layered smoked/frosted glass across shell chrome, cards, controls and overlays, static liquid-metal rim highlights, warm molten-gold & cyan accents, and crescent-moon action textures, with opaque reduced-transparency fallbacks). The [native verification guide](../../docs/wiki/code/native-verification.md) describes how to review the production views and exact-head packages.
 
-The Rune/rune-kit macOS and Linux x86_64 API client supports **Embedded** and **Distributed** backends. Embedded uses a bundled companion started explicitly by the user over a private Unix socket. Distributed connects to an operator-managed gateway. Backend engines run outside the desktop process. Its six sidebar destinations are Actor Maintenance, News Cycles, Brain Search, Tool Box, Model Assignments and Jobs & Logs. The brand avatar opens Workstation Status. It groups actor search and workstation activity under **Services**, followed by **Status checks** and **Diagnostics**. **Settings → Connection** walks through setup and selects the backend type after launch. **Settings → General** shows the app name and version. Distributed setup uses a gateway URL, operator approval and macOS Keychain or Linux D-Bus Secret Service, with explicit Linux session-only mode also available.
+The Rune/rune-kit macOS and Linux x86_64 API client supports **Embedded** and **Distributed** backends. Embedded uses a bundled companion started explicitly by the user over a private Unix socket. Distributed connects to an operator-managed gateway. Backend engines run outside the desktop process. Its five sidebar destinations are Actor Maintenance, Search, Tool Box, Model Assignments and Jobs & Logs. The brand avatar opens Workstation Status. Workstation Status opens with **Status checks** expanded and offers an action icon for each applicable check. Open **Diagnostics** below the checks for backend connection details and Embedded capabilities. **Settings → Connection** walks through setup and selects the backend type after launch. **Settings → General** shows the app name and version. Distributed setup uses a gateway URL, operator approval and macOS Keychain or Linux D-Bus Secret Service, with explicit Linux session-only mode also available.
 
 [Design and control allowlist](../../docs/wiki/code/native-design-system.md) · [Connection contracts](../../docs/wiki/code/native-connections.md) · [Protected identity](../../docs/wiki/code/native-workspaces.md) · [Implementation/verification status](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md)
 
-[![Six destinations and selected content](../../docs/diagrams/native-workstation-layout.svg)](../../docs/diagrams/native-workstation-layout.html)
+[![Five destinations and selected content](../../docs/diagrams/native-workstation-layout.svg)](../../docs/diagrams/native-workstation-layout.html)
 
 ## Build and provision
 
 ### macOS quick start
 
-You’ll need the pinned Rust **1.95.0** toolchain, Python 3, Xcode Command Line Tools, and the bundled actor catalog checked out through Git LFS. Quit Fleetworks before rebuilding an open app.
+You’ll need the pinned Rust **1.95.0** toolchain, Python 3, Xcode Command Line Tools, and the bundled actor catalog checked out through Git LFS.
 
 **RustRover.** Open the repository root, choose **Build and open Fleetworks (Embedded)** from the run configuration menu, and click **Run**. [Shared run configuration](../../.idea/runConfigurations/Build_and_open_Fleetworks_Embedded.xml)
 
@@ -23,13 +23,28 @@ PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=1 \
   python3 -B scripts/fleetworks_quick_start.py --profile debug --start-embedded
 ```
 
-The launcher builds and opens the app, then starts its bundled Embedded companion. Automatic startup uses macOS Accessibility. If macOS asks for permission, allow RustRover or Terminal under **System Settings → Privacy & Security → Accessibility**. To start the companion by hand, omit `--start-embedded`, then click **Start Embedded Backend** in Fleetworks.
+The launcher builds and opens the app, then starts its bundled Embedded companion. Automatic startup uses macOS Accessibility. If macOS asks for permission, allow RustRover or Terminal under **System Settings → Privacy & Security → Accessibility**. To start it manually, omit `--start-embedded` and select **Default folder** in Fleetworks.
 
-The launcher reuses the repository's Cargo cache and prints the app path before building. The debug bundle is `target/native/aarch64-apple-darwin/debug/Fleetworks.app` on Apple Silicon and `target/native/x86_64-apple-darwin/debug/Fleetworks.app` on Intel. Use `--profile release` for the optimized bundle in the sibling `release` directory. Embedded data stays in `.agent-scratch/native-quick-start-profile/` across rebuilds. Use `--help` for custom paths and verified offline artifacts.
+At the source prompt, press Enter for the latest `origin/nightly`. Type `pr` to list open PRs targeting `nightly`, then enter a PR number. You can also enter a PR number or commit SHA directly. Sign in with `gh auth login` for PR selection.
+
+| Flag | Build source |
+| --- | --- |
+| `--nightly` | Fetch and build the latest `origin/nightly`. |
+| `--pr 78` | Build the exact head of open PR #78 against `nightly`. |
+| `--commit <sha>` | Build a Git commit. Supply the full SHA if the commit is unavailable locally. |
+| `--source-dir .` | Build the current checkout, including uncommitted edits. You can also point to another worktree of the same repository. |
+
+Each flag skips the source prompt. Nightly, PR, and commit selections switch the dedicated `.agent-scratch/worktrees/quick-start-source/` worktree to the selected revision. Cargo checks both the desktop and Embedded companion for changes using the shared `target/agents` cache.
+
+Once a source build succeeds, Quick Start asks the running app for the selected bundle and profile to quit, waits for its Embedded companion to exit, then installs and opens the replacement. A build failure leaves the running app available. Embedded data stays in `.agent-scratch/native-quick-start-profile/` across rebuilds.
+
+The debug bundle is `target/native/aarch64-apple-darwin/debug/Fleetworks.app` on Apple Silicon and `target/native/x86_64-apple-darwin/debug/Fleetworks.app` on Intel. Use `--profile release` for the optimized bundle in the sibling `release` directory. Use `--reuse-bundle` to open a compatible installed bundle or `--app-artifact <id>` to open a compatible verified Actions app. Use `--help` for custom paths.
 
 #### Add the Assistant pack
 
-Sign in with `gh auth login` using an account with access to the repository. In a Fleetworks Actions run for your checkout, find the **Fleetworks-Inbox-QA-Pack** artifact with the target printed by Quick Start. Intel uses `x86_64-apple-darwin` and Apple Silicon uses `aarch64-apple-darwin`. Use the numeric artifact ID from that artifact's link as `QA_ARTIFACT_ID`. The launcher checks the pack against the matching platform's Embedded inference smoke receipt, including the archive and manifest digests.
+Quick Start checks for a compatible, verified Assistant pack for the selected build and Mac architecture. Sign in with `gh auth login` using an account with access to the repository. Pack updates activate before a stopped profile launches. Quick Start uses the installed pack while a new pack is being verified or Actions is unavailable. Pass `--no-inbox-sync` to skip the automatic check.
+
+To select a specific pack, find the **Fleetworks-Inbox-QA-Pack** artifact from a completed Fleetworks Actions run with compatible worker inputs. Intel uses `x86_64-apple-darwin` and Apple Silicon uses `aarch64-apple-darwin`. Use the numeric artifact ID from its link as `QA_ARTIFACT_ID`. The launcher checks the matching platform’s Embedded inference smoke receipt, including the archive and manifest digests. Use `--pr` or `--commit` to select the intended source.
 
 ```sh
 PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=1 \
@@ -37,13 +52,13 @@ PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=1 \
   --inbox-artifact "$QA_ARTIFACT_ID"
 ```
 
-The script registers the pack in the Quick Start profile. In the app it opens, enable **Backend inference** under **Settings → Connection**, then check **Settings → Assistant**. The pack includes FLAN-T5 Small and the native worker. The companion provisions Base separately when selected and resources allow. On a new computer, run the same script with that computer's matching artifact ID. The installed pack and downloaded model assets persist across app rebuilds. If the artifact expires, use a newer compatible run with a verified pack. [Offline setup and resource requirements](../../deploy/inbox-qa.md)
+The script registers the verified pack in the Quick Start profile. In the app it opens, enable **Backend inference** under **Settings → Connection** and open the Inbox Assistant. The pack includes GPT-2 Small and the native worker. Model assets and previous pack installations persist across app rebuilds. [Offline setup and resource requirements](../../deploy/inbox-qa.md)
 
 If an older copy of the launcher reports `Select the root of a Fleetworks checkout` from the repository root, run `git --version`. Older Git versions such as 2.30 can trigger this error on either Mac architecture. The current launcher resolves Git's checkout paths on both older and newer versions. To run an older copy, use Apple Git by prepending `/usr/bin` to `PATH` for that command.
 
 ### Build and backend options
 
-Distributed setup uses [operator pairing and the system keyring](../../docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target). Embedded setup uses **Start Embedded Backend** and a private companion state directory. See the [backend type and parity contract](../../docs/wiki/code/native-connections.md#backend-types-and-parity).
+Distributed setup in Settings uses [operator pairing and the system keyring](../../docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target). Each Embedded folder holds private companion state. See the [backend type and parity contract](../../docs/wiki/code/native-connections.md#backend-types-and-parity).
 
 Use the complete-app helper; agent builds add `--agent` and reuse the shared debug graph. Opening the app is an explicit action.
 
@@ -77,7 +92,7 @@ Add `--provision-gateway-credential` to save a protected exact-origin file refer
 
 ## Embedded desktop in Docker
 
-Use the Linux x86_64 development image when you want the Rune app and its Embedded companion in one container. The desktop opens its usual backend chooser. Select **Embedded**, then choose **Start Embedded Backend**. The app starts its packaged companion over a private Unix socket, so the container needs no published backend port.
+Use the Linux x86_64 development image when you want the Rune app and its Embedded companion in one container. Select **Default folder** to start the packaged companion over a private Unix socket. The container needs no published backend port.
 
 Download the `Fleetworks-Embedded-Desktop-Docker-Archive-*` artifact from an [opt-in image run](../../docs/wiki/code/ci.md#embedded-desktop-docker-image), verify its checksum, then load the image.
 
@@ -123,7 +138,7 @@ On Linux, use **Enter actor CSV path** to type an absolute path to a local `.csv
 
 After updating maintenance code, close an already running Fleetworks app, then run `python3 deploy/native_review.py up --name native-local` to coordinate schema 11 bootstrap/services and rebuild backend and native app. The helper's `--open` preserves an existing running instance, so leaving it open would retain the older app.
 
-News Cycles uses authoritative history/counts and workstation history tombstones; shared evidence and audit remain. Brain is one search field, bounded results and a dossier. Tools are service/provider cards with a key modal; manual tool runs/results are outside the native surface. Models provides inline keys and supported role-routing controls while preserving hidden fields/secrets and revision conflicts. Jobs & Logs shows server-enforced workstation activity and safe selected-job summaries without filters, action toolbars or raw provider output.
+Brain is one search field, bounded results and a dossier. Tools are service/provider cards with a key modal; manual tool runs/results are outside the native surface. Models provides inline keys and supported role-routing controls while preserving hidden fields/secrets and revision conflicts. Jobs & Logs shows server-enforced workstation activity and safe selected-job summaries without filters, action toolbars or raw provider output.
 
 Durable acceptance is queued, not completed. Uncertain requests retain the exact request/body/context and original registration for read-only reconciliation. Changing a gateway fences old responses, caches and confirmations. Missing optional services disable only affected actions. Unknown values remain unavailable; app navigation never submits backend work.
 
@@ -148,6 +163,6 @@ Pairing tests use injected Keychain stores. Installed-app launch, real Keychain 
 
 ## Startup, utilities and materials
 
-A cold launch opens **Choose a backend** with the animated Quiet Orbit mark and two interactive tiles. Select **Embedded** or **Distributed** to show setup, then explicitly start or connect. **Back** returns to the chooser with the settled mark. Launches with `--api-origin` or `--api-token-file` skip the chooser. The `backend-choice` fixture shows the production chooser with synthetic effects. The toolbar has a command button (Cmd/Ctrl+K), an inbox bell and an Assistant toggle. The Assistant is off by default and sends a turn to the backend's chat endpoint, which only answers ok; there are no replies yet.
+A cold launch fades in the Embedded folder grid beneath Quiet Orbit. Choose a folder to start Embedded and proceed through registration, data setup, optional inference, and workstation checks. **Back** returns to the grid with the settled mark. Launches with `--api-origin` or `--api-token-file` bypass the folder picker. The `backend-choice` fixture shows the same grid with synthetic data. [Startup and connection guide](../../docs/wiki/code/native-connections.md#cold-launch-startup)
 
 Glass surfaces (the Assistant composer and the command panel) use a same-window blur. They draw opaque, with the same bounds, when macOS Reduce Transparency is on or when `FLEETWORKS_OPAQUE_MATERIALS` is `1`, `true`, `yes` or `on`. Linux no longer forces the opaque mode.

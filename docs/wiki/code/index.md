@@ -6,7 +6,7 @@ Start with the [workspace manifest](../../../Cargo.toml). The native macOS app c
 
 | Branch | What to inspect | Next page |
 | --- | --- | --- |
-| [Native app](../../../apps/fleetworks-desktop) · [Client contracts](../../../crates/fleetworks-contracts) | Six sidebar destinations plus Status/setup, origin-pinned SDK and protected workstation identity | [Connections](native-connections.md) · [Identity](native-workspaces.md) · [Design system](native-design-system.md) · [Assistant chat contract](assistant-chat-contract.md) |
+| [Native app](../../../apps/fleetworks-desktop) · [Client contracts](../../../crates/fleetworks-contracts) | Five sidebar destinations plus Status/setup, origin-pinned SDK and protected workstation identity | [Connections](native-connections.md) · [Identity](native-workspaces.md) · [Design system](native-design-system.md) · [Assistant chat contract](assistant-chat-contract.md) |
 | [Core](../../../crates/argos-osint-core/src) | Atlas, Intel, Brain, providers and NLP | [Core map](core.md) |
 | [HTTP adapter](../../../crates/argos-osint-api) · [Service host](../../../services/api-host) | Versioned API, authenticated gateway, private Brain, readiness and worker roles | [Intel web](intel-web.md) |
 | [Compose](../../../deploy) · [Jobs stores](../../../crates/fleetworks-jobs) | Local service graph and embedded durable delivery | [Deployment](../../../deploy/README.md) |

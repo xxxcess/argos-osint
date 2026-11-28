@@ -19,6 +19,9 @@ import time
 import fleetworks_qa_pack as pack
 
 ROOT = Path(__file__).resolve().parents[1]
+FLAN_INPUT_WINDOW = 512
+GPT2_INPUT_WINDOW = 1024 - 128
+GPT2_MODELS = {"gpt2-small", "gpt2-medium"}
 LINUX_SYSTEM = {"libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2", "librt.so.1",
                 "libgcc_s.so.1", "libstdc++.so.6", "libutil.so.1", "libresolv.so.2"}
 DARWIN_WHEELS = {
@@ -77,7 +80,12 @@ def torch_environment():
     return root, key, env
 
 
-def linux_libraries(binary, directory, env, installed=False):
+def linux_libraries(binary, directory, env, installed=False, *, torch_root=None):
+    if installed:
+        library_dirs = (directory.resolve(),)
+    else:
+        pack.check(torch_root is not None, "Copying Linux libraries requires the pinned Torch wheel")
+        library_dirs = (torch_root / "lib", torch_root.parent / "torch.libs")
     result = run("ldd", str(binary), env=env, capture=True, timeout=60)
     pack.check("not found" not in result, "Inbox QA worker library could not be resolved")
     paths = []
@@ -85,9 +93,8 @@ def linux_libraries(binary, directory, env, installed=False):
         if name in LINUX_SYSTEM:
             continue
         source = Path(source)
-        if installed:
-            pack.check(source.resolve().parent == directory.resolve(), "Inbox QA linked outside its pack")
-        else:
+        pack.check(source.resolve().parent in library_dirs, "Inbox QA linked a library outside its expected root")
+        if not installed:
             shutil.copyfile(source, directory / name)
         paths.append(directory / name)
     versions = run("readelf", "--version-info", str(binary), *map(str, paths), capture=True, timeout=60)
@@ -142,13 +149,18 @@ def prepare_assets(directory, chat_model):
     directory.mkdir(mode=0o700, parents=True)
     url = f"https://huggingface.co/{pin['repository']}/resolve/{pin['revision']}"
     for name, asset in pin["files"].items():
-        destination = directory / name
-        run("curl", "--fail", "--silent", "--show-error", "--location",
-            "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "5",
-            "--retry", "3", "--max-time", "1200", "--max-filesize", str(asset["bytes"]),
-            f"{url}/{name}", "--output", str(destination), timeout=1240)
-        pack.check(destination.stat().st_size == asset["bytes"] and pack.sha256(destination) == asset["sha256"],
-                   f"{name} does not match the pinned chat model")
+        with tempfile.NamedTemporaryFile(dir=directory, prefix=f".{name}-", delete=False) as output:
+            temporary = Path(output.name)
+        try:
+            run("curl", "--fail", "--silent", "--show-error", "--location",
+                "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "5",
+                "--retry", "3", "--max-time", "1200", "--max-filesize", str(asset["bytes"]),
+                f"{url}/{name}", "--output", str(temporary), timeout=1240)
+            pack.check(temporary.stat().st_size == asset["bytes"] and pack.sha256(temporary) == asset["sha256"],
+                       f"{name} does not match the pinned chat model")
+            os.replace(temporary, directory / name)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODEL, *, model_directory=None):
@@ -157,8 +169,11 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
     model_env = {loader_key: str(root / "lib"), "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
                  "RAYON_NUM_THREADS": "1", "FLEETWORKS_QA_DIALOGUE": "1",
                  "FLEETWORKS_QA_CONTEXT_USAGE": "1", "FLEETWORKS_QA_STREAMING": "1",
+                 "FLEETWORKS_QA_RESPONSE_PLAN": "1", "FLEETWORKS_QA_DECODED_CLARIFICATION": "1",
+                 "FLEETWORKS_QA_GENERAL_DIALOGUE": "1", "FLEETWORKS_QA_JOB_LOG_CONTEXT": "1",
                  "FLEETWORKS_QA_MODEL_TARGET": chat_model}
-    window = 512
+    extended_context = chat_model in GPT2_MODELS
+    window = GPT2_INPUT_WINDOW if extended_context else FLAN_INPUT_WINDOW
     started = time.monotonic()
     worker = root / pack.WORKER
     model = model_directory or root / "model"
@@ -222,9 +237,16 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
         pack.check(0 < size <= 512 * 1024, "QA checkpoint reply exceeds its limit")
         return json.loads(read(size))
 
+    def has_prompt_marker(text):
+        text = text.lower()
+        return any(marker in text for marker in (
+            "earlier user", "earlier assistant", "current user", "approved observations:", "reply:",
+        ))
+
     def valid_reply(reply):
         return (isinstance(reply, str) and bool(reply.strip()) and reply.isprintable()
-                and len(reply.encode("utf-8")) <= 1024 and len(reply.split()) <= 60)
+                and len(reply.encode("utf-8")) <= 1024 and len(reply.split()) <= 60
+                and not has_prompt_marker(reply))
 
     def receive_event(request, sequence):
         envelope = receive()
@@ -251,26 +273,90 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
             chunks.append(text)
         raise ValueError("generator did not complete its bounded draft")
 
-    def complete_turn(event, *, prose_required):
+    def complete_turn(event):
         reply = event.get("reply")
         usage = event.get("context", {})
         pack.check(event.get("kind") == "complete" and event.get("outcome") == "answered"
-                   and (valid_reply(reply) or (reply is None and not prose_required)),
+                   and valid_reply(reply),
                    "generator did not complete the bounded turn")
         pack.check(usage.get("window_tokens") == window and usage.get("model_windows") == 1
                    and type(usage.get("peak_input_tokens")) is int and 0 < usage["peak_input_tokens"] <= window,
                    "generator did not report its bounded input window")
-        return usage, reply is not None
+        return usage, reply
+
+    def probe_operational(turn_id, question, *, facts=None, plan=None):
+        nonlocal deadline
+        if facts is None:
+            facts = [
+                {"source_id": "actor-search", "text": "Actor search is ready."},
+                {"source_id": "gateway", "text": "Gateway reported “ready” for local requests."},
+            ]
+        request = {
+            "turn_id": turn_id, "snapshot_id": turn_id, "question": question, "passages": facts,
+            "dialogue": {"kind": "operational", "history": []},
+        }
+        if plan is not None:
+            request["plan"] = plan
+        turn_started = time.monotonic()
+        deadline = turn_started + 25
+        send({"command": "ask", "request": request})
+        event, first_finding, draft, _ = read_drafts(request)
+        for sequence, fact in enumerate(facts, first_finding):
+            pack.check(event == {"kind": "finding", "turn_id": turn_id, "sequence": sequence,
+                                 "start": 0, "end": len(fact["text"]),
+                                 "source_id": fact["source_id"], "text": fact["text"]},
+                       "operational turn did not cite an exact frozen fact in order")
+            event = receive_event(request, sequence + 1)
+        context, reply = complete_turn(event)
+        body = " ".join(fact["text"] for fact in facts)
+        pack.check(reply in (body, f"Here is the current status. {body}", f"Here are the current checks. {body}",
+                             f"Here are the recorded observations. {body}"),
+                   "operational reply did not preserve all approved facts")
+        pack.check(draft == reply, "operational turn did not stream its verified reply before completion")
+        turn_finished = time.monotonic()
+        sample_rss()
+        return {"context": context, "delta_events": first_finding - 1, "composed": bool(reply),
+                "reply_ms": round((turn_finished - turn_started) * 1000, 1)}
+
+    def probe_context_limit(turn_id, padding):
+        nonlocal deadline
+        # Pinned GPT-2 tokenizes each space-prefixed x into one token. Keep the
+        # question within the wire byte limit while exercising the tokenizer limit.
+        summary = "Registration."
+        request = {
+            "turn_id": turn_id, "snapshot_id": turn_id,
+            "question": "Fixture labels:" + " x" * padding + ". What are my notifications?",
+            "passages": [], "dialogue": {"kind": "general", "history": []},
+            "plan": {"focus": f"Inbox notification groups reported by the desktop. {summary}",
+                     "note": "Use the reported groups.", "required_passages": []},
+        }
+        deadline = time.monotonic() + 25
+        send({"command": "ask", "request": request})
+        event, _, draft, _ = read_drafts(request)
+        if event.get("outcome") == "input_too_large":
+            pack.check(not draft and event.get("reply") is None and event.get("context") == {
+                "window_tokens": window, "model_windows": 0, "peak_input_tokens": 0,
+            }, "oversized GPT-2 prompt reached the decoder")
+            return None
+        context, reply = complete_turn(event)
+        pack.check(reply == summary, "GPT-2 changed the approved notification summary")
+        return context
 
     try:
-        ready = {"reply": "ready_with_streaming", "protocol": 1,
+        ready = {"reply": "ready_with_job_log_context", "protocol": 1, "window_tokens": window,
                  "model_revision": pack.CHAT_MODELS[chat_model]["revision"]}
         pack.check(receive() == ready, "chat checkpoint did not become ready with streaming")
         warm = time.monotonic()
+        if extended_context:
+            deadline = warm + 5
+            send({"command": "ping"})
+            pack.check(receive() == ready, "chat checkpoint changed its advertised input window")
         sample_rss()
         greeting = {
             "turn_id": "pack-dialogue-probe", "snapshot_id": "pack-dialogue-probe",
             "question": "Hello!", "passages": [],
+            # Keep the older companion input shape to check that the worker
+            # can stream a greeting even when unrelated history is supplied.
             "dialogue": {"kind": "greeting", "history": [
                 {"question": "What can I call you?", "reply": "You can call me Fleetworks."},
                 {"question": "Good morning.", "reply": "Good morning!"},
@@ -282,29 +368,41 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
         greeting_terminal, greeting_sequence, greeting_draft, first_delta = read_drafts(greeting)
         pack.check(first_delta is not None and greeting_draft.strip(),
                    "generator did not stream any conversational text before completion")
-        greeting_context, _ = complete_turn(greeting_terminal, prose_required=True)
+        pack.check(not has_prompt_marker(greeting_draft), "generator streamed a conversational prompt marker")
+        greeting_context, _ = complete_turn(greeting_terminal)
         greeted = time.monotonic()
         sample_rss()
 
-        fact = {"source_id": "readiness", "text": "Actor search is ready."}
-        operational = {
-            "turn_id": "pack-operational-probe", "snapshot_id": "pack-operational-probe",
-            "question": "What is the state of actor search?", "passages": [fact],
-            "dialogue": {"kind": "operational", "history": []},
-        }
-        operational_started = time.monotonic()
-        deadline = operational_started + 25
-        send({"command": "ask", "request": operational})
-        finding, finding_sequence, operational_draft, _ = read_drafts(operational)
-        pack.check(not operational_draft or operational_draft.strip() == fact["text"],
-                   "operational turn streamed text outside its approved observation")
-        pack.check(finding == {"kind": "finding", "turn_id": operational["turn_id"], "sequence": finding_sequence,
-                               "start": 0, "end": len(fact["text"]), **fact},
-                   "operational turn did not cite the exact frozen fact")
-        terminal = receive_event(operational, finding_sequence + 1)
-        operational_context, composed = complete_turn(terminal, prose_required=False)
-        operational_finished = time.monotonic()
-        sample_rss()
+        question = "How are actor search and the gateway doing?"
+        operational = probe_operational("pack-operational-probe", question)
+        log_context = probe_operational(
+            "pack-job-log-probe", "What happened with this job?",
+            facts=[
+                {"source_id": "job", "text": "The import job completed."},
+                {"source_id": "log", "text": "Recent job log reported 12 imported records.", "job_log_tail": True},
+            ],
+            plan={"focus": "Selected import job", "note": "Explain the selected job.",
+                  "required_passages": ["job"]},
+        )
+        extended = {}
+        if extended_context:
+            # Each " test" is one token in the pinned GPT-2 vocabulary. The
+            # question stays under the 4096-byte wire limit with room for the menu.
+            long_question = "Fixture labels:" + " test" * 600 + ". " + question
+            long_operational = probe_operational("pack-long-operational-probe", long_question)
+            pack.check(long_operational["context"]["peak_input_tokens"] > FLAN_INPUT_WINDOW,
+                       "GPT-2 did not exercise an input above the FLAN window")
+            short = probe_context_limit("pack-short-context-probe", 0)
+            pack.check(short is not None, "short GPT-2 prompt unexpectedly exceeded its window")
+            remaining = window - short["peak_input_tokens"]
+            exact = probe_context_limit("pack-exact-context-probe", remaining)
+            pack.check(exact is not None and exact["peak_input_tokens"] == window,
+                       "GPT-2 did not accept the full prompt window")
+            pack.check(probe_context_limit("pack-over-context-probe", remaining + 1) is None,
+                       "GPT-2 accepted a prompt one token over its window")
+            extended = {"long_operational_context": long_operational["context"],
+                        "long_operational_reply_ms": long_operational["reply_ms"],
+                        "exact_prompt_context": exact, "oversized_prompt_rejected": True}
 
         send({"command": "shutdown"})
         pack.check(process.wait(timeout=10) == 0, "QA checkpoint worker did not shut down")
@@ -312,11 +410,12 @@ def verify_inference(root, loader_key, target, chat_model=pack.DEFAULT_CHAT_MODE
                 "first_delta_ms": round((first_delta - greeting_started) * 1000, 1),
                 "first_reply_ms": round((greeted - greeting_started) * 1000, 1),
                 "dialogue_delta_events": greeting_sequence - 1,
-                "operational_delta_events": finding_sequence - 1,
-                "operational_reply_ms": round((operational_finished - operational_started) * 1000, 1),
-                "dialogue_context": greeting_context, "operational_context": operational_context,
-                "operational_composed": composed, "peak_sampled_rss_bytes": peak_rss,
-                "rss_samples": rss_samples}
+                "operational_delta_events": operational["delta_events"],
+                "operational_reply_ms": operational["reply_ms"],
+                "dialogue_context": greeting_context, "operational_context": operational["context"],
+                "job_log_context": log_context["context"],
+                "operational_composed": operational["composed"], "peak_sampled_rss_bytes": peak_rss,
+                "rss_samples": rss_samples, **extended}
     except Exception:
         error_log.seek(0)
         diagnostic = error_log.read(16 * 1024)
@@ -352,8 +451,9 @@ def probe(target, chat_model, runtime, manifest_sha256, assets=None):
             "runtime_manifest_sha256": manifest_sha256, "checkpoint_smoke": result}
 
 
-def build(target, directory, chat_model=pack.DEFAULT_CHAT_MODEL):
+def build(target, directory, requested_model=None):
     readonly_toolchain(target)
+    chat_model = requested_model or pack.DEFAULT_CHAT_MODEL
     directory = directory.resolve()
     directory.mkdir(parents=True, exist_ok=False)
     staging = directory / "staging"
@@ -373,7 +473,7 @@ def build(target, directory, chat_model=pack.DEFAULT_CHAT_MODEL):
     for path in (binary, listener):
         shutil.copy2(ROOT / "target/agents/release" / path.name, path)
     native = (mac_libraries(binary, libraries, torch_root) if target in DARWIN_WHEELS
-              else linux_libraries(binary, libraries, env))
+              else linux_libraries(binary, libraries, env, torch_root=torch_root))
     notices = []
     for info in sorted(torch_root.parent.glob("torch-*.dist-info")):
         for source in sorted([*info.glob("LICENSE"), *info.glob("NOTICE*")]):
@@ -385,10 +485,10 @@ def build(target, directory, chat_model=pack.DEFAULT_CHAT_MODEL):
     archive = directory / f"Fleetworks-Inbox-QA-Pack-{target}.tar.gz"
     digests = pack.build(argparse.Namespace(model=model, worker=binary, listener=listener,
                                            lib=native, license=notices, output=archive, target=target,
-                                           chat_model=chat_model))
+                                           chat_model=requested_model))
     installed = directory / "installed"
     pack.install(argparse.Namespace(archive=archive, output=installed, state_dir=None, target=target,
-                                    chat_model=chat_model, archive_sha256=digests["archive_sha256"],
+                                    chat_model=requested_model, archive_sha256=digests["archive_sha256"],
                                     manifest_sha256=digests["manifest_sha256"]))
     if target not in DARWIN_WHEELS:
         linux_libraries(installed / pack.WORKER, installed / "lib",
@@ -406,7 +506,8 @@ def main():
     command = commands.add_parser("build")
     command.add_argument("--target", required=True, choices=pack.TARGETS)
     command.add_argument("--output", type=Path, required=True)
-    command.add_argument("--chat-model", choices=pack.CHAT_MODELS, default=pack.DEFAULT_CHAT_MODEL)
+    command.add_argument("--chat-model", choices=pack.CHAT_MODELS,
+                         help=f"Select a pinned generator pack (default: {pack.DEFAULT_CHAT_MODEL})")
     command = commands.add_parser("probe")
     command.add_argument("--target", required=True, choices=pack.TARGETS)
     command.add_argument("--chat-model", required=True, choices=pack.CHAT_MODELS)

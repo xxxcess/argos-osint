@@ -33,7 +33,7 @@ pub(crate) const MAX_INPUT_BYTES: usize = 4 * 1024;
 pub(crate) const UNAVAILABLE: &str =
     "The Assistant is unavailable: this backend does not advertise chat. Nothing was sent.";
 pub(crate) const NEEDS_SOURCE: &str =
-    "Select a job, cycle or readiness check to ask about. Nothing was sent.";
+    "Select a job or readiness check to ask about. Nothing was sent.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Context {
@@ -217,36 +217,16 @@ pub(crate) fn source_for(context: &Context) -> Option<ChatSourceReference> {
 
 /// What the Assistant is about right now, from the selection the operator already made.
 pub(crate) fn current_context(state: &State) -> Context {
-    let short = |id: &str| id.chars().take(12).collect::<String>();
-    match state.page {
-        Page::Jobs => {
-            if let Some(id) = &state.selected_job_id {
-                return Context {
-                    kind: "Job",
-                    label: format!("Job {}", short(id)),
-                    key: format!("job:{id}"),
-                };
-            }
-        }
-        Page::Atlas => {
-            if let Some(id) = &state.selected_cycle_id {
-                return Context {
-                    kind: "Cycle",
-                    label: format!("Cycle {}", short(id)),
-                    key: format!("cycle:{id}"),
-                };
-            }
-        }
-        Page::Workstation => {
-            if let Some(id) = &state.selected_readiness {
-                return Context {
-                    kind: "Readiness",
-                    label: format!("Readiness: {id}"),
-                    key: format!("readiness:{id}"),
-                };
-            }
-        }
-        _ => {}
+    if let Some(id) = state
+        .selected_readiness
+        .as_ref()
+        .filter(|_| state.page == Page::Workstation)
+    {
+        return Context {
+            kind: "Readiness",
+            label: format!("Readiness: {id}"),
+            key: format!("readiness:{id}"),
+        };
     }
     Context {
         kind: "Page",
@@ -375,6 +355,7 @@ impl State {
             ChatMessage {
                 id: "fixture-1".into(),
                 role: Role::Operator,
+                timestamp: None,
                 state: TurnState::Final,
                 text: "Why is this job slow?".into(),
                 citations: Vec::new(),
@@ -382,6 +363,7 @@ impl State {
             ChatMessage {
                 id: "fixture-2".into(),
                 role: Role::Assistant,
+                timestamp: None,
                 state: TurnState::Running,
                 text: String::new(),
                 citations: vec![Citation {
@@ -392,6 +374,7 @@ impl State {
             ChatMessage {
                 id: "fixture-3".into(),
                 role: Role::Assistant,
+                timestamp: None,
                 state: TurnState::Failed {
                     reason: "backend restarted".into(),
                 },
@@ -682,6 +665,7 @@ mod tests {
         assistant.messages.push(crate::chat_ui::ChatMessage {
             id: "m".into(),
             role: crate::chat_ui::Role::Operator,
+            timestamp: None,
             state: crate::chat_ui::TurnState::Final,
             text: "hi".into(),
             citations: Vec::new(),
@@ -791,6 +775,7 @@ mod render_tests {
                 ChatMessage {
                     id: "1".into(),
                     role: Role::Operator,
+                    timestamp: None,
                     state: TurnState::Final,
                     text: "Why is this job slow?".into(),
                     citations: Vec::new(),
@@ -798,11 +783,23 @@ mod render_tests {
                 ChatMessage {
                     id: "2".into(),
                     role: Role::Assistant,
+                    timestamp: None,
                     state: TurnState::Running,
                     text: String::new(),
                     citations: vec![Citation {
                         kind: "Job",
                         label: "Job abc".into(),
+                    }],
+                },
+                ChatMessage {
+                    id: "3".into(),
+                    role: Role::Assistant,
+                    timestamp: None,
+                    state: TurnState::Final,
+                    text: "The preceding job finished.".into(),
+                    citations: vec![Citation {
+                        kind: "Job",
+                        label: "Job xyz".into(),
                     }],
                 },
             ];
@@ -813,7 +810,8 @@ mod render_tests {
         assert!(rt.find("chat-message-2").is_some());
         assert!(rt.find("chat-state-2").is_some());
         assert!(rt.find("chat-state-1").is_none());
-        assert!(rt.find("chat-citation-0").is_some());
+        assert!(rt.find("chat-citation-2-0").is_some());
+        assert!(rt.find("chat-citation-3-0").is_some());
         rt.update(|state, _| {
             state.assistant.sync_scope(1);
             state.assistant.sync_scope(2);

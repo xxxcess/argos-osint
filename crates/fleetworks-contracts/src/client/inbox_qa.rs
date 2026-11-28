@@ -13,7 +13,9 @@ use crate::chat::QaTurn;
 use crate::chat::QaTurnRequest;
 use crate::chat::QA_CANCEL_PATH;
 use crate::chat::QA_EVENTS_PATH;
+use crate::chat::QA_HISTORY_PATH;
 use crate::chat::QA_LATEST_PATH;
+use crate::chat::QA_MAX_RETAINED_TURNS;
 use crate::chat::QA_RELATED_ACTIVITY_PATH;
 use crate::chat::QA_SETTINGS_PATH;
 use crate::chat::QA_TURNS_PATH;
@@ -24,6 +26,7 @@ pub(super) fn is_qa_route(route: &str) -> bool {
         QA_SETTINGS_PATH
             | QA_TURNS_PATH
             | QA_LATEST_PATH
+            | QA_HISTORY_PATH
             | QA_EVENTS_PATH
             | QA_CANCEL_PATH
             | QA_RELATED_ACTIVITY_PATH
@@ -75,6 +78,20 @@ impl Client {
     pub async fn latest_qa_turn(&self) -> Result<Option<QaTurn>, ClientError> {
         self.require_qa_registration()?;
         self.get(QA_LATEST_PATH).await
+    }
+
+    /// Read retained terminal exchanges for this registration, newest first.
+    pub async fn qa_history(&self) -> Result<Vec<QaTurn>, ClientError> {
+        self.require_qa_registration()?;
+        let turns: Vec<QaTurn> = self.get(QA_HISTORY_PATH).await?;
+        if turns.len() > QA_MAX_RETAINED_TURNS
+            || turns
+                .iter()
+                .any(|turn| !turn.state.is_terminal() || turn.provisional_reply.is_some())
+        {
+            return Err(ClientError::InvalidResponse);
+        }
+        Ok(turns)
     }
 
     /// Resume the selected turn from a cursor, waiting briefly for new events when requested.

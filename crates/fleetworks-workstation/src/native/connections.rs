@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::File;
+use std::os::unix::fs::MetadataExt;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
@@ -30,6 +31,7 @@ pub const LOCAL_BACKEND_DIR: &str = "local-backend";
 const FORMAT: u16 = 1;
 const MAX_PROFILES: usize = 32;
 const MAX_CATALOG_BYTES: u64 = 256 * 1024;
+const MAX_PROFILE_NAME_BYTES: usize = 128;
 const TOKEN_LIMIT: u64 = 4096;
 
 /// Transport kind for a saved Fleetworks destination profile.
@@ -338,7 +340,7 @@ impl NativeContainer {
     /// Read-only, including an absent catalog. Existing unmarked/unknown or
     /// unsafe documents require repair and are never overwritten or imported.
     pub fn connection_profiles(&self) -> Result<ConnectionProfilesSnapshot> {
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         Ok(self.read_connections()?.0.snapshot)
     }
 
@@ -348,7 +350,7 @@ impl NativeContainer {
         let origin = Client::canonical_origin(origin)?;
         let credential = CredentialReference::capture(path, &origin)?;
         drop(credential.open_verified(&origin)?);
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         let (mut catalog, object) = self.read_connections()?;
         let matches: Vec<_> = catalog
             .snapshot
@@ -451,12 +453,63 @@ impl NativeContainer {
         id: Option<&str>,
         input: GatewayProfileInput,
     ) -> Result<ConnectionProfilesSnapshot> {
-        let _guard = self.locked()?;
+        self.save_profile(expected_revision, id, true, |_| Ok(input))
+    }
+
+    /// Save a private Embedded folder as a startup target without changing the editor selection.
+    /// Uses the same catalog revision and lock as connection profile edits.
+    pub fn add_local_backend_folder(
+        &self,
+        expected_revision: u64,
+        path: PathBuf,
+    ) -> Result<ConnectionProfilesSnapshot> {
+        self.save_profile(expected_revision, None, false, |snapshot| {
+            validate_local_state_dir_path(&path)?;
+            let default_path = self.root.join(LOCAL_BACKEND_DIR).join("embedded");
+            let object = std::fs::symlink_metadata(&path)
+                .ok()
+                .map(|metadata| (metadata.dev(), metadata.ino()));
+            let matches_path = |candidate: &Path| {
+                path == candidate
+                    || object.is_some_and(|object| {
+                        std::fs::symlink_metadata(candidate)
+                            .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == object)
+                    })
+            };
+            anyhow::ensure!(
+                !matches_path(&default_path),
+                "This folder is already available as the default folder."
+            );
+            anyhow::ensure!(
+                !snapshot.profiles.iter().any(|profile| {
+                    if let Some(folder) = &profile.local_state_dir {
+                        return matches_path(folder);
+                    }
+                    profile.origin.strip_prefix("local://").is_some_and(|slug| {
+                        matches_path(&self.root.join(LOCAL_BACKEND_DIR).join(slug))
+                    })
+                }),
+                "This folder is already saved."
+            );
+            let name = local_folder_name(&path, &snapshot.profiles)?;
+            GatewayProfileInput::new_local(name, None, Some(path))
+        })
+    }
+
+    fn save_profile(
+        &self,
+        expected_revision: u64,
+        id: Option<&str>,
+        select: bool,
+        prepare_input: impl FnOnce(&ConnectionProfilesSnapshot) -> Result<GatewayProfileInput>,
+    ) -> Result<ConnectionProfilesSnapshot> {
+        let _guard = self.locked_settings()?;
         let (mut catalog, object) = self.read_connections()?;
         anyhow::ensure!(
             catalog.snapshot.revision == expected_revision,
             "saved connections changed; refresh before saving"
         );
+        let input = prepare_input(&catalog.snapshot)?;
         anyhow::ensure!(
             !catalog
                 .snapshot
@@ -514,7 +567,9 @@ impl NativeContainer {
                     None => local_origin_for_profile(&profile_id)?,
                 };
                 let state_dir = match input.local_state_dir {
-                    Some(dir) => self.validate_local_backend_state_dir(&dir)?,
+                    Some(dir) => self.validate_local_backend_state_dir(&dir).context(
+                        "Choose a private folder you own or enter the path to a new subfolder",
+                    )?,
                     None => self.ensure_local_backend_state_dir(&profile_id)?,
                 };
                 GatewayProfile {
@@ -545,7 +600,9 @@ impl NativeContainer {
             None => catalog.snapshot.profiles.push(next_profile),
         }
         catalog.snapshot.revision = revision;
-        catalog.snapshot.selected_profile_id = Some(profile_id);
+        if select {
+            catalog.snapshot.selected_profile_id = Some(profile_id);
+        }
         self.write_connections(&catalog, object)?;
         Ok(catalog.snapshot)
     }
@@ -557,7 +614,7 @@ impl NativeContainer {
         expected_revision: u64,
         id: &str,
     ) -> Result<ConnectionProfilesSnapshot> {
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         let (mut catalog, object) = self.read_connections()?;
         anyhow::ensure!(
             catalog.snapshot.revision == expected_revision,
@@ -589,7 +646,7 @@ impl NativeContainer {
                 ConnectionCatalog {
                     format_version: FORMAT,
                     installation_marker: self.installation_marker.clone(),
-                    root_object: self.root_object,
+                    root_object: self.catalog_root_object,
                     snapshot: ConnectionProfilesSnapshot::empty(),
                 },
                 None,
@@ -623,7 +680,7 @@ impl NativeContainer {
         anyhow::ensure!(
             catalog.format_version == FORMAT
                 && catalog.installation_marker == self.installation_marker
-                && catalog.root_object == self.root_object
+                && catalog.root_object == self.catalog_root_object
                 && catalog.snapshot.profiles.len() <= MAX_PROFILES,
             "saved connection ownership or format needs repair"
         );
@@ -684,12 +741,41 @@ impl NativeContainer {
 fn validate_name(name: &str) -> Result<()> {
     anyhow::ensure!(
         !name.is_empty()
-            && name.len() <= 128
+            && name.len() <= MAX_PROFILE_NAME_BYTES
             && name.trim() == name
             && !name.chars().any(char::is_control),
         "connection name must be 1–128 UTF-8 bytes without control or edge whitespace"
     );
     Ok(())
+}
+
+fn local_folder_name(path: &Path, profiles: &[GatewayProfile]) -> Result<String> {
+    let basename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("Embedded folder must have a UTF-8 name")?
+        .trim();
+    let basename = if basename.is_empty() {
+        "Embedded folder"
+    } else {
+        basename
+    };
+    for number in 1..=MAX_PROFILES + 1 {
+        let suffix = if number == 1 {
+            String::new()
+        } else {
+            format!(" ({number})")
+        };
+        let limit = basename.floor_char_boundary(MAX_PROFILE_NAME_BYTES - suffix.len());
+        let name = format!("{}{suffix}", basename[..limit].trim_end());
+        if !profiles
+            .iter()
+            .any(|profile| UniCase::new(profile.name.as_str()) == UniCase::new(name.as_str()))
+        {
+            return Ok(name);
+        }
+    }
+    anyhow::bail!("No unused name is available for this Embedded folder")
 }
 
 #[cfg(test)]

@@ -1,0 +1,6 @@
+{
+  "events": [
+    { "t": 0.25, "type": "click", "key": "search-category-actors" },
+    { "t": 0.75, "type": "mark", "name": "actors-open", "key": "search-category-results" }
+  ]
+}

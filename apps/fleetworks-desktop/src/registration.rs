@@ -53,6 +53,10 @@ impl State {
 
     pub(crate) fn invalidate_origin(&mut self) {
         self.origin_revision = self.origin_revision.wrapping_add(1);
+        self.reset_inbox_for_authority();
+        self.search_category = None;
+        self.actor_catalog.reset();
+        self.search_articles.reset();
         self.reveal = None;
         self.tool_key_dialog = false;
         self.registration.request = None;
@@ -69,7 +73,6 @@ impl State {
         self.scoped_logs.invalidate_origin();
         self.scoped_jobs.invalidate_origin();
         self.backend.invalidate_activity();
-        self.cycles.invalidate();
         self.maintenance.invalidate_origin();
         self.readiness_revision = self.readiness_revision.wrapping_add(1);
         if let Load::Ready(readiness) = &mut self.readiness {
@@ -147,19 +150,28 @@ impl State {
         self.registration.request_id = request_id;
         match result {
             Ok(registered) => {
+                if self
+                    .registration
+                    .context
+                    .as_ref()
+                    .is_some_and(|previous| !previous.same_request_context(&registered.context))
+                {
+                    self.reset_inbox_for_authority();
+                }
                 self.registration.context = Some(registered.context);
+                self.sync_jobs_binding();
                 self.registration.receipt = Load::Ready(registered.receipt);
                 self.registration.message = Some("Workstation registration verified".into());
-                // The two protected-journal reads run in sequence: the catalog lock is nonblocking,
-                // so concurrent reads can fail with "catalog is busy".
-                if !self.restore_cycle_deletion() {
-                    self.restore_actor_reindex();
-                }
+                self.restore_actor_reindex();
                 self.refresh_readiness();
                 self.refresh_page();
             }
             Err(error) => {
+                if self.registration.context.is_some() {
+                    self.reset_inbox_for_authority();
+                }
                 self.registration.context = None;
+                self.sync_jobs_binding();
                 self.registration.receipt = Load::Failed(error);
             }
         }

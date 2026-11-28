@@ -15,7 +15,6 @@ use rune::Shadow;
 use rune::TextStyle;
 use rune::Transition;
 use rune::Tx;
-use rune_kit::Dialog;
 use rune_kit::IconButton;
 use rune_kit::IconButtonVariant;
 use rune_kit::Kit;
@@ -564,51 +563,6 @@ pub(crate) fn section_header(
         .children(right)
 }
 
-/// Compact modal prompt helper using `rune_kit::Dialog`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn modal_prompt<S: 'static>(
-    key: impl Into<String>,
-    title: impl Into<String>,
-    description: impl Into<String>,
-    open: bool,
-    width: f32,
-    on_close: impl Fn(&mut S) + Clone + 'static,
-    body: El,
-    footer: Option<El>,
-    kit: &Kit,
-    layer: &mut Vec<El>,
-) {
-    let description = description.into();
-    let mut content = col().w_full().px(16.0).pb(16.0).gap(12.0);
-    if !description.is_empty() {
-        content = content.child(
-            text(description)
-                .font(kit.ty.small)
-                .color(kit.c.text_muted)
-                .wrap(),
-        );
-    }
-    content = content.child(body);
-    if let Some(footer) = footer {
-        content = content.child(
-            row()
-                .w_full()
-                .gap(8.0)
-                .center_y()
-                .child(spacer())
-                .child(footer),
-        );
-    }
-    Dialog::new(key, title)
-        .open(open)
-        .width(width)
-        .fit()
-        .click_outside(true)
-        .on_close(on_close)
-        .child(content)
-        .build(kit, layer);
-}
-
 fn skeleton_card_shell(body: El, tone: StatusTone, preferences: ViewPreferences, kit: &Kit) -> El {
     let fill = if preferences.matte() {
         kit.c.surface_raised
@@ -621,6 +575,30 @@ fn skeleton_card_shell(body: El, tone: StatusTone, preferences: ViewPreferences,
         tone.border().alpha(0.50)
     };
     body.w_full().fill(fill).border(1.0, border).radius(10.0)
+}
+
+/// Pending text value with the same accessible status in either motion mode.
+pub(crate) fn skeleton_text_value(
+    label: &str,
+    width: f32,
+    tone: StatusTone,
+    preferences: ViewPreferences,
+) -> El {
+    row()
+        .w_full()
+        .min_w(0.0)
+        .min_h(18.0)
+        .center_y()
+        .role("status")
+        .label(label)
+        .child(material::skeleton_block(
+            None,
+            Some(width),
+            11.0,
+            4.0,
+            tone,
+            preferences,
+        ))
 }
 
 /// Readiness check list skeleton mirroring gateway readiness rows.
@@ -698,55 +676,6 @@ pub(crate) fn skeleton_readiness_list(preferences: ViewPreferences, kit: &Kit) -
             ));
         list = list.child(skeleton_card_shell(
             card,
-            StatusTone::Neutral,
-            preferences,
-            kit,
-        ));
-    }
-    list
-}
-
-/// Cycle history skeleton mirroring Atlas cycle tiles.
-pub(crate) fn skeleton_cycle_history(preferences: ViewPreferences, kit: &Kit) -> El {
-    let mut list = col()
-        .key("cycles-loading")
-        .role("status")
-        .label("Loading cycle history")
-        .w_full()
-        .gap(8.0);
-    for pill_w in [168.0, 156.0, 176.0, 162.0] {
-        let row_tile = row()
-            .w_full()
-            .padding(10.0)
-            .gap(8.0)
-            .center_y()
-            .child(material::skeleton_block(
-                None,
-                Some(7.0),
-                7.0,
-                999.0,
-                StatusTone::Info,
-                preferences,
-            ))
-            .child(material::skeleton_block(
-                None,
-                Some(pill_w),
-                28.0,
-                14.0,
-                StatusTone::Neutral,
-                preferences,
-            ))
-            .child(spacer())
-            .child(material::skeleton_block(
-                None,
-                Some(66.0),
-                22.0,
-                999.0,
-                StatusTone::Info,
-                preferences,
-            ));
-        list = list.child(skeleton_card_shell(
-            row_tile,
             StatusTone::Neutral,
             preferences,
             kit,

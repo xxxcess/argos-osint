@@ -130,9 +130,20 @@ pub(crate) async fn execute(
         .context("setup_dataset_unavailable")?;
     let reclaim_unused_memory = embedded && payload.operation == MaintenanceOperation::SeedActors;
     let started = Instant::now();
-    let budget =
-        bulk_pressure::await_admission(repo, task, &workspace, &cancel, reclaim_unused_memory)
-            .await;
+    let allocation = if reclaim_unused_memory {
+        store.embedded_resources()
+    } else {
+        None
+    };
+    let budget = bulk_pressure::await_admission(
+        repo,
+        task,
+        &workspace,
+        &cancel,
+        reclaim_unused_memory,
+        allocation,
+    )
+    .await;
     if reclaim_unused_memory {
         report_seed_phase("admission", started);
     }

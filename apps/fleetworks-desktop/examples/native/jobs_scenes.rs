@@ -36,6 +36,8 @@ fn row(id: &str, app: &str, operation: &str, state: &str) -> ActivityJob {
         operation: operation.into(),
         state: state.into(),
         phase: state.into(),
+        active_since: String::new(),
+        finished_at: String::new(),
         progress_done: None,
         progress_total: None,
         error_summary: String::new(),
@@ -62,10 +64,10 @@ fn response(
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect(),
+        activity_actions_available: rows.iter().any(|row| row.activity_actions_available),
         rows,
         activity_scope: scope,
         relation_counts_available: false,
-        activity_actions_available: false,
         counts: Some(JobsDashboardCounts {
             active: 7,
             queued: 12,
@@ -101,6 +103,41 @@ fn setup(state: &mut State) {
     state.page = Page::Jobs;
     state.sync_jobs_binding();
 }
+pub fn grouped_list(state: &mut State) {
+    setup(state);
+    let rows = [
+        (
+            "synthetic-tools-job",
+            "tools",
+            "Run tool check",
+            "completed",
+        ),
+        (
+            "synthetic-completed",
+            "brain",
+            "Index actor catalog",
+            "completed",
+        ),
+        ("synthetic-failed", "jobs", "Actor seed", "failed"),
+        ("synthetic-queued", "jobs", "Actor seed", "queued"),
+        (
+            "synthetic-running",
+            "brain",
+            "Index actor catalog",
+            "running",
+        ),
+    ];
+    let jobs = rows
+        .into_iter()
+        .map(|(id, app, title, status)| {
+            let mut job = row(id, app, "", status);
+            job.title = title.into();
+            job
+        })
+        .collect();
+    install(state, jobs);
+}
+
 pub fn filters_ready(state: &mut State) {
     setup(state);
     state.scoped_jobs.draft.status = JobsStatusFilter::Failed;

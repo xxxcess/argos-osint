@@ -31,7 +31,11 @@ mod tests {
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+#[cfg(unix)]
+use std::io::Read;
 use std::net::SocketAddr;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -70,8 +74,9 @@ use fleetworks_contracts::chat::QaRelatedActivityRequest;
 use fleetworks_contracts::chat::QaRelationshipReason;
 use fleetworks_contracts::chat::QaSettingsUpdate;
 use fleetworks_contracts::chat::QaTurnRequest;
-use fleetworks_contracts::chat::QaTurnState;
 use fleetworks_contracts::chat::CHAT_TURNS_PATH;
+use fleetworks_contracts::chat::QA_GPT2_GENERATORS_FEATURE;
+use fleetworks_contracts::chat::QA_HISTORY_FEATURE;
 use fleetworks_contracts::chat::QA_MODEL_SETTINGS_FEATURE;
 use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
 use fleetworks_contracts::classifier_activation::ActivationRequest;
@@ -661,6 +666,13 @@ async fn run_shared_flow(
     assert!(caps.features.iter().any(|f| f == "workstation-readiness"));
     let local = transport == "ipc";
     assert_eq!(caps.features.iter().any(|f| f == "inbox-qa-v2"), local);
+    assert_eq!(caps.features.iter().any(|f| f == QA_HISTORY_FEATURE), local);
+    assert_eq!(
+        caps.features
+            .iter()
+            .any(|f| f == QA_GPT2_GENERATORS_FEATURE),
+        local,
+    );
     assert!(caps.features.iter().any(|f| f == "jobs"));
     assert!(caps.features.iter().any(|f| f == "logs"));
     let local_nlp = local && cfg!(feature = "nlp");
@@ -1242,6 +1254,25 @@ async fn run_shared_flow(
         "actor detail parity",
     );
 
+    let browse: fleetworks_contracts::search::ActorBrowsePage = client
+        .get_with_query(
+            fleetworks_contracts::search::ACTOR_BROWSE_PATH,
+            &fleetworks_contracts::search::ActorBrowseQuery::new(None, 25).expect("browse query"),
+        )
+        .await
+        .expect("browse actor catalog");
+    assert!(browse
+        .rows
+        .iter()
+        .any(|actor| actor.actor_id == canonical_actor_id));
+    assert!(browse.rows.len() <= 25);
+    record(
+        &mut *report,
+        "actors_browse",
+        "live_parity",
+        "bounded canonical actor catalog page on both transports",
+    );
+
     let readiness: WorkstationReadiness = client
         .workstation_readiness()
         .await
@@ -1257,6 +1288,25 @@ async fn run_shared_flow(
     }));
     if local {
         assert!(readiness.atlas_preflight.is_none());
+    }
+    for id in [
+        ReadinessCheckId::Jobs,
+        ReadinessCheckId::Brain,
+        ReadinessCheckId::Control,
+        ReadinessCheckId::Classifier,
+        ReadinessCheckId::ClassifierInference,
+    ] {
+        let check = readiness
+            .checks
+            .iter()
+            .find(|check| check.id == id)
+            .expect("backend-specific readiness check");
+        if local {
+            assert_eq!(check.state, ReadinessState::NotApplicable, "{id}");
+            assert_eq!(check.reason_code, "distributed_service_only", "{id}");
+        } else {
+            assert_ne!(check.state, ReadinessState::NotApplicable, "{id}");
+        }
     }
 
     assert!(readiness
@@ -1476,7 +1526,8 @@ async fn run_shared_flow(
         assert!(qa_settings.can_manage);
         assert_eq!(
             qa_settings.generator.unwrap().preference,
-            QaGeneratorPreference::Automatic
+            QaGeneratorPreference::Gpt2Small,
+            "A fresh Embedded registration uses the default GPT-2 Small preference"
         );
         assert_eq!(
             qa_settings.decision.unwrap().preference,
@@ -1497,6 +1548,11 @@ async fn run_shared_flow(
                 .is_none(),
             "A fresh Embedded registration has no accepted Assistant exchange",
         );
+        assert!(client
+            .qa_history()
+            .await
+            .expect("history while Off")
+            .is_empty());
         assert_eq!(
             client
                 .update_qa_settings(&QaSettingsUpdate::new(
@@ -1538,24 +1594,24 @@ async fn run_shared_flow(
                 .is_none(),
             "inline triage must not create a transcript"
         );
-        let count = QaTurnRequest::new(
-            format!("parity-failed-count-{transport}"),
-            qa_context.clone(),
-            "How many jobs failed?".into(),
-            None,
-        )
-        .expect("valid scoped count question");
-        let answered = client.submit_qa_turn(&count).await.expect("direct answer");
-        assert_eq!(answered.state, QaTurnState::Answered);
-        assert_eq!(answered.findings.len(), 1);
-        assert_eq!(answered.findings[0].source.kind, ChatSourceKind::JobCount);
-        let usage = answered.context.expect("direct answer context usage");
-        assert_eq!(usage.model_windows, 0);
-        assert_eq!(usage.peak_input_tokens, 0);
-        assert_eq!(
-            client.submit_qa_turn(&count).await.expect("direct replay"),
-            answered
-        );
+        for (suffix, question) in [
+            ("failed-count", "How many jobs failed?"),
+            ("running-list", "What jobs are running?"),
+            ("recall", "What did I ask?"),
+        ] {
+            let request = QaTurnRequest::new(
+                format!("parity-{suffix}-{transport}"),
+                qa_context.clone(),
+                question.into(),
+                None,
+            )
+            .expect("valid Assistant question");
+            assert_eq!(
+                client.submit_qa_turn(&request).await.unwrap_err(),
+                ClientError::Status(503),
+                "No generator is running for {question}",
+            );
+        }
 
         let job = ChatSourceReference::new(ChatSourceKind::Job, seed_receipt.job_id.clone())
             .expect("private seed job reference");
@@ -1568,46 +1624,23 @@ async fn run_shared_flow(
             QaRelatedActivity::Found { target, .. }
                 if target.kind == ChatSourceKind::Readiness && target.id == "actor_catalog"
         ));
-        assert_eq!(
-            client.latest_qa_turn().await.expect("read latest QA"),
-            Some(answered)
-        );
         let explain = QaTurnRequest::new(
             format!("parity-explain-job-{transport}"),
             qa_context.clone(),
             "What happened?".into(),
-            Some(job.clone()),
+            Some(job),
         )
         .expect("selected job question");
-        let explanation = client
-            .submit_qa_turn(&explain)
-            .await
-            .expect("direct job explanation");
-        assert_eq!(explanation.state, QaTurnState::Answered);
-        assert_eq!(explanation.findings[0].source, job);
-        assert_eq!(explanation.related_activity, Some(related_job));
-        let follow_up = QaTurnRequest::new(
-            format!("parity-follow-job-{transport}"),
-            qa_context.clone(),
-            "What about now?".into(),
-            None,
-        )
-        .expect("follow-up after focus was cleared");
-        let refreshed = client
-            .submit_qa_turn(&follow_up)
-            .await
-            .expect("new observation for the retained subject");
-        assert_eq!(refreshed.state, QaTurnState::Answered);
-        assert_eq!(refreshed.question, follow_up.question);
-        assert_eq!(refreshed.findings[0].source, job);
-        assert!(refreshed.findings[0].observed_at > explanation.findings[0].observed_at);
-        assert_eq!(refreshed.findings.len(), 2);
-        assert_eq!(refreshed.findings[1].source, job);
-        assert_eq!(refreshed.findings[1].label, "Previous observation");
         assert_eq!(
-            refreshed.findings[1].observed_at,
-            explanation.findings[0].observed_at,
+            client.submit_qa_turn(&explain).await.unwrap_err(),
+            ClientError::Status(503),
         );
+        assert!(client
+            .latest_qa_turn()
+            .await
+            .expect("read latest QA")
+            .is_none());
+        assert!(client.qa_history().await.expect("read history").is_empty());
 
         let julia_update = QaSettingsUpdate::preferences(qa_context.clone(), enabled.revision)
             .with_decision_preference(QaDecisionPreference::Julia1Q8);
@@ -1624,7 +1657,7 @@ async fn run_shared_flow(
         );
         assert_eq!(
             julia.generation, enabled.generation,
-            "decision save keeps FLAN warm"
+            "decision save retains the active generator generation"
         );
         assert_eq!(
             client.update_qa_settings(&julia_update).await.unwrap_err(),
@@ -1654,23 +1687,40 @@ async fn run_shared_flow(
             QaDecisionPreference::Julia1Q8
         );
         assert!(small.generation > same.generation);
+        assert!(client
+            .qa_history()
+            .await
+            .expect("read history after generator switch")
+            .is_empty());
         assert_eq!(
-            client
-                .latest_qa_turn()
-                .await
-                .expect("history after generator switch"),
-            Some(refreshed)
+            client.submit_qa_turn(&explain).await.unwrap_err(),
+            ClientError::Status(503),
         );
-        assert_eq!(
-            client
-                .submit_qa_turn(&explain)
+        let mut previous = small;
+        for preference in [
+            QaGeneratorPreference::Gpt2Small,
+            QaGeneratorPreference::Gpt2Medium,
+        ] {
+            let saved = client
+                .update_qa_settings(
+                    &QaSettingsUpdate::preferences(qa_context.clone(), previous.revision)
+                        .with_generator_preference(preference),
+                )
                 .await
-                .expect("replay after generator switch"),
-            explanation
-        );
+                .expect("save explicit GPT-2 generator");
+            assert_eq!(saved.generator.unwrap().preference, preference);
+            assert_eq!(saved.decision, previous.decision);
+            assert!(saved.generation > previous.generation);
+            let fetched = client
+                .qa_settings()
+                .await
+                .expect("read saved GPT-2 generator");
+            assert_eq!(fetched.generator.unwrap().preference, preference);
+            previous = saved;
+        }
         let base = client
             .update_qa_settings(
-                &QaSettingsUpdate::preferences(qa_context.clone(), small.revision)
+                &QaSettingsUpdate::preferences(qa_context.clone(), previous.revision)
                     .with_generator_preference(QaGeneratorPreference::FlanT5Base),
             )
             .await
@@ -1679,7 +1729,7 @@ async fn run_shared_flow(
             base.generator.unwrap().preference,
             QaGeneratorPreference::FlanT5Base
         );
-        assert!(base.generation > small.generation);
+        assert!(base.generation > previous.generation);
         let edge = client
             .update_qa_settings(
                 &QaSettingsUpdate::preferences(qa_context.clone(), base.revision)
@@ -1712,6 +1762,11 @@ async fn run_shared_flow(
             off.decision.unwrap().preference,
             QaDecisionPreference::VllmD3EdgeQ8
         );
+        assert!(client
+            .qa_history()
+            .await
+            .expect("history after Off")
+            .is_empty());
     } else {
         let missing = ClientError::Status(404);
         assert_eq!(client.qa_settings().await.unwrap_err(), missing);
@@ -1720,6 +1775,7 @@ async fn run_shared_flow(
             missing
         );
         assert_eq!(client.latest_qa_turn().await.unwrap_err(), missing);
+        assert_eq!(client.qa_history().await.unwrap_err(), missing);
         assert_eq!(
             client
                 .update_qa_settings(&QaSettingsUpdate::new(qa_context.clone(), 0, true))
@@ -1753,6 +1809,7 @@ async fn run_shared_flow(
         "qa_turn_submit",
         "qa_related_activity",
         "qa_latest",
+        "qa_history",
         "qa_events",
         "qa_cancel",
     ] {
@@ -2035,6 +2092,11 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
             .is_some_and(|obs| obs.status == "complete"),
         "durable setup_jobs seed observation must persist in embedded SurrealDB"
     );
+    let context_db = Path::new("context").join("workstation-context.sqlite3");
+    assert!(
+        !http.root.join(&context_db).exists(),
+        "the HTTP backend does not own an Embedded observation journal"
+    );
     http.shutdown().await;
 
     // 2. Run exact same shared scenario suite against compiled `argos-api-host --role local-ipc`.
@@ -2067,6 +2129,7 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
             "qa_turn_submit",
             "qa_related_activity",
             "qa_latest",
+            "qa_history",
             "qa_events",
             "qa_cancel",
         ]
@@ -2087,6 +2150,19 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
         .await
         .expect("IPC graceful shutdown ack");
     assert!(shutdown_ack.checkpointed);
+
+    #[cfg(unix)]
+    let journal_identity = {
+        let path = ipc_root.join(&context_db);
+        let mut file = std::fs::File::open(path).expect("Embedded workstation observation journal");
+        let mut signature = [0; 16];
+        file.read_exact(&mut signature)
+            .expect("journal SQLite header");
+        assert_eq!(&signature, b"SQLite format 3\0");
+        let metadata = file.metadata().expect("journal metadata");
+        assert_eq!(metadata.mode() & 0o077, 0, "journal is owner-only");
+        (metadata.dev(), metadata.ino())
+    };
 
     // Check protocol mismatch intentional exception on fresh non-destructive handshake probe.
     let mismatch_dir = create_private_dir("fleetworks-ipc-mismatch");
@@ -2110,6 +2186,12 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
     let ipc_client2 = Client::from_local_ipc(Arc::clone(&ipc2))
         .with_registered_context(&ipc_res.registered_context)
         .expect("attach saved registered context after restart");
+
+    #[cfg(unix)]
+    {
+        let metadata = std::fs::metadata(ipc_root.join(&context_db)).expect("reopened journal");
+        assert_eq!((metadata.dev(), metadata.ino()), journal_identity);
+    }
 
     let restarted_qa = ipc_client2
         .qa_settings()

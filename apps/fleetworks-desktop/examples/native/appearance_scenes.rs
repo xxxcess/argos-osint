@@ -5,7 +5,7 @@ use fleetworks_desktop::accessibility::FixtureAccessibility;
 use fleetworks_desktop::State;
 
 pub fn satin(state: &mut State) {
-    super::atlas_ready(state);
+    super::redesign_scenes::status(state);
     state.accessibility.fixture_override = Some(FixtureAccessibility::default());
 }
 pub fn matte(state: &mut State) {

@@ -123,15 +123,21 @@ fn real_shell_navigation_works_offline_without_boundary_effects() {
     );
     connected.frame(0.0);
     assert!(connected.find("sidebar-context-footer").is_none());
+    assert!(connected.find("sidebar-operations-heading").is_none());
     assert!(connected.find("deployment").is_none());
     assert!(connected.find("gateway-status-header").is_none());
     assert!(connected.find("connection-editor").is_none());
     assert!(connected.find("connect-id").is_none());
-    assert!(connected.find("workstation-registration-tag").is_some());
+    assert!(connected.find("workstation-registration-tag").is_none());
+    assert!(connected.find("nav-atlas").is_none());
     let connected_tree = connected.accessibility_json().to_string();
+    assert!(!connected_tree.contains("News Cycles"));
     assert!(!connected_tree.contains("Connect ID"));
     assert!(!connected_tree.contains("Gateway connected"));
-    assert!(connected_tree.contains("Distributed registration ID synthetic-registration"));
+    assert!(!connected_tree.contains("synthetic-registration"));
+    assert!(connected.elements().iter().any(|element| {
+        element.key.as_deref() == Some("nav-brain") && element.label.as_deref() == Some("Search")
+    }));
     let hidden_connect_id = connected
         .state
         .registration
@@ -161,6 +167,51 @@ fn real_shell_navigation_works_offline_without_boundary_effects() {
                     .contains("synthetic-deployment"),
                 "deployment ID stays restricted to Workstation Status Gateway Backend"
             );
+        }
+    }
+}
+
+#[test]
+fn native_destination_shortcuts_select_only_current_pages_at_both_widths() {
+    for size in [(1180.0, 780.0), (640.0, 480.0)] {
+        let mut state = registered_fixture();
+        state
+            .connection
+            .capabilities
+            .as_mut()
+            .expect("fixture capabilities")
+            .features
+            .extend(["atlas-cycles".into(), "atlas-cycle-history-v1".into()]);
+        let mut runtime = Runtime::new(
+            state,
+            app::view,
+            size,
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.on_key = app::spec().on_key;
+        runtime.frame(0.0);
+        let destinations = [
+            ('1', Page::Seed),
+            ('2', Page::Brain),
+            ('6', Page::Brain),
+            ('3', Page::Tools),
+            ('4', Page::Models),
+            ('5', Page::Jobs),
+        ];
+        for (index, (digit, page)) in destinations.into_iter().enumerate() {
+            runtime.key(rune::KeyEvent {
+                key: rune::Key::Command(digit),
+                mods: rune::Mods::default(),
+            });
+            runtime.frame((index + 1) as f64 / 60.0);
+            assert_eq!(runtime.state.page, page, "shortcut {digit} at {size:?}");
+            assert!(!runtime
+                .accessibility_json()
+                .to_string()
+                .contains("News Cycles"));
         }
     }
 }
@@ -265,12 +316,10 @@ pub(crate) fn registered_fixture() -> State {
 fn folder_only_switch_keeps_global_drafts_and_fences_future_origin() {
     let mut state = registered_fixture();
     state.brain.query = TextEdit::new("global actor draft");
-    state.backend.article_search = TextEdit::new("global article draft");
     state.backend.tool_inputs = TextEdit::new("{\"email\":\"fixture@example.test\"}");
     let old_revision = state.origin_revision;
     state.change_workspace(workspace("research"));
     assert_eq!(state.brain.query.text, "global actor draft");
-    assert_eq!(state.backend.article_search.text, "global article draft");
     assert_eq!(
         state.backend.tool_inputs.text,
         "{\"email\":\"fixture@example.test\"}"
@@ -414,14 +463,14 @@ fn provider_key_is_masked_in_real_accessibility_tree_and_confirmation() {
 }
 
 #[test]
-fn direct_cycles_navigation_observes_configuration_before_any_mutation() {
+fn direct_models_navigation_observes_configuration_before_any_mutation() {
     let mut state = registered_fixture();
     assert!(
         state.configuration_revision().is_none(),
         "fresh connection has no previous model/profile snapshot"
     );
     state.intents.clear();
-    state.navigate(Page::Atlas);
+    state.navigate(Page::Models);
     assert!(
         state.intents.iter().any(|intent| matches!(
             intent,
@@ -429,7 +478,7 @@ fn direct_cycles_navigation_observes_configuration_before_any_mutation() {
                 kind: ReadKind::Models
             }
         )),
-        "cycles must request its required configuration without a prior Models visit"
+        "Models must request its required configuration on entry"
     );
     assert!(
         !state.intents.iter().any(|intent| matches!(
@@ -582,6 +631,7 @@ fn compact_connected_setup_readiness_toggle(kind: fleetworks_workstation::native
 
     let mut state = registered_fixture();
     state.backend_kind = kind;
+    state.setup_gateway = true;
     if kind == BackendKind::Local {
         state.connection.origin = TextEdit::new("local://embedded");
     }
@@ -611,21 +661,7 @@ fn compact_connected_setup_readiness_toggle(kind: fleetworks_workstation::native
     );
     runtime.frame(0.0);
     runtime.frame(1.0 / 60.0);
-    assert!(!runtime.state.setup_gateway);
-    let (x, y) = runtime
-        .find("open-workstation-settings")
-        .expect("open Settings");
-    runtime.pointer_down(x, y);
-    runtime.pointer_up(x, y);
-    runtime.frame(2.0 / 60.0);
-    let (x, y) = runtime
-        .find("settings-category-connection")
-        .expect("reopen Connection settings");
-    runtime.pointer_down(x, y);
-    runtime.pointer_up(x, y);
-    runtime.frame(2.5 / 60.0);
-    assert!(runtime.state.settings_open);
-    assert!(!runtime.state.setup_gateway);
+    assert!(runtime.find("gateway-setup-body").is_some());
     assert!(runtime.state.connected());
     assert!(runtime.state.registration.context.is_some());
 
@@ -717,6 +753,7 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
     const SETUP_SWITCH: &str = "setup-advanced-toggle/switch";
     const FAILED_ROW: &str = "readiness-trigger-jobs";
     const FAILED_DETAIL: &str = "readiness-details-jobs";
+    const FAILED_ACTION: &str = "readiness-action-jobs";
     const ACTOR_ROW: &str = "readiness-trigger-actor_search";
     const PASSED_ROW: &str = "readiness-trigger-gateway";
 
@@ -799,12 +836,8 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
         assert!(summary.contains("Status checks"), "{summary}");
         assert!(summary.contains("1 passed"), "{summary}");
         assert!(summary.contains("1 failed"), "{summary}");
-        assert!(runtime.find(FAILED_ROW).is_none());
+        assert_eq!(runtime.find(FAILED_ROW).is_some(), !setup);
         assert!(runtime.find(FAILED_DETAIL).is_none());
-
-        if !setup {
-            assert!(runtime.find("actor-search-summary-card").is_some());
-        }
 
         // The blocker must be visible in the initial viewport on all three surfaces.
         let critical = assert_status_check_fully_visible(&runtime, CRITICAL);
@@ -815,10 +848,12 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
         runtime.state.intents.clear();
         press_status_check(&mut runtime, &mut frame);
         assert!(runtime.state.intents.contains(&Intent::Readiness));
-        assert!(runtime.find(FAILED_ROW).is_none());
+        assert_eq!(runtime.find(FAILED_ROW).is_some(), !setup);
 
         focus_status_check(&mut runtime, disclosure, &mut frame);
-        press_status_check(&mut runtime, &mut frame);
+        if setup {
+            press_status_check(&mut runtime, &mut frame);
+        }
         assert!(runtime.find("backend-readiness-checks").is_some());
         assert!(runtime.find(FAILED_DETAIL).is_none());
 
@@ -831,6 +866,14 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
             Some("Actor search: Background indexing")
         );
         assert_eq!(passed.label.as_deref(), Some("Gateway: Ready"));
+        let action = status_check_element(&runtime, FAILED_ACTION);
+        assert_eq!(action.role, "button");
+        assert_eq!(action.label.as_deref(), Some("View Jobs details"));
+        assert!(action.target[0] > failed.target[0]);
+        assert_eq!(
+            action.target[0],
+            status_check_element(&runtime, "readiness-action-gateway").target[0]
+        );
         assert!(failed.target[1] < actor.target[1], "{kind:?}");
         assert!(actor.target[1] < passed.target[1], "{kind:?}");
         for key in ["readiness-icon-jobs", "readiness-icon-gateway"] {
@@ -852,9 +895,12 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
         });
         tick_status_checks(&mut runtime, &mut frame);
         assert!(assert_status_check_fully_visible(&runtime, FAILED_ROW).focused);
+        focus_status_check(&mut runtime, FAILED_ACTION, &mut frame);
         press_status_check(&mut runtime, &mut frame);
         assert!(runtime.find(FAILED_DETAIL).is_some());
-        assert!(status_check_element(&runtime, FAILED_ROW).focused);
+        let action = status_check_element(&runtime, FAILED_ACTION);
+        assert!(action.focused);
+        assert_eq!(action.label.as_deref(), Some("Hide Jobs details"));
         let tree = runtime.accessibility_json().to_string();
         assert!(tree.contains("process_not_ready"));
         assert!(tree.contains("The Jobs service reported that its dispatcher was not ready."));
@@ -874,7 +920,7 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
             state.complete_readiness(Ok(next));
         });
         tick_status_checks(&mut runtime, &mut frame);
-        assert!(status_check_element(&runtime, FAILED_ROW).focused);
+        assert!(status_check_element(&runtime, FAILED_ACTION).focused);
         assert!(runtime.find(FAILED_DETAIL).is_some());
         assert!(runtime
             .accessibility_json()
@@ -919,7 +965,6 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
 
 #[test]
 fn desktop_status_table_aligns_columns_and_exposes_the_granted_row_action() {
-    use fleetworks_contracts::readiness::DatasetKind;
     use fleetworks_contracts::readiness::ReadinessAction;
     use fleetworks_contracts::readiness::ReadinessActionId;
     use fleetworks_contracts::readiness::ReadinessCheck;
@@ -995,11 +1040,7 @@ fn desktop_status_table_aligns_columns_and_exposes_the_granted_row_action() {
     let blocker = status_check_element(&runtime, "readiness-critical-action");
     assert_eq!(blocker.visible, blocker.rect);
     assert_eq!(blocker.label.as_deref(), Some("Refresh checks"));
-    assert!(runtime.find("workstation-open-seed").is_none());
-    assert!(runtime.find(SEED).is_none());
-    runtime.update(|_, tx| tx.focus("status-checks-toggle", true));
-    tick_status_checks(&mut runtime, &mut frame);
-    press_status_check(&mut runtime, &mut frame);
+    assert!(runtime.find("workstation-services").is_none());
     let header = status_check_element(&runtime, "readiness-status-table-header");
     let column_labels: Vec<_> = runtime
         .elements()
@@ -1017,6 +1058,7 @@ fn desktop_status_table_aligns_columns_and_exposes_the_granted_row_action() {
     assert!(runtime.find("readiness-details-actor_catalog").is_none());
     let seed = status_check_element(&runtime, SEED);
     assert!(seed.focusable);
+    assert_eq!(seed.label.as_deref(), Some("Open actor seed setup"));
     assert!(seed.target[0] > catalog_status.target[0]);
     runtime.update(|_, tx| {
         tx.scroll_into_view(SEED);
@@ -1024,14 +1066,12 @@ fn desktop_status_table_aligns_columns_and_exposes_the_granted_row_action() {
     });
     tick_status_checks(&mut runtime, &mut frame);
     assert!(status_check_element(&runtime, SEED).focused);
-    runtime.state.intents.clear();
     press_status_check(&mut runtime, &mut frame);
-    assert!(runtime.state.intents.contains(&Intent::ChooseDataset {
-        kind: DatasetKind::ActorCatalog,
-    }));
-    assert!(runtime.find("readiness-details-actor_catalog").is_none());
+    assert_eq!(runtime.state.page, Page::Seed);
+    assert_eq!(runtime.state.seed_stage, crate::app::SeedStage::Seed);
 
     runtime.update(|state, _| {
+        state.navigate(Page::Workstation);
         let Load::Ready(readiness) = &state.readiness else {
             panic!("expected the previous observation");
         };
@@ -1190,11 +1230,7 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
     assert!(runtime.find("maintenance-seed").is_some());
     assert!(runtime.find("maintenance-train").is_none());
     assert!(runtime.find("maintenance-reindex").is_some());
-    let seed_action = if cfg!(target_os = "linux") {
-        "Enter actor CSV path"
-    } else {
-        "1. Seed Actors"
-    };
+    let seed_action = "Local CSV";
     let seed_explanation =
         "Use a CSV to add or update actors. Existing actors outside this CSV are kept.";
     let seed_tree = runtime.accessibility_json().to_string();
@@ -1247,7 +1283,7 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
 }
 
 #[test]
-fn workstation_tags_the_resolved_registration_and_keeps_metrics_in_the_toolbar() {
+fn workstation_diagnostics_expose_current_registration_and_keep_metrics_in_the_toolbar() {
     use crate::workstation_dashboard::HostMetrics;
     use fleetworks_workstation::native::BackendKind;
 
@@ -1269,13 +1305,15 @@ fn workstation_tags_the_resolved_registration_and_keeps_metrics_in_the_toolbar()
     runtime.reduced_motion = true;
     let mut frame = 0;
     tick_status_checks(&mut runtime, &mut frame);
-    let tag = assert_status_check_fully_visible(&runtime, "workstation-registration-tag");
-    assert_eq!(
-        tag.label.as_deref(),
-        Some("Embedded registration ID synthetic-registration")
-    );
-    assert!(runtime.find("workstation-services").is_some());
-    assert!(runtime.find("workstation-jobs-counts").is_some());
+    assert!(runtime.find("workstation-registration-tag").is_none());
+    assert!(runtime.find("workstation-registration-id").is_none());
+    assert!(!runtime
+        .accessibility_json()
+        .to_string()
+        .contains("synthetic-registration"));
+    assert!(runtime.find("workstation-services").is_none());
+    assert!(runtime.find("workstation-jobs-counts").is_none());
+    assert!(runtime.find("backend-readiness-checks").is_some());
     assert!(runtime.find("status-checks-toggle/trigger").is_some());
     assert!(runtime.find("workstation-diagnostics/trigger").is_some());
     assert!(runtime.find("host-resources-card").is_none());
@@ -1316,17 +1354,32 @@ fn workstation_tags_the_resolved_registration_and_keeps_metrics_in_the_toolbar()
         .unwrap()
         .contains("Latest refresh failed: gateway timed out"));
 
+    runtime.update(|_, tx| {
+        tx.scroll_into_view("workstation-diagnostics/trigger");
+        tx.focus("workstation-diagnostics", true);
+    });
+    tick_status_checks(&mut runtime, &mut frame);
+    assert!(runtime.elements().iter().any(|element| {
+        element.focused && element.path.ends_with("/workstation-diagnostics/trigger")
+    }));
+    runtime.key(rune::KeyEvent {
+        key: rune::Key::Text(" ".into()),
+        mods: rune::Mods::default(),
+    });
+    tick_status_checks(&mut runtime, &mut frame);
+    assert!(runtime.state.workstation_diagnostics_open);
+    let details = runtime.accessibility_json().to_string();
+    assert!(details.contains("Registration ID") && details.contains("synthetic-registration"));
+
     runtime.update(|state, _| {
         state.registration.context = None;
         state.registration.receipt = Load::Loading;
     });
     tick_status_checks(&mut runtime, &mut frame);
-    assert_eq!(
-        status_check_element(&runtime, "workstation-registration-tag")
-            .label
-            .as_deref(),
-        Some("Embedded · Registering…")
-    );
+    assert!(runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Registering…"));
     assert!(runtime.find("workstation-jobs-counts").is_none());
 
     runtime.update(move |state, _| {
@@ -1334,12 +1387,9 @@ fn workstation_tags_the_resolved_registration_and_keeps_metrics_in_the_toolbar()
         state.connection.status = ConnectionStatus::Disconnected;
     });
     tick_status_checks(&mut runtime, &mut frame);
-    assert_eq!(
-        status_check_element(&runtime, "workstation-registration-tag")
-            .label
-            .as_deref(),
-        Some("Embedded · Unregistered")
-    );
+    let offline = runtime.accessibility_json().to_string();
+    assert!(offline.contains("Unregistered"));
+    assert!(!offline.contains("synthetic-registration"));
     assert!(runtime.find("toolbar-telemetry").is_none());
 }
 

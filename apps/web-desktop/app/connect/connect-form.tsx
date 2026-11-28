@@ -2,7 +2,15 @@
 
 import { useState } from "react";
 import { StyleSheet, Text, TextInput, View } from "react-native";
-import { Button, colors, Copy, fonts, Notice, Panel } from "@argos/ui";
+import {
+  Button,
+  colors,
+  Copy,
+  fonts,
+  LoadingState,
+  Notice,
+  Panel,
+} from "@argos/ui";
 import { parseConnectId } from "../../connect-id.mjs";
 import { announceConnectionChange } from "../connection-events";
 
@@ -104,15 +112,21 @@ export function ConnectForm({
               label="Connect registered workstation"
               intent="submit"
             >
-              {pending ? "Verifying…" : "Connect"}
+              Connect
             </Button>
           </View>
           {error ? <Notice>{error}</Notice> : null}
-          <Text accessibilityLiveRegion="polite" style={styles.help}>
-            {pending
-              ? "Checking the registration in this web deployment."
-              : "Unknown, revoked or other-backend IDs cannot unlock this deployment. Configure and register in the native app first."}
-          </Text>
+          {pending ? (
+            <LoadingState
+              label="Checking the registration in this web deployment."
+              compact
+            />
+          ) : (
+            <Text style={styles.help}>
+              Unknown, revoked or other-backend IDs cannot unlock this
+              deployment. Configure and register in the native app first.
+            </Text>
+          )}
         </Panel>
       </View>
     </View>

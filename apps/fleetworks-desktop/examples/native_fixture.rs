@@ -11,7 +11,7 @@ mod native {
     mod overhaul_scenes;
     mod readiness_scenes;
     mod redesign_scenes;
-    mod startup_data_scenes;
+    mod startup_scenes;
     mod submission_scenes;
 
     use fleetworks_contracts::capabilities::Capabilities;
@@ -26,11 +26,10 @@ mod native {
     use fleetworks_contracts::chat::QaGeneratorSettings;
     use fleetworks_contracts::chat::QaModelTarget;
     use fleetworks_contracts::chat::QaPhase;
-    use fleetworks_contracts::chat::QaRelatedActivity;
-    use fleetworks_contracts::chat::QaRelationshipReason;
     use fleetworks_contracts::chat::QaSettings;
-    use fleetworks_contracts::chat::QaStartupStage;
     use fleetworks_contracts::chat::QaTurn;
+    use fleetworks_contracts::chat::QaTurnLimitation;
+    use fleetworks_contracts::chat::QaTurnStage;
     use fleetworks_contracts::chat::QaTurnState;
     use fleetworks_contracts::chat::QA_MODEL_SETTINGS_FEATURE;
     use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
@@ -60,8 +59,6 @@ mod native {
     use fleetworks_desktop::app::Load;
     use fleetworks_desktop::backend::AccountMetadata;
     use fleetworks_desktop::backend::ActivityJob;
-    use fleetworks_desktop::backend::Article;
-    use fleetworks_desktop::backend::ArticlePage;
     use fleetworks_desktop::backend::JobDetail;
     use fleetworks_desktop::backend::JobLogs;
     use fleetworks_desktop::backend::LogEntry;
@@ -255,25 +252,6 @@ mod native {
         serde_json::to_vec(&serde_json::json!({"schema_version":4,"accounts":{},"roles":roles,"tool_credentials":{}})).expect("synthetic portable fixture")
     }
 
-    fn atlas_ready(state: &mut State) {
-        connected(state);
-        state.backend.article_day = TextEdit::new("2026-01-01");
-        state.backend.articles = Load::Ready(ArticlePage {
-            rows: vec![Article {
-                id: "synthetic-article".into(),
-                title: "Synthetic source report".into(),
-                description: "A bounded native article-list fixture.".into(),
-                source_name: "Fixture News".into(),
-                published_at: "2026-01-01T00:00:00Z".into(),
-                category: "pol".into(),
-                categories: vec!["pol".into(), "mil".into()],
-            }],
-            next_cursor: None,
-            revision: "synthetic-revision".into(),
-        });
-        state.page = Page::Atlas;
-    }
-
     fn tools_ready(state: &mut State) {
         registered(state);
         state.backend.profile = Load::Ready(ProfileSnapshot {
@@ -312,6 +290,8 @@ mod native {
             operation: "actor_seed".into(),
             state: "running".into(),
             phase: "seeding".into(),
+            active_since: String::new(),
+            finished_at: String::new(),
             progress_done: Some(250),
             progress_total: Some(1000),
             error_summary: String::new(),
@@ -455,6 +435,24 @@ mod native {
         }
         match intent {
             Intent::Dossier { .. } => populate_dossier(state),
+            Intent::BrowseActors => {
+                use fleetworks_contracts::search::ActorBrowsePage;
+                let rows = [
+                    ("synthetic-actor-1", "Harbor Union"),
+                    ("synthetic-actor-10", "Outer Harbor Council"),
+                    ("synthetic-actor-2", "Harbor Planning Council"),
+                    ("synthetic-actor-3", "Harbor Transit Office"),
+                    ("synthetic-actor-4", "Cove Planning Board"),
+                    ("synthetic-actor-5", "Cove Transit Office"),
+                    ("synthetic-actor-6", "Eastshore Council"),
+                    ("synthetic-actor-7", "North Quay Office"),
+                    ("synthetic-actor-8", "Port Works Authority"),
+                    ("synthetic-actor-9", "South Pier Council"),
+                ]
+                .map(|(id, label)| ActorSearchHit::new(id.into(), label.into(), 0, String::new()))
+                .to_vec();
+                state.fixture_actor_catalog(ActorBrowsePage::new(rows, None));
+            }
             Intent::Search { .. } => {
                 let revision = state.brain.query_revision();
                 let mut index = IndexStatus::unknown("2026-01-01T00:00:00Z".into());
@@ -582,13 +580,6 @@ mod native {
                 state.page = page;
             }
             Intent::BackendRead {
-                kind: ReadKind::Articles,
-            } => {
-                let page = state.page;
-                atlas_ready(state);
-                state.page = page;
-            }
-            Intent::BackendRead {
                 kind: ReadKind::Tools,
             } => {
                 let page = state.page;
@@ -607,9 +598,9 @@ mod native {
     }
 
     fn setup_connected_embedded(state: &mut State) {
-        setup_connected_distributed(state);
-        state.backend_kind = BackendKind::Local;
-        state.connection.origin = TextEdit::new("local://embedded");
+        readiness_scenes::embedded_status_checks(state);
+        state.setup_gateway = true;
+        state.setup_advanced_open = true;
     }
 
     fn setup_connected_distributed(state: &mut State) {
@@ -621,6 +612,7 @@ mod native {
     fn inbox(state: &mut State) {
         registered(state);
         state.seed_inbox_drawer_fixture();
+        state.seed_inbox_retained_job_fixture();
     }
 
     fn inbox_qa_off(state: &mut State, kind: BackendKind) {
@@ -644,13 +636,26 @@ mod native {
         state.seed_inbox_qa_fixture(settings, None);
     }
 
-    fn inbox_qa_turn(state: &mut State, stage: QaTurnState) {
+    fn inbox_qa_ready(state: &mut State) {
         registered(state);
-        state.seed_inbox_qa_drawer_fixture();
+        state.seed_inbox_qa_overflow_fixture();
+        triage_connection(state, QaPhase::Ready);
+    }
+
+    fn inbox_qa_turn(
+        state: &mut State,
+        stage: QaTurnState,
+        work: Option<QaTurnStage>,
+        additional_finding: Option<QaFinding>,
+    ) {
+        registered(state);
+        state.seed_inbox_qa_overflow_fixture();
         state.backend_kind = BackendKind::Local;
         state.connection.origin = TextEdit::new("local://embedded");
-        let question = if stage == QaTurnState::Answered {
-            "Summarize workstation readiness."
+        let question = if additional_finding.is_some() {
+            "Is actor search ready, and how much memory is in use?"
+        } else if stage == QaTurnState::Answered {
+            "Is actor search ready now, and what is a search index?"
         } else {
             "Is actor search ready?"
         };
@@ -660,11 +665,18 @@ mod native {
             question.into(),
         );
         turn.state = stage;
+        turn.stage = work;
         turn.cursor = 1;
-        if stage == QaTurnState::Running {
+        turn.accepted_at = Some(1_767_225_600);
+        if stage == QaTurnState::Running && work.is_none() {
             turn.provisional_reply = Some("Let me check actor search readiness.".into());
         }
+        if stage == QaTurnState::InsufficientContext {
+            turn.limitation = Some(QaTurnLimitation::CapabilityUnavailable);
+        }
         if matches!(stage, QaTurnState::Answered | QaTurnState::Canceled) {
+            turn.completed_at = Some(1_767_225_602);
+            turn.response_time_ms = Some(2_410);
             let answer = "Actor search is ready.";
             turn.findings.push(QaFinding::new(
                 ChatSourceReference::new(ChatSourceKind::Readiness, "actor-search".into())
@@ -678,16 +690,51 @@ mod native {
             turn.cursor = 3;
         }
         if stage == QaTurnState::Answered {
+            state.selected_readiness = Some("actor_search".into());
+            turn.reply = Some(if let Some(finding) = additional_finding {
+                let reply = format!("Actor search is ready. {}", finding.text);
+                turn.findings.push(finding);
+                turn.cursor += 1;
+                reply
+            } else {
+                "A search index organizes data so matching records can be found quickly.".into()
+            });
             turn.context = Some(QaContextUsage::new(
                 QaModelTarget::FlanT5Small.input_tokens(),
                 448,
                 1,
             ));
+            let mut prior = QaTurn::queued(
+                "fixture-turn-previous".into(),
+                "fixture-request-previous".into(),
+                "Is actor search ready?".into(),
+            );
+            prior.state = QaTurnState::Answered;
+            prior.accepted_at = Some(1_767_225_480);
+            prior.completed_at = Some(1_767_225_515);
+            prior.response_time_ms = Some(35_000);
+            prior.reply = Some("Actor search was ready.".into());
+            prior.cursor = 2;
+            state.seed_inbox_qa_history_fixture(vec![turn.clone(), prior]);
         }
         state.seed_inbox_qa_fixture(
             QaSettings::new(true, QaPhase::Ready, 2, 1, true),
             Some(turn),
         );
+    }
+
+    fn inbox_qa_sources(state: &mut State) {
+        let text = "Workstation memory usage is 42%.";
+        let metric = QaFinding::new(
+            ChatSourceReference::new(ChatSourceKind::HostMetric, "memory".into())
+                .expect("fixture memory source"),
+            "Memory usage".into(),
+            text.into(),
+            0,
+            text.len() as u32,
+            "2026-01-01T00:00:01Z".into(),
+        );
+        inbox_qa_turn(state, QaTurnState::Answered, None, Some(metric));
     }
 
     fn triage_connection(state: &mut State, phase: QaPhase) {
@@ -699,31 +746,56 @@ mod native {
         state.seed_inbox_qa_fixture(QaSettings::new(true, phase, 2, 1, true), None);
     }
 
-    fn jobs_related_activity(state: &mut State) {
+    fn jobs_assistant_explain(state: &mut State) {
         jobs_ready(state);
         triage_connection(state, QaPhase::Ready);
-        state.seed_activity_triage_fixture(QaRelatedActivity::Found {
-            target: ChatSourceReference::new(ChatSourceKind::Readiness, "actor_catalog".into())
-                .expect("synthetic triage target"),
-            reason: QaRelationshipReason::StageCheck,
-        });
+        state
+            .connection
+            .capabilities
+            .as_mut()
+            .expect("synthetic permissions")
+            .permissions
+            .push(Permission::RetryJob);
+        let Load::Ready(detail) = &mut state.backend.detail else {
+            panic!("Actor seed fixture must set job detail");
+        };
+        detail.job.title = "Actor seed".into();
+        detail.job.state = "failed".into();
+        detail.job.phase = "Failed".into();
+        detail.job.error_summary = "Task lease expired after maximum worker recoveries".into();
+        detail.job.can_retry = true;
+        detail.job.activity_actions_available = true;
+        detail.job.action_reason_code = "supported".into();
+        detail.activity_actions_available = true;
+        let row = detail.job.clone();
+        jobs_scenes::install(state, vec![row]);
     }
 
-    fn inbox_related_activity(state: &mut State) {
+    fn inbox_notice_actions(state: &mut State, phase: QaPhase) {
         readiness_scenes::observed(state);
-        triage_connection(state, QaPhase::Starting);
+        triage_connection(state, phase);
+        if let Some(capabilities) = &mut state.connection.capabilities {
+            capabilities.features.push(QA_MODEL_SETTINGS_FEATURE.into());
+        }
+        let mut settings = QaSettings::new(true, phase, 2, 1, true);
+        settings.generator = Some(QaGeneratorSettings::new(
+            QaGeneratorPreference::Automatic,
+            Some(settings.model_target),
+            phase,
+            None,
+        ));
+        settings.decision = Some(QaDecisionSettings::new(
+            QaDecisionPreference::RulesOnly,
+            QaDecisionPreference::RulesOnly,
+            QaPhase::Off,
+            None,
+        ));
+        state.seed_inbox_qa_fixture(settings, None);
         state.fixture_show_triage_notice();
-        state.seed_activity_triage_fixture(QaRelatedActivity::Found {
-            target: ChatSourceReference::new(ChatSourceKind::Readiness, "actor_search".into())
-                .expect("synthetic current readiness"),
-            reason: QaRelationshipReason::CurrentStatus,
-        });
     }
 
     fn workstation_status(state: &mut State) {
-        readiness_scenes::mixed_status_checks(state);
-        state.backend_kind = BackendKind::Local;
-        state.connection.origin = TextEdit::new("local://embedded");
+        readiness_scenes::embedded_status_checks(state);
         state.host_metrics = Load::Ready(fleetworks_desktop::workstation_dashboard::HostMetrics {
             cpu_percent: Some(18.0),
             memory_percent: Some(0.0),
@@ -740,62 +812,31 @@ mod native {
         state.fixture_show_workstation_settings();
     }
 
-    fn assistant_settings(state: &mut State, provisioning: bool) {
+    fn assistant_settings(state: &mut State, qualified: bool) {
         registered(state);
         state.backend_kind = BackendKind::Local;
         state.connection.origin = TextEdit::new("local://embedded");
-        let mut settings = QaSettings::new(
-            true,
-            if provisioning {
-                QaPhase::Starting
-            } else {
-                QaPhase::Ready
-            },
-            2,
-            1,
-            true,
-        );
-        if provisioning {
-            settings.model_target = QaModelTarget::FlanT5Base;
-            settings.startup_stage = Some(QaStartupStage::DownloadingPack);
-        }
+        let mut settings = QaSettings::new(true, QaPhase::Ready, 2, 1, true);
         if let Some(capabilities) = &mut state.connection.capabilities {
             capabilities.features.push(QA_MODEL_SETTINGS_FEATURE.into());
         }
         settings.generator = Some(QaGeneratorSettings::new(
-            if provisioning {
-                QaGeneratorPreference::FlanT5Base
-            } else {
-                QaGeneratorPreference::Automatic
-            },
-            (!provisioning).then_some(settings.model_target),
+            QaGeneratorPreference::Automatic,
+            Some(settings.model_target),
             settings.phase,
             None,
         ));
         settings.decision = Some(QaDecisionSettings::new(
             QaDecisionPreference::Julia1Q8,
             QaDecisionPreference::RulesOnly,
-            QaPhase::Off,
-            Some(QaDecisionAvailabilityReason::AwaitingQualification),
+            if qualified {
+                QaPhase::Starting
+            } else {
+                QaPhase::Unavailable
+            },
+            (!qualified).then_some(QaDecisionAvailabilityReason::AwaitingQualification),
         ));
-        let turn = (!provisioning).then(|| {
-            let mut turn = QaTurn::queued(
-                "settings-fixture-turn".into(),
-                "settings-fixture-request".into(),
-                "Summarize workstation readiness.".into(),
-            );
-            turn.state = QaTurnState::Answered;
-            turn.cursor = 3;
-            turn.context = Some(QaContextUsage::new(
-                settings.model_target.input_tokens(),
-                448,
-                1,
-            ));
-            turn.model_target = Some(settings.model_target);
-            turn.model_generation = Some(settings.generation);
-            turn
-        });
-        state.seed_inbox_qa_fixture(settings, turn);
+        state.seed_inbox_qa_fixture(settings, None);
         state.fixture_show_assistant_settings();
     }
 
@@ -823,20 +864,33 @@ mod native {
         });
     }
 
+    fn tool_provider_keys_matte(state: &mut State) {
+        review_appearance(
+            state,
+            redesign_scenes::tool_provider_keys,
+            ReviewAppearance::Matte,
+        );
+    }
+
+    fn tool_provider_keys_reduced_motion(state: &mut State) {
+        review_appearance(
+            state,
+            redesign_scenes::tool_provider_keys,
+            ReviewAppearance::ReducedMotion,
+        );
+    }
+
     pub fn run() {
         rune::run(AppSpec {
             init,
             scenes: &[
-                ("backend-choice", State::fixture_show_backend_choice),
+                ("backend-choice", startup_scenes::folders),
                 ("backend-choice-opening", |state| {
-                    state.startup = fleetworks_desktop::startup::Startup::cold_launch();
+                    // The short docking scripts sample the handoff after the intro settles.
+                    state.fixture_show_backend_choice();
                 }),
                 ("backend-choice-matte", |state| {
-                    review_appearance(
-                        state,
-                        State::fixture_show_backend_choice,
-                        ReviewAppearance::Matte,
-                    );
+                    review_appearance(state, startup_scenes::folders, ReviewAppearance::Matte);
                 }),
                 ("backend-choice-reduced-motion", |state| {
                     state.fixture_show_backend_choice();
@@ -847,27 +901,30 @@ mod native {
                         });
                 }),
                 ("startup-embedded-registered", |state| {
-                    startup_data_scenes::ready(state, false);
+                    startup_scenes::registered(state, false);
                 }),
                 ("startup-embedded-registered-reduced-motion", |state| {
-                    startup_data_scenes::ready(state, true);
+                    startup_scenes::registered(state, true);
                 }),
-                ("startup-data-seed", startup_data_scenes::seed),
-                ("startup-data-index", startup_data_scenes::index),
+                ("startup-embedded-health", startup_scenes::embedded_health),
+                ("startup-health-checks-mixed", startup_scenes::mixed_checks),
                 (
-                    "startup-data-index-queued",
-                    startup_data_scenes::index_queued,
+                    "startup-embedded-health-unavailable",
+                    startup_scenes::checks_unavailable,
                 ),
-                // Stable scenario key used by the Linux capture workflow.
-                ("startup-data-train", startup_data_scenes::index),
-                (
-                    "startup-health-checks-mixed",
-                    startup_data_scenes::mixed_checks,
-                ),
-                (
-                    "startup-data-checks-unavailable",
-                    startup_data_scenes::checks_unavailable,
-                ),
+                ("workstation-seed-action", |state| {
+                    state.set_backend_kind(BackendKind::Local);
+                    redesign_scenes::seed(state);
+                    state.connection.origin = rune::TextEdit::new("local://embedded");
+                    state.page = Page::Workstation;
+                    state.seed_startup_bundled_dataset_fixture();
+                }),
+                ("workstation-index-action", |state| {
+                    state.set_backend_kind(BackendKind::Local);
+                    redesign_scenes::seed_ready(state);
+                    state.connection.origin = rune::TextEdit::new("local://embedded");
+                    state.page = Page::Workstation;
+                }),
                 ("redesign-status", redesign_scenes::status),
                 ("redesign-seed", redesign_scenes::seed),
                 ("redesign-seed-ready", redesign_scenes::seed_ready),
@@ -880,7 +937,6 @@ mod native {
                     "redesign-seed-confirmation",
                     redesign_scenes::seed_confirmation,
                 ),
-                ("redesign-cycles", redesign_scenes::cycles),
                 ("redesign-brain", redesign_scenes::brain),
                 ("redesign-tools", redesign_scenes::tools),
                 ("redesign-models", redesign_scenes::models),
@@ -955,14 +1011,43 @@ mod native {
                 ("inbox-qa-off-distributed", |state| {
                     inbox_qa_off(state, BackendKind::Remote);
                 }),
+                ("inbox-qa-ready", inbox_qa_ready),
                 ("inbox-qa-pending", |state| {
-                    inbox_qa_turn(state, QaTurnState::Running);
+                    inbox_qa_turn(state, QaTurnState::Running, None, None);
+                }),
+                ("inbox-qa-working", |state| {
+                    inbox_qa_turn(
+                        state,
+                        QaTurnState::Running,
+                        Some(QaTurnStage::Working),
+                        None,
+                    );
+                }),
+                ("inbox-qa-thinking", |state| {
+                    inbox_qa_turn(
+                        state,
+                        QaTurnState::Running,
+                        Some(QaTurnStage::Thinking),
+                        None,
+                    );
+                }),
+                ("inbox-qa-writing", |state| {
+                    inbox_qa_turn(
+                        state,
+                        QaTurnState::Running,
+                        Some(QaTurnStage::Writing),
+                        None,
+                    );
+                }),
+                ("inbox-qa-history-unavailable", |state| {
+                    inbox_qa_turn(state, QaTurnState::InsufficientContext, None, None);
                 }),
                 ("inbox-qa-answered", |state| {
-                    inbox_qa_turn(state, QaTurnState::Answered);
+                    inbox_qa_turn(state, QaTurnState::Answered, None, None);
                 }),
+                ("inbox-qa-sources", inbox_qa_sources),
                 ("inbox-qa-stopped", |state| {
-                    inbox_qa_turn(state, QaTurnState::Canceled);
+                    inbox_qa_turn(state, QaTurnState::Canceled, None, None);
                 }),
                 ("inbox-qa-pack-missing", |state| {
                     inbox_qa_unavailable(state, QaAvailabilityReason::PackMissing);
@@ -986,6 +1071,10 @@ mod native {
                     state.workstation_status_checks_open = false;
                 }),
                 ("workstation-settings", workstation_settings),
+                ("workstation-resources", |state| {
+                    registered(state);
+                    state.fixture_show_resource_settings();
+                }),
                 ("workstation-settings-assistant", |state| {
                     assistant_settings(state, false);
                 }),
@@ -1001,6 +1090,7 @@ mod native {
                 }),
                 ("workstation-status-checks-mixed-matte", |state| {
                     review_appearance(state, workstation_status, ReviewAppearance::Matte);
+                    state.fixture_show_workstation_diagnostics();
                 }),
                 ("workstation-status-checks-mixed-reduced-motion", |state| {
                     review_appearance(state, workstation_status, ReviewAppearance::ReducedMotion);
@@ -1038,20 +1128,16 @@ mod native {
                         ReviewAppearance::ReducedMotion,
                     );
                 }),
-                ("atlas-provider-keys-matte", |state| {
-                    review_appearance(
-                        state,
-                        submission_scenes::atlas_provider_keys,
-                        ReviewAppearance::Matte,
-                    );
-                }),
-                ("atlas-provider-keys-reduced-motion", |state| {
-                    review_appearance(
-                        state,
-                        submission_scenes::atlas_provider_keys,
-                        ReviewAppearance::ReducedMotion,
-                    );
-                }),
+                ("tool-provider-keys-matte", tool_provider_keys_matte),
+                (
+                    "tool-provider-keys-reduced-motion",
+                    tool_provider_keys_reduced_motion,
+                ),
+                ("atlas-provider-keys-matte", tool_provider_keys_matte),
+                (
+                    "atlas-provider-keys-reduced-motion",
+                    tool_provider_keys_reduced_motion,
+                ),
                 ("workstation-settings-matte", |state| {
                     review_appearance(state, workstation_settings, ReviewAppearance::Matte);
                 }),
@@ -1087,20 +1173,15 @@ mod native {
                 ("workstation-offline", |state| {
                     state.page = Page::Workstation
                 }),
-                ("atlas-offline", |state| state.page = Page::Atlas),
-                ("atlas-articles-ready", atlas_ready),
+                // Existing workflow selectors capture supported native replacements.
+                ("atlas-offline", |state| state.page = Page::Workstation),
+                ("atlas-articles-ready", redesign_scenes::status),
                 (
                     "atlas-prerequisites",
-                    submission_scenes::atlas_prerequisites,
+                    readiness_scenes::inference_unverified,
                 ),
-                (
-                    "atlas-provider-keys",
-                    submission_scenes::atlas_provider_keys,
-                ),
-                ("atlas-submit-preview", submission_scenes::atlas_preview),
-                ("atlas-submit-accepted", submission_scenes::atlas_accepted),
-                ("atlas-submit-uncertain", submission_scenes::atlas_uncertain),
-                ("atlas-request-resolved", submission_scenes::atlas_resolved),
+                ("atlas-provider-keys", redesign_scenes::tool_provider_keys),
+                ("tool-provider-keys", redesign_scenes::tool_provider_keys),
                 ("brain-search-ready", brain_ready),
                 ("brain-dossier", brain_dossier),
                 ("brain-search-indexing", |state| {
@@ -1146,8 +1227,14 @@ mod native {
                 ("maintenance-preview", maintenance_preview),
                 ("jobs-offline", |state| state.page = Page::Jobs),
                 ("jobs-ready", jobs_ready),
-                ("jobs-related-activity", jobs_related_activity),
-                ("inbox-related-activity-limited", inbox_related_activity),
+                ("jobs-assistant-explain", jobs_assistant_explain),
+                ("inbox-notice-actions-starting", |state| {
+                    inbox_notice_actions(state, QaPhase::Starting);
+                }),
+                ("inbox-notice-actions", |state| {
+                    inbox_notice_actions(state, QaPhase::Ready);
+                }),
+                ("jobs-grouped-list", jobs_scenes::grouped_list),
                 ("jobs-filters-ready", jobs_scenes::filters_ready),
                 ("jobs-page-two", jobs_scenes::page_two),
                 ("jobs-no-matches", jobs_scenes::no_matches),

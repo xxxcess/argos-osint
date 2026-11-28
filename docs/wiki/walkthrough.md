@@ -14,7 +14,9 @@ Start with the [README](../../README.md), [concepts](concepts/index.md), and [gl
 
 ## Run the client and backend
 
-Install the pinned Rust 1.95.0 toolchain and Xcode tools for native app packaging. Docker and Compose v2.20+ operate the separate backend. Start at the [quick start](../../README.md#quick-start), then follow [native connections](code/native-connections.md) and [direct deployment](../../deploy/README.md). The app never launches services.
+Install the pinned Rust 1.95.0 toolchain and the host packaging tools. On macOS, Quick Start builds the selected `nightly`, PR, or commit revision and can start Embedded in its private profile. On Linux x86_64, build the bundle and start the companion from **Setup Gateway**. [Quick Start and manual packaging](../../README.md#quick-start)
+
+Use Docker and Compose v2.20+ to operate Distributed. Connect the native app through its setup flow. [Native connections](code/native-connections.md) · [Direct deployment](../../deploy/README.md)
 
 Use the same deployment env file, Compose files and project for startup, status, logs and stop. Keep backend data separate from the protected native container. Retired terminal instructions are preserved only as [historical evidence](../archive/cli-retirement.md).
 

@@ -163,6 +163,90 @@ fn edit_selection_and_duplicate_names_obey_catalog_revision() {
 }
 
 #[test]
+fn startup_folders_survive_reopen_and_keep_the_existing_editor_selection() {
+    let temporary = tempfile::tempdir().expect("isolated fixture home");
+    let home = temporary
+        .path()
+        .canonicalize()
+        .expect("real fixture directory");
+    token(&home, "token");
+    let container = NativeContainer::open_settings(&home).expect("owned settings");
+    let remote = container
+        .save_connection_profile(0, None, input(&home, "Review gateway"))
+        .expect("saved gateway");
+    let first_path = home.join("Desk");
+    let first = container
+        .add_local_backend_folder(remote.revision, first_path.clone())
+        .expect("create private startup folder");
+    let nested_parent = home.join("other");
+    std::fs::create_dir(&nested_parent).expect("existing picker parent");
+    let second_path = nested_parent.join("Desk");
+    let second = container
+        .add_local_backend_folder(first.revision, second_path.clone())
+        .expect("different folder with the same basename");
+    assert_eq!(second.selected_profile_id, remote.selected_profile_id);
+    assert_eq!(second.profiles[1].name, "Desk");
+    assert_eq!(second.profiles[2].name, "Desk (2)");
+    assert_ne!(second.profiles[1].origin, second.profiles[2].origin);
+    for (profile, path) in second.profiles[1..].iter().zip([&first_path, &second_path]) {
+        assert_eq!(profile.local_state_dir.as_ref(), Some(path));
+        assert!(profile.credential.is_none());
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    assert!(container
+        .add_local_backend_folder(second.revision, first_path.join("."))
+        .is_err());
+    let default = container.root().join(LOCAL_BACKEND_DIR).join("embedded");
+    assert!(container
+        .add_local_backend_folder(second.revision, default.clone())
+        .is_err());
+    assert!(
+        !default.exists(),
+        "listing the default never provisions its state"
+    );
+    assert!(container
+        .add_local_backend_folder(first.revision, home.join("Stale writer"))
+        .is_err());
+    assert!(!home.join("Stale writer").exists());
+    drop(container);
+    assert_eq!(
+        NativeContainer::open_settings(&home)
+            .expect("reopen same installation")
+            .connection_profiles()
+            .expect("saved folders persist"),
+        second
+    );
+}
+
+#[test]
+fn startup_folder_add_preserves_permissions_and_refuses_linked_paths() {
+    let temporary = tempfile::tempdir().expect("isolated fixture home");
+    let home = temporary
+        .path()
+        .canonicalize()
+        .expect("real fixture directory");
+    let container = NativeContainer::open_settings(&home).expect("owned settings");
+    let shared = home.join("shared");
+    let linked = home.join("linked");
+    std::fs::create_dir(&shared).expect("existing directory");
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755))
+        .expect("public fixture permissions");
+    std::os::unix::fs::symlink(&shared, &linked).expect("synthetic symlink");
+    assert!(container
+        .add_local_backend_folder(0, shared.clone())
+        .is_err());
+    assert!(container.add_local_backend_folder(0, linked).is_err());
+    assert_eq!(
+        std::fs::metadata(&shared).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    assert!(!container.root().join(CONNECTIONS_FILE).exists());
+}
+
+#[test]
 fn corrupt_binding_permissions_and_record_limits_are_rejected_without_secrets() {
     let temporary = tempfile::tempdir().expect("isolated fixture home");
     let home = temporary

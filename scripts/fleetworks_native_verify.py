@@ -111,7 +111,12 @@ def mapping(values, *, label):
 
 
 def selections(args, root):
-    scenes = list(dict.fromkeys(args.scene))
+    # Existing hosted workflow revisions still use the previous scene selectors.
+    aliases = {
+        "jobs-related-activity": "job-retry-preview",
+        "inbox-related-activity-limited": "inbox-notice-actions-starting",
+    }
+    scenes = list(dict.fromkeys(aliases.get(scene, scene) for scene in args.scene))
     if any(not NAME.fullmatch(scene) for scene in scenes):
         raise ValueError("Invalid native scene name")
     if args.list_scenes:

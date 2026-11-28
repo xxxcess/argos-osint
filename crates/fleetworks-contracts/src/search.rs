@@ -14,6 +14,8 @@ use serde::Serialize;
 pub const ACTOR_SEARCH_CONTRACT_VERSION: u16 = 1;
 /// Existing actor search route, extended by explicit discovery mode.
 pub const ACTOR_SEARCH_PATH: &str = "/api/v1/actors/search";
+/// Unfiltered browsing of the current canonical actor catalog.
+pub const ACTOR_BROWSE_PATH: &str = "/api/v1/actors/browse";
 /// Authoritative dossier route using the canonical selected actor ID.
 pub const ACTOR_DETAIL_PATH: &str = "/api/v1/actors/detail";
 /// Authorized durable actor index repair route.
@@ -24,6 +26,64 @@ pub const MAX_ACTOR_SEARCH_QUERY_BYTES: usize = 256;
 pub const MAX_ACTOR_SEARCH_QUERY_TOKENS: usize = 16;
 /// Maximum public results per bounded actor discovery request.
 pub const MAX_ACTOR_SEARCH_RESULTS: u16 = 25;
+
+/// Maximum actor rows in one catalog browse page.
+pub const MAX_ACTOR_BROWSE_RESULTS: u16 = 25;
+/// UTF-8 byte bound for the canonical actor ID used as the continuation key.
+pub const MAX_ACTOR_BROWSE_CURSOR_BYTES: usize = 256;
+
+/// Unfiltered catalog page in ascending canonical actor ID order.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ActorBrowseQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    pub limit: u16,
+}
+
+impl ActorBrowseQuery {
+    /// Create a bounded page request. Use the previous page's cursor to continue.
+    pub fn new(cursor: Option<String>, limit: u16) -> Result<Self, ActorBrowseQueryError> {
+        let query = Self { cursor, limit };
+        query.validate()?;
+        Ok(query)
+    }
+
+    /// Revalidate a request received over HTTP or IPC.
+    pub fn validate(&self) -> Result<(), ActorBrowseQueryError> {
+        if !(1..=MAX_ACTOR_BROWSE_RESULTS).contains(&self.limit) {
+            return Err(ActorBrowseQueryError::InvalidLimit);
+        }
+        if self.cursor.as_ref().is_some_and(|cursor| {
+            cursor.trim().is_empty()
+                || cursor.len() > MAX_ACTOR_BROWSE_CURSOR_BYTES
+                || cursor.chars().any(char::is_control)
+        }) {
+            return Err(ActorBrowseQueryError::InvalidCursor);
+        }
+        Ok(())
+    }
+}
+
+/// Invalid catalog page arguments without including the caller's cursor in the error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ActorBrowseQueryError {
+    InvalidCursor,
+    InvalidLimit,
+}
+
+impl fmt::Display for ActorBrowseQueryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidCursor => "invalid actor browse cursor",
+            Self::InvalidLimit => "actor browse limit must be between 1 and 25",
+        })
+    }
+}
+
+impl std::error::Error for ActorBrowseQueryError {}
 
 /// Explicit new discovery mode; deterministic domain name/alias lookups remain.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -218,6 +278,22 @@ impl ActorSearchHit {
             index_generation,
             score: 0.0,
         }
+    }
+}
+
+/// A bounded catalog page. Rows have no retrieval rank or serving-index generation.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct ActorBrowsePage {
+    pub rows: Vec<ActorSearchHit>,
+    pub next_cursor: Option<String>,
+}
+
+impl ActorBrowsePage {
+    /// Return the catalog projections and the cursor for any following page.
+    #[must_use]
+    pub fn new(rows: Vec<ActorSearchHit>, next_cursor: Option<String>) -> Self {
+        Self { rows, next_cursor }
     }
 }
 

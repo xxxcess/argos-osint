@@ -20,7 +20,7 @@ import {
 import { ActorHitCard } from "./ActorHitCard";
 import { ArticleCard } from "./ArticleCard";
 import { DeskButton } from "../desk-ui";
-import { intelColors as c } from "../../shell/intel-theme";
+import { intelColors as c, intelLoadingTints } from "../../shell/intel-theme";
 import { intelFonts } from "../../shell/intel-fonts";
 
 const UNAVAILABLE_STATUS = [404, 405, 501];
@@ -85,7 +85,11 @@ function ActorResults({
       {problem ? (
         <Notice>Actor search skipped. {problem}</Notice>
       ) : actors.isLoading && !hasData ? (
-        <LoadingState label="Searching actors…" compact />
+        <LoadingState
+          label="Searching actors…"
+          compact
+          tint={intelLoadingTints.search}
+        />
       ) : missingRoute && !hasData ? (
         <Notice>Actor search is unavailable on this backend.</Notice>
       ) : failed && !hasData ? (
@@ -298,7 +302,13 @@ export function SearchResults({
           </Text>
         ) : null}
       </View>
-      {search.isLoading ? <LoadingState label="Searching…" compact /> : null}
+      {search.isLoading ? (
+        <LoadingState
+          label="Searching articles…"
+          compact
+          tint={intelLoadingTints.search}
+        />
+      ) : null}
       {unavailable ? (
         <Notice>Article search is unavailable on this backend.</Notice>
       ) : error ? (
@@ -329,6 +339,13 @@ export function SearchResults({
           </View>
         ))}
       </View>
+      {search.isFetchingNextPage ? (
+        <LoadingState
+          label="Loading more results…"
+          compact
+          tint={intelLoadingTints.search}
+        />
+      ) : null}
       {search.isFetchNextPageError ? (
         <Notice>Could not load more results. {search.error?.message}</Notice>
       ) : null}
@@ -344,11 +361,9 @@ export function SearchResults({
             void search.fetchNextPage({ cancelRefetch: false });
           }}
         >
-          {search.isFetchingNextPage
-            ? "Loading…"
-            : search.isFetchNextPageError
-              ? "Retry loading results"
-              : "Load more results"}
+          {search.isFetchNextPageError
+            ? "Retry loading results"
+            : "Load more results"}
         </DeskButton>
       ) : null}
     </ScrollView>

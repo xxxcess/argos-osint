@@ -2,11 +2,10 @@
 #![cfg(feature = "surreal")]
 
 mod support;
+#[path = "support/workstation.rs"]
+mod workstation;
 
 use argos_osint_core::jobs_view::JobFilter;
-use argos_osint_core::storage::bootstrap;
-use argos_osint_core::storage::connect_registry;
-use argos_osint_core::storage::connect_registry::RegistryAuthority;
 use argos_osint_core::storage::inbox_qa as qa;
 use argos_osint_core::storage::job_context::InteractiveAdmission;
 use argos_osint_core::storage::job_dispatch;
@@ -21,62 +20,27 @@ use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::chat::QaDecisionPreference;
 use fleetworks_contracts::chat::QaGeneratorPreference;
+use fleetworks_contracts::chat::QaModelTarget;
 use fleetworks_contracts::chat::QaTurnRequest;
 use fleetworks_contracts::chat::QaTurnState;
-use fleetworks_contracts::connect::RegistrationEnsureRequest;
 use fleetworks_contracts::context::ActivityScope;
 use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::OriginSource;
 use fleetworks_contracts::context::RegisteredContext;
+use fleetworks_contracts::qa_worker::QaContextUsage;
+use fleetworks_contracts::qa_worker::QaDialogueKind;
 use fleetworks_contracts::qa_worker::QaPassage;
+use fleetworks_contracts::qa_worker::QaWorkerDialogue;
 use fleetworks_contracts::qa_worker::QaWorkerRequest;
 use support::Server;
 use surrealdb::engine::any::Any;
 use surrealdb::types::RecordId;
 use surrealdb::Surreal;
-
-const QA_WORKER: &str = "qa-model-fixture";
-const QA_PLACEMENT: &str = "qa-placement-fixture";
-
-fn authority() -> RegistryAuthority {
-    RegistryAuthority::new("scope-a", "fixture-native", "fixture-access")
-        .expect("fixture authority")
-}
-
-async fn register(repo: &Repository, node: &str, child: &str) -> RegisteredContext {
-    bootstrap::ensure_network_identity(repo.db())
-        .await
-        .expect("explicit fixture bootstrap identity");
-    connect_registry::initialize_control(repo.db())
-        .await
-        .expect("explicit fixture control");
-    let ip = if node == "node-a" {
-        "192.0.2.42"
-    } else {
-        "198.51.100.42"
-    };
-    let receipt = connect_registry::ensure(
-        repo,
-        &authority(),
-        &RegistrationEnsureRequest::new(
-            format!("ensure-{node}-{child}"),
-            Some(ip.parse().expect("synthetic IP")),
-            format!("installation-{node}"),
-        ),
-    )
-    .await
-    .expect("actual fixture registration")
-    .receipt;
-    connect_registry::registration_context(
-        repo,
-        &authority(),
-        &receipt.registration_id,
-        receipt.revision,
-    )
-    .await
-    .expect("actual current registration context")
-}
+use workstation::{
+    authority, ready_qa_replica, register, start_qa_delivery, start_qa_fixture, QA_PLACEMENT,
+    QA_WORKER,
+};
 
 fn scope(context: &RegisteredContext, child: bool) -> ActivityScope {
     let _ = child;
@@ -268,6 +232,20 @@ async fn node_child_deployment_and_causal_membership_filter_before_limits_and_fa
             .expect("other authority")
             .is_empty()
     );
+    db.query("UPDATE job SET state='running', updated_at=<datetime>$updated WHERE id IN $selected RETURN NONE")
+        .bind(("updated", ordering_epoch.to_rfc3339()))
+        .bind(("selected", ["owned-a", "owned-b", "other-node"].map(|id| RecordId::new("job", id)).to_vec()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let (running, names) = view::running_activity_jobs(db, "scope-a", &node, 1)
+        .await
+        .unwrap();
+    assert_eq!(running, 2);
+    assert_eq!(names.len(), 1);
+    assert_eq!(names[0].job_id, "owned-a");
+    assert_eq!(names[0].title, "private-title-owned-a");
 }
 
 #[tokio::test]
@@ -281,6 +259,16 @@ async fn shared_reuse_preserves_creator_but_private_fields_and_search_stay_unava
     let other = register(&repo, "node-b", "analysis").await;
     associate(&repo, &first, "shared", "original", "task").await;
     let first_scope = scope(&first, true);
+    db.query("UPDATE job:shared SET state='running' RETURN NONE")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let (running, names) = view::running_activity_jobs(db, "scope-a", &first_scope, 1)
+        .await
+        .unwrap();
+    assert_eq!(running, 1);
+    assert_eq!(names[0].title, "private-title-shared");
     let before = view::get_activity_job(db, "scope-a", &first_scope, "shared")
         .await
         .expect("original job")
@@ -299,41 +287,52 @@ async fn shared_reuse_preserves_creator_but_private_fields_and_search_stay_unava
     let request = QaTurnRequest::new(
         "private-job-answer".into(),
         MutationContext::new(&first),
-        "What happened?".into(),
-        Some(source.clone()),
+        "What jobs are running?".into(),
+        None,
     )
     .unwrap();
     let id = qa::accepted_turn_id(&actor, &request, setting.history_generation).unwrap();
     let at = Utc::now();
+    let text = "Private-title-shared is running.";
+    let mut worker_request = QaWorkerRequest::new(
+        id.clone(),
+        id,
+        request.question.clone(),
+        vec![QaPassage::new("passage-0".into(), text.into())],
+    );
+    worker_request.dialogue = Some(QaWorkerDialogue {
+        kind: QaDialogueKind::Operational,
+        history: Vec::new(),
+    });
     let evidence = qa::FrozenEvidence {
-        answer_mode: qa::AnswerMode::Grounded,
-        notice: None,
-        conversation: None,
-        request: QaWorkerRequest::new(
-            id.clone(),
-            id,
-            request.question.clone(),
-            vec![QaPassage::new(
-                "passage-0".into(),
-                "Selected job is queued.".into(),
-            )],
-        ),
+        request: worker_request,
         sources: vec![qa::Source {
             opaque_id: "passage-0".into(),
             reference: source.clone(),
             label: "Selected job".into(),
             observed_at: at.to_rfc3339(),
+            provenance: None,
             measurement: None,
             whole_passage: false,
         }],
         sampled_at_ms: at.timestamp_millis(),
     };
     let metadata = || qa::AdmissionMetadata {
-        subject: Some(source.clone()),
+        subject: None,
         observation: None,
         related_activity: None,
+        status_check_tally: None,
+        used_previous_exchange: false,
+        response_started_at_ms: None,
+        conversation: Default::default(),
     };
-    let answer = qa::admit(
+    assert!(matches!(
+        qa::admit(&repo, &actor, &request, evidence.clone(), metadata(), setting.generation).await,
+        Err(TxError::Abort(reason)) if reason == "inbox_qa:generator_unavailable"
+    ));
+    assert!(qa::latest(&repo, &actor).await.unwrap().is_none());
+    ready_qa_replica(&repo, setting.generation).await;
+    let queued = qa::admit(
         &repo,
         &actor,
         &request,
@@ -342,12 +341,35 @@ async fn shared_reuse_preserves_creator_but_private_fields_and_search_stay_unava
         setting.generation,
     )
     .await
-    .expect("private job answer");
+    .expect("admit private job question with a ready worker");
+    assert_eq!(queued.state, QaTurnState::Queued);
+    let lease = start_qa_delivery(&repo).await;
+    let target = QaModelTarget::default();
+    assert!(qa::publish_findings_and_complete(
+        &repo,
+        &lease,
+        QaTurnState::Answered,
+        &[evidence.sources[0].finding(text.into(), 0, text.chars().count() as u32)],
+        qa::ModelResult {
+            context: Some(QaContextUsage::new(target.input_tokens(), 48, 1)),
+            reply: Some(text.into()),
+            model_target: Some(target),
+        },
+    )
+    .await
+    .unwrap());
+    let answer = qa::latest(&repo, &actor).await.unwrap().unwrap().0;
+    assert!(
+        qa::beat(&repo, QA_PLACEMENT, QA_WORKER, setting.generation, false)
+            .await
+            .unwrap()
+    );
     assert_eq!(answer.state, QaTurnState::Answered);
     assert_eq!(
         qa::replay(&repo, &actor, &request).await.unwrap(),
-        Some(answer)
+        Some(answer.clone())
     );
+    assert_eq!(qa::history(&repo, &actor).await.unwrap(), vec![answer]);
 
     associate(&repo, &other, "shared", "reuse-other-node", "task").await;
     assert!(matches!(
@@ -361,6 +383,10 @@ async fn shared_reuse_preserves_creator_but_private_fields_and_search_stay_unava
         Err(TxError::Abort(reason)) if reason == "inbox_qa:missing"
     ));
     assert!(qa::latest(&repo, &actor).await.unwrap().is_none());
+    assert!(
+        qa::history(&repo, &actor).await.unwrap().is_empty(),
+        "A retained exchange cannot reveal private details after the job is shared",
+    );
     assert!(qa::last_answered_prompt(&repo, &actor)
         .await
         .unwrap()
@@ -375,8 +401,13 @@ async fn shared_reuse_preserves_creator_but_private_fields_and_search_stay_unava
             row.status_only && !row.private_details_available && !row.activity_actions_available
         );
         assert_eq!(row.job.id, "shared");
-        assert_eq!(row.job.state, "queued");
+        assert_eq!(row.job.state, "running");
         assert!(!row.job.cancellable);
+        let (running, names) = view::running_activity_jobs(db, "scope-a", &selected, 1)
+            .await
+            .unwrap();
+        assert_eq!(running, 1);
+        assert!(names.is_empty());
         let json = serde_json::to_string(&row).expect("row wire serialization");
         for private in [
             "private-title",
@@ -432,18 +463,37 @@ async fn qa_generator_replacement_fences_leased_output_and_leaves_decision_indep
         context.clone(),
     );
     let db = repo.db();
+    assert_eq!(
+        qa::setting(&repo).await.unwrap().generator_preference,
+        QaGeneratorPreference::Gpt2Small
+    );
     db.query("CREATE inbox_qa_settings:current SET enabled=false, revision=4, generation=3, epoch='', model_target='flan_t5_base' RETURN NONE")
         .await.unwrap().check().unwrap();
     let migrated = qa::setting(&repo).await.unwrap();
     assert_eq!(
         migrated.generator_preference,
-        QaGeneratorPreference::Automatic
+        QaGeneratorPreference::Gpt2Small
     );
     assert_eq!(
         migrated.decision_preference,
         QaDecisionPreference::RulesOnly
     );
-    let enabled = qa::set(&repo, &actor, migrated.revision, true)
+    let automatic = qa::update(
+        &repo,
+        &actor,
+        migrated.revision,
+        qa::SettingUpdate {
+            generator_preference: Some(QaGeneratorPreference::Automatic),
+            ..qa::SettingUpdate::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        qa::setting(&repo).await.unwrap().generator_preference,
+        QaGeneratorPreference::Automatic
+    );
+    let enabled = qa::set(&repo, &actor, automatic.revision, true)
         .await
         .unwrap();
 
@@ -487,6 +537,10 @@ async fn qa_generator_replacement_fences_leased_output_and_leaves_decision_indep
     )
     .await
     .unwrap();
+    assert_eq!(
+        generator.generator_preference,
+        QaGeneratorPreference::FlanT5Small
+    );
     assert_eq!(generator.decision_generation, decision.decision_generation);
     assert!(
         !qa::beat(&repo, QA_PLACEMENT, QA_WORKER, enabled.generation, true)
@@ -500,94 +554,6 @@ async fn qa_generator_replacement_fences_leased_output_and_leaves_decision_indep
     assert_eq!(canceled.turn_id, running.turn_id);
     assert_eq!(canceled.state, QaTurnState::Canceled);
     assert!(canceled.findings.is_empty());
-}
-
-async fn start_qa_fixture(
-    repo: &Repository,
-    actor: &qa::Actor,
-    context: &RegisteredContext,
-    enabled: qa::Setting,
-    request_id: &str,
-) -> (QaTurnRequest, Box<job_dispatch::DeliveryLease>) {
-    let db = repo.db();
-    assert_eq!(
-        qa::claim_replica(repo, QA_PLACEMENT, QA_WORKER, enabled.generation)
-            .await
-            .unwrap(),
-        qa::ReplicaClaim::Warm,
-    );
-    assert!(
-        qa::beat(repo, QA_PLACEMENT, QA_WORKER, enabled.generation, true)
-            .await
-            .unwrap()
-    );
-    job_dispatch::enable_pool(db, qa::POOL).await.unwrap();
-    let request = QaTurnRequest::new(
-        request_id.into(),
-        MutationContext::new(context),
-        "Is the gateway ready?".into(),
-        None,
-    )
-    .unwrap();
-    let id = qa::accepted_turn_id(actor, &request, enabled.history_generation).unwrap();
-    let at = Utc::now();
-    let evidence = qa::FrozenEvidence {
-        answer_mode: qa::AnswerMode::Model,
-        notice: None,
-        conversation: None,
-        request: QaWorkerRequest::new(
-            id.clone(),
-            id,
-            request.question.clone(),
-            vec![QaPassage::new(
-                "passage-0".into(),
-                "Gateway is ready.".into(),
-            )],
-        ),
-        sources: vec![qa::Source {
-            opaque_id: "passage-0".into(),
-            reference: ChatSourceReference::new(ChatSourceKind::Readiness, "gateway".into())
-                .unwrap(),
-            label: "Gateway".into(),
-            observed_at: at.to_rfc3339(),
-            measurement: None,
-            whole_passage: false,
-        }],
-        sampled_at_ms: at.timestamp_millis(),
-    };
-    let queued = qa::admit(
-        repo,
-        actor,
-        &request,
-        evidence,
-        qa::AdmissionMetadata {
-            subject: None,
-            observation: None,
-            related_activity: None,
-        },
-        enabled.generation,
-    )
-    .await
-    .unwrap();
-    assert_eq!(queued.state, QaTurnState::Queued);
-    let claim = job_dispatch::claim_ready(db, qa::POOL, "qa-fixture-relay", Utc::now())
-        .await
-        .unwrap()
-        .expect("model delivery");
-    let job_dispatch::DeliveryClaim::Claimed(lease) = job_dispatch::claim_delivery(
-        db,
-        &claim.envelope,
-        QA_WORKER,
-        30,
-        Utc::now(),
-        "qa-fixture-claim",
-    )
-    .await
-    .unwrap() else {
-        panic!("model delivery must be leased");
-    };
-    assert!(qa::start(repo, &lease).await.unwrap().is_some());
-    (request, lease)
 }
 
 #[tokio::test]

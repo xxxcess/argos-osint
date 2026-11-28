@@ -360,6 +360,10 @@ fn router_with_access(
         .route("/api/v1/articles", get(articles))
         .route("/api/v1/articles/search", get(article_search))
         .route("/api/v1/articles/counts", get(article_counts))
+        .route(
+            fleetworks_contracts::search::ACTOR_BROWSE_PATH,
+            get(actor_dossier::browse),
+        )
         .merge(brain_routes);
     let router = if mode == AccessMode::Bearer {
         let tools_routes = tools::routes();

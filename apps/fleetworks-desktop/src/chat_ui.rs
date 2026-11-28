@@ -41,9 +41,13 @@ impl Role {
 pub(crate) enum TurnState {
     Queued,
     Running,
+    Thinking,
+    Writing,
     Streaming,
     Retrying { attempt: u32 },
     Final,
+    Stopped,
+    Unavailable { reason: &'static str },
     Failed { reason: String },
 }
 
@@ -53,11 +57,15 @@ impl TurnState {
         match self {
             Self::Queued => Some(("Queued".to_owned(), StatusTone::Neutral)),
             Self::Running => Some(("Working".to_owned(), StatusTone::Info)),
+            Self::Thinking => Some(("Thinking".to_owned(), StatusTone::Info)),
+            Self::Writing => Some(("Writing".to_owned(), StatusTone::Info)),
             Self::Streaming => Some(("Draft · unverified".to_owned(), StatusTone::Info)),
             Self::Retrying { attempt } => {
                 Some((format!("Retrying, attempt {attempt}"), StatusTone::Warn))
             }
             Self::Final => None,
+            Self::Stopped => Some(("Stopped".to_owned(), StatusTone::Neutral)),
+            Self::Unavailable { reason } => Some(((*reason).to_owned(), StatusTone::Warn)),
             Self::Failed { reason } => Some((format!("Failed: {reason}"), StatusTone::Err)),
         }
     }
@@ -65,13 +73,17 @@ impl TurnState {
     pub(crate) fn is_pending(&self) -> bool {
         matches!(
             self,
-            Self::Queued | Self::Running | Self::Streaming | Self::Retrying { .. }
+            Self::Queued
+                | Self::Running
+                | Self::Thinking
+                | Self::Writing
+                | Self::Streaming
+                | Self::Retrying { .. }
         )
     }
 }
 
-/// A source the answer rests on. Only a short label and kind ever reach the view, never raw
-/// evidence text.
+/// The short label and kind displayed for a source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Citation {
     pub kind: &'static str,
@@ -82,6 +94,7 @@ pub(crate) struct Citation {
 pub(crate) struct ChatMessage {
     pub id: String,
     pub role: Role,
+    pub timestamp: Option<String>,
     pub state: TurnState,
     pub text: String,
     pub citations: Vec<Citation>,
@@ -112,18 +125,20 @@ fn chip(label: String, tone: StatusTone, kit: &Kit) -> El {
         .child(rune::text(label).font(kit.ty.small).color(tone.fg()).wrap())
 }
 
-pub(crate) fn citation_rows(list: &[Citation], kit: &Kit) -> El {
-    let mut column = rune::col().w_full().gap(3.0);
-    for (index, citation) in list.iter().enumerate() {
-        column = column.child(
-            rune::text(format!("{}: {}", citation.kind, citation.label))
-                .key(format!("chat-citation-{index}"))
-                .font(kit.ty.small)
-                .color(theme::hex(theme::TEXT_SECONDARY))
-                .wrap_anywhere(),
-        );
-    }
-    column
+pub(crate) fn citation_row(message_id: &str, index: usize, citation: &Citation, kit: &Kit) -> El {
+    rune::text(format!("{}: {}", citation.kind, citation.label))
+        .key(format!("chat-citation-{message_id}-{index}"))
+        .font(kit.ty.small)
+        .color(theme::hex(theme::TEXT_SECONDARY))
+        .wrap_anywhere()
+}
+
+pub(crate) fn citation_rows(message_id: &str, list: &[Citation], kit: &Kit) -> El {
+    rune::col().w_full().gap(3.0).children(
+        list.iter()
+            .enumerate()
+            .map(|(index, citation)| citation_row(message_id, index, citation, kit)),
+    )
 }
 
 /// One message. The operator's sit on the right in an accent tint; the Assistant's sit on the
@@ -138,43 +153,103 @@ pub(crate) fn bubble(message: &ChatMessage, kit: &Kit) -> El {
                     .font(kit.ty.small_medium)
                     .color(theme::hex(theme::TEXT_MUTED)),
             )
-            .child(citation_rows(&message.citations, kit))
+            .child(citation_rows(&message.id, &message.citations, kit))
     });
-    bubble_with_sources(message, sources, kit)
+    bubble_with_sources(message, sources, Some(message.role), kit)
 }
 
-pub(crate) fn bubble_with_sources(message: &ChatMessage, sources: Option<El>, kit: &Kit) -> El {
-    let operator = message.role == Role::Operator;
+pub(crate) fn inbox_answer(message: &ChatMessage, sources: Option<El>, kit: &Kit) -> El {
+    bubble_with_sources(message, sources, None, kit)
+}
+
+fn bubble_with_sources(
+    message: &ChatMessage,
+    sources: Option<El>,
+    visible_owner: Option<Role>,
+    kit: &Kit,
+) -> El {
+    let state = message
+        .state
+        .chip()
+        .map(|(label, tone)| chip(label, tone, kit).key(format!("chat-state-{}", message.id)));
+    let key = message_key(&message.id);
+    let header = (visible_owner.is_some() || message.timestamp.is_some())
+        .then(|| message_header(&key, visible_owner, message.timestamp.as_deref(), kit));
+    message_bubble(
+        key,
+        message.role,
+        &message.text,
+        header,
+        state,
+        sources,
+        kit,
+    )
+}
+
+fn message_header(
+    key: &str,
+    visible_owner: Option<Role>,
+    timestamp: Option<&str>,
+    kit: &Kit,
+) -> El {
+    rune::row()
+        .key(format!("{key}-header"))
+        .min_w(0.0)
+        .gap(6.0)
+        .flex_wrap()
+        .center_y()
+        .children(visible_owner.map(|role| {
+            rune::text(role.label())
+                .font(kit.ty.small_medium)
+                .color(theme::hex(theme::TEXT_MUTED))
+                .a11y_hidden()
+        }))
+        .children(timestamp.map(|time| {
+            rune::text(time)
+                .key(format!("{key}-time"))
+                .font(kit.ty.text_xsmall)
+                .color(theme::hex(theme::TEXT_MUTED))
+        }))
+}
+
+fn message_bubble(
+    key: String,
+    role: Role,
+    text: &str,
+    header: Option<El>,
+    state: Option<El>,
+    sources: Option<El>,
+    kit: &Kit,
+) -> El {
+    let operator = role == Role::Operator;
     let tone = if operator {
         StatusTone::Accent
     } else {
         StatusTone::Neutral
     };
-    let mut body = rune::col().w_full().gap(6.0).child(
-        rune::text(message.role.label())
-            .font(kit.ty.small_medium)
-            .color(theme::hex(theme::TEXT_MUTED)),
-    );
-    if !message.text.is_empty() {
+    let mut body = rune::col().w_full().gap(6.0).children(header);
+    if !text.is_empty() {
         body = body.child(
-            rune::text(message.text.clone())
+            rune::text(text)
                 .font(kit.ty.small)
                 .color(theme::hex(theme::TEXT_PRIMARY))
                 .wrap_anywhere(),
         );
     }
-    if let Some((label, chip_tone)) = message.state.chip() {
-        body = body.child(chip(label, chip_tone, kit).key(format!("chat-state-{}", message.id)));
-    }
+    let label = if text.is_empty() && role == Role::Assistant {
+        "Assistant status".to_owned()
+    } else {
+        format!("{} message", role.label())
+    };
     let surface = rune::col()
-        .key(message_key(&message.id))
-        .label(format!("{} message", message.role.label()))
+        .key(key)
+        .label(label)
         .max_w(BUBBLE_MAX)
         .padding(10.0)
         .radius(10.0)
         .fill(tone.bg())
         .border(1.0, tone.border())
-        .child(body.children(sources));
+        .child(body.children(state).children(sources));
     let row = rune::row().w_full();
     if operator {
         row.child(rune::spacer()).child(surface)
@@ -230,6 +305,7 @@ mod tests {
         ChatMessage {
             id: id.to_string(),
             role,
+            timestamp: None,
             state,
             text: format!("message {id}"),
             citations: Vec::new(),

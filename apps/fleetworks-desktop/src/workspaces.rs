@@ -102,6 +102,11 @@ pub(crate) struct WorkspaceUpdate {
     pub(crate) message: Option<String>,
 }
 
+enum WorkspaceOpen {
+    Initial(Option<PathBuf>),
+    Retry,
+}
+
 impl State {
     pub fn copy_workspace_path(&mut self, name: &str, tx: &mut Tx) {
         let Load::Ready(snapshot) = &self.workspaces.snapshot else {
@@ -120,6 +125,14 @@ impl State {
         }
     }
     pub fn initialize_workspaces(&mut self, selection: Option<PathBuf>) {
+        self.request_workspaces(WorkspaceOpen::Initial(selection));
+    }
+
+    pub(crate) fn retry_workspace_access(&mut self) {
+        self.request_workspaces(WorkspaceOpen::Retry);
+    }
+
+    fn request_workspaces(&mut self, open: WorkspaceOpen) {
         if self.fixture || self.workspaces.busy {
             return;
         }
@@ -130,8 +143,7 @@ impl State {
         self.workspaces.busy = true;
         self.workspaces.snapshot = Load::Loading;
         self.workspaces.revision = self.workspaces.revision.wrapping_add(1);
-        self.workspaces.request =
-            services.initialize_workspaces(selection, self.workspaces.revision);
+        self.workspaces.request = services.initialize_workspaces(open, self.workspaces.revision);
     }
 
     /// Folder-only changes preserve backend drafts and Brain search/dossier state.
@@ -283,9 +295,12 @@ impl State {
             }
         }
         // Preload local pairing/profile metadata only; never start a connection automatically.
-        if self.uses_native_pairing() {
+        let native_pairing = self.uses_native_pairing();
+        if native_pairing {
             self.initialize_pairing_connection();
-        } else if matches!(self.connection_profiles.catalog, Load::Idle)
+        }
+        if (self.startup.active() || !native_pairing)
+            && matches!(self.connection_profiles.catalog, Load::Idle)
             && self.workspaces.container.is_some()
         {
             self.initialize_connection_profiles();
@@ -294,16 +309,18 @@ impl State {
 }
 
 impl GatewayEffects {
-    fn initialize_workspaces(
-        &self,
-        selection: Option<PathBuf>,
-        revision: u64,
-    ) -> Option<RequestTask> {
+    fn initialize_workspaces(&self, open: WorkspaceOpen, revision: u64) -> Option<RequestTask> {
         let ui = self.ui.get()?.clone();
         let task = self.runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
-                anyhow::ensure!(selection.is_none(), "workspace selection is retired");
-                let container = Arc::new(NativeContainer::open_settings(&platform::home()?)?);
+                let home = platform::home()?;
+                let container = Arc::new(match open {
+                    WorkspaceOpen::Initial(selection) => {
+                        anyhow::ensure!(selection.is_none(), "workspace selection is retired");
+                        NativeContainer::open_settings(&home)?
+                    }
+                    WorkspaceOpen::Retry => NativeContainer::retry_settings_access(&home)?,
+                });
                 Ok(WorkspaceUpdate {
                     snapshot: WorkspaceSnapshot {
                         root: container.root().to_path_buf(),

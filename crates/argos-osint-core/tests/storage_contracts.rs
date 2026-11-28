@@ -19,13 +19,21 @@
 #![cfg(feature = "surreal")]
 
 mod support;
+#[path = "support/workstation.rs"]
+mod workstation;
 
 use argos_osint_core::storage;
+use argos_osint_core::storage::inbox_qa as qa;
+use argos_osint_core::storage::tx::TxError;
+use fleetworks_contracts::chat::QaModelTarget;
+use fleetworks_contracts::chat::QaTurnState;
+use fleetworks_contracts::qa_worker::QaContextUsage;
 use support::*;
 use surrealdb::engine::any::{connect, Any};
 use surrealdb::opt::auth::Root;
 use surrealdb::types::{QueryError, SurrealValue};
 use surrealdb::Surreal;
+use workstation::{register, start_qa_fixture};
 
 #[tokio::test]
 async fn authentication_rejects_bad_and_missing_credentials() {
@@ -633,5 +641,431 @@ async fn concurrent_diskann_inserts_with_filtered_search() {
             hits.first().map(|h| h.key.clone()),
             Some(format!("c{n:03}"))
         );
+    }
+}
+
+#[tokio::test]
+async fn qa_selected_generator_seals_all_findings_atomically_under_the_live_lease() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server
+        .repo("argos", "workstation_assistant_generator")
+        .await;
+    let context = register(&repo, "node-a", "research").await;
+    let other_context = register(&repo, "node-b", "research").await;
+    let actor = qa::Actor::new(
+        "scope-a".into(),
+        "fixture-native".into(),
+        "fixture-access".into(),
+        context.clone(),
+    );
+    let enabled = qa::set(
+        &repo,
+        &actor,
+        qa::setting(&repo).await.unwrap().revision,
+        true,
+    )
+    .await
+    .unwrap();
+    let (request, lease) =
+        start_qa_fixture(&repo, &actor, &context, enabled, "generated-batch").await;
+    let evidence = qa::start(&repo, &lease).await.unwrap().unwrap();
+    use fleetworks_contracts::chat::QaTurnStage;
+    use fleetworks_contracts::qa_worker::QaWorkerPlan;
+
+    assert_eq!(
+        qa::latest(&repo, &actor).await.unwrap().unwrap().0.stage,
+        Some(QaTurnStage::Working),
+    );
+    let planning = qa::begin_planning(&repo, &lease).await.unwrap().unwrap();
+    assert_eq!(
+        qa::latest(&repo, &actor).await.unwrap().unwrap().0.stage,
+        Some(QaTurnStage::Thinking),
+    );
+    let ids = evidence
+        .request
+        .passages
+        .iter()
+        .map(|p| p.source_id.clone())
+        .collect::<Vec<_>>();
+    let note = "Answer using the verified observations.".to_owned();
+    let mut plan = qa::ResponsePlan {
+        task: qa::ResponseTask::ResponsePlan,
+        version: 1,
+        snapshot: "another-snapshot".into(),
+        decision_generation: planning.decision_generation,
+        mode: qa::ResponseMode::Current,
+        focus: None,
+        clarification: None,
+        ordered_passages: ids.clone(),
+        worker: Some(QaWorkerPlan::new(String::new(), note.clone(), ids, None)),
+        requires_worker_support: false,
+        negotiated: true,
+        note,
+    };
+    assert!(matches!(
+        qa::accept_plan(&repo, &lease, &plan).await,
+        Err(TxError::Abort(reason)) if reason == "inbox_qa:invalid_part"
+    ));
+    plan.snapshot = evidence.binding().unwrap();
+    assert!(qa::accept_plan(&repo, &lease, &plan).await.unwrap());
+    assert!(!qa::accept_plan(&repo, &lease, &plan).await.unwrap());
+    assert_eq!(
+        qa::latest(&repo, &actor).await.unwrap().unwrap().0.stage,
+        Some(QaTurnStage::Writing),
+    );
+    let findings: Vec<_> = evidence
+        .request
+        .passages
+        .iter()
+        .zip(&evidence.sources)
+        .map(|(passage, source)| {
+            source.finding(
+                passage.text.clone(),
+                0,
+                u32::try_from(passage.text.chars().count()).unwrap(),
+            )
+        })
+        .collect();
+    let before = qa::latest(&repo, &actor).await.unwrap().unwrap().0;
+    let target = QaModelTarget::default();
+    let model_result = || qa::ModelResult {
+        context: Some(QaContextUsage::new(target.input_tokens(), 48, 1)),
+        reply: Some("Gateway is ready. Actor catalog is ready.".into()),
+        model_target: Some(target),
+    };
+    assert!(matches!(
+        qa::publish_findings_and_complete(
+            &repo, &lease, QaTurnState::Answered, &findings, qa::ModelResult::default(),
+        )
+        .await,
+        Err(TxError::Abort(reason)) if reason == "inbox_qa:invalid_part"
+    ));
+    let duplicate = [findings[0].clone(), findings[0].clone()];
+    assert!(matches!(
+        qa::publish_findings_and_complete(
+            &repo, &lease, QaTurnState::Answered, &duplicate, model_result(),
+        )
+        .await,
+        Err(TxError::Abort(reason)) if reason == "inbox_qa:invalid_part"
+    ));
+    let (running, _) = qa::latest(&repo, &actor).await.unwrap().unwrap();
+    assert_eq!(running.state, QaTurnState::Running);
+    assert_eq!(running.cursor, before.cursor);
+    assert!(running.accepted_at.is_some());
+    assert_eq!(running.accepted_at, before.accepted_at);
+    assert!(running.completed_at.is_none());
+    assert!(running.response_time_ms.is_none());
+    assert!(running.findings.is_empty());
+    assert!(
+        qa::history(&repo, &actor).await.unwrap().is_empty(),
+        "History omits the active exchange",
+    );
+
+    assert!(qa::publish_findings_and_complete(
+        &repo,
+        &lease,
+        QaTurnState::Answered,
+        &findings,
+        model_result(),
+    )
+    .await
+    .unwrap());
+    let (answered, events) = qa::latest(&repo, &actor).await.unwrap().unwrap();
+    assert_eq!(answered.state, QaTurnState::Answered);
+    assert_eq!(answered.findings, findings);
+    assert_eq!(answered.cursor, before.cursor + 3);
+    assert_eq!(events.last().unwrap().state, QaTurnState::Answered);
+    let other = qa::Actor::new(
+        "scope-a".into(),
+        "fixture-native".into(),
+        "fixture-access".into(),
+        other_context,
+    );
+    assert!(
+        qa::history(&repo, &other).await.unwrap().is_empty(),
+        "Another registration cannot read the terminal exchange",
+    );
+    let turn = surrealdb::types::RecordId::new("inbox_qa_exchange", answered.turn_id.clone());
+    let mut stored = repo
+        .db()
+        .query(
+            "SELECT VALUE accepted_at FROM ONLY $turn;
+             SELECT VALUE completed_at FROM ONLY $turn;
+             SELECT VALUE payload FROM ONLY $turn;",
+        )
+        .bind(("turn", turn.clone()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let accepted_at = stored.take::<Option<i64>>(0).unwrap().unwrap();
+    let completed_at = stored.take::<Option<i64>>(1).unwrap().unwrap();
+    assert_eq!(answered.accepted_at, Some(accepted_at.div_euclid(1_000)));
+    assert_eq!(answered.accepted_at, running.accepted_at);
+    assert_eq!(answered.completed_at, Some(completed_at.div_euclid(1_000)));
+    assert_eq!(
+        answered.response_time_ms,
+        Some(u64::try_from(completed_at - accepted_at).unwrap()),
+    );
+    let payload = stored.take::<Option<String>>(2).unwrap().unwrap();
+    let mut legacy: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    let legacy_turn = legacy["turn"].as_object_mut().unwrap();
+    legacy_turn.remove("accepted_at");
+    legacy_turn.remove("completed_at");
+    legacy_turn.remove("response_time_ms");
+    repo.db()
+        .query("UPDATE $turn SET payload=$legacy RETURN NONE")
+        .bind(("turn", turn.clone()))
+        .bind(("legacy", legacy.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(
+        qa::replay(&repo, &actor, &request).await.unwrap(),
+        Some(answered.clone()),
+    );
+    assert_eq!(
+        qa::latest(&repo, &actor).await.unwrap().unwrap().0,
+        answered
+    );
+    assert_eq!(
+        qa::history(&repo, &actor).await.unwrap(),
+        vec![answered],
+        "History exposes the sealed exchange and its timestamps even with a legacy payload",
+    );
+    assert!(!qa::publish_findings_and_complete(
+        &repo,
+        &lease,
+        QaTurnState::Answered,
+        &findings,
+        model_result(),
+    )
+    .await
+    .unwrap());
+    // Exercise the retention filter before the asynchronous reaper removes this row.
+    repo.db()
+        .query("UPDATE $turn SET completed_at=$expired RETURN NONE")
+        .bind(("turn", turn))
+        .bind((
+            "expired",
+            chrono::Utc::now().timestamp_millis() - 16 * 60_000,
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert!(qa::history(&repo, &actor).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn qa_verified_clarification_survives_unanswered_attempts_until_superseded() {
+    use argos_osint_core::nlp::conversation::{
+        ClarificationReason, Focus, Goal, Intent, Metric, PendingClarification,
+    };
+    use argos_osint_core::storage::job_dispatch;
+    use chrono::Utc;
+    use fleetworks_contracts::chat::QaTurnRequest;
+    use fleetworks_contracts::context::MutationContext;
+    use fleetworks_contracts::qa_worker::{
+        QaClarification, QaDialogueKind, QaWorkerDialogue, QaWorkerPlan, QaWorkerRequest,
+    };
+    use workstation::{ready_qa_replica, start_qa_delivery, QA_PLACEMENT, QA_WORKER};
+
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "assistant_open_clarification").await;
+    let context = register(&repo, "node-a", "research").await;
+    let actor = qa::Actor::new(
+        "scope-a".into(),
+        "fixture-native".into(),
+        "fixture-access".into(),
+        context.clone(),
+    );
+    let enabled = qa::set(
+        &repo,
+        &actor,
+        qa::setting(&repo).await.unwrap().revision,
+        true,
+    )
+    .await
+    .unwrap();
+    ready_qa_replica(&repo, enabled.generation).await;
+    let pending = PendingClarification {
+        reason: ClarificationReason::Subject,
+        choices: [Metric::Cpu, Metric::Memory]
+            .into_iter()
+            .map(|metric| Focus {
+                intent: Intent::Metric(metric),
+                source: None,
+                goal: Goal::Measurement,
+                temporal: None,
+                constraints: Vec::new(),
+            })
+            .collect(),
+        temporal: None,
+    };
+    for (id, question, outcome, expected_open) in [
+        ("clarify", "CPU or memory?", QaTurnState::Answered, true),
+        ("stop", "Check again.", QaTurnState::Canceled, true),
+        ("failed", "Check again.", QaTurnState::Failed, true),
+        ("replace", "Thanks.", QaTurnState::Answered, false),
+        (
+            "failed-after-replace",
+            "Check again.",
+            QaTurnState::Failed,
+            false,
+        ),
+    ] {
+        assert!(
+            qa::beat(&repo, QA_PLACEMENT, QA_WORKER, enabled.generation, true)
+                .await
+                .unwrap()
+        );
+        let request = QaTurnRequest::new(
+            id.into(),
+            MutationContext::new(&context),
+            question.into(),
+            None,
+        )
+        .unwrap();
+        let turn_id = qa::accepted_turn_id(&actor, &request, enabled.history_generation).unwrap();
+        let clarification = (id == "clarify").then(|| pending.clone());
+        let mut worker_request =
+            QaWorkerRequest::new(turn_id.clone(), turn_id, question.into(), Vec::new());
+        worker_request.dialogue = Some(QaWorkerDialogue {
+            kind: if clarification.is_some() {
+                QaDialogueKind::Clarification
+            } else {
+                QaDialogueKind::Acknowledgement
+            },
+            history: Vec::new(),
+        });
+        let boundary = qa::freshness_boundary(&repo, &actor).await.unwrap();
+        let sampled_at_ms = Utc::now().timestamp_millis();
+        let sampled_at_ms = if sampled_at_ms > boundary {
+            sampled_at_ms
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            Utc::now().timestamp_millis()
+        };
+        let evidence = qa::FrozenEvidence {
+            request: worker_request,
+            sources: Vec::new(),
+            sampled_at_ms,
+        };
+        let turn = qa::admit(
+            &repo,
+            &actor,
+            &request,
+            evidence.clone(),
+            qa::AdmissionMetadata {
+                subject: None,
+                observation: None,
+                related_activity: None,
+                status_check_tally: None,
+                used_previous_exchange: false,
+                response_started_at_ms: None,
+                conversation: qa::ConversationState {
+                    pending: clarification.clone(),
+                    ..qa::ConversationState::default()
+                },
+            },
+            enabled.generation,
+        )
+        .await
+        .unwrap();
+        if outcome == QaTurnState::Canceled {
+            assert_eq!(
+                qa::cancel(&repo, &actor, &turn.turn_id)
+                    .await
+                    .unwrap()
+                    .state,
+                outcome
+            );
+        } else {
+            let lease = start_qa_delivery(&repo).await;
+            if let Some(clarification) = clarification {
+                let planning = qa::begin_planning(&repo, &lease).await.unwrap().unwrap();
+                let note = "Ask which monitored resource to check.".to_owned();
+                let mut worker = QaWorkerPlan::new(String::new(), note.clone(), Vec::new(), None);
+                worker.clarification = Some(QaClarification::Subject);
+                assert!(qa::accept_plan(
+                    &repo,
+                    &lease,
+                    &qa::ResponsePlan {
+                        task: qa::ResponseTask::ResponsePlan,
+                        version: 1,
+                        snapshot: evidence.binding().unwrap(),
+                        decision_generation: planning.decision_generation,
+                        mode: qa::ResponseMode::Clarification,
+                        focus: None,
+                        clarification: Some(clarification),
+                        ordered_passages: Vec::new(),
+                        worker: Some(worker),
+                        requires_worker_support: true,
+                        negotiated: true,
+                        note,
+                    }
+                )
+                .await
+                .unwrap());
+            }
+            let target = QaModelTarget::default();
+            let result = if outcome == QaTurnState::Answered {
+                qa::ModelResult {
+                    context: Some(QaContextUsage::new(target.input_tokens(), 48, 1)),
+                    reply: Some(
+                        if id == "clarify" {
+                            QaClarification::Subject.text()
+                        } else {
+                            "You are welcome."
+                        }
+                        .into(),
+                    ),
+                    model_target: Some(target),
+                }
+            } else {
+                qa::ModelResult::default()
+            };
+            assert!(
+                qa::publish_with_model_result(&repo, &lease, outcome, None, result)
+                    .await
+                    .unwrap()
+            );
+            let delivery = if outcome == QaTurnState::Answered {
+                job_dispatch::DeliveryOutcome::Complete {
+                    result_ref: "assistant-reply",
+                }
+            } else {
+                job_dispatch::DeliveryOutcome::Failed {
+                    reason: "assistant_failed",
+                }
+            };
+            job_dispatch::finish_delivery(repo.db(), &lease, delivery, Utc::now())
+                .await
+                .unwrap();
+        }
+        let retained = qa::pending_clarification(&repo, &actor).await.unwrap();
+        assert_eq!(retained.as_ref(), expected_open.then_some(&pending), "{id}");
+        if id == "clarify" {
+            let other = qa::Actor::new(
+                "scope-a".into(),
+                "fixture-native".into(),
+                "fixture-access".into(),
+                register(&repo, "node-b", "research").await,
+            );
+            assert!(qa::pending_clarification(&repo, &other)
+                .await
+                .unwrap()
+                .is_none());
+            assert!(qa::last_answered_prompt(&repo, &actor)
+                .await
+                .unwrap()
+                .is_none());
+        }
     }
 }

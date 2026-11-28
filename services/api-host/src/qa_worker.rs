@@ -49,10 +49,16 @@ use fleetworks_contracts::qa_worker::QaWorkerReply;
 use fleetworks_contracts::qa_worker::QaWorkerRequest;
 use fleetworks_contracts::qa_worker::QaWorkerSequence;
 use fleetworks_contracts::qa_worker::QA_CONTEXT_USAGE_ENV;
+use fleetworks_contracts::qa_worker::QA_DECODED_CLARIFICATION_ENV;
 use fleetworks_contracts::qa_worker::QA_DIALOGUE_ENV;
+use fleetworks_contracts::qa_worker::QA_GENERAL_DIALOGUE_ENV;
+use fleetworks_contracts::qa_worker::QA_JOB_LOG_CONTEXT_ENV;
+use fleetworks_contracts::qa_worker::QA_LEGACY_STREAMING_WINDOW_TOKENS;
+use fleetworks_contracts::qa_worker::QA_MODEL_CONTEXT_ENV;
 use fleetworks_contracts::qa_worker::QA_MODEL_FILES;
 use fleetworks_contracts::qa_worker::QA_MODEL_REVISION;
 use fleetworks_contracts::qa_worker::QA_MODEL_TARGET_ENV;
+use fleetworks_contracts::qa_worker::QA_RESPONSE_PLAN_ENV;
 use fleetworks_contracts::qa_worker::QA_STREAMING_ENV;
 use fleetworks_contracts::qa_worker::QA_WORKER_PROTOCOL;
 use serde::Deserialize;
@@ -80,13 +86,15 @@ const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_PACK_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_PACK_FILES: usize = 32;
 const WARM_LIMIT: Duration = Duration::from_secs(45);
-const TURN_LIMIT: Duration = Duration::from_secs(25);
+pub(crate) const TURN_LIMIT: Duration = Duration::from_secs(25);
 const PING_LIMIT: Duration = Duration::from_secs(2);
 const UNLOAD_LIMIT: Duration = Duration::from_secs(3);
 const MIB: u64 = 1024 * 1024;
 pub(crate) const WORKSTATION_RESERVE: u64 = 1024 * MIB;
 const SMALL_RESIDENT_LIMIT: u64 = 1536 * MIB;
 const BASE_RESIDENT_LIMIT: u64 = 3584 * MIB;
+const GPT2_SMALL_RESIDENT_LIMIT: u64 = 2048 * MIB;
+const GPT2_MEDIUM_RESIDENT_LIMIT: u64 = 4608 * MIB;
 
 fn configured_u16(name: &str) -> Option<u16> {
     env::var(name).ok()?.parse().ok()
@@ -100,18 +108,21 @@ fn select_target(
     let limit = available_memory
         .saturating_sub(WORKSTATION_RESERVE)
         .min(operator_limit);
-    match preference {
-        QaGeneratorPreference::Automatic | QaGeneratorPreference::FlanT5Base
-            if limit >= BASE_RESIDENT_LIMIT =>
-        {
-            Some(QaModelTarget::FlanT5Base)
-        }
-        QaGeneratorPreference::Automatic | QaGeneratorPreference::FlanT5Small
-            if limit >= SMALL_RESIDENT_LIMIT =>
-        {
-            Some(QaModelTarget::FlanT5Small)
-        }
-        _ => None,
+    let automatic_target = if limit >= GPT2_SMALL_RESIDENT_LIMIT {
+        QaModelTarget::Gpt2Small
+    } else {
+        QaModelTarget::FlanT5Small
+    };
+    let target = preference.explicit_target().unwrap_or(automatic_target);
+    (limit >= resident_limit(target)).then_some(target)
+}
+
+fn resident_limit(target: QaModelTarget) -> u64 {
+    match target {
+        QaModelTarget::FlanT5Base => BASE_RESIDENT_LIMIT,
+        QaModelTarget::Gpt2Small => GPT2_SMALL_RESIDENT_LIMIT,
+        QaModelTarget::Gpt2Medium => GPT2_MEDIUM_RESIDENT_LIMIT,
+        _ => SMALL_RESIDENT_LIMIT,
     }
 }
 
@@ -135,10 +146,7 @@ impl WorkerLimits {
             threads: configured_u16("FLEETWORKS_QA_CPU_THREADS")
                 .filter(|n| (1..=4).contains(n))
                 .unwrap_or(1),
-            resident_bytes: match target {
-                QaModelTarget::FlanT5Base => BASE_RESIDENT_LIMIT,
-                _ => SMALL_RESIDENT_LIMIT,
-            },
+            resident_bytes: resident_limit(target),
         }
     }
 }
@@ -290,15 +298,18 @@ impl QaWorkerSupervisor {
         let model = if packed_target == Some(target) {
             pack.join("model")
         } else {
-            progress(QaStartupStage::DownloadingPack);
-            match crate::qa_model_assets::provision(&self.state_dir, target).await {
+            match crate::qa_model_assets::provision(&self.state_dir, target, || {
+                progress(QaStartupStage::DownloadingPack);
+            })
+            .await
+            {
                 Ok(model) => model,
                 Err(error)
                     if preference == QaGeneratorPreference::Automatic
-                        && target == QaModelTarget::FlanT5Base
+                        && target == QaModelTarget::Gpt2Small
                         && packed_target == Some(QaModelTarget::FlanT5Small) =>
                 {
-                    let _ = warm_error("base_model_provision", error);
+                    let _ = warm_error("default_model_provision", error);
                     target = QaModelTarget::FlanT5Small;
                     selected_model(target);
                     pack.join("model")
@@ -319,26 +330,24 @@ impl QaWorkerSupervisor {
 
     async fn connect_ready(
         &self,
+        slot: &mut Option<WorkerSession>,
         target: QaModelTarget,
         preference: QaGeneratorPreference,
         stopped: &mut watch::Receiver<()>,
-        cancel: &CancellationToken,
         selected_model: &(dyn Fn(QaModelTarget) + Sync),
         progress: &(dyn Fn(QaStartupStage) + Sync),
-    ) -> Result<WorkerSession> {
-        let mut session = tokio::select! {
+    ) -> Result<()> {
+        let session = slot.insert(tokio::select! {
             biased;
             _ = stopped.changed() => return Err(anyhow!("QA worker is stopping")),
-            _ = cancel.cancelled() => return Err(anyhow!("QA request was canceled")),
             result = self.connect(target, preference, selected_model, progress) => result?,
-        };
+        });
         let child_pid = session.child_id();
         let mut stage = WarmStage::new("worker_ready_frame");
         let resident_limit = session.resident_limit;
         let (ready, failure_stage) = tokio::select! {
             biased;
             _ = stopped.changed() => (Err(anyhow!("QA worker is stopping")), None),
-            _ = cancel.cancelled() => (Err(anyhow!("QA request was canceled")), None),
             error = guard_resident(child_pid, resident_limit) => (Err(error), Some("worker_memory_limit")),
             result = timeout(WARM_LIMIT, session.ready()) => match result {
                 Ok(result) => (result, Some("worker_ready_frame")),
@@ -360,10 +369,11 @@ impl QaWorkerSupervisor {
                     "Inbox QA worker warmup failed"
                 );
             }
-            let _ = session.stop().await;
+            let _ = stop_worker(slot).await;
             return Err(error);
         }
-        Ok(session)
+        session.lifecycle = WorkerLifecycle::Ready;
+        Ok(())
     }
 
     pub(crate) async fn warm_with_progress(
@@ -375,24 +385,18 @@ impl QaWorkerSupervisor {
         let mut stopped = self.stopping.subscribe();
         let _admission = self.model_admission.lock().await;
         let mut slot = self.session.lock().await;
-        if let Some(old) = slot.take() {
-            old.stop().await?;
-        }
+        stop_worker(&mut slot).await?;
         let target = select_workstation_model(preference).await?;
         selected_model(target);
-        let cancel = CancellationToken::new();
-        *slot = Some(
-            self.connect_ready(
-                target,
-                preference,
-                &mut stopped,
-                &cancel,
-                selected_model,
-                progress,
-            )
-            .await?,
-        );
-        Ok(())
+        self.connect_ready(
+            &mut slot,
+            target,
+            preference,
+            &mut stopped,
+            selected_model,
+            progress,
+        )
+        .await
     }
 
     pub(crate) async fn active_model(&self) -> Option<QaModelTarget> {
@@ -400,13 +404,35 @@ impl QaWorkerSupervisor {
             .lock()
             .await
             .as_ref()
+            .filter(|session| session.lifecycle == WorkerLifecycle::Ready)
             .map(|session| session.model_target)
+    }
+
+    pub(crate) async fn response_plan_support(
+        &self,
+        needs_decoded_clarification: bool,
+        needs_general_dialogue: bool,
+    ) -> (bool, bool) {
+        let session = self.session.lock().await;
+        let Some(session) = session
+            .as_ref()
+            .filter(|session| session.lifecycle == WorkerLifecycle::Ready)
+        else {
+            return (false, false);
+        };
+        let support = session.response_plan;
+        (
+            support.supports(needs_decoded_clarification)
+                && (!needs_general_dialogue || support.supports_general_dialogue()),
+            support == ResponsePlanSupport::JobLogContext,
+        )
     }
 
     pub(crate) async fn check_ready(&self) -> Result<()> {
         let mut slot = self.session.lock().await;
         let session = slot
             .as_mut()
+            .filter(|session| session.lifecycle == WorkerLifecycle::Ready)
             .ok_or_else(|| anyhow!("QA worker unavailable"))?;
         let child_pid = session.child_id();
         let resident_limit = session.resident_limit;
@@ -430,7 +456,19 @@ impl QaInference for QaWorkerSupervisor {
             let mut slot = self.session.lock().await;
             let session = slot
                 .as_mut()
+                .filter(|session| session.lifecycle == WorkerLifecycle::Ready)
                 .ok_or_else(|| anyhow!("QA worker unavailable"))?;
+            ensure!(
+                (session.response_plan.supports_general_dialogue()
+                    || !request
+                        .dialogue
+                        .as_ref()
+                        .is_some_and(|dialogue| dialogue.kind.needs_general_support()))
+                    && request.plan.as_ref().is_none_or(|plan| session
+                        .response_plan
+                        .supports(plan.clarification.is_some())),
+                "QA response plan support was not negotiated"
+            );
             let child_pid = session.child_id();
             let resident_limit = session.resident_limit;
             let (result, failure_stage) = tokio::select! {
@@ -467,9 +505,7 @@ impl QaInference for QaWorkerSupervisor {
                         "Inbox QA worker could not finish the turn"
                     );
                 }
-                if let Some(session) = slot.take() {
-                    let _ = session.stop().await;
-                }
+                let _ = stop_worker(&mut slot).await;
             }
             result
         })
@@ -479,19 +515,56 @@ impl QaInference for QaWorkerSupervisor {
         Box::pin(async move {
             self.stopping.send_modify(|_| {});
             let mut slot = self.session.lock().await;
-            if let Some(session) = slot.take() {
-                session.stop().await?;
-            }
-            Ok(())
+            stop_worker(&mut slot).await
         })
     }
 }
 
+async fn stop_worker(slot: &mut Option<WorkerSession>) -> Result<()> {
+    if let Some(session) = slot.as_mut() {
+        session.stop().await?;
+        *slot = None;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum WorkerLifecycle {
+    Starting,
+    Ready,
+    Stopping,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ResponsePlanSupport {
+    Unavailable,
+    Legacy,
+    DecodedClarification,
+    GeneralDialogue,
+    JobLogContext,
+}
+
+impl ResponsePlanSupport {
+    fn supports(self, needs_decoded_clarification: bool) -> bool {
+        match self {
+            Self::Unavailable => false,
+            Self::Legacy => !needs_decoded_clarification,
+            Self::DecodedClarification | Self::GeneralDialogue | Self::JobLogContext => true,
+        }
+    }
+
+    fn supports_general_dialogue(self) -> bool {
+        matches!(self, Self::GeneralDialogue | Self::JobLogContext)
+    }
+}
+
 struct WorkerSession {
+    lifecycle: WorkerLifecycle,
     input: Box<dyn AsyncWrite + Send + Unpin>,
     output: Box<dyn AsyncRead + Send + Unpin>,
     child: Option<Child>,
-    streaming: bool,
+    streaming_window: Option<u16>,
+    response_plan: ResponsePlanSupport,
     model_target: QaModelTarget,
     resident_limit: u64,
 }
@@ -509,6 +582,11 @@ impl WorkerSession {
             .env(QA_CONTEXT_USAGE_ENV, "1")
             .env(QA_DIALOGUE_ENV, "1")
             .env(QA_STREAMING_ENV, "1")
+            .env(QA_MODEL_CONTEXT_ENV, "1")
+            .env(QA_RESPONSE_PLAN_ENV, "1")
+            .env(QA_DECODED_CLARIFICATION_ENV, "1")
+            .env(QA_GENERAL_DIALOGUE_ENV, "1")
+            .env(QA_JOB_LOG_CONTEXT_ENV, "1")
             .env(QA_MODEL_TARGET_ENV, target.slug())
             .env("OMP_NUM_THREADS", &threads)
             .env("MKL_NUM_THREADS", &threads)
@@ -531,10 +609,12 @@ impl WorkerSession {
             .take()
             .ok_or_else(|| warm_error("worker_spawn", anyhow!("missing QA worker output")))?;
         Ok(Self {
+            lifecycle: WorkerLifecycle::Starting,
             input: Box::new(input),
             output: Box::new(output),
             child: Some(child),
-            streaming: false,
+            streaming_window: None,
+            response_plan: ResponsePlanSupport::Unavailable,
             model_target: target,
             resident_limit: limits.resident_bytes,
         })
@@ -573,15 +653,14 @@ impl WorkerSession {
     }
 
     fn validate_ready(&mut self, reply: QaWorkerReply) -> Result<()> {
-        match reply {
+        let (streaming_window, response_plan) = match reply {
             QaWorkerReply::ReadyWithDialogue {
                 protocol,
                 model_revision,
             } if protocol == QA_WORKER_PROTOCOL
                 && model_revision == self.model_target.revision() =>
             {
-                self.streaming = false;
-                Ok(())
+                (None, ResponsePlanSupport::Unavailable)
             }
             QaWorkerReply::ReadyWithStreaming {
                 protocol,
@@ -589,8 +668,66 @@ impl WorkerSession {
             } if protocol == QA_WORKER_PROTOCOL
                 && model_revision == self.model_target.revision() =>
             {
-                self.streaming = true;
-                Ok(())
+                (
+                    Some(QA_LEGACY_STREAMING_WINDOW_TOKENS),
+                    ResponsePlanSupport::Unavailable,
+                )
+            }
+            QaWorkerReply::ReadyWithStreamingContext {
+                protocol,
+                model_revision,
+                window_tokens,
+            } if protocol == QA_WORKER_PROTOCOL
+                && model_revision == self.model_target.revision()
+                && window_tokens == self.model_target.input_tokens()
+                && window_tokens > QA_LEGACY_STREAMING_WINDOW_TOKENS =>
+            {
+                (Some(window_tokens), ResponsePlanSupport::Unavailable)
+            }
+            QaWorkerReply::ReadyWithResponsePlan {
+                protocol,
+                model_revision,
+                window_tokens,
+            } if protocol == QA_WORKER_PROTOCOL
+                && model_revision == self.model_target.revision()
+                && (window_tokens == self.model_target.input_tokens()
+                    || window_tokens == QA_LEGACY_STREAMING_WINDOW_TOKENS) =>
+            {
+                (Some(window_tokens), ResponsePlanSupport::Legacy)
+            }
+            QaWorkerReply::ReadyWithDecodedClarification {
+                protocol,
+                model_revision,
+                window_tokens,
+            } if protocol == QA_WORKER_PROTOCOL
+                && model_revision == self.model_target.revision()
+                && (window_tokens == self.model_target.input_tokens()
+                    || window_tokens == QA_LEGACY_STREAMING_WINDOW_TOKENS) =>
+            {
+                (
+                    Some(window_tokens),
+                    ResponsePlanSupport::DecodedClarification,
+                )
+            }
+            QaWorkerReply::ReadyWithGeneralDialogue {
+                protocol,
+                model_revision,
+                window_tokens,
+            } if protocol == QA_WORKER_PROTOCOL
+                && model_revision == self.model_target.revision()
+                && window_tokens == self.model_target.input_tokens() =>
+            {
+                (Some(window_tokens), ResponsePlanSupport::GeneralDialogue)
+            }
+            QaWorkerReply::ReadyWithJobLogContext {
+                protocol,
+                model_revision,
+                window_tokens,
+            } if protocol == QA_WORKER_PROTOCOL
+                && model_revision == self.model_target.revision()
+                && window_tokens == self.model_target.input_tokens() =>
+            {
+                (Some(window_tokens), ResponsePlanSupport::JobLogContext)
             }
             QaWorkerReply::StartupFailed {
                 source,
@@ -604,12 +741,23 @@ impl WorkerSession {
                     worker_panic_cause = cause.code(),
                     "Inbox QA worker reported a startup panic"
                 );
-                Err(anyhow!("QA model process panicked during startup"))
+                return Err(anyhow!("QA model process panicked during startup"));
             }
-            _ => Err(anyhow!(
-                "QA worker could not confirm the expected checkpoint"
-            )),
-        }
+            _ => {
+                return Err(anyhow!(
+                    "QA worker could not confirm the expected checkpoint"
+                ))
+            }
+        };
+        ensure!(
+            self.lifecycle != WorkerLifecycle::Ready
+                || (self.streaming_window == streaming_window
+                    && self.response_plan == response_plan),
+            "QA worker changed its negotiated context"
+        );
+        self.streaming_window = streaming_window;
+        self.response_plan = response_plan;
+        Ok(())
     }
 
     async fn ping(&mut self) -> Result<()> {
@@ -622,8 +770,13 @@ impl WorkerSession {
         request: QaWorkerRequest,
         events: mpsc::Sender<QaWorkerEvent>,
     ) -> Result<()> {
+        ensure!(
+            self.response_plan == ResponsePlanSupport::JobLogContext
+                || !request.passages.iter().any(|passage| passage.job_log_tail),
+            "QA job log context support was not negotiated"
+        );
         self.send(&QaWorkerCommand::Ask {
-            request: request.clone(),
+            request: Box::new(request.clone()),
         })
         .await?;
         let mut validation = QaWorkerSequence::default();
@@ -633,15 +786,18 @@ impl WorkerSession {
             };
             let terminal = validation.accept(&request, &event)?;
             match &event {
-                QaWorkerEvent::Delta { .. } => ensure!(self.streaming, "unexpected QA stream"),
+                QaWorkerEvent::Delta { .. } => {
+                    ensure!(self.streaming_window.is_some(), "unexpected QA stream");
+                }
                 QaWorkerEvent::Complete {
                     context: Some(context),
                     ..
-                } if self.streaming => {
-                    ensure!(
-                        context.window_tokens == self.model_target.input_tokens(),
-                        "unexpected QA context window"
-                    );
+                } => {
+                    let window_matches = match self.streaming_window {
+                        Some(window) => context.window_tokens == window,
+                        None => context.window_tokens <= QA_LEGACY_STREAMING_WINDOW_TOKENS,
+                    };
+                    ensure!(window_matches, "unexpected QA context window");
                 }
                 _ => {}
             }
@@ -655,19 +811,29 @@ impl WorkerSession {
         }
     }
 
-    async fn stop(mut self) -> Result<()> {
-        if let Some(mut child) = self.child.take() {
-            if matches!(
-                timeout(UNLOAD_LIMIT, async {
-                    self.send(&QaWorkerCommand::Shutdown).await?;
-                    child.wait().await?;
-                    Ok::<_, anyhow::Error>(())
-                })
-                .await,
-                Ok(Ok(()))
-            ) {
+    async fn stop(&mut self) -> Result<()> {
+        let try_graceful = self.lifecycle != WorkerLifecycle::Stopping;
+        self.lifecycle = WorkerLifecycle::Stopping;
+        if self.child.is_some() {
+            if try_graceful
+                && matches!(
+                    timeout(UNLOAD_LIMIT, async {
+                        self.send(&QaWorkerCommand::Shutdown).await?;
+                        self.child
+                            .as_mut()
+                            .expect("owned worker child")
+                            .wait()
+                            .await?;
+                        Ok::<_, anyhow::Error>(())
+                    })
+                    .await,
+                    Ok(Ok(()))
+                )
+            {
                 return Ok(());
             }
+            // Keep the handle in the supervisor slot if this wait is interrupted.
+            let child = self.child.as_mut().expect("owned worker child");
             if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
                 // SAFETY: An unreaped child owns its PID and was spawned as process group leader.
                 unsafe { libc::kill(-pid, libc::SIGKILL) };
@@ -830,9 +996,17 @@ fn load_installed_pointer(state_dir: &Path, target: QaModelTarget) -> Result<Pac
         }
     }
     match read_pointer(&state_dir.join("qa-pack.json")) {
-        Err(error) if pointer_missing(&error) && named && target == QaModelTarget::FlanT5Base => {
-            // A named Small pack also contains the shared verified generator runtime.
-            read_pointer(&targets.join("flan-t5-small.json"))
+        Err(error) if pointer_missing(&error) && named => {
+            // Named default and legacy packs also contain the shared verified runtime.
+            for fallback in [QaModelTarget::Gpt2Small, QaModelTarget::FlanT5Small] {
+                if fallback != target {
+                    match read_pointer(&targets.join(format!("{}.json", fallback.slug()))) {
+                        Err(error) if pointer_missing(&error) => {}
+                        other => return other,
+                    }
+                }
+            }
+            Err(error)
         }
         other => other,
     }
@@ -1073,22 +1247,22 @@ fn host_target() -> String {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn selects_largest_model_with_memory_left_for_the_workstation() {
+    fn automatic_prefers_gpt_with_memory_left_for_the_workstation() {
         use super::{
-            select_target, BASE_RESIDENT_LIMIT, SMALL_RESIDENT_LIMIT, WORKSTATION_RESERVE,
+            select_target, GPT2_SMALL_RESIDENT_LIMIT, SMALL_RESIDENT_LIMIT, WORKSTATION_RESERVE,
         };
         use fleetworks_contracts::chat::QaModelTarget;
 
-        let base_available = BASE_RESIDENT_LIMIT + WORKSTATION_RESERVE;
+        let gpt_available = GPT2_SMALL_RESIDENT_LIMIT + WORKSTATION_RESERVE;
         let small_available = SMALL_RESIDENT_LIMIT + WORKSTATION_RESERVE;
         assert_eq!(
-            select_target(QaGeneratorPreference::Automatic, base_available, u64::MAX),
-            Some(QaModelTarget::FlanT5Base)
+            select_target(QaGeneratorPreference::Automatic, gpt_available, u64::MAX),
+            Some(QaModelTarget::Gpt2Small)
         );
         assert_eq!(
             select_target(
                 QaGeneratorPreference::Automatic,
-                base_available - 1,
+                gpt_available - 1,
                 u64::MAX
             ),
             Some(QaModelTarget::FlanT5Small)
@@ -1096,7 +1270,7 @@ mod tests {
         assert_eq!(
             select_target(
                 QaGeneratorPreference::Automatic,
-                base_available,
+                gpt_available,
                 SMALL_RESIDENT_LIMIT
             ),
             Some(QaModelTarget::FlanT5Small)
@@ -1116,7 +1290,7 @@ mod tests {
         assert_eq!(
             select_target(
                 QaGeneratorPreference::Automatic,
-                base_available,
+                gpt_available,
                 SMALL_RESIDENT_LIMIT - 1
             ),
             None
@@ -1161,6 +1335,28 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn explicit_gpt2_preferences_admit_only_the_requested_target() {
+        for (preference, target, resident) in [
+            (
+                QaGeneratorPreference::Gpt2Small,
+                QaModelTarget::Gpt2Small,
+                GPT2_SMALL_RESIDENT_LIMIT,
+            ),
+            (
+                QaGeneratorPreference::Gpt2Medium,
+                QaModelTarget::Gpt2Medium,
+                GPT2_MEDIUM_RESIDENT_LIMIT,
+            ),
+        ] {
+            let available = resident + WORKSTATION_RESERVE;
+            assert_eq!(select_target(preference, available, resident), Some(target));
+            assert_eq!(select_target(preference, available, resident - 1), None);
+            assert_eq!(select_target(preference, available - 1, resident), None);
+            assert_eq!(WorkerLimits::for_target(target).resident_bytes, resident);
+        }
     }
 
     use std::os::unix::fs::PermissionsExt;
@@ -1210,23 +1406,15 @@ mod tests {
     }
 
     #[test]
-    fn base_admission_finds_named_small_runtime_only_when_preferred_pointers_are_missing() {
+    fn alternate_models_find_named_small_runtime_when_preferred_pointers_are_missing() {
         let state = tempfile::tempdir().unwrap();
         fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let targets = state.path().join("qa-model-packs");
         fs::create_dir(&targets).unwrap();
         fs::set_permissions(&targets, fs::Permissions::from_mode(0o700)).unwrap();
-        let target = select_target(
-            QaGeneratorPreference::Automatic,
-            BASE_RESIDENT_LIMIT + WORKSTATION_RESERVE,
-            u64::MAX,
-        )
-        .unwrap();
-        assert_eq!(target, QaModelTarget::FlanT5Base);
         assert!(!state.path().join("qa-model-assets").exists());
 
         let small = targets.join("flan-t5-small.json");
-        let base = targets.join("flan-t5-base.json");
         let generic = state.path().join("qa-pack.json");
         let write = |path: &Path, root: &str| {
             let pointer = serde_json::json!({
@@ -1236,20 +1424,281 @@ mod tests {
             fs::write(path, pointer.to_string()).unwrap();
             fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
         };
-        let found = || load_installed_pointer(state.path(), target).map(|pointer| pointer.root);
         write(&small, "/named-small");
-        assert_eq!(found().unwrap(), Path::new("/named-small"));
+        for target in [
+            QaModelTarget::FlanT5Base,
+            QaModelTarget::Gpt2Small,
+            QaModelTarget::Gpt2Medium,
+        ] {
+            let named = targets.join(format!("{}.json", target.slug()));
+            let found = || load_installed_pointer(state.path(), target).map(|pointer| pointer.root);
+            assert_eq!(found().unwrap(), Path::new("/named-small"));
 
-        write(&generic, "/default-pack");
-        assert_eq!(found().unwrap(), Path::new("/default-pack"));
-        write(&base, "/named-base");
-        assert_eq!(found().unwrap(), Path::new("/named-base"));
+            write(&generic, "/default-pack");
+            assert_eq!(found().unwrap(), Path::new("/default-pack"));
+            write(&named, "/named-exact");
+            assert_eq!(found().unwrap(), Path::new("/named-exact"));
 
-        fs::write(&base, b"malformed pointer").unwrap();
-        assert!(!pointer_missing(&found().unwrap_err()));
-        fs::remove_file(&base).unwrap();
-        fs::write(&generic, b"malformed pointer").unwrap();
-        assert!(!pointer_missing(&found().unwrap_err()));
+            fs::write(&named, b"malformed pointer").unwrap();
+            assert!(!pointer_missing(&found().unwrap_err()));
+            fs::remove_file(&named).unwrap();
+            fs::write(&generic, b"malformed pointer").unwrap();
+            assert!(!pointer_missing(&found().unwrap_err()));
+            fs::remove_file(&generic).unwrap();
+        }
+        write(&targets.join("gpt2-small.json"), "/named-gpt");
+        assert_eq!(
+            load_installed_pointer(state.path(), QaModelTarget::FlanT5Base)
+                .unwrap()
+                .root,
+            Path::new("/named-gpt")
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_reaps_an_interrupted_shutdown_without_reusing_the_worker() {
+        let (io, mut peer) = UnixStream::pair().unwrap();
+        let (reader, writer) = io.into_split();
+        let child = Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        let target = QaModelTarget::FlanT5Small;
+        let supervisor = QaWorkerSupervisor::embedded_for_state(PathBuf::new());
+        *supervisor.session.lock().await = Some(WorkerSession {
+            lifecycle: WorkerLifecycle::Ready,
+            input: Box::new(writer),
+            output: Box::new(reader),
+            child: Some(child),
+            streaming_window: Some(QA_LEGACY_STREAMING_WINDOW_TOKENS),
+            response_plan: ResponsePlanSupport::Unavailable,
+            model_target: target,
+            resident_limit: WorkerLimits::for_target(target).resident_bytes,
+        });
+        {
+            let shutdown = supervisor.shutdown();
+            tokio::pin!(shutdown);
+            let command = timeout(PING_LIMIT, async {
+                tokio::select! {
+                    result = &mut shutdown => panic!("worker exited before interrupted wait: {result:?}"),
+                    command = read_command(&mut peer) => command,
+                }
+            })
+            .await
+            .unwrap();
+            assert!(matches!(command, QaWorkerCommand::Shutdown));
+        }
+        assert_eq!(
+            supervisor
+                .session
+                .lock()
+                .await
+                .as_ref()
+                .and_then(WorkerSession::child_id),
+            Some(pid)
+        );
+        assert_eq!(supervisor.active_model().await, None);
+        assert!(supervisor.check_ready().await.is_err());
+
+        supervisor.shutdown().await.unwrap();
+        assert!(supervisor.session.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn gpt2_streaming_receipts_use_the_negotiated_window() {
+        let legacy = QA_LEGACY_STREAMING_WINDOW_TOKENS;
+        for target in [QaModelTarget::Gpt2Small, QaModelTarget::Gpt2Medium] {
+            let extended = target.input_tokens();
+            let legacy_ready = || QaWorkerReply::ReadyWithStreaming {
+                protocol: QA_WORKER_PROTOCOL,
+                model_revision: target.revision().into(),
+            };
+            let model_ready = |window_tokens| QaWorkerReply::ReadyWithStreamingContext {
+                protocol: QA_WORKER_PROTOCOL,
+                model_revision: target.revision().into(),
+                window_tokens,
+            };
+            for (advertised, received) in [
+                (legacy, legacy),
+                (legacy, extended),
+                (extended, extended),
+                (extended, legacy),
+            ] {
+                let (io, mut peer) = UnixStream::pair().unwrap();
+                let (reader, writer) = io.into_split();
+                let mut session = WorkerSession {
+                    lifecycle: WorkerLifecycle::Starting,
+                    input: Box::new(writer),
+                    output: Box::new(reader),
+                    child: None,
+                    streaming_window: None,
+                    response_plan: ResponsePlanSupport::Unavailable,
+                    model_target: target,
+                    resident_limit: WorkerLimits::for_target(target).resident_bytes,
+                };
+                assert!(session.validate_ready(model_ready(legacy)).is_err());
+
+                let usage = QaContextUsage::new(received, 82, 1);
+                let child = async {
+                    let ready = if advertised == legacy {
+                        legacy_ready()
+                    } else {
+                        model_ready(advertised)
+                    };
+                    write_reply(&mut peer, ready).await;
+                    let QaWorkerCommand::Ask { request } = read_command(&mut peer).await else {
+                        panic!("missing inference request");
+                    };
+                    write_reply(
+                        &mut peer,
+                        QaWorkerReply::Event {
+                            event: QaWorkerEvent::Complete {
+                                turn_id: request.turn_id,
+                                sequence: 1,
+                                outcome: QaWorkerOutcome::Answered,
+                                context: Some(usage),
+                                reply: Some("Hello!".into()),
+                            },
+                        },
+                    )
+                    .await;
+                };
+                let executor = async {
+                    session.ready().await.unwrap();
+                    session.lifecycle = WorkerLifecycle::Ready;
+                    assert_eq!(session.streaming_window, Some(advertised));
+                    let other_ready = if advertised == legacy {
+                        model_ready(extended)
+                    } else {
+                        legacy_ready()
+                    };
+                    assert!(session.validate_ready(other_ready).is_err());
+
+                    let mut request = QaWorkerRequest::new(
+                        "turn-a".into(),
+                        "snapshot-a".into(),
+                        "Hi!".into(),
+                        Vec::new(),
+                    );
+                    request.dialogue = Some(QaWorkerDialogue {
+                        kind: QaDialogueKind::Greeting,
+                        history: Vec::new(),
+                    });
+                    let (events, mut stream) = mpsc::channel(1);
+                    let result = session.ask(request, events).await;
+                    if advertised == received {
+                        result.unwrap();
+                        assert!(matches!(
+                            stream.recv().await,
+                            Some(QaWorkerEvent::Complete { context: Some(context), .. }) if context == usage
+                        ));
+                    } else {
+                        assert_eq!(
+                            result.unwrap_err().to_string(),
+                            "unexpected QA context window"
+                        );
+                        assert!(stream.recv().await.is_none());
+                    }
+                };
+                timeout(PING_LIMIT, async { tokio::join!(child, executor) })
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reply_plan_negotiation_is_fixed_at_startup() {
+        for target in QaModelTarget::ALL {
+            let (io, _peer) = UnixStream::pair().unwrap();
+            let (reader, writer) = io.into_split();
+            let mut session = WorkerSession {
+                lifecycle: WorkerLifecycle::Starting,
+                input: Box::new(writer),
+                output: Box::new(reader),
+                child: None,
+                streaming_window: None,
+                response_plan: ResponsePlanSupport::Unavailable,
+                model_target: target,
+                resident_limit: WorkerLimits::for_target(target).resident_bytes,
+            };
+            let plan = |window_tokens| QaWorkerReply::ReadyWithResponsePlan {
+                protocol: QA_WORKER_PROTOCOL,
+                model_revision: target.revision().into(),
+                window_tokens,
+            };
+            let decoded = |window_tokens| QaWorkerReply::ReadyWithDecodedClarification {
+                protocol: QA_WORKER_PROTOCOL,
+                model_revision: target.revision().into(),
+                window_tokens,
+            };
+            let general = |window_tokens| QaWorkerReply::ReadyWithGeneralDialogue {
+                protocol: QA_WORKER_PROTOCOL,
+                model_revision: target.revision().into(),
+                window_tokens,
+            };
+            let job_log_context = QaWorkerReply::ReadyWithJobLogContext {
+                protocol: QA_WORKER_PROTOCOL,
+                model_revision: target.revision().into(),
+                window_tokens: target.input_tokens(),
+            };
+            assert!(session.validate_ready(plan(256)).is_err());
+            session.validate_ready(plan(target.input_tokens())).unwrap();
+            session.lifecycle = WorkerLifecycle::Ready;
+            session.validate_ready(plan(target.input_tokens())).unwrap();
+            assert!(session.response_plan.supports(false));
+            assert!(!session.response_plan.supports(true));
+            assert!(!session.response_plan.supports_general_dialogue());
+            assert!(session
+                .validate_ready(decoded(target.input_tokens()))
+                .is_err());
+            assert!(session
+                .validate_ready(QaWorkerReply::ReadyWithStreaming {
+                    protocol: QA_WORKER_PROTOCOL,
+                    model_revision: target.revision().into(),
+                })
+                .is_err());
+            session.lifecycle = WorkerLifecycle::Starting;
+            assert!(session.validate_ready(decoded(256)).is_err());
+            session
+                .validate_ready(decoded(target.input_tokens()))
+                .unwrap();
+            session.lifecycle = WorkerLifecycle::Ready;
+            session
+                .validate_ready(decoded(target.input_tokens()))
+                .unwrap();
+            assert!(session.response_plan.supports(true));
+            assert!(!session.response_plan.supports_general_dialogue());
+            assert!(session.validate_ready(plan(target.input_tokens())).is_err());
+            session.lifecycle = WorkerLifecycle::Starting;
+            if target.input_tokens() != QA_LEGACY_STREAMING_WINDOW_TOKENS {
+                assert!(session
+                    .validate_ready(general(QA_LEGACY_STREAMING_WINDOW_TOKENS))
+                    .is_err());
+                session
+                    .validate_ready(decoded(QA_LEGACY_STREAMING_WINDOW_TOKENS))
+                    .unwrap();
+            }
+            session
+                .validate_ready(general(target.input_tokens()))
+                .unwrap();
+            assert_eq!(session.streaming_window, Some(target.input_tokens()));
+            session.lifecycle = WorkerLifecycle::Ready;
+            session
+                .validate_ready(general(target.input_tokens()))
+                .unwrap();
+            assert!(session
+                .validate_ready(decoded(target.input_tokens()))
+                .is_err());
+            assert!(session.response_plan.supports_general_dialogue());
+            session.lifecycle = WorkerLifecycle::Starting;
+            session.validate_ready(job_log_context).unwrap();
+            assert!(session.response_plan.supports_general_dialogue());
+        }
     }
 
     #[tokio::test]
@@ -1259,10 +1708,12 @@ mod tests {
         let target = QaModelTarget::FlanT5Small;
         let usage = QaContextUsage::new(target.input_tokens(), 82, 1);
         let mut session = WorkerSession {
+            lifecycle: WorkerLifecycle::Starting,
             input: Box::new(output),
             output: Box::new(input),
             child: None,
-            streaming: false,
+            streaming_window: None,
+            response_plan: ResponsePlanSupport::Unavailable,
             model_target: target,
             resident_limit: WorkerLimits::for_target(target).resident_bytes,
         };

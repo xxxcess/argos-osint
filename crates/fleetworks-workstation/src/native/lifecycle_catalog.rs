@@ -132,9 +132,9 @@ impl NativeContainer {
                     "saved platform Trash reference is invalid"
                 );
                 anyhow::ensure!(
-                    prepared.trash_object.device == self.root_object.device
-                        && prepared.trash_object.owner == self.root_object.owner
-                        && prepared.trash_object != self.root_object
+                    prepared.trash_object.device == self.catalog_root_object.device
+                        && prepared.trash_object.owner == self.catalog_root_object.owner
+                        && prepared.trash_object != self.catalog_root_object
                         && catalog
                             .workspaces
                             .iter()

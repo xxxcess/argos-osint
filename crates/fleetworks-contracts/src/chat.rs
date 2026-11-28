@@ -63,6 +63,8 @@ pub enum ChatInputError {
     PageTooLarge,
     InvalidLimit,
     InvalidWait,
+    InvalidInboxNotifications,
+    InvalidJobNotification,
 }
 
 impl fmt::Display for ChatInputError {
@@ -80,6 +82,8 @@ impl fmt::Display for ChatInputError {
             Self::PageTooLarge => "Chat page is over its size limit",
             Self::InvalidLimit => "Invalid chat page limit",
             Self::InvalidWait => "Invalid chat wait",
+            Self::InvalidInboxNotifications => "Invalid Inbox notification summary",
+            Self::InvalidJobNotification => "A job notification needs a job source",
         })
     }
 }

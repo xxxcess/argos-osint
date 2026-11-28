@@ -6,7 +6,7 @@
 
 Use the approved [material source](../../../assets/brand/source/fleetworks-liquid-metal-glass.png), SHA-256 `1ae553782431da7649a1d88accdacc9076c3a039f1c2b5c0018f5998d7d70112`. Its smoky glass sphere contains a molten ivory/amber core; the crescent contains coarse fractured obsidian. The runtime and exported mark consist of the warm core and crescent. Retain the sparse faint stars within the crescent. Warm metallic highlights belong to this symbol, never to ordinary controls or reading surfaces.
 
-Brand display areas contain the symbol alone. Remove the visible wordmark in the backend chooser, navigation header and setup brand region; preserve the product name in accessibility labels, window titles, package metadata and documentation. This is not a repository, API, package or application-identity rename. Screen titles such as Setup Gateway remain functional headings outside the brand region.
+Brand display areas contain the symbol alone. Preserve the product name in accessibility labels, window titles, package metadata and documentation. Show functional headings, including the workstation folder picker and setup stages, below the mark.
 
 All materials are visible in the first frame. The [static SVG](../../../assets/brand/fleetworks-mark.svg) defines the settled crescent and core. The [prior GIF](../../../assets/brand/reference/fleetworks-quiet-orbit.gif), [MP4](../../../assets/brand/reference/fleetworks-quiet-orbit.mp4), [poster](../../../assets/brand/reference/fleetworks-quiet-orbit.png) and [playback manifest](../../../assets/brand/reference/quiet-orbit/playback.json) document the earlier satellite study and underlying material treatment.
 
@@ -14,17 +14,16 @@ All materials are visible in the first frame. The [static SVG](../../../assets/b
 
 | Item | Contract |
 | --- | --- |
-| Native chooser | The complete scene and both backend tiles are usable in the first frame. Play the core motion for 3 seconds, then hold the final pose. |
-| Setup | The selected form opens immediately. Move the current orbit pose into the setup header over about 220 ms and keep the mark there through start, registration, failure and retry. Start Embedded Backend and Connect remain explicit. Back restores focus to the selected tile and returns the settled mark without replay. |
-| Data setup | Center the active stage and controls below the settled mark. Four dots indicate actor catalog, actor index, classifier, and workstation checks. Keep the same content envelope through confirmation, progress, and outcome. |
-| Enter workstation | Mount Workstation Status after setup. Move the mark into the wide or compact sidebar rail over about 200 ms and settle into the static crescent and core. |
+| Native folder picker | Start with the complete orbital mark and fade the folder tiles into view in staggered 440 ms entrances. Play the core motion for 3 seconds, then hold the final pose. |
+| Setup | Selecting a folder starts Embedded while the opening finishes. Move the completed orbit pose into the setup header over about 220 ms. Progress dots mark connection, registration, and Embedded health checks. Hold each resolved checklist for two seconds. Back on the connection and registration stages restores focus to the selected tile without replay. |
+| Enter workstation | Mount Workstation Status automatically after the health checklist hold. Move the mark into the wide or compact sidebar rail over about 200 ms and settle into the static crescent and core. |
 | Scope | One startup presentation; no replay on navigation, dialog close, refresh or in-app reconnect |
-| Reduced motion / asset failure | Show the complete static mark directly at each destination. Chooser, form and workstation input follow the same timing. |
+| Reduced motion / asset failure | Show the complete static mark directly at each destination. Reduced Motion skips the opening delay and keeps the two-second checklist hold. |
 | After startup | Ordinary pages are static apart from useful local activity; no full-canvas decorative motion loop |
 
 Measure the complete scene envelope before sizing. Use a centered contain transform with uniform scale: `s = min(availableWidth / envelopeWidth, availableHeight / envelopeHeight)`. Calculate available dimensions after page insets, keep the envelope inside the measured native window, and convert logical points to physical pixels only at rasterization. Do not size by the sphere alone or stretch an 800×450 rectangle. Recheck at minimum 640×480, compact 800×1100, baseline 1180×780 and wide 1440×900, with 1×/2× scale and enlarged text. Logo scaling must not push the setup form outside the available viewport.
 
-Use the same opaque `#060709` root clear color for native window, backend chooser, setup, content shell and web page. The full artwork sits above the chooser heading. A soft dark scrim backs the heading and tiles and fades into the surrounding canvas. Two equal matte tiles stay within the window. Scene transparency uses object coverage, with premultiplied alpha consistently applied through interpolation/compositing; black mineral interiors remain opaque. Do not use brightness/chroma keying to remove exterior black. The baked reference GIF stays unchanged and is not a production background layer. Derive supported RGBA layers or a bounded native scene for runtime; any exterior space/stars belong to a separate persistent canvas layer rather than the logo rectangle. Working screens use the theme's uniform canvas; settle exterior star opacity to zero by service content, without an exposure step or image-backing boundary. Missing textures fall back to the complete static mark, not a new loading screen.
+Use the same opaque `#060709` root clear color for the native window, folder picker, setup, content shell and web page. The artwork sits above the heading and centered folder grid. Selecting a folder docks the mark in the center while setup stages slide beneath it. Scene transparency uses object coverage with premultiplied alpha. Black mineral interiors remain opaque. Derive supported RGBA layers or a bounded native scene for runtime. Place exterior stars in a separate persistent canvas layer and settle their opacity to zero by service content. Missing textures use the complete static mark.
 
 ## Earlier satellite study
 
@@ -54,7 +53,7 @@ The [verifier notes](../../../assets/brand/reference/quiet-orbit/source/clearanc
 
 ## In-app transitions
 
-The connected shell keeps its navigation and canvas fixed during a keyed 160 ms content fade. Brain details open from the selected result with a four-point shift. The Inbox popover shifts four points down from the toolbar bell over a dimmed workspace. Assistant and Commands enter with short four- to six-point slides and fades. Refreshes keep the same view identity, scroll and selection. With reduced motion the views swap directly and keep focus and status cues.
+The connected shell keeps its navigation and canvas fixed during a keyed 160 ms content fade. Brain details open from the selected result with a four-point shift. Jobs & Logs slides the selected job’s logs in from the right and brings the list back from the left. The Inbox popover shifts four points down from the toolbar bell over a dimmed workspace. Assistant and Commands enter with short four- to six-point slides and fades. Refreshes keep the same view identity, scroll and selection. With reduced motion the views swap directly and keep focus and status cues.
 
 ## Acceptance
 

@@ -6,6 +6,7 @@ use std::sync::{
 };
 use tokio::sync::{mpsc, oneshot};
 pub mod cache;
+pub mod conversation;
 mod engine;
 pub mod remote;
 pub(crate) mod select;
@@ -179,8 +180,17 @@ struct Job {
     _bytes: BytePermit,
     enqueued: std::time::Instant,
 }
+struct ConversationJob {
+    question: String,
+    context: conversation::Context,
+    deadline: std::time::Instant,
+    cancel: Arc<AtomicBool>,
+    response: oneshot::Sender<conversation::Features>,
+    _bytes: BytePermit,
+}
 enum Work {
     Annotation(Box<Job>),
+    Conversation(Box<ConversationJob>),
     ActorNames {
         names: Vec<String>,
         response: std::sync::mpsc::SyncSender<Option<Vec<String>>>,
@@ -197,6 +207,14 @@ impl Drop for BytePermit {
         self.used.fetch_sub(self.bytes, Ordering::AcqRel);
     }
 }
+struct CancelConversation(Arc<AtomicBool>);
+
+impl Drop for CancelConversation {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 pub struct Service {
     sender: mpsc::Sender<Work>,
     bytes: Arc<AtomicUsize>,
@@ -228,6 +246,24 @@ impl Service {
                 while let Some(work) = receiver.blocking_recv() {
                     let job = match work {
                         Work::Annotation(job) => *job,
+                        Work::Conversation(job) => {
+                            let result = if job.cancel.load(Ordering::Acquire) {
+                                conversation::Features::terminal(Status::Cancelled)
+                            } else if std::time::Instant::now() >= job.deadline {
+                                conversation::Features::terminal(Status::Timeout)
+                            } else if let Ok(engine) = engine.as_mut() {
+                                engine.conversation(
+                                    &job.question,
+                                    &job.context,
+                                    job.cancel,
+                                    job.deadline,
+                                )
+                            } else {
+                                conversation::Features::terminal(Status::Failed)
+                            };
+                            let _ = job.response.send(result);
+                            continue;
+                        }
                         Work::ActorNames {
                             names,
                             response,
@@ -291,6 +327,13 @@ impl Service {
                                                         Annotation::terminal(
                                                             &pending.source,
                                                             &pending.context,
+                                                            Status::Failed,
+                                                        ),
+                                                    );
+                                                }
+                                                Work::Conversation(pending) => {
+                                                    let _ = pending.response.send(
+                                                        conversation::Features::terminal(
                                                             Status::Failed,
                                                         ),
                                                     );
@@ -419,6 +462,91 @@ impl Service {
             return terminal;
         }
         rx.await.unwrap_or(terminal)
+    }
+
+    /// Parse one Embedded question on the process-shared local worker.
+    ///
+    /// The deadline caps configuration, startup, queueing and execution. Dropping
+    /// the future cancels admitted work, and unrelated article caches are bypassed.
+    pub async fn parse_conversation(
+        question: &str,
+        context: conversation::Context,
+        deadline: tokio::time::Instant,
+    ) -> conversation::Features {
+        use std::time::Duration;
+        use tokio::time::Instant;
+
+        if !cfg!(feature = "nlp") {
+            return conversation::Features::terminal(Status::Disabled);
+        }
+        if question.len() > conversation::MAX_INPUT {
+            return conversation::Features::terminal(Status::TooLarge);
+        }
+        let deadline = deadline.min(Instant::now() + Duration::from_millis(100));
+        static ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(32);
+        let Ok(admission) = ADMISSION.try_acquire() else {
+            return conversation::Features::terminal(Status::Busy);
+        };
+        tokio::time::timeout_at(deadline, async {
+            let service = tokio::task::spawn_blocking(move || {
+                if configured_mode() == Mode::Off {
+                    return Err(Status::Disabled);
+                }
+                if deadline <= Instant::now() {
+                    return Err(Status::Timeout);
+                }
+                Ok((Self::shared(), admission))
+            })
+            .await
+            .unwrap_or(Err(Status::Failed));
+            let (service, _admission) = match service {
+                Ok(service) => service,
+                Err(status) => return conversation::Features::terminal(status),
+            };
+            service
+                .parse_on_worker(question, context, deadline.into_std())
+                .await
+        })
+        .await
+        .unwrap_or_else(|_| conversation::Features::terminal(Status::Timeout))
+    }
+
+    async fn parse_on_worker(
+        &self,
+        question: &str,
+        context: conversation::Context,
+        deadline: std::time::Instant,
+    ) -> conversation::Features {
+        if !context.supports_language(question) {
+            return conversation::Features::terminal(Status::Unsupported);
+        }
+        if std::time::Instant::now() >= deadline {
+            return conversation::Features::terminal(Status::Timeout);
+        }
+        let permit = match self.reserve_bytes(question.len()) {
+            Ok(permit) => permit,
+            Err(status) => return conversation::Features::terminal(status),
+        };
+        let (response, receiver) = oneshot::channel();
+        let cancel = CancelConversation(Arc::new(AtomicBool::new(false)));
+        let work = Work::Conversation(Box::new(ConversationJob {
+            question: question.to_owned(),
+            context,
+            deadline,
+            cancel: cancel.0.clone(),
+            response,
+            _bytes: permit,
+        }));
+        if let Err(error) = self.sender.try_send(work) {
+            let status = match error {
+                mpsc::error::TrySendError::Closed(_) => Status::Failed,
+                mpsc::error::TrySendError::Full(_) => Status::Busy,
+            };
+            return conversation::Features::terminal(status);
+        }
+        receiver
+            .await
+            .unwrap_or_else(|_| conversation::Features::terminal(Status::Failed))
     }
 
     /// Bounded local maintenance, called outside the legacy store transaction. Busy

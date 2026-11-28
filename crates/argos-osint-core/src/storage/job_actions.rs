@@ -95,6 +95,7 @@ struct Head {
     stopped: bool,
     owned: bool,
     children: bool,
+    seed_retry_children_safe: bool,
     task_count: i64,
     task_id: String,
     task_state: String,
@@ -143,6 +144,14 @@ fn head_query() -> &'static str {
          AND (scope_id!=$scope OR deployment_id!=$deployment OR workstation_id!=$node) LIMIT 1))=0) ?? false AS owned,
      (array::len((SELECT VALUE id FROM job WHERE parent=$parent.id LIMIT 1))>0
        OR array::len((SELECT VALUE id FROM job_ancestor WHERE ancestor=$parent.id LIMIT 1))>0) AS children,
+     IF operation='actor_seed' AND state='failed' {
+       array::len((SELECT VALUE id FROM job WHERE parent=$parent.id
+         AND (kind!='maintenance' OR operation!='index_actor_catalog'
+           OR (type::record('actor_search_cause',record::id(id)).parent_job ?? '')!=record::id(parent))
+         LIMIT 1))=0
+       AND array::len((SELECT VALUE id FROM job_ancestor WHERE ancestor=$parent.id
+         AND (job.parent ?? job)!=ancestor LIMIT 1))=0
+     } ELSE { false } AS seed_retry_children_safe,
      array::len((SELECT VALUE id FROM task WHERE job=$parent.id LIMIT 2)) AS task_count,
      (SELECT VALUE record::id(id) FROM task WHERE job=$parent.id LIMIT 1)[0] ?? '' AS task_id,
      (SELECT VALUE state FROM task WHERE job=$parent.id LIMIT 1)[0] ?? '' AS task_state,
@@ -169,12 +178,12 @@ fn available(head: &Head) -> ActionAvailability {
     let safe = head.owned
         && head.is_root
         && head.kind != "service"
-        && !head.children
         && head.task_count == 1
         && !head.cancel_requested
         && !head.stopped;
     let expected_pool = pool_for_operation(&head.operation);
     let can_cancel = safe
+        && !head.children
         && expected_pool.is_some_and(|pool| {
             head.task_pool == pool
                 && head.task_operation == head.operation
@@ -182,13 +191,17 @@ fn available(head: &Head) -> ActionAvailability {
                 && head.task_state == "queued"
                 && head.attempts == 0
         });
-    let can_retry =
-        safe && expected_pool.is_some_and(|pool| {
+    // Each seed attempt can leave a tracked index projection for its committed
+    // batches. Retrying the source task preserves those child jobs.
+    let can_retry = safe
+        && (!head.children || head.seed_retry_children_safe)
+        && head.retry_enabled
+        && expected_pool.is_some_and(|pool| {
             head.task_pool == pool
                 && head.task_operation == head.operation
                 && head.state == "failed"
                 && head.task_state == "failed"
-        }) && head.retry_enabled;
+        });
     ActionAvailability {
         job_id: head.job_id.clone(),
         can_cancel,

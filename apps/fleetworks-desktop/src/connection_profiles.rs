@@ -25,6 +25,11 @@ use crate::connection::ConnectionTestSummary;
 use crate::connection::GatewayEffects;
 use crate::connection::RequestTask;
 
+mod embedded;
+
+use embedded::EmbeddedFolderForm;
+pub(crate) use embedded::EmbeddedTarget;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProfileAction {
     Refresh,
@@ -52,6 +57,7 @@ pub struct ConnectionProfiles {
     pub(crate) operator_token_override: bool,
     pub(crate) initial_selection_applied: bool,
     pub(crate) draft_revision: u64,
+    pub(crate) embedded_folder: EmbeddedFolderForm,
     revision: u64,
     test_revision: u64,
     request: Option<RequestTask>,
@@ -144,9 +150,7 @@ impl State {
             || self.configuration.confirmation.is_some()
             || self.transfer.confirmation.is_some()
             || self.maintenance.confirmation.is_some()
-            || self.submissions.atlas.confirmation.is_some()
             || self.submissions.tools.confirmation.is_some()
-            || self.submissions.atlas.delivery_uncertain
             || self.submissions.tools.delivery_uncertain
             || self.backend.tool_inputs.text != "{}"
     }
@@ -232,7 +236,7 @@ impl State {
             }
         }
         self.local_backend.state_dir = profile.local_state_dir.clone();
-        if profile.kind == BackendKind::Local {
+        if profile.kind == BackendKind::Local && !self.fixture {
             self.local_backend.refresh_binary_status();
         }
         self.connection_profiles.editing = false;

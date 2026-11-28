@@ -2,19 +2,26 @@
 
 use std::fmt::Write as _;
 
+use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use fleetworks_contracts::readiness::ReadinessActionId;
 use fleetworks_contracts::readiness::ReadinessCheck;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
+use fleetworks_contracts::readiness::WorkstationReadiness;
 use rune::El;
 use rune::Tx;
 use rune_kit::glyphs;
+use rune_kit::ControlSize;
+use rune_kit::IconButton;
+use rune_kit::IconButtonVariant;
 use rune_kit::Kit;
 
 use crate::accessibility::ViewPreferences;
 use crate::app::Load;
+use crate::app::Page;
+use crate::app::SeedStage;
 use crate::app::State;
 use crate::icons;
 use crate::material::MetalFinish;
@@ -28,6 +35,15 @@ use crate::views::unsynced_glyph;
 pub(crate) const ACTOR_INDEX_CATCH_UP: &str = "Actor index catching up in the background";
 
 impl State {
+    pub(crate) fn readiness_check_applies(&self, check: &ReadinessCheck) -> bool {
+        // Older Embedded companions used Unknown for absent standalone probes.
+        check.state != ReadinessState::NotApplicable
+            && !(self.is_local_backend()
+                && check.id.requires_distributed_backend()
+                && check.state == ReadinessState::Unknown
+                && check.reason_code == "owner_not_configured")
+    }
+
     pub(crate) fn readiness_check_fresh(&self, check: &ReadinessCheck) -> bool {
         self.readiness_check_fresh_at(check, self.clock)
     }
@@ -38,6 +54,15 @@ impl State {
                 now >= received && (now - received) * 1000.0 <= check.fresh_for_ms as f64
             })
     }
+}
+
+fn status_checks<'a>(
+    state: &'a State,
+    readiness: &'a WorkstationReadiness,
+) -> impl Iterator<Item = &'a ReadinessCheck> {
+    readiness.checks.iter().filter(move |check| {
+        check.id != ReadinessCheckId::ClassifierTraining && state.readiness_check_applies(check)
+    })
 }
 
 pub(crate) fn workstation_health(state: &State) -> (&'static str, StatusTone) {
@@ -52,14 +77,10 @@ pub(crate) fn workstation_health(state: &State) -> (&'static str, StatusTone) {
         Load::Pending | Load::Loading => ("Checking health", StatusTone::Info),
         Load::Failed(_) => ("Health checks unavailable", StatusTone::Warn),
         Load::Ready(readiness) => {
-            let checks = readiness.checks.iter().filter(|check| {
-                check.id != ReadinessCheckId::ClassifierTraining
-                    && check.state != ReadinessState::NotApplicable
-            });
             let mut observed = false;
             let mut unresolved = false;
             let mut attention = false;
-            for check in checks {
+            for check in status_checks(state, readiness) {
                 observed = true;
                 if !state.readiness_check_fresh(check) {
                     unresolved = true;
@@ -100,13 +121,9 @@ pub(crate) fn workstation_section(state: &State, preferences: ViewPreferences, k
         .w_full()
         .gap(6.0)
         .child(
-            disclosure_trigger("trigger", summary.clone(), open, kit)
-                .fill(kit.c.layer_01)
-                .child(disclosure_text(summary, kit))
-                .child(chevron(open, kit))
-                .on_press(|state: &mut State| {
-                    state.workstation_status_checks_open = !state.workstation_status_checks_open;
-                }),
+            section_disclosure_trigger(summary, open, kit).on_press(|state: &mut State| {
+                state.workstation_status_checks_open = !state.workstation_status_checks_open;
+            }),
         )
         .children(open.then(|| {
             if connected {
@@ -170,14 +187,9 @@ fn summary_label(state: &State) -> String {
         return "Status checks · no observations".to_owned();
     }
     let (mut passed, mut failed, mut unresolved) = (0, 0, 0);
-    for check in readiness
-        .checks
-        .iter()
-        .filter(|check| check.id != ReadinessCheckId::ClassifierTraining)
-    {
+    for check in status_checks(state, readiness) {
         let fresh = state.readiness_check_fresh(check);
         match CheckStatus::of(check, fresh) {
-            CheckStatus::NotApplicable => (),
             CheckStatus::Ready => passed += 1,
             CheckStatus::Failed if fresh => failed += 1,
             _ => unresolved += 1,
@@ -200,8 +212,7 @@ fn summary_label(state: &State) -> String {
 }
 
 const STATUS_COLUMN_WIDTH: f32 = 148.0;
-const ACTION_COLUMN_WIDTH: f32 = 178.0;
-const COMPACT_TABLE_WIDTH: f32 = 470.0;
+const ACTION_COLUMN_WIDTH: f32 = 52.0;
 
 struct StatusCheckRow<'a> {
     check: &'a ReadinessCheck,
@@ -229,13 +240,20 @@ fn checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
             return body.child(ui_components::skeleton_readiness_list(preferences, kit));
         }
         Load::Failed(error) => {
-            return body.child(
-                rune::text("Status checks unavailable")
-                    .font(kit.ty.small)
-                    .color(kit.c.std_text)
-                    .role("alert")
-                    .description(error.clone()),
-            );
+            return body
+                .child(
+                    rune::text("Status checks unavailable")
+                        .font(kit.ty.small)
+                        .color(kit.c.std_text)
+                        .role("alert")
+                        .description(error.clone()),
+                )
+                .child(refresh_button(
+                    "workstation-readiness-retry",
+                    state,
+                    preferences,
+                    kit,
+                ));
         }
         Load::Ready(readiness) => readiness,
     };
@@ -256,14 +274,7 @@ fn checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
     if readiness.checks.is_empty() {
         return body.child(quiet("No check observations", kit));
     }
-    let compact = rune::memo::layout_with("backend-readiness-checks", |rect| {
-        rect[2] < COMPACT_TABLE_WIDTH
-    })
-    .unwrap_or(true);
-    let mut rows: Vec<_> = readiness
-        .checks
-        .iter()
-        .filter(|check| check.id != ReadinessCheckId::ClassifierTraining)
+    let mut rows: Vec<_> = status_checks(state, readiness)
         .map(|check| {
             let fresh = state.readiness_check_fresh(check);
             let status = if crate::views::actor_search_is_background_indexing(state, check) {
@@ -283,6 +294,9 @@ fn checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
             }
         })
         .collect();
+    if rows.is_empty() {
+        return body.child(quiet("No applicable status checks", kit));
+    }
     rows.sort_by_key(|row| {
         (
             row.status != CheckStatus::Failed,
@@ -301,8 +315,7 @@ fn checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
     let header = table_cells(
         heading("Service").pl(8.0),
         heading("Status"),
-        (!compact).then(|| heading("Action")),
-        compact,
+        heading("Action"),
     )
     .key("readiness-status-table-header")
     .role("row")
@@ -318,90 +331,203 @@ fn checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
             .child(header)
             .children(
                 rows.into_iter()
-                    .map(|row| check_row(state, row, compact, preferences, kit)),
+                    .map(|row| check_row(state, row, preferences, kit)),
             ),
     )
 }
 
-fn table_cells(service: El, status: El, action: Option<El>, compact: bool) -> El {
-    let cells = rune::row()
+fn table_cells(service: El, status: El, action: El) -> El {
+    rune::row()
         .w_full()
         .min_w(0.0)
         .gap(8.0)
         .center_y()
         .child(service.grow(1.0).min_w(0.0))
-        .child(status.w(STATUS_COLUMN_WIDTH));
-    let action_col = rune::row().min_w(0.0);
-    if compact {
-        return cells
-            .flex_wrap()
-            .children(action.map(|button| action_col.w_full().pl(8.0).child(button)));
+        .child(status.w(STATUS_COLUMN_WIDTH))
+        .child(rune::row().w(ACTION_COLUMN_WIDTH).child(action))
+}
+
+fn row_icon(icon: &'static rune::Icon, label: &str) -> IconButton {
+    IconButton::new(icon)
+        .variant(IconButtonVariant::Ghost)
+        .control_size(ControlSize::Large)
+        .label(label)
+        .help(label)
+}
+
+fn toggle_details(state: &mut State, id: ReadinessCheckId) {
+    let check_id = id.as_str();
+    if state.expanded_readiness.remove(&id) {
+        if state.selected_readiness.as_deref() == Some(check_id) {
+            state.selected_readiness = None;
+        }
+    } else {
+        state.expanded_readiness.insert(id);
+        state.selected_readiness = Some(check_id.to_owned());
     }
-    cells.child(action_col.w(ACTION_COLUMN_WIDTH).children(action))
+}
+
+fn open_actor_maintenance(state: &mut State, tx: &mut Tx) {
+    if state
+        .maintenance_disabled_reason(MaintenanceOperation::SeedActors)
+        .is_none()
+    {
+        state.seed_stage = SeedStage::Seed;
+        state.navigate(Page::Seed);
+        tx.focus(crate::maintenance::SEED_ACTION_KEY, tx.focus_visible());
+    }
+}
+
+fn workstation_row_action(state: &State, row: &StatusCheckRow<'_>, kit: &Kit) -> Option<El> {
+    let id = row.check.id;
+    if state.page != Page::Workstation || state.setup_gateway {
+        return None;
+    }
+    let registered = state.registration.context.is_some();
+    let can_read_jobs = registered && state.permission(Permission::ReadWorkstationActivity);
+    if id == ReadinessCheckId::ActorSearch && state.maintenance.pending_reindex.is_some() {
+        return Some(
+            row_icon(&icons::REFRESH, "Check actor index request")
+                .disabled(state.maintenance.busy())
+                .on_press(State::reconcile_actor_reindex)
+                .build(kit)
+                .key("workstation-check-index-request"),
+        );
+    }
+    let active_job = match id {
+        ReadinessCheckId::ActorCatalog => state
+            .maintenance
+            .operation_job(MaintenanceOperation::SeedActors)
+            .filter(|record| {
+                record
+                    .detail
+                    .as_ref()
+                    .is_none_or(|detail| crate::backend::job_is_active(&detail.job.state))
+            })
+            .map(|record| record.job_id.as_str()),
+        ReadinessCheckId::ActorSearch => crate::views::active_actor_reindex(state)
+            .map(|job| job.id.as_str())
+            .or_else(|| crate::views::queued_actor_reindex_id(state)),
+        _ => None,
+    };
+    if let Some(job_id) = active_job.filter(|_| can_read_jobs) {
+        let job_id = job_id.to_owned();
+        let label = if id == ReadinessCheckId::ActorSearch {
+            "View actor index job"
+        } else {
+            "View actor seed job"
+        };
+        return Some(
+            row_icon(&icons::JOBS, label)
+                .on_press(move |state: &mut State| {
+                    if state.permission(Permission::ReadWorkstationActivity) {
+                        state.open_job(&job_id);
+                    }
+                })
+                .build(kit)
+                .key(format!("readiness-job-{}", id.as_str())),
+        );
+    }
+    match id {
+        ReadinessCheckId::ActorSearch
+            if row.status == CheckStatus::Ready
+                && state.permission(Permission::ReadBackend)
+                && state
+                    .connection
+                    .capabilities
+                    .as_ref()
+                    .is_some_and(|capabilities| capabilities.require_actor_search().is_ok()) =>
+        {
+            Some(
+                row_icon(kit.glyph.search, "Search actors")
+                    .on_press(|state: &mut State| {
+                        if state.permission(Permission::ReadBackend) {
+                            state.navigate(Page::Brain);
+                        }
+                    })
+                    .build(kit)
+                    .key("workstation-search-actors"),
+            )
+        }
+        ReadinessCheckId::Jobs if row.status == CheckStatus::Ready && can_read_jobs => Some(
+            row_icon(&icons::JOBS, "Open Jobs & Logs")
+                .on_press(|state: &mut State| {
+                    if state.registration.context.is_some()
+                        && state.permission(Permission::ReadWorkstationActivity)
+                    {
+                        state.select_activity_tab(crate::logs::ActivityTab::Jobs);
+                        state.navigate(Page::Jobs);
+                    }
+                })
+                .build(kit)
+                .key("readiness-open-jobs"),
+        ),
+        _ => None,
+    }
+}
+
+fn check_action(state: &State, row: &StatusCheckRow<'_>, expanded: bool, kit: &Kit) -> El {
+    if let Some(action) = workstation_row_action(state, row, kit) {
+        return action;
+    }
+    let id = row.check.id;
+    match row.primary {
+        Some(ReadinessActionId::RebuildActorIndex) => row_icon(&icons::BRAIN, "Build actor index")
+            .on_press(|state: &mut State| {
+                state.preview_maintenance(MaintenanceOperation::ReindexActors);
+            })
+            .build(kit)
+            .key(crate::maintenance::WORKSTATION_REINDEX_ACTION_KEY),
+        Some(ReadinessActionId::SeedActors)
+            if state.page == Page::Workstation && !state.setup_gateway =>
+        {
+            row_icon(&icons::SEED, "Open actor seed setup")
+                .on_press_tx(open_actor_maintenance)
+                .build(kit)
+                .key("readiness-action-actor_catalog-SeedActors")
+        }
+        Some(ReadinessActionId::SeedActors) => row_icon(&icons::SEED, "Choose actor CSV")
+            .on_press_tx(|state: &mut State, tx| {
+                state.choose_dataset(DatasetKind::ActorCatalog, tx)
+            })
+            .build(kit)
+            .key("readiness-action-actor_catalog-SeedActors"),
+        _ => {
+            let label = if expanded {
+                format!("Hide {} details", title(id))
+            } else {
+                format!("View {} details", title(id))
+            };
+            row_icon(kit.glyph.eye, &label)
+                .expanded(expanded)
+                .on_press(move |state: &mut State| toggle_details(state, id))
+                .build(kit)
+                .key(format!("readiness-action-{}", id.as_str()))
+        }
+    }
 }
 
 fn check_row(
     state: &State,
     row: StatusCheckRow<'_>,
-    compact: bool,
     preferences: ViewPreferences,
     kit: &Kit,
 ) -> El {
-    let StatusCheckRow {
-        check,
-        fresh,
-        status,
-        primary,
-    } = row;
+    let check = row.check;
+    let status = row.status;
+    let primary = row.primary;
     let id = check.id;
     let check_id = id.as_str();
     let expanded = state.expanded_readiness.contains(&id);
     let name = title(id);
     let observed = !check.observed_at.is_empty() || !check.reason_code.is_empty();
-    let has_details = !check.explanation.is_empty()
-        || observed
-        || !check.job_ids.is_empty()
-        || !check.artifact_ids.is_empty()
-        || check
-            .actions
-            .iter()
-            .any(|action| Some(action.id) != primary && maintenance_action(action.id).is_some());
-    let stale_reason = (!fresh && check.state != ReadinessState::NotApplicable).then(|| {
-        let mut reason = format!("{name} observation unsynced.");
-        if has_details {
-            reason.push_str(" Open details for the last observation.");
-        }
-        reason
-    });
+    let stale_reason = (!row.fresh)
+        .then(|| format!("{name} observation unsynced. Open details for the last observation."));
     let label = format!("{name}: {}", status.label());
-    let trigger_key = check_trigger_key(id);
-    let mut service = if has_details {
-        disclosure_trigger(trigger_key, label, expanded, kit)
-            .child(disclosure_text(name, kit))
-            .child(chevron(expanded, kit))
-            .on_press(move |state: &mut State| {
-                if state.expanded_readiness.remove(&id) {
-                    if state.selected_readiness.as_deref() == Some(check_id) {
-                        state.selected_readiness = None;
-                    }
-                } else {
-                    state.expanded_readiness.insert(id);
-                    state.selected_readiness = Some(check_id.to_owned());
-                }
-            })
-    } else {
-        rune::row()
-            .key(trigger_key)
-            .min_h(32.0)
-            .px(8.0)
-            .center_y()
-            .child(
-                rune::text(name)
-                    .font(kit.ty.text_small_medium)
-                    .color(kit.c.std_text)
-                    .wrap(),
-            )
-    };
+    let mut service = disclosure_trigger(check_trigger_key(id), label, expanded, kit)
+        .child(disclosure_text(name, kit))
+        .child(chevron(expanded, kit))
+        .on_press(move |state: &mut State| toggle_details(state, id));
     if let Some(description) = &stale_reason {
         service = service.description(description.clone());
     }
@@ -420,16 +546,14 @@ fn check_row(
             unsynced_glyph(&format!("readiness-unsynced-{check_id}"), description, kit)
                 .a11y_hidden()
         }));
-    let action = primary
-        .and_then(|action| maintenance_button(state, preferences, kit, check.id, action))
-        .map(|(button, _)| button);
+    let action = check_action(state, &row, expanded, kit);
     let mut row = rune::col()
         .key(format!("readiness-{check_id}"))
         .role("row")
         .w_full()
         .min_w(0.0)
-        .child(table_cells(service, status_cell, action, compact));
-    if expanded && has_details {
+        .child(table_cells(service, status_cell, action));
+    if expanded {
         let mut detail = rune::col()
             .key(format!("readiness-details-{check_id}"))
             .role("region")
@@ -446,6 +570,30 @@ fn check_row(
                     kit,
                 )
             }));
+        if !observed
+            && check.explanation.is_empty()
+            && check.job_ids.is_empty()
+            && check.artifact_ids.is_empty()
+            && check.actions.is_empty()
+        {
+            detail = detail.child(quiet("No additional details were reported.", kit));
+        }
+        if status == CheckStatus::BackgroundIndexing {
+            detail = detail.child(quiet(ACTOR_INDEX_CATCH_UP, kit));
+        }
+        if id == ReadinessCheckId::ActorSearch && !state.setup_gateway {
+            detail = detail
+                .children(crate::backend_views::actor_index_receipt_banner(
+                    state,
+                    preferences,
+                    kit,
+                ))
+                .children(crate::backend_views::unresolved_actor_reindex_banner(
+                    state,
+                    preferences,
+                    kit,
+                ));
+        }
         if !check.job_ids.is_empty() {
             detail = detail.child(quiet(format!("Jobs: {}", check.job_ids.join(", ")), kit));
         }
@@ -460,7 +608,16 @@ fn check_row(
             .iter()
             .filter(|action| Some(action.id) != primary)
         {
-            if let Some((button, reason)) =
+            let disabled_operation = maintenance_action(action.id)
+                .filter(|_| !action.allowed || !state.permission(action.permission));
+            if let Some((operation, _)) = disabled_operation {
+                detail = detail.children(
+                    state
+                        .maintenance_disabled_reason(operation)
+                        .or_else(|| action.disabled_reason.clone())
+                        .map(|reason| quiet(reason, kit)),
+                );
+            } else if let Some((button, reason)) =
                 maintenance_button(state, preferences, kit, check.id, action.id)
             {
                 detail = detail
@@ -497,6 +654,14 @@ fn status_tag(status: CheckStatus, check_id: &str, tone: StatusTone, kit: &Kit) 
                 .color(tone.fg())
                 .a11y_hidden(),
         )
+}
+
+pub(crate) fn section_disclosure_trigger(title: impl Into<String>, open: bool, kit: &Kit) -> El {
+    let title = title.into();
+    disclosure_trigger("trigger", title.clone(), open, kit)
+        .fill(kit.c.layer_01)
+        .child(disclosure_text(title, kit))
+        .child(chevron(open, kit))
 }
 
 fn disclosure_trigger(key: impl Into<String>, label: String, expanded: bool, kit: &Kit) -> El {
@@ -591,12 +756,9 @@ pub(crate) fn primary_issue(
     let Load::Ready(readiness) = &state.readiness else {
         return None;
     };
-    let (check, status) = readiness
-        .checks
-        .iter()
+    let (check, status) = status_checks(state, readiness)
         .filter(|check| {
             check.id != ReadinessCheckId::Registration
-                && check.id != ReadinessCheckId::ClassifierTraining
                 && (setup
                     || !matches!(
                         check.id,
@@ -653,7 +815,7 @@ fn admitted_action(state: &State, check: &ReadinessCheck) -> Option<ReadinessAct
     check
         .actions
         .iter()
-        .filter(|action| action.allowed)
+        .filter(|action| action.allowed && state.permission(action.permission))
         .find_map(|action| {
             let (operation, _) = maintenance_action(action.id)?;
             state
@@ -677,6 +839,11 @@ fn maintenance_button(
         .finish(MetalFinish::Gunmetal)
         .disabled(reason.is_some())
         .on_press_tx(move |state: &mut State, tx| match operation {
+            MaintenanceOperation::SeedActors
+                if state.page == Page::Workstation && !state.setup_gateway =>
+            {
+                open_actor_maintenance(state, tx);
+            }
             MaintenanceOperation::SeedActors => state.choose_dataset(DatasetKind::ActorCatalog, tx),
             MaintenanceOperation::ReindexActors => state.preview_maintenance(operation),
             _ => {}
@@ -701,7 +868,6 @@ enum CheckStatus {
     Unknown,
     RememberedReady,
     Ready,
-    NotApplicable,
 }
 
 impl CheckStatus {
@@ -717,7 +883,6 @@ impl CheckStatus {
             ReadinessState::Degraded => Self::Degraded,
             ReadinessState::Running => Self::Checking,
             ReadinessState::Unavailable => Self::Unavailable,
-            ReadinessState::NotApplicable => Self::NotApplicable,
             _ => Self::Unknown,
         }
     }
@@ -741,7 +906,6 @@ impl CheckStatus {
             Self::Unknown => "Unknown",
             Self::RememberedReady => "Last ready",
             Self::Ready => "Ready",
-            Self::NotApplicable => "N/A",
         }
     }
 
@@ -753,7 +917,6 @@ impl CheckStatus {
             Self::Checking | Self::BackgroundIndexing => 3,
             Self::Unknown | Self::RememberedReady => 4,
             Self::Ready => 5,
-            Self::NotApplicable => 6,
         }
     }
 
@@ -763,9 +926,7 @@ impl CheckStatus {
             Self::NeedsData | Self::NotReady | Self::Degraded => StatusTone::Warn,
             Self::Checking | Self::BackgroundIndexing => StatusTone::Neutral,
             Self::Ready => StatusTone::Ok,
-            Self::Unavailable | Self::Unknown | Self::RememberedReady | Self::NotApplicable => {
-                StatusTone::Neutral
-            }
+            Self::Unavailable | Self::Unknown | Self::RememberedReady => StatusTone::Neutral,
         }
     }
     fn glyph(self) -> &'static rune::Icon {
@@ -774,9 +935,7 @@ impl CheckStatus {
             Self::NeedsData | Self::NotReady | Self::Degraded => &icons::ALERT,
             Self::Checking | Self::BackgroundIndexing => &icons::JOBS,
             Self::Ready => &glyphs::CHECK,
-            Self::Unavailable | Self::Unknown | Self::RememberedReady | Self::NotApplicable => {
-                &glyphs::DASH
-            }
+            Self::Unavailable | Self::Unknown | Self::RememberedReady => &glyphs::DASH,
         }
     }
 }

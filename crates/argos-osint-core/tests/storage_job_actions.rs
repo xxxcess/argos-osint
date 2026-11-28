@@ -541,6 +541,36 @@ async fn failed_actor_seed_retries_and_respects_active_resource_owner() {
         .check()
         .expect("fail other seed statement");
 
+    jobs::create_job(
+        repo.db(),
+        &NewJob {
+            id: "untracked-index-child",
+            kind: "maintenance",
+            operation: "index_actor_catalog",
+            parent: Some("seed-other"),
+            created_at: now,
+        },
+        &[],
+    )
+    .await
+    .expect("child with no tracked index cause");
+    let untracked =
+        job_actions::availability(&repo, "fixture-scope", &ctx, &["seed-other".to_owned()])
+            .await
+            .expect("read untracked child availability");
+    assert!(
+        !untracked[0].can_retry,
+        "an index label alone is insufficient"
+    );
+    assert!(job_actions::perform(
+        &repo,
+        &native(&ctx, "retry-with-untracked-child"),
+        Action::Retry,
+        "seed-other"
+    )
+    .await
+    .is_err());
+
     let ready =
         job_actions::availability(&repo, "fixture-scope", &ctx, &["seed-failed".to_owned()])
             .await

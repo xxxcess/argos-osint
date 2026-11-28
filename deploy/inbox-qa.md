@@ -1,13 +1,14 @@
 # Set up Embedded Inbox Assistant
 
-Inbox Assistant starts Off. In an Embedded workstation, turn on **Backend inference**. The **Assistant** tab in Workstation Settings shows the saved preferences, effective engines, startup progress and current generator context usage. Open Assistant from Workstation Status or use the Inbox composer. Direct questions and explicit links are available while the generator prepares.
+Inbox Assistant starts Off. In an Embedded workstation, turn on **Backend inference**. Open Inbox from the toolbar bell and use its Assistant composer. Sending becomes available when the generator is ready. The composer shows the reason whenever sending is unavailable, and completed responses show the measured context usage.
 
-- **Generator** offers **Automatic**, **FLAN-T5 Small** (~308 MB) and **FLAN-T5 Base** (~990 MB). Automatic uses fresh headroom and verified assets to choose a worker. Explicit Small always requests Small. If explicit Base cannot fit or provision, it stays selected and the panel displays the cause.
-- **Decision** offers **Rules only**, **Julia-1 Q8** (168 MB) and **vLLM d3-edge Q8** (806 MB). The companion saves either model preference with **Rules only** effective until that exact model and runtime qualify on the current native target. Saving an unqualified choice triggers no downloads. A Decision save keeps the current generator warm.
+GPT-2 Small is the default generator. The **Assistant** tab in Workstation Settings controls Decision, with **Rules only**, **Julia-1 Q8** (168 MB) and **vLLM d3-edge Q8** (806 MB). The companion saves either model preference with **Rules only** effective until that exact model and runtime qualify on the current native target. Saving an unqualified choice triggers no downloads. A Decision save keeps the current generator warm.
 
 Workstation Status keeps its deterministic warnings and diagnostic checks available during startup and when inference is off.
 
 ## Verified offline packs
+
+On macOS, Quick Start looks for an Assistant pack verified by the Embedded smoke for the selected build and Mac architecture. Use `--inbox-artifact` with a numeric Actions artifact ID to choose a specific compatible pack, or `--no-inbox-sync` to skip automatic discovery. [Quick Start pack setup](../apps/fleetworks-desktop/README.md#add-the-assistant-pack)
 
 Use the offline pack and digest record for the app’s architecture. Obtain the digests from the trusted release or the exact CI artifact used for verification. The importer verifies the archive, manifest, native architecture, worker, libraries, and pinned model assets.
 
@@ -20,14 +21,47 @@ python3 scripts/fleetworks_qa_pack.py install \
 
 Use the Embedded companion’s state directory for the selected installation. The pack parent and the private state directory must belong to the current user. To replace a pack, turn the Assistant Off, import into a new version directory, then enable it.
 
-The default pack carries the verified worker, its runtime libraries and FLAN-T5 Small. Install it once on a fresh workstation. With Automatic selected, the companion prefers FLAN-T5 Base when measured memory headroom allows it. It reuses a verified cached Base checkpoint or provisions its pinned files in the private profile. When Base assets cannot be provisioned, the verified Small checkpoint in the offline pack is available as a fallback. The companion loads one model at a time. The [news classifier](../docs/wiki/code/classifier.md) uses its own model and configuration.
+The default pack carries the verified worker, its runtime libraries and GPT-2 Small. The companion can also load verified named packs and provision pinned assets into the private profile. Existing Automatic settings prefer GPT-2 Small when memory allows. They can fall back to FLAN-T5 Small under tighter memory limits or when using an available legacy pack. Response generation runs inside the offline worker sandbox. The companion loads one model at a time. The [news classifier](../docs/wiki/code/classifier.md) uses its own model and configuration.
+
+FLAN-T5 accepts 512 input tokens and GPT-2 accepts up to 896. Both allow up to 128 output tokens. The input window includes the question, resolved focus, whole evidence passages and the plan's instruction of up to 64 tokens. Recall uses its own bounded exchange history. The context meter uses the budget reported for each turn.
+
+The companion asks the worker for plan support with `FLEETWORKS_QA_RESPONSE_PLAN=1`. The worker confirms support in its Ready response before it can receive the new fields. Older packs keep their existing request shape and can use their 512-token window. If a request requires plan support, the older worker reports unavailable capability for that turn. [Protocol and tokenizer limits](../docs/wiki/code/assistant-chat-contract.md#models-and-lifecycle)
 
 ## Host requirements
 
 The worker requires Linux Landlock ABI 3 or newer, or macOS Seatbelt. The companion starts it with read access to the verified pack, selected model assets, and system loader. Workstation Settings and Inbox show whether the pack is missing or invalid, the sandbox is unavailable, or the worker has insufficient resources or cannot start.
 
-At startup, the companion reserves 1 GiB of available memory for the workstation and its other workloads. The worker’s resident-memory limits are 3,584 MiB for Base and 1,536 MiB for Small. If available memory cannot accommodate Small and the reserve, Settings reports insufficient resources. Model asset downloads also leave a 512 MiB reserve on the private profile filesystem. The fixture and operator ceiling `FLEETWORKS_QA_MEMORY_MIB` accepts 512 to 6144 MiB. The worker runs at reduced priority with one CPU thread by default. `FLEETWORKS_QA_CPU_THREADS` accepts 1 to 4.
+At startup, the companion reserves 1 GiB of available memory for the workstation and its other workloads. The worker’s resident-memory limits are 3,584 MiB for FLAN-T5 Base, 1,536 MiB for FLAN-T5 Small, 2,048 MiB for GPT-2 Small and 4,608 MiB for GPT-2 Medium. If available memory cannot accommodate the chosen worker and the reserve, the Inbox composer reports insufficient resources. Model asset downloads also leave a 512 MiB reserve on the private profile filesystem. The fixture and operator ceiling `FLEETWORKS_QA_MEMORY_MIB` accepts 512 to 6144 MiB. The worker runs at reduced priority with one CPU thread by default. `FLEETWORKS_QA_CPU_THREADS` accepts 1 to 4.
 
-The offline package smoke uses a 1,536 MiB ceiling and verifies Small without network access. The Linux pack job exercises Base separately. Turning inference off cancels active work, unloads workers, and leaves the preferences and Inbox notifications available.
+With normal macOS memory pressure, Assistant admission counts free, file-backed and purgeable pages as RAM headroom. Under elevated pressure or if the kernel sample is unavailable, it uses the conservative system estimate.
+
+The offline package smoke uses a 1,536 MiB ceiling and verifies Small without network access, including generated greetings and time-range clarification. The Linux pack job exercises Base separately. Turning inference off cancels active work, unloads workers, and leaves the preferences and Inbox notifications available.
+
+## Local operational context
+
+The local generator answers general questions. For mixed questions, exact workstation observations appear alongside the model's separate explanation. Inbox notification answers preserve the priority and counts supplied by the desktop. These capabilities require a compatible worker pack. Quick Start selects a compatible smoke-verified pack when available.
+
+Questions about an attached job use its current status and can cite up to two short excerpts from the newest authorized log entries for that job. The worker limits the extra prompt content to half the active input window. Use **Open Job Logs** on the notification to inspect the selected job’s scoped log view.
+
+The Embedded companion writes allowlisted observations to `context/workstation-context.sqlite3` under the selected `--state-dir`. Ordinary authorized readiness and job reads can contribute while Backend inference is off. The journal adds no polling, and entries reflect observed changes. Assistant history can be incomplete due to retention, collection gaps or resource visibility changes.
+
+Keep the journal and its sidecars inside the owner-only Embedded state directory. The companion checks its deployment identity and protects it with the existing state lock. Turning Backend inference off stops execution and clears conversations, choices and response plans. The separate observation journal follows its seven-day and 10,000-event retention policy. Distributed deployments keep their existing notification path. [Storage and coverage](../docs/wiki/code/storage.md#embedded-workstation-observation-journal)
+
+## Workstation question benchmark
+
+Run the workstation questions through a packaged Embedded companion with private state, home and temporary directories. The benchmark checks the bundle target and companion SHA-256 against the app manifest before launch. It checks that GPT-2 Small and **Rules only** are the defaults, then enables Backend inference. Use the GPT-2 Small pack directory and manifest SHA-256 from a verified installation or artifact receipt.
+
+```sh
+mkdir -p .agent-scratch
+python3 -B scripts/fleetworks_workstation_bench.py \
+  --app "$FLEETWORKS_APP" --pack-dir "$QA_PACK_DIR" \
+  --manifest-sha256 "$QA_MANIFEST_SHA256" > .agent-scratch/workstation-bench.json
+```
+
+Add `--base-model-assets "$PINNED_BASE_MODEL_DIR"` to compare the verified FLAN-T5 Base model. The default GPT-2 Small run uses a 2,048 MiB worker cap. Each run creates a synthetic registration, checks that a Rules only lookup resolves the catalog's current status without creating an exchange, and reads readiness and job counts over private IPC. Resource checks use the frozen samples cited in each turn.
+
+The JSON records answer text, citations, measured model use, and admission, first-draft and terminal latency per question. Post-admission latency includes execution and IPC polling. On Linux the report also records peak resident worker memory observed from the kernel. The benchmark verifies complete cited passages, checks conversational text for repeated sentences, and flags echoed prompt labels.
+
+Use `--warmup-turns` for unmeasured greetings and `--iterations` to repeat the measured cases with a new isolated registration each time. A completed run reports case failures in JSON. Use `--fail-on-error` to also exit nonzero on a fact, route, or reply-style check failure. Launch, setup, and transport errors always exit nonzero.
 
 [Assistant contract](../docs/wiki/code/assistant-chat-contract.md) · [Hosted verification](../docs/wiki/code/ci.md)

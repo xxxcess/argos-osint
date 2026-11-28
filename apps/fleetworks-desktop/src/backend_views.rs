@@ -1,16 +1,18 @@
 //! Allowlisted backend operation cards and workstation-scoped activity.
 
 use fleetworks_contracts::context::Permission;
-use fleetworks_contracts::readiness::AtlasKeyPresence;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::MaintenanceOperation;
-use fleetworks_contracts::readiness::ReadinessState;
 use rune::Cx;
 use rune::El;
 use rune::Key;
 use rune::ScrollSpec;
 use rune::TextEdit;
+use rune::Tx;
 use rune_kit::Cell;
+use rune_kit::ControlSize;
+use rune_kit::IconButton;
+use rune_kit::IconButtonVariant;
 use rune_kit::Kit;
 use rune_kit::Progress;
 use rune_kit::RollingText;
@@ -25,16 +27,13 @@ use crate::app::ModelsTab;
 use crate::app::Page;
 use crate::app::SeedStage;
 use crate::app::State;
-use crate::backend::ReadRequest;
 use crate::icons;
 use crate::job_actions::JobAction;
+use crate::job_actions::JobActionConfirmation;
 use crate::logs::LogStatus;
 use crate::maintenance;
 use crate::material;
 use crate::material::MetalFinish;
-use crate::submission::AcceptedReceipt;
-use crate::submission::SubmissionKind;
-use crate::submission::SubmissionPhase;
 use crate::theme;
 use crate::theme::StatusTone;
 use crate::ui_components;
@@ -57,42 +56,43 @@ fn card(state: &State, preferences: ViewPreferences, tone: StatusTone, body: El)
     )
 }
 
-fn load_message<T>(
+fn load_view<T>(
     load: &Load<T>,
     empty: &str,
-    preferences: ViewPreferences,
+    placeholder: impl FnOnce() -> El,
     kit: &Kit,
 ) -> Option<El> {
     match load {
-        Load::Idle => Some(quiet(empty.to_owned(), kit)),
-        Load::Pending | Load::Loading => Some(
-            ui_components::async_status_strip(
-                "backend-loading",
-                "Syncing with gateway",
-                "Loading from the selected gateway…",
-                true,
-                StatusTone::Accent,
-                preferences,
-                kit,
-            )
-            .role("status"),
-        ),
+        Load::Idle if !empty.is_empty() => Some(quiet(empty.to_owned(), kit)),
+        Load::Pending | Load::Loading => Some(placeholder().role("status")),
         Load::Failed(error) => Some(line(error.clone(), kit).role("alert")),
-        Load::Ready(_) => None,
+        Load::Idle | Load::Ready(_) => None,
     }
 }
 
-fn list_load_or_skeleton<T>(
-    load: &Load<T>,
-    empty: &str,
-    skeleton: El,
-    preferences: ViewPreferences,
-    kit: &Kit,
-) -> Option<El> {
-    match load {
-        Load::Pending | Load::Loading => Some(skeleton.role("status")),
-        _ => load_message(load, empty, preferences, kit),
-    }
+fn receipt_placeholder(key: &str, label: &str, preferences: ViewPreferences) -> El {
+    rune::col()
+        .key(key.to_owned())
+        .w_full()
+        .gap(7.0)
+        .py(3.0)
+        .label(label.to_owned())
+        .child(material::skeleton_block(
+            Some(0.42),
+            None,
+            12.0,
+            4.0,
+            StatusTone::Info,
+            preferences,
+        ))
+        .child(material::skeleton_block(
+            Some(0.62),
+            None,
+            10.0,
+            4.0,
+            StatusTone::Info,
+            preferences,
+        ))
 }
 
 fn state_tone(value: &str) -> StatusTone {
@@ -163,635 +163,11 @@ pub(crate) fn page(
         .for_view(state.fixture, cx.is_reduced_motion());
     match state.page {
         Page::Seed => scroll(maintenance(state, preferences, kit, layers), "seed-body"),
-        Page::Atlas => atlas(state, preferences, kit, layers),
         Page::Tools => tools(state, cx, preferences, kit, layers),
         Page::Models => models(state, cx, preferences, kit, layers),
-        Page::Jobs => jobs(state, preferences, kit, layers, log_width),
+        Page::Jobs => jobs(state, preferences, kit, log_width),
         _ => rune::col(),
     }
-}
-
-fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Vec<El>) -> El {
-    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
-    let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
-    let lane = state.submissions.lane(SubmissionKind::Atlas);
-    let reason = state.submission_disabled_reason(SubmissionKind::Atlas);
-    let unresolved = lane.attempt.is_some() && lane.receipt.is_none();
-
-    let count_badge = match &state.cycles.history {
-        Load::Ready(cycles) => Some(ui_components::status_pill(
-            format!("{} cycles", cycles.rows.len()),
-            None,
-            StatusTone::Info,
-            kit,
-        )),
-        _ => None,
-    };
-
-    let trigger = ActionButton::new(if unresolved {
-        "Resolve pending cycle"
-    } else {
-        "New Cycle"
-    })
-    .key("atlas-submit-preview")
-    .icon(if unresolved {
-        &icons::REFRESH
-    } else {
-        &icons::PLUS
-    })
-    .finish(MetalFinish::GoldCta)
-    .busy(lane.busy())
-    .disabled(if unresolved {
-        !state.permission(Permission::ReadWorkstationActivity)
-    } else {
-        reason.is_some()
-    })
-    .on_press(|state: &mut State| {
-        if state
-            .submissions
-            .lane(SubmissionKind::Atlas)
-            .attempt
-            .is_some()
-            && state
-                .submissions
-                .lane(SubmissionKind::Atlas)
-                .receipt
-                .is_none()
-        {
-            state.resolve_submission(SubmissionKind::Atlas);
-        } else {
-            state.preview_atlas_cycle();
-        }
-    })
-    .build(kit, preferences, pointer_ref);
-
-    let mut action = rune::col().gap(8.0).child(ui_components::section_header(
-        &icons::ATLAS,
-        "News Cycles",
-        None,
-        count_badge,
-        None,
-        kit,
-    ));
-
-    if state.atlas_advertised() {
-        action = action.child(atlas_prerequisites(state, preferences, kit));
-        tool_key_dialog(state, preferences, kit, layers);
-    }
-    if let Some(reason) = &reason {
-        action = action.child(quiet(reason.as_str(), kit));
-    }
-    if state.is_local_backend() {
-        action = action.child(
-            ActionButton::new("Set up Distributed")
-                .key("atlas-open-distributed-setup")
-                .on_press_tx(|state: &mut State, tx| {
-                    state.open_connection_settings();
-                    tx.scroll_into_view("switch-remote-gateway");
-                    tx.focus("switch-remote-gateway", tx.by_keys());
-                })
-                .build(kit, preferences, None),
-        );
-    }
-    action = action.child(rune::row().child(trigger));
-    if !lane.busy() {
-        if let Some(snapshot) = &lane.confirmation {
-            action = action.child(material::glass_panel(
-                rune::col()
-                    .gap(8.0)
-                    .padding(12.0)
-                    .radius(8.0)
-                    .key("atlas-submit-confirmation")
-                    .child(heading("Confirm New Cycle", kit))
-                    .child(quiet(
-                        format!("Configuration revision {}", snapshot.configuration_revision),
-                        kit,
-                    ))
-                    .child(quiet(
-                        "Queue one collection cycle. Acceptance means queued; only the gateway can report completion.",
-                        kit,
-                    ))
-                    .child(
-                        rune::row()
-                            .gap(8.0)
-                            .child(
-                                ActionButton::new("Confirm New Cycle")
-                                    .key("atlas-submit-confirm")
-                                    .icon(&icons::ATLAS)
-                                    .finish(MetalFinish::FracturedConfirm)
-                                    .disabled(reason.is_some())
-                                    .on_press(|state: &mut State| {
-                                        state.confirm_submission(SubmissionKind::Atlas)
-                                    })
-                                    .build(kit, preferences, pointer_ref),
-                            )
-                            .child(
-                                ActionButton::new("Keep current cycles")
-                                    .finish(MetalFinish::Gunmetal)
-                                    .on_press(|state: &mut State| {
-                                        state.submissions.lane_mut(SubmissionKind::Atlas).confirmation =
-                                            None
-                                    })
-                                    .build(kit, preferences, pointer_ref),
-                            ),
-                    ),
-                preferences,
-            ));
-        }
-    }
-    let status = match lane.phase {
-        SubmissionPhase::Preparing => Some("Preparing the durable cycle request…"),
-        SubmissionPhase::Posting => Some("Waiting for the gateway acceptance receipt…"),
-        SubmissionPhase::OutcomeUnknown => Some(
-            "Delivery is uncertain. The original request is retained; resolving it does not submit a replacement cycle.",
-        ),
-        _ => None,
-    };
-    if let Some(status) = status {
-        action = action.child(ui_components::async_status_strip(
-            "atlas-phase-status",
-            "Submitting cycle",
-            status,
-            true,
-            StatusTone::Accent,
-            preferences,
-            kit,
-        ));
-    }
-    if let Some(AcceptedReceipt::Atlas(receipt)) = &lane.receipt {
-        let matched_cycle = match &state.cycles.history {
-            Load::Ready(cycles) => cycles
-                .rows
-                .iter()
-                .find(|cycle| cycle.job_id == receipt.job_id || cycle.run_id == receipt.run_id),
-            _ => None,
-        };
-        let (receipt_title, receipt_detail, receipt_tone) = match matched_cycle {
-            Some(cycle) if !crate::backend::job_is_active(&cycle.state) => {
-                let detail = match (cycle.article_count, &cycle.finished_at) {
-                    (Some(count), _) => format!("Job {} · {count} articles", receipt.job_id),
-                    (None, Some(finished)) => {
-                        format!("Job {} · Finished {finished}", receipt.job_id)
-                    }
-                    (None, None) => format!("Job {} · {}", receipt.job_id, cycle.state),
-                };
-                (
-                    format!("Cycle {} · {}", receipt.run_id, cycle.state),
-                    detail,
-                    state_tone(&cycle.state),
-                )
-            }
-            Some(cycle) => (
-                format!("Cycle {} · {}", receipt.run_id, cycle.state),
-                format!("Job {} · Completion pending", receipt.job_id),
-                state_tone(&cycle.state),
-            ),
-            None => (
-                format!("Accepted cycle {}", receipt.run_id),
-                format!("Job {} · Completion pending", receipt.job_id),
-                StatusTone::Ok,
-            ),
-        };
-        action = action.child(
-            ui_components::async_status_strip(
-                "atlas-receipt",
-                receipt_title,
-                receipt_detail,
-                false,
-                receipt_tone,
-                preferences,
-                kit,
-            )
-            .role("status"),
-        );
-    }
-    if !matches!(lane.resolution, Load::Idle) {
-        if let Some(message) = load_message(&lane.resolution, "", preferences, kit) {
-            action = action.child(message);
-        }
-    }
-    if let Some(message) = &lane.message {
-        action = action.child(line(message.clone(), kit).role("status"));
-    }
-
-    let cycles_unsynced = state.cycles.read_error.as_ref().map(|error| {
-        crate::views::unsynced_glyph(
-            "cycles-unsynced",
-            format!("Cycle history unsynced · {error}"),
-            kit,
-        )
-    });
-    let cycles_retry = (state.cycles.read_error.is_some()
-        || matches!(state.cycles.history, Load::Failed(_)))
-    .then(|| {
-        ActionButton::new("Retry")
-            .key("cycles-history-retry")
-            .icon(&icons::REFRESH)
-            .finish(MetalFinish::Gunmetal)
-            .busy(state.cycles.busy())
-            .disabled(!state.connected() || state.cycles.busy())
-            .on_press(|state: &mut State| state.refresh_cycles())
-            .build(kit, preferences, pointer_ref)
-    });
-    let mut history = rune::col().child(ui_components::section_header(
-        &icons::JOBS,
-        "Cycle history",
-        Some("Select any cycle to expand run metadata or history removal"),
-        cycles_unsynced,
-        cycles_retry,
-        kit,
-    ));
-    if let Some(message) = list_load_or_skeleton(
-        &state.cycles.history,
-        "Cycle history has not been observed.",
-        ui_components::skeleton_cycle_history(preferences, kit),
-        preferences,
-        kit,
-    ) {
-        history = history.child(message);
-    }
-    if let Load::Ready(cycles) = &state.cycles.history {
-        if cycles.rows.is_empty() {
-            history = history.child(quiet(
-                "No cycles are associated with this workstation.",
-                kit,
-            ));
-        }
-        for cycle in &cycles.rows {
-            let id = cycle.job_id.clone();
-            let modal_id = cycle.job_id.clone();
-            let selected = state.cycles.selected.as_deref() == Some(cycle.job_id.as_str());
-            let tone = state_tone(&cycle.state);
-
-            let mut row_content = rune::col().padding(10.0).gap(6.0).child(
-                rune::row()
-                    .w_full()
-                    .center_y()
-                    .gap(8.0)
-                    .child(ui_components::status_dot(tone, preferences))
-                    .child(
-                        ActionButton::new(format!("{} · {}", cycle.created_at, cycle.state))
-                            .key(format!("cycle-select-{}", cycle.job_id))
-                            .finish(if selected {
-                                MetalFinish::GoldCta
-                            } else {
-                                MetalFinish::ObsidianPill
-                            })
-                            .on_press(move |state: &mut State| state.select_cycle(&id))
-                            .build(kit, preferences, pointer_ref),
-                    )
-                    .child(rune::spacer())
-                    .child(ui_components::status_pill(
-                        cycle.state.clone(),
-                        None,
-                        tone,
-                        kit,
-                    )),
-            );
-            if selected {
-                row_content = row_content
-                    .child(quiet(
-                        format!(
-                            "Run {} · articles {}",
-                            cycle.run_id,
-                            cycle
-                                .article_count
-                                .map_or("unavailable".into(), |count| count.to_string())
-                        ),
-                        kit,
-                    ))
-                    .children(
-                        cycle
-                            .finished_at
-                            .as_ref()
-                            .map(|finished| quiet(format!("Finished {finished}"), kit)),
-                    )
-                    .child(
-                        rune::row()
-                            .gap(8.0)
-                            .child(
-                                ActionButton::new("Inspect summary")
-                                    .finish(MetalFinish::Gunmetal)
-                                    .on_press(move |state: &mut State| {
-                                        state.selected_cycle_id = Some(modal_id.clone());
-                                    })
-                                    .build(kit, preferences, pointer_ref),
-                            )
-                            .child(
-                                ActionButton::new("Delete cycle history…")
-                                    .key("cycle-delete-preview")
-                                    .icon(&icons::TRASH)
-                                    .finish(MetalFinish::CrimsonDanger)
-                                    .disabled(state.cycle_deletion_disabled_reason().is_some())
-                                    .on_press(|state: &mut State| state.preview_delete_cycle())
-                                    .build(kit, preferences, pointer_ref),
-                            ),
-                    );
-                if let Some(reason) = state.cycle_deletion_disabled_reason() {
-                    row_content = row_content.child(quiet(reason, kit));
-                }
-            }
-            history = history.child(
-                material::interactive_tile(
-                    row_content,
-                    selected,
-                    tone,
-                    preferences,
-                    pointer_ref,
-                    shadow_ref,
-                )
-                .key(format!("cycle-{}", cycle.job_id)),
-            );
-        }
-        history = history.child(cycles_tail(
-            state,
-            cycles.rows.len(),
-            kit,
-            preferences,
-            pointer_ref,
-        ));
-
-        if let Some(active_id) = &state.selected_cycle_id {
-            if let Some(cycle) = cycles.rows.iter().find(|c| c.job_id == *active_id) {
-                let detail = rune::col()
-                    .gap(8.0)
-                    .child(line(format!("Run ID: {}", cycle.run_id), kit))
-                    .child(line(format!("Job ID: {}", cycle.job_id), kit))
-                    .child(quiet(format!("Created: {}", cycle.created_at), kit))
-                    .children(
-                        cycle
-                            .finished_at
-                            .as_ref()
-                            .map(|finished| quiet(format!("Finished: {finished}"), kit)),
-                    )
-                    .child(quiet(
-                        format!(
-                            "Articles collected: {}",
-                            cycle
-                                .article_count
-                                .map_or("unavailable".into(), |count| count.to_string())
-                        ),
-                        kit,
-                    ));
-                ui_components::modal_prompt(
-                    "cycle-inspector",
-                    format!("Cycle {}", cycle.run_id),
-                    format!("State: {}", cycle.state),
-                    true,
-                    460.0,
-                    |state: &mut State| state.selected_cycle_id = None,
-                    detail,
-                    Some(
-                        ActionButton::new("Close")
-                            .finish(MetalFinish::GoldCta)
-                            .on_press(|state: &mut State| state.selected_cycle_id = None)
-                            .build(kit, preferences, pointer_ref),
-                    ),
-                    kit,
-                    layers,
-                );
-            }
-        }
-    }
-    if let Some(id) = &state.cycles.confirmation {
-        history = history.child(
-            rune::col()
-                .padding(12.0)
-                .gap(8.0)
-                .radius(8.0)
-                .fill(theme::hex(theme::STATUS_ERR_BG))
-                .border(1.0, theme::hex(theme::STATUS_ERR_BORDER))
-                .key("cycle-delete-confirmation")
-                .child(heading("Delete this cycle from workstation history?", kit))
-                .child(quiet(
-                    format!(
-                        "Job {id}. Shared articles, evidence and durable job audit remain intact. This does not cancel the cycle."
-                    ),
-                    kit,
-                ))
-                .child(
-                    rune::row()
-                        .gap(8.0)
-                        .child(
-                            ActionButton::new("Delete from history")
-                                .key("cycle-delete-confirm")
-                                .icon(&icons::TRASH)
-                                .finish(MetalFinish::FracturedDanger)
-                                .busy(matches!(state.cycles.deletion, Load::Loading))
-                                .on_press(|state: &mut State| state.confirm_delete_cycle())
-                                .build(kit, preferences, pointer_ref),
-                        )
-                        .child(
-                            ActionButton::new("Keep cycle history")
-                                .finish(MetalFinish::Gunmetal)
-                                .on_press(|state: &mut State| state.cycles.confirmation = None)
-                                .build(kit, preferences, pointer_ref),
-                        ),
-                ),
-        );
-    }
-    if !matches!(state.cycles.deletion, Load::Idle) {
-        if let Some(message) = load_message(&state.cycles.deletion, "", preferences, kit) {
-            history = history.child(message);
-        }
-    }
-    if matches!(state.cycles.deletion, Load::Failed(_)) {
-        history = history.child(
-            ActionButton::new("Resolve pending deletion")
-                .key("cycle-delete-resolve")
-                .finish(MetalFinish::Gunmetal)
-                .on_press(|state: &mut State| state.confirm_delete_cycle())
-                .build(kit, preferences, pointer_ref),
-        );
-    }
-    if let Load::Ready(receipt) = &state.cycles.deletion {
-        history = history.child(quiet(
-            if receipt.hidden {
-                "Cycle hidden from this workstation's history."
-            } else {
-                "The gateway did not report the cycle as hidden."
-            },
-            kit,
-        ));
-    }
-    if let Some(message) = &state.cycles.message {
-        history = history.child(line(message.clone(), kit).role("status"));
-    }
-    scroll(
-        rune::col()
-            .gap(14.0)
-            .child(card(state, preferences, StatusTone::Accent, action))
-            .child(card(state, preferences, StatusTone::Info, history)),
-        "atlas-body",
-    )
-}
-
-pub(crate) fn switch_to_distributed(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
-    ActionButton::new("Switch to Distributed")
-        .key("switch-remote-gateway")
-        .disabled(
-            state.connection.status == crate::connection::ConnectionStatus::Connecting
-                || state.local_backend.stopping,
-        )
-        .on_press_tx(State::open_atlas_distributed_setup)
-        .build(kit, preferences, None)
-}
-
-fn atlas_prerequisites(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
-    let preflight = state.atlas_preflight();
-    let mut checks = rune::col()
-        .key("atlas-prerequisites")
-        .gap(4.0)
-        .w_full()
-        .child(ui_components::section_header(
-            &icons::SHIELD_CHECK,
-            "Cycle prerequisites",
-            None,
-            None,
-            Some(
-                rune::row()
-                    .gap(6.0)
-                    .center_y()
-                    .child(
-                        ActionButton::new("Configure API keys")
-                            .key("atlas-configure-provider-keys")
-                            .icon(&icons::KEY)
-                            .finish(MetalFinish::ObsidianPill)
-                            .disabled(!can_configure_atlas_keys(state))
-                            .on_press(|state: &mut State| {
-                                if !can_configure_atlas_keys(state) {
-                                    return;
-                                }
-                                reset_tool_key_editor(state);
-                                state.tool_key_dialog = true;
-                                state.submissions.atlas.confirmation = None;
-                                state.backend_read(ReadRequest::Profile);
-                            })
-                            .build(kit, preferences, None),
-                    )
-                    .child(
-                        ActionButton::new("Refresh checks")
-                            .key("atlas-preflight-refresh")
-                            .icon(&icons::REFRESH)
-                            .finish(MetalFinish::ObsidianPill)
-                            .disabled(
-                                !state.permission(Permission::ReadBackend)
-                                    || state.readiness_pending(),
-                            )
-                            .on_press(|state: &mut State| state.refresh_readiness())
-                            .build(kit, preferences, None),
-                    ),
-            ),
-            kit,
-        ));
-
-    for (id, label, observed, ready_label) in [
-        (
-            "atlas-worker",
-            "Atlas worker",
-            preflight.map(|report| report.atlas_worker),
-            "Available",
-        ),
-        (
-            "rust-bert",
-            "Rust-BERT worker and checkpoint",
-            preflight.map(|report| report.rust_bert),
-            if preflight.is_some_and(|report| report.rust_bert_verified) {
-                "Verified"
-            } else {
-                "Checkpoint available"
-            },
-        ),
-    ] {
-        let (status, tone) = match observed {
-            Some(ReadinessState::Ready) => (ready_label, StatusTone::Ok),
-            Some(ReadinessState::Running) => ("Checking", StatusTone::Info),
-            Some(ReadinessState::NotReady | ReadinessState::Degraded) => {
-                ("Not ready", StatusTone::Warn)
-            }
-            Some(ReadinessState::Unavailable | ReadinessState::NotApplicable) => {
-                ("Unavailable", StatusTone::Neutral)
-            }
-            _ => ("Unchecked", StatusTone::Neutral),
-        };
-        checks = checks.child(atlas_check_row(id, label, status, tone, None, kit));
-    }
-
-    let keys = state.atlas_key_states();
-    let mut have_saved_key = false;
-    for (provider, label, presence) in keys {
-        let (status, tone) = atlas_key_status(presence);
-        have_saved_key |= presence == AtlasKeyPresence::Saved;
-        let action = (presence == AtlasKeyPresence::Missing).then(|| {
-            ActionButton::new("Tool Box")
-                .key(format!("atlas-key-open-{provider}"))
-                .finish(MetalFinish::ObsidianPill)
-                .on_press(move |state: &mut State| {
-                    state.navigate(Page::Tools);
-                    open_tool_credential_editor(state, provider);
-                })
-                .build(kit, preferences, None)
-                .label(format!("Configure the {label} API key in Tool Box"))
-        });
-        checks = checks.child(atlas_check_row(provider, label, status, tone, action, kit));
-    }
-    if have_saved_key {
-        checks = checks.child(quiet("Saved keys still need provider authentication.", kit));
-    }
-    checks
-}
-
-fn atlas_key_status(presence: AtlasKeyPresence) -> (&'static str, StatusTone) {
-    match presence {
-        AtlasKeyPresence::Missing => ("Missing key", StatusTone::Warn),
-        AtlasKeyPresence::Saved => ("Key saved", StatusTone::Neutral),
-        _ => ("Unchecked", StatusTone::Neutral),
-    }
-}
-
-fn atlas_check_row(
-    id: &str,
-    name: &str,
-    status: &str,
-    tone: StatusTone,
-    action: Option<El>,
-    kit: &Kit,
-) -> El {
-    rune::row()
-        .key(format!("atlas-check-{id}"))
-        .w_full()
-        .min_w(0.0)
-        .flex_wrap()
-        .center_y()
-        .gap(6.0)
-        .child(line(name, kit).grow(1.0).min_w(0.0))
-        .child(ui_components::status_pill(status, None, tone, kit))
-        .children(action)
-}
-
-fn can_configure_atlas_keys(state: &State) -> bool {
-    state.page == Page::Atlas
-        && state.atlas_advertised()
-        && state.connected()
-        && state.registration.context.is_some()
-        && state.permission(Permission::ManageConfiguration)
-        && !matches!(state.configuration.result, Load::Loading)
-}
-
-fn current_tool_credential_slot<'a>(
-    state: &'a State,
-    provider: &str,
-) -> Option<&'a crate::backend::ToolCredentialMetadata> {
-    let Load::Ready(profile) = &state.backend.profile else {
-        return None;
-    };
-    if state.configuration_revision() != Some(profile.configuration_revision) {
-        return None;
-    }
-    profile
-        .tool_credentials
-        .iter()
-        .find(|slot| slot.provider == provider)
 }
 
 fn reset_tool_key_editor(state: &mut State) {
@@ -805,15 +181,7 @@ fn reset_tool_key_editor(state: &mut State) {
 }
 
 fn open_tool_credential_editor(state: &mut State, provider: &str) {
-    let available = match state.page {
-        Page::Tools => state.permission(Permission::ManageConfiguration),
-        Page::Atlas => {
-            can_configure_atlas_keys(state)
-                && current_tool_credential_slot(state, provider).is_some()
-        }
-        _ => false,
-    };
-    if !available {
+    if state.page != Page::Tools || !state.permission(Permission::ManageConfiguration) {
         return;
     }
     reset_tool_key_editor(state);
@@ -869,11 +237,10 @@ fn tools(
 
 fn tool_catalog(state: &State, wide: bool, preferences: ViewPreferences, kit: &Kit) -> El {
     let mut body = rune::col().w_full().min_w(0.0).gap(10.0);
-    if let Some(message) = list_load_or_skeleton(
+    if let Some(message) = load_view(
         &state.backend.tools,
         "Tool availability has not been observed.",
-        ui_components::skeleton_tool_catalog(preferences, kit),
-        preferences,
+        || ui_components::skeleton_tool_catalog(preferences, kit),
         kit,
     ) {
         body = body.child(message);
@@ -943,11 +310,10 @@ fn tools_overview(state: &State, preferences: ViewPreferences, kit: &Kit) -> El 
                 .key("tool-box-overview-title"),
         )
         .child(quiet("Provider API keys", kit));
-    if let Some(message) = list_load_or_skeleton(
+    if let Some(message) = load_view(
         &state.backend.profile,
         "Credential availability has not been observed.",
-        ui_components::skeleton_tool_credentials(preferences, kit),
-        preferences,
+        || ui_components::skeleton_tool_credentials(preferences, kit),
         kit,
     ) {
         body = body.child(message);
@@ -1035,29 +401,14 @@ fn tool_key_dialog(state: &State, preferences: ViewPreferences, kit: &Kit, layer
     if !state.tool_key_dialog {
         return;
     }
-    let atlas = state.page == Page::Atlas;
-    let provider = state.configuration.tool_provider.text.as_str();
-    let editing = !provider.is_empty();
-    let title = if atlas {
-        "Atlas provider keys".into()
-    } else {
-        format!("{provider} API keys")
-    };
-    let editor = if atlas && !editing {
-        atlas_key_sources(state, preferences, kit)
-    } else {
-        tool_key_editor(state, atlas, provider, preferences, kit)
-    };
+    let provider = &state.configuration.tool_provider.text;
+    let title = format!("{provider} API keys");
     layers.extend(ui_components::glass_dialog(
         "tool-api-key",
         &title,
         480.0,
         rune::col()
-            .key(if editing {
-                "provider-key-editor"
-            } else {
-                "atlas-key-sources"
-            })
+            .key("provider-key-editor")
             .w_full()
             .max_h(316.0)
             .min_h(0.0)
@@ -1066,7 +417,7 @@ fn tool_key_dialog(state: &State, preferences: ViewPreferences, kit: &Kit, layer
             })
             .padding(16.0)
             .gap(12.0)
-            .child(editor)
+            .child(tool_key_editor(state, preferences, kit))
             .child(configuration_status(state, preferences, kit)),
         false,
         |state: &mut State| {
@@ -1078,93 +429,9 @@ fn tool_key_dialog(state: &State, preferences: ViewPreferences, kit: &Kit, layer
     ));
 }
 
-fn atlas_key_sources(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
-    let mut body = rune::col().gap(6.0).child(quiet(
-        "Save a primary or fallback key for each source. Saved keys still need provider authentication.",
-        kit,
-    ));
-    for (provider, label, presence) in state.atlas_key_states() {
-        let (status, tone) = atlas_key_status(presence);
-        let editor = ActionButton::new("Edit key")
-            .key(format!("atlas-key-edit-{provider}"))
-            .finish(MetalFinish::ObsidianPill)
-            .disabled(
-                !can_configure_atlas_keys(state)
-                    || current_tool_credential_slot(state, provider).is_none(),
-            )
-            .on_press(move |state: &mut State| open_tool_credential_editor(state, provider))
-            .build(kit, preferences, None)
-            .label(format!("Edit {label} API keys"));
-        body = body.child(atlas_check_row(
-            &format!("source-{provider}"),
-            label,
-            status,
-            tone,
-            Some(editor),
-            kit,
-        ));
-    }
-    if let Some(message) = load_message(
-        &state.backend.profile,
-        "Saved provider slots have not been loaded.",
-        preferences,
-        kit,
-    ) {
-        body = body.child(message);
-    }
-    if !matches!(state.backend.profile, Load::Loading | Load::Pending)
-        && state
-            .atlas_key_states()
-            .iter()
-            .any(|(provider, _, _)| current_tool_credential_slot(state, provider).is_none())
-    {
-        body = body.child(
-            ActionButton::new("Refresh provider slots")
-                .key("atlas-key-refresh-slots")
-                .on_press(|state: &mut State| state.backend_read(ReadRequest::Profile))
-                .build(kit, preferences, None),
-        );
-    }
-    body
-}
-
-fn tool_key_editor(
-    state: &State,
-    atlas: bool,
-    provider: &str,
-    preferences: ViewPreferences,
-    kit: &Kit,
-) -> El {
+fn tool_key_editor(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
-    let changed = !state.configuration.tool_primary.text.is_empty()
-        || !state.configuration.tool_fallback.text.is_empty()
-        || state.configuration.clear_tool_primary
-        || state.configuration.clear_tool_fallback;
-    let mut body = rune::col().gap(12.0);
-    if atlas {
-        let provider_name = state
-            .atlas_key_states()
-            .into_iter()
-            .find_map(|(id, name, _)| (id == provider).then_some(name))
-            .unwrap_or(provider);
-        body = body.child(
-            rune::row()
-                .w_full()
-                .center_y()
-                .flex_wrap()
-                .gap(8.0)
-                .child(heading(provider_name, kit).grow(1.0))
-                .child(
-                    ActionButton::new("All providers")
-                        .key("atlas-key-back")
-                        .finish(MetalFinish::ObsidianPill)
-                        .disabled(matches!(state.configuration.result, Load::Loading))
-                        .on_press(|state: &mut State| reset_tool_key_editor(state))
-                        .build(kit, preferences, None),
-                ),
-        );
-    }
-    body.child(quiet(
+    rune::col().gap(12.0).child(quiet(
                 "Keys remain masked and are sent only after confirmation. Blank fields preserve saved keys; clearing a slot requires its explicit toggle.",
                 kit,
             ))
@@ -1213,15 +480,12 @@ fn tool_key_editor(
                 },
             ))
             .child(
-                ActionButton::new(if atlas { "Review API keys" } else { "Review key replacement" })
+                ActionButton::new("Review key replacement")
                     .key("tool-credentials-preview")
                     .icon(&icons::SHIELD_CHECK)
                     .finish(MetalFinish::GoldCta)
                     .busy(matches!(state.configuration.result, Load::Loading))
-                    .disabled(
-                        !state.permission(Permission::ManageConfiguration)
-                            || (atlas && (!changed || current_tool_credential_slot(state, provider).is_none())),
-                    )
+                    .disabled(!state.permission(Permission::ManageConfiguration))
                     .on_press(|state: &mut State| state.preview_tool_credentials())
                     .build(kit, preferences, pointer_ref),
             )
@@ -1288,11 +552,10 @@ fn models(
     match active_tab {
         ModelsTab::Providers => {
             body = body.child(heading("Providers", kit));
-            if let Some(message) = list_load_or_skeleton(
+            if let Some(message) = load_view(
                 &state.backend.profile,
                 "Provider metadata has not been observed.",
-                ui_components::skeleton_provider_accounts(preferences, kit),
-                preferences,
+                || ui_components::skeleton_provider_accounts(preferences, kit),
                 kit,
             ) {
                 body = body.child(message);
@@ -1417,11 +680,10 @@ fn models(
         }
         ModelsTab::Roles => {
             body = body.child(heading("Role assignments", kit));
-            if let Some(message) = list_load_or_skeleton(
+            if let Some(message) = load_view(
                 &state.backend.models,
                 "Role assignments have not been observed.",
-                ui_components::skeleton_model_roles(preferences, kit),
-                preferences,
+                || ui_components::skeleton_model_roles(preferences, kit),
                 kit,
             ) {
                 body = body.child(message);
@@ -1549,10 +811,19 @@ fn configuration_status(state: &State, preferences: ViewPreferences, kit: &Kit) 
                     ),
             );
     }
-    if !matches!(state.configuration.result, Load::Idle) {
-        if let Some(message) = load_message(&state.configuration.result, "", preferences, kit) {
-            body = body.child(message);
-        }
+    if let Some(message) = load_view(
+        &state.configuration.result,
+        "",
+        || {
+            receipt_placeholder(
+                "configuration-receipt-loading",
+                "Saving configuration",
+                preferences,
+            )
+        },
+        kit,
+    ) {
+        body = body.child(message);
     }
     if let Load::Ready(saved) = &state.configuration.result {
         body = body.child(
@@ -1594,21 +865,41 @@ fn job_count_text(count: usize) -> String {
     }
 }
 
-/// Jobs & Logs list width, gap and the page width from which the list sits beside the detail.
-const JOBS_LIST_WIDTH: f32 = 300.0;
-const JOBS_GAP: f32 = 16.0;
-const JOBS_SIDE_BY_SIDE_WIDTH: f32 = 940.0;
+fn jobs(state: &State, preferences: ViewPreferences, kit: &Kit, log_width: f32) -> El {
+    let show_detail = state.registration.context.is_some() && state.backend.selected_job.is_some();
+    let (key, offset, pane) = if show_detail {
+        (
+            "jobs-detail-view",
+            48.0,
+            job_logs(state, preferences, kit, log_width),
+        )
+    } else {
+        ("jobs-list-view", -48.0, jobs_list(state, preferences, kit))
+    };
+    let mut transition = crate::app::surface_transition(
+        preferences.reduced_motion,
+        rune::Transition::offset(offset, 0.0),
+    );
+    transition.springs.exit = rune::Spring::NONE;
+    rune::col()
+        .key("jobs-view")
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .clip_rounded(0.0)
+        .child(
+            rune::col()
+                .key(key)
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .transition(transition)
+                .child(pane),
+        )
+}
 
-fn jobs(
-    state: &State,
-    preferences: ViewPreferences,
-    kit: &Kit,
-    layers: &mut Vec<El>,
-    log_width: f32,
-) -> El {
+fn jobs_list(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
-    let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
-    let narrow = log_width < 660.0;
     let header_count = match (&state.scoped_jobs.page, state.scoped_jobs.status) {
         (Some(page), crate::jobs_query::JobsLoad::Ready) => {
             if let Some(total) = page.matched_total {
@@ -1678,538 +969,617 @@ fn jobs(
             "jobs-body",
         );
     }
-    // Wide enough for a ~300 pt list beside a detail pane that still has room for the log table.
-    let side_by_side = log_width >= JOBS_SIDE_BY_SIDE_WIDTH;
-    let detail_width = if side_by_side {
-        log_width - JOBS_LIST_WIDTH - JOBS_GAP
-    } else {
-        log_width
-    };
-    let mut list_col = rune::col().gap(12.0);
-    let mut detail_col = rune::col().gap(12.0);
-    let show_list = !narrow || state.backend.selected_job.is_none();
-    let show_detail = !narrow || state.backend.selected_job.is_some();
-    if show_list {
-        if let Some(message) = list_load_or_skeleton(
-            &state.backend.jobs,
-            "Workstation activity has not been observed.",
-            ui_components::skeleton_job_list(preferences, kit),
-            preferences,
-            kit,
-        ) {
-            list_col = list_col.child(message);
-        }
-        if let Load::Ready(jobs) = &state.backend.jobs {
-            if jobs.rows.is_empty() {
-                list_col =
-                    list_col.child(quiet("No jobs are associated with this workstation.", kit));
+    if let Some(message) = load_view(
+        &state.backend.jobs,
+        "Workstation activity has not been observed.",
+        || ui_components::skeleton_job_list(preferences, kit),
+        kit,
+    ) {
+        body = body.child(message);
+    }
+    if let Load::Ready(jobs) = &state.backend.jobs {
+        if let Some((latest, rest)) = jobs.rows.split_first() {
+            let mut groups = [
+                ("Running", Vec::new()),
+                ("Queued", Vec::new()),
+                ("Failed", Vec::new()),
+                ("Completed", Vec::new()),
+                ("Other", Vec::new()),
+            ];
+            for job in rest {
+                let group = match job.state.as_str() {
+                    "running" => 0,
+                    "queued" | "retry_scheduled" => 1,
+                    "failed" => 2,
+                    "completed" => 3,
+                    _ => 4,
+                };
+                groups[group].1.push(job);
             }
-            for job in jobs.rows.iter() {
-                let id = job.id.clone();
-                let selected = state.backend.selected_job.as_deref() == Some(job.id.as_str());
-                let tone = state_tone(&job.state);
-                let title = format!(
-                    "{} · {} · {}{}",
-                    job.app,
-                    if job.title.is_empty() {
-                        &job.operation
-                    } else {
-                        &job.title
-                    },
-                    job.state,
-                    if job.status_only {
-                        " · status only"
-                    } else {
-                        ""
-                    }
-                );
-                let tile_content = rune::row()
-                    .w_full()
-                    .padding(7.0)
-                    .gap(8.0)
-                    .center_y()
-                    .child(ui_components::status_dot(tone, preferences))
-                    .child(
-                        rune::col()
-                            .grow(1.0)
-                            .min_w(0.0)
-                            .gap(1.0)
-                            .child(
-                                rune::text(title.clone())
-                                    .font(kit.ty.ui_medium)
-                                    .color(theme::hex(theme::TEXT_PRIMARY))
-                                    .wrap(),
+            body = body.child(jobs_group_heading("Latest", kit));
+            body = body.child(job_row(state, latest, preferences, kit));
+            // Keep every row under the same parent when refreshed jobs move between groups.
+            for (label, rows) in groups.into_iter().filter(|(_, rows)| !rows.is_empty()) {
+                body = body.child(jobs_group_heading(label, kit));
+                for job in rows {
+                    body = body.child(job_row(state, job, preferences, kit));
+                }
+            }
+        } else {
+            body = body.child(quiet("No jobs are associated with this workstation.", kit));
+        }
+        body = body.child(jobs_tail(
+            state,
+            jobs.rows.len(),
+            kit,
+            preferences,
+            pointer_ref,
+        ));
+    }
+    scroll(body, "jobs-body")
+}
+
+fn jobs_group_heading(label: &str, kit: &Kit) -> El {
+    heading(label, kit)
+        .key(format!("jobs-group-{}", label.to_ascii_lowercase()))
+        .role("heading")
+}
+
+fn activity_job_key(id: &str) -> String {
+    format!("activity-job-{id}")
+}
+
+fn job_row(
+    state: &State,
+    job: &crate::backend::ActivityJob,
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> El {
+    let id = job.id.clone();
+    let tone = state_tone(&job.state);
+    let title = format!(
+        "{} · {}{}",
+        job.app,
+        if job.title.is_empty() {
+            &job.operation
+        } else {
+            &job.title
+        },
+        if job.status_only {
+            " · status only"
+        } else {
+            ""
+        }
+    );
+    let tile_content = rune::row()
+        .w_full()
+        .padding(7.0)
+        .gap(8.0)
+        .center_y()
+        .child(ui_components::status_dot(tone, preferences))
+        .child(
+            rune::col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(1.0)
+                .child(
+                    rune::text(title.clone())
+                        .font(kit.ty.ui_medium)
+                        .color(theme::hex(theme::TEXT_PRIMARY))
+                        .wrap(),
+                )
+                .child(quiet(truncate_id(&job.id, 24), kit).label(job.id.clone())),
+        )
+        .child(ui_components::status_pill(
+            job.state.clone(),
+            None,
+            tone,
+            kit,
+        ))
+        .child(
+            rune::icon(&icons::CHEVRON_RIGHT, 14.0)
+                .color(kit.c.text_muted)
+                .a11y_hidden(),
+        );
+    material::interactive_tile(
+        tile_content,
+        false,
+        tone,
+        preferences,
+        (!preferences.matte()).then_some(&state.pointer_offset),
+        (!preferences.matte()).then_some(&state.shadow_offset),
+    )
+    .key(activity_job_key(&job.id))
+    .role("button")
+    .label(format!("{title} · {}", job.state))
+    .focusable(true)
+    .on_press_tx(move |state: &mut State, tx| {
+        state.select_job(&id);
+        if state.backend.selected_job.as_deref() == Some(id.as_str()) {
+            tx.focus("jobs-back-to-list", tx.focus_visible());
+        }
+    })
+}
+
+const JOB_RETRY_KEY: &str = "job-retry-preview";
+const JOB_RETRY_CONFIRM_KEY: &str = "job-action-confirm";
+
+fn dismiss_actor_seed_retry(state: &mut State, tx: &mut Tx) {
+    if matches!(state.job_actions.response, Load::Loading) {
+        return;
+    }
+    state.job_actions.confirmation = None;
+    tx.focus(JOB_RETRY_KEY, tx.focus_visible());
+}
+
+fn actor_seed_retry_confirmation(
+    state: &State,
+    confirmation: &JobActionConfirmation,
+    kit: &Kit,
+) -> El {
+    let pending = matches!(state.job_actions.response, Load::Loading);
+    let disabled_reason = (!pending)
+        .then(|| state.job_action_disabled_reason(JobAction::Retry))
+        .flatten();
+    let title = if confirmation.title.is_empty() {
+        "Actor seed"
+    } else {
+        &confirmation.title
+    };
+    let description = if pending {
+        "Preparing the retry…"
+    } else {
+        disabled_reason
+            .as_deref()
+            .unwrap_or("The failed task resumes from its saved checkpoint.")
+    };
+    let confirm = IconButton::new(kit.glyph.check)
+        .variant(IconButtonVariant::Submit)
+        .control_size(ControlSize::ExtraLarge)
+        .label("Confirm retry")
+        .help("Confirm retry")
+        .disabled(pending || disabled_reason.is_some())
+        .on_press(State::confirm_job_action)
+        .build(kit)
+        .key(JOB_RETRY_CONFIRM_KEY);
+    let cancel = IconButton::new(kit.glyph.close)
+        .variant(IconButtonVariant::Ghost)
+        .control_size(ControlSize::ExtraLarge)
+        .label("Cancel retry")
+        .help("Cancel retry")
+        .disabled(pending)
+        .on_press_tx(dismiss_actor_seed_retry)
+        .build(kit)
+        .key("job-action-cancel");
+    rune::row()
+        .key("job-action-confirmation")
+        .w_full()
+        .center_y()
+        .gap(12.0)
+        .child(
+            rune::col()
+                .key("actor-seed-retry-copy")
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(heading(format!("Confirm retry for {title}"), kit))
+                .child(quiet(description, kit)),
+        )
+        .child(rune::row().w(80.0).gap(8.0).child(confirm).child(cancel))
+        .on_key(|state: &mut State, event, tx| {
+            if event.key != Key::Escape {
+                return false;
+            }
+            if !tx.key_repeat() {
+                dismiss_actor_seed_retry(state, tx);
+            }
+            true
+        })
+}
+
+fn job_logs(state: &State, preferences: ViewPreferences, kit: &Kit, detail_width: f32) -> El {
+    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
+    let back = ActionButton::new("Back to jobs")
+        .key("jobs-back-to-list")
+        .icon(&icons::CHEVRON_LEFT)
+        .finish(MetalFinish::Gunmetal)
+        .on_press_tx(|state: &mut State, tx| {
+            if let Some(id) = state.back_to_jobs() {
+                if matches!(&state.backend.jobs, Load::Ready(jobs)
+                    if jobs.rows.iter().any(|job| job.id == id))
+                {
+                    let key = activity_job_key(&id);
+                    tx.scroll_into_view(&key);
+                    tx.focus(key, tx.focus_visible());
+                } else {
+                    tx.focus("nav-jobs", tx.focus_visible());
+                }
+            }
+        })
+        .build(kit, preferences, pointer_ref);
+    let mut detail_col = rune::col().gap(12.0);
+    if let Some(message) = load_view(
+        &state.backend.detail,
+        "No details have been observed for the selected job.",
+        || ui_components::skeleton_job_detail(preferences, kit),
+        kit,
+    ) {
+        detail_col = detail_col.child(message);
+    }
+    if let Load::Ready(detail) = &state.backend.detail {
+        let detail_title = if detail.job.title.is_empty() {
+            detail.job.operation.clone()
+        } else {
+            detail.job.title.clone()
+        };
+        let tone = state_tone(&detail.job.state);
+        let error_summary = job_error_summary(&detail.job);
+        let mut details = rune::col().gap(10.0).child(ui_components::section_header(
+            &icons::JOBS,
+            detail_title,
+            Some(&format!(
+                "{} · {} · {}",
+                detail.job.id, detail.job.state, detail.job.phase
+            )),
+            Some(ui_components::status_pill(
+                detail.job.state.clone(),
+                None,
+                tone,
+                kit,
+            )),
+            crate::activity_triage::explain_job_button(state, kit),
+            kit,
+        ));
+        if let Some((done, total)) = detail
+            .job
+            .progress_done
+            .zip(detail.job.progress_total)
+            .filter(|(done, total)| *done >= 0 && *total > 0)
+        {
+            let frac = (done.min(total) as f32 / total as f32).clamp(0.0, 1.0);
+            let prefix = if detail.job.phase.is_empty() {
+                "Progress"
+            } else {
+                detail.job.phase.as_str()
+            };
+            details = details.child(
+                Progress::new(Some(frac))
+                    .label(format!("{prefix} · {done} / {total}"))
+                    .show_value()
+                    .build(kit)
+                    .w_full(),
+            );
+        } else {
+            let phase = detail.job.phase.trim();
+            let known_done = detail.job.progress_done.filter(|done| *done >= 0);
+            let progress_label = match (phase.is_empty(), known_done) {
+                (false, Some(done)) => format!("{phase} · {done} processed"),
+                (true, Some(done)) => format!("{done} processed"),
+                (false, None) => format!("Phase: {phase}"),
+                (true, None) => detail.job.state.clone(),
+            };
+            if crate::backend::job_is_active(&detail.job.state)
+                || known_done.is_some()
+                || !phase.is_empty()
+            {
+                details = details.child(quiet(progress_label, kit).role("status"));
+            }
+        }
+        if !detail.private_details_available
+            || !detail.job.private_details_available
+            || detail.job.status_only
+        {
+            details = details.child(quiet(
+                "Private details and logs are unavailable for this shared job.",
+                kit,
+            ));
+        } else {
+            if !error_summary.is_empty() {
+                details = details.child(line(error_summary, kit).role("alert"));
+            }
+            let retry_confirmation = state
+                .job_actions
+                .confirmation
+                .as_ref()
+                .filter(|item| item.action == JobAction::Retry && item.job_id == detail.job.id);
+            let is_actor_seed =
+                matches!(detail.job.operation.as_str(), "actor_seed" | "seed_actors");
+            if let Some(confirmation) = retry_confirmation.filter(|_| is_actor_seed) {
+                details = details.child(actor_seed_retry_confirmation(state, confirmation, kit));
+            } else if detail.job.state == "failed" || detail.job.can_retry {
+                let retry_reason = state.job_action_disabled_reason(JobAction::Retry);
+                let retry_busy = matches!(state.job_actions.response, Load::Loading);
+                details = details.child(
+                    rune::row().w_full().center_y().gap(8.0).child(
+                        ActionButton::new("Retry job")
+                            .key(JOB_RETRY_KEY)
+                            .icon(&icons::REFRESH)
+                            .finish(MetalFinish::GoldCta)
+                            .status(
+                                if retry_busy {
+                                    "Retrying…"
+                                } else if retry_reason.is_none() {
+                                    "Ready"
+                                } else {
+                                    "Unavailable"
+                                },
+                                if retry_busy {
+                                    StatusTone::Accent
+                                } else if retry_reason.is_none() {
+                                    StatusTone::Ok
+                                } else {
+                                    StatusTone::Warn
+                                },
                             )
-                            .child(quiet(truncate_id(&job.id, 24), kit).label(job.id.clone())),
+                            .busy(retry_busy)
+                            .disabled(retry_reason.is_some())
+                            .on_press_tx(move |state: &mut State, tx| {
+                                state.preview_job_action(JobAction::Retry);
+                                if is_actor_seed && state.job_actions.confirmation.is_some() {
+                                    tx.focus(JOB_RETRY_CONFIRM_KEY, tx.focus_visible());
+                                }
+                            })
+                            .build(kit, preferences, pointer_ref),
+                    ),
+                );
+                if let Some(reason) = retry_reason {
+                    details = details.child(quiet(reason, kit));
+                }
+            }
+            if let Some(confirmation) = retry_confirmation.filter(|_| !is_actor_seed) {
+                let confirming = matches!(state.job_actions.response, Load::Loading);
+                let confirm_button = ActionButton::new("Confirm retry")
+                    .key(JOB_RETRY_CONFIRM_KEY)
+                    .icon(&icons::SHIELD_CHECK)
+                    .finish(MetalFinish::FracturedConfirm)
+                    .status(
+                        if confirming { "Queuing…" } else { "Ready" },
+                        if confirming {
+                            StatusTone::Accent
+                        } else {
+                            StatusTone::Ok
+                        },
+                    )
+                    .busy(confirming)
+                    .disabled(confirming)
+                    .on_press(|state: &mut State| state.confirm_job_action())
+                    .build(kit, preferences, pointer_ref);
+                let cancel_button = ActionButton::new("Keep current job state")
+                    .finish(MetalFinish::Gunmetal)
+                    .on_press(|state: &mut State| {
+                        state.job_actions.confirmation = None;
+                    })
+                    .build(kit, preferences, pointer_ref);
+                let action_buttons = if detail_width < 420.0 {
+                    rune::col()
+                        .gap(8.0)
+                        .child(confirm_button)
+                        .child(cancel_button)
+                } else {
+                    rune::row()
+                        .gap(8.0)
+                        .child(confirm_button)
+                        .child(cancel_button)
+                };
+                details = details.child(card(
+                    state,
+                    preferences,
+                    StatusTone::Accent,
+                    rune::col()
+                        .key("job-action-confirmation")
+                        .gap(8.0)
+                        .child(heading(
+                            format!("Confirm retry for {}", confirmation.title),
+                            kit,
+                        ))
+                        .child(quiet(
+                            format!(
+                                "{} · re-queues the failed task with a fresh request identity.",
+                                confirmation.job_id
+                            ),
+                            kit,
+                        ))
+                        .child(action_buttons),
+                ));
+            }
+            let matching_attempt = state.job_actions.attempt.as_ref().is_some_and(|(item, _)| {
+                item.action == JobAction::Retry && item.job_id == detail.job.id
+            });
+            match &state.job_actions.response {
+                Load::Loading if matching_attempt => {
+                    details = details.child(ui_components::async_status_strip(
+                        "job-action-loading",
+                        "Submitting retry…",
+                        "Sending scoped retry trigger to backend gateway",
+                        true,
+                        StatusTone::Accent,
+                        preferences,
+                        kit,
+                    ));
+                }
+                Load::Ready(receipt)
+                    if receipt.receipt.job_id == detail.job.id
+                        && receipt.receipt.action == JobAction::Retry =>
+                {
+                    details = details.child(
+                        ui_components::async_status_strip(
+                            "job-action-receipt",
+                            "Retry queued",
+                            format!(
+                                "Action {} · state {}",
+                                receipt.receipt.action_id, receipt.receipt.state
+                            ),
+                            false,
+                            StatusTone::Ok,
+                            preferences,
+                            kit,
+                        )
+                        .role("status"),
+                    );
+                }
+                Load::Failed(error) if matching_attempt => {
+                    details = details.child(line(error.clone(), kit).role("alert")).child(
+                        ActionButton::new("Retry exact request")
+                            .key("job-action-retry-exact")
+                            .icon(&icons::REFRESH)
+                            .finish(MetalFinish::GoldCta)
+                            .on_press(|state: &mut State| state.retry_exact_job_action())
+                            .build(kit, preferences, pointer_ref),
+                    );
+                }
+                Load::Failed(error) if state.job_actions.attempt.is_none() => {
+                    details = details.child(line(error.clone(), kit).role("alert"));
+                }
+                _ => {}
+            }
+            if let Some(message) = &state.job_actions.message {
+                details = details.child(line(message.clone(), kit).role("status"));
+            }
+            if let Some(result) = &detail.maintenance_result {
+                details = details.child(result.view(kit));
+            }
+            let worker_summary = job_worker_sync_summary(&detail.job);
+            details = details.child(
+                rune::row()
+                    .w_full()
+                    .center_y()
+                    .gap(8.0)
+                    .child(
+                        heading("Operational logs", kit)
+                            .key(crate::logs::SECTION_KEY)
+                            .grow(1.0),
                     )
                     .child(ui_components::status_pill(
-                        job.state.clone(),
+                        if worker_summary.is_empty() {
+                            detail.job.state.clone()
+                        } else {
+                            worker_summary.clone()
+                        },
                         None,
                         tone,
                         kit,
-                    ));
-                list_col = list_col.child(
-                    material::interactive_tile(
-                        tile_content,
-                        selected,
-                        tone,
-                        preferences,
-                        pointer_ref,
-                        shadow_ref,
-                    )
-                    .key(format!("activity-job-{}", job.id))
-                    .role("button")
-                    .label(title)
-                    .focusable(true)
-                    .on_press(move |state: &mut State| state.select_job(&id)),
-                );
-            }
-            list_col = list_col.child(jobs_tail(
-                state,
-                jobs.rows.len(),
-                kit,
-                preferences,
-                pointer_ref,
-            ));
-        }
-    }
-    if show_detail {
-        if narrow && state.backend.selected_job.is_some() {
-            detail_col = detail_col.child(
-                ActionButton::new("Back to jobs")
-                    .key("jobs-back-to-list")
-                    .finish(MetalFinish::Gunmetal)
-                    .on_press(|state: &mut State| {
-                        state.backend.selected_job = None;
-                        state.backend.detail = Load::Idle;
-                    })
-                    .build(kit, preferences, pointer_ref),
+                    )),
             );
-        }
-        if let Some(message) = list_load_or_skeleton(
-            &state.backend.detail,
-            "Select a job to view its safe operational summaries.",
-            ui_components::skeleton_job_detail(preferences, kit),
-            preferences,
-            kit,
-        ) {
-            detail_col = detail_col.child(message);
-        }
-    }
-    if show_detail {
-        if let Load::Ready(detail) = &state.backend.detail {
-            let detail_title = if detail.job.title.is_empty() {
-                detail.job.operation.clone()
+            // One status strip with one key. Its title follows the job and the live toggle, never
+            // the individual request, so follow polls do not swap text or resize the section.
+            let job_active = crate::backend::job_is_active(&detail.job.state)
+                && state.scoped_logs.status != LogStatus::Unavailable;
+            let strip = if job_active && state.scoped_logs.following {
+                Some(("Live", format!("Worker: {worker_summary}"), tone))
+            } else if job_active {
+                Some((
+                    "Job active",
+                    format!("Phase: {worker_summary}"),
+                    StatusTone::Info,
+                ))
+            } else if state.scoped_logs.status == LogStatus::Loading {
+                Some((
+                    "Reading summaries",
+                    format!("Worker: {worker_summary}"),
+                    StatusTone::Info,
+                ))
             } else {
-                detail.job.title.clone()
+                None
             };
-            let detail_id = detail.job.id.clone();
-            let tone = state_tone(&detail.job.state);
-            let error_summary = job_error_summary(&detail.job);
-            let mut details = rune::col().gap(10.0).child(ui_components::section_header(
-                &icons::JOBS,
-                detail_title.clone(),
-                Some(&format!(
-                    "{} · {} · {}",
-                    detail.job.id, detail.job.state, detail.job.phase
-                )),
-                Some(ui_components::status_pill(
-                    detail.job.state.clone(),
-                    None,
-                    tone,
+            if let Some((strip_title, strip_detail, strip_tone)) = strip {
+                details = details.child(ui_components::async_status_strip(
+                    "logs-status",
+                    strip_title,
+                    strip_detail,
+                    true,
+                    strip_tone,
+                    preferences,
                     kit,
-                )),
-                Some(
-                    ActionButton::new("Pop out summary")
-                        .finish(MetalFinish::ObsidianPill)
-                        .on_press(move |state: &mut State| {
-                            state.selected_job_id = Some(detail_id.clone());
-                        })
-                        .build(kit, preferences, pointer_ref),
-                ),
-                kit,
-            ));
-            if let Some((done, total)) = detail
-                .job
-                .progress_done
-                .zip(detail.job.progress_total)
-                .filter(|(done, total)| *done >= 0 && *total > 0)
-            {
-                let frac = (done.min(total) as f32 / total as f32).clamp(0.0, 1.0);
-                let prefix = if detail.job.phase.is_empty() {
-                    "Progress"
-                } else {
-                    detail.job.phase.as_str()
-                };
-                details = details.child(
-                    Progress::new(Some(frac))
-                        .label(format!("{prefix} · {done} / {total}"))
-                        .show_value()
-                        .build(kit)
-                        .w_full(),
-                );
-            } else {
-                let phase = detail.job.phase.trim();
-                let known_done = detail.job.progress_done.filter(|done| *done >= 0);
-                let progress_label = match (phase.is_empty(), known_done) {
-                    (false, Some(done)) => format!("{phase} · {done} processed"),
-                    (true, Some(done)) => format!("{done} processed"),
-                    (false, None) => format!("Phase: {phase}"),
-                    (true, None) => detail.job.state.clone(),
-                };
-                if crate::backend::job_is_active(&detail.job.state)
-                    || known_done.is_some()
-                    || !phase.is_empty()
+                ));
+            }
+            if let Some(message) = &state.scoped_logs.message {
+                details = details.child(line(message.clone(), kit).role("status"));
+                if !state.scoped_logs.busy()
+                    && matches!(
+                        state.scoped_logs.status,
+                        LogStatus::Unavailable | LogStatus::RestartRequired
+                    )
                 {
-                    details = details.child(quiet(progress_label, kit).role("status"));
+                    details = details.child(
+                        ActionButton::new("Refresh logs")
+                            .finish(MetalFinish::ObsidianPill)
+                            .on_press(|state: &mut State| state.refresh_operational_logs())
+                            .build(kit, preferences, pointer_ref),
+                    );
                 }
             }
-            if !detail.private_details_available
-                || !detail.job.private_details_available
-                || detail.job.status_only
-            {
-                details = details.child(quiet(
-                    "Private details and logs are unavailable for this shared job.",
-                    kit,
-                ));
-            } else {
-                if !error_summary.is_empty() {
-                    details = details.child(line(error_summary, kit).role("alert"));
-                }
-                details = details.children(crate::activity_triage::actions(
-                    state,
-                    crate::activity_triage::Anchor::Job,
-                    kit,
-                    preferences,
-                ));
-                if detail.job.state == "failed" || detail.job.can_retry {
-                    let retry_reason = state.job_action_disabled_reason(JobAction::Retry);
-                    let retry_busy = matches!(state.job_actions.response, Load::Loading);
-                    details = details.child(
-                        rune::row().w_full().center_y().gap(8.0).child(
-                            ActionButton::new("Retry job")
-                                .key("job-retry-preview")
-                                .icon(&icons::REFRESH)
-                                .finish(MetalFinish::GoldCta)
-                                .status(
-                                    if retry_busy {
-                                        "Retrying…"
-                                    } else if retry_reason.is_none() {
-                                        "Ready"
-                                    } else {
-                                        "Unavailable"
-                                    },
-                                    if retry_busy {
-                                        StatusTone::Accent
-                                    } else if retry_reason.is_none() {
-                                        StatusTone::Ok
-                                    } else {
-                                        StatusTone::Warn
-                                    },
-                                )
-                                .busy(retry_busy)
-                                .disabled(retry_reason.is_some())
-                                .on_press(|state: &mut State| {
-                                    state.preview_job_action(JobAction::Retry);
-                                })
-                                .build(kit, preferences, pointer_ref),
-                        ),
-                    );
-                    if let Some(reason) = retry_reason {
-                        details = details.child(quiet(reason, kit));
+            // A read that already resolved stays resolved while a follow or older read runs.
+            let resolved = matches!(
+                state.scoped_logs.status,
+                LogStatus::Ready | LogStatus::DisplayLimit
+            );
+            if state.scoped_logs.rows.is_empty() && (!state.scoped_logs.busy() || resolved) {
+                // Three different states: not read yet, read with no events, and a failed read.
+                // A failed read shows its own message and Refresh button above.
+                match state.scoped_logs.status {
+                    LogStatus::Idle => {
+                        details =
+                            details.child(quiet("Logs for this job have not been read yet.", kit));
                     }
-                }
-                if let Some(confirmation) =
-                    state.job_actions.confirmation.as_ref().filter(|item| {
-                        item.action == JobAction::Retry && item.job_id == detail.job.id
-                    })
-                {
-                    let confirming = matches!(state.job_actions.response, Load::Loading);
-                    let confirm_button = ActionButton::new("Confirm retry")
-                        .key("job-action-confirm")
-                        .icon(&icons::SHIELD_CHECK)
-                        .finish(MetalFinish::FracturedConfirm)
-                        .status(
-                            if confirming { "Queuing…" } else { "Ready" },
-                            if confirming {
-                                StatusTone::Accent
-                            } else {
-                                StatusTone::Ok
-                            },
-                        )
-                        .busy(confirming)
-                        .disabled(confirming)
-                        .on_press(|state: &mut State| state.confirm_job_action())
-                        .build(kit, preferences, pointer_ref);
-                    let cancel_button = ActionButton::new("Keep current job state")
-                        .finish(MetalFinish::Gunmetal)
-                        .on_press(|state: &mut State| {
-                            state.job_actions.confirmation = None;
-                        })
-                        .build(kit, preferences, pointer_ref);
-                    let action_buttons = if detail_width < 420.0 {
-                        rune::col()
-                            .gap(8.0)
-                            .child(confirm_button)
-                            .child(cancel_button)
-                    } else {
-                        rune::row()
-                            .gap(8.0)
-                            .child(confirm_button)
-                            .child(cancel_button)
-                    };
-                    details = details.child(card(
-                        state,
-                        preferences,
-                        StatusTone::Accent,
-                        rune::col()
-                            .key("job-action-confirmation")
-                            .gap(8.0)
-                            .child(heading(
-                                format!("Confirm retry for {}", confirmation.title),
-                                kit,
-                            ))
-                            .child(quiet(
-                                format!(
-                                    "{} · re-queues the failed task with a fresh request identity.",
-                                    confirmation.job_id
-                                ),
-                                kit,
-                            ))
-                            .child(action_buttons),
-                    ));
-                }
-                let matching_attempt =
-                    state.job_actions.attempt.as_ref().is_some_and(|(item, _)| {
-                        item.action == JobAction::Retry && item.job_id == detail.job.id
-                    });
-                match &state.job_actions.response {
-                    Load::Loading if matching_attempt => {
-                        details = details.child(ui_components::async_status_strip(
-                            "job-action-loading",
-                            "Submitting retry…",
-                            "Sending scoped retry trigger to backend gateway",
-                            true,
-                            StatusTone::Accent,
-                            preferences,
+                    LogStatus::Ready | LogStatus::DisplayLimit => {
+                        details = details.child(quiet(
+                            "No safe operational summaries are available for this job.",
                             kit,
                         ));
                     }
-                    Load::Ready(receipt)
-                        if receipt.receipt.job_id == detail.job.id
-                            && receipt.receipt.action == JobAction::Retry =>
-                    {
-                        details = details.child(
-                            ui_components::async_status_strip(
-                                "job-action-receipt",
-                                "Retry queued",
-                                format!(
-                                    "Action {} · state {}",
-                                    receipt.receipt.action_id, receipt.receipt.state
-                                ),
-                                false,
-                                StatusTone::Ok,
-                                preferences,
-                                kit,
-                            )
-                            .role("status"),
-                        );
-                    }
-                    Load::Failed(error) if matching_attempt => {
-                        details = details.child(line(error.clone(), kit).role("alert")).child(
-                            ActionButton::new("Retry exact request")
-                                .key("job-action-retry-exact")
-                                .icon(&icons::REFRESH)
-                                .finish(MetalFinish::GoldCta)
-                                .on_press(|state: &mut State| state.retry_exact_job_action())
-                                .build(kit, preferences, pointer_ref),
-                        );
-                    }
-                    Load::Failed(error) if state.job_actions.attempt.is_none() => {
-                        details = details.child(line(error.clone(), kit).role("alert"));
-                    }
                     _ => {}
                 }
-                if let Some(message) = &state.job_actions.message {
-                    details = details.child(line(message.clone(), kit).role("status"));
-                }
-                if let Some(result) = &detail.maintenance_result {
-                    details = details.child(result.view(kit));
-                }
-                let worker_summary = job_worker_sync_summary(&detail.job);
-                details = details.child(
-                    rune::row()
-                        .w_full()
-                        .center_y()
-                        .gap(8.0)
-                        .child(heading("Operational logs", kit).grow(1.0))
-                        .child(ui_components::status_pill(
-                            if worker_summary.is_empty() {
-                                detail.job.state.clone()
-                            } else {
-                                worker_summary.clone()
-                            },
-                            None,
-                            tone,
-                            kit,
-                        )),
-                );
-                // One status strip with one key. Its title follows the job and the live toggle, never
-                // the individual request, so follow polls do not swap text or resize the section.
-                let job_active = crate::backend::job_is_active(&detail.job.state)
-                    && state.scoped_logs.status != LogStatus::Unavailable;
-                let strip = if state.scoped_logs.following {
-                    Some(("Live", format!("Worker: {worker_summary}"), tone))
-                } else if job_active {
-                    Some((
-                        "Job active",
-                        format!("Phase: {worker_summary}"),
-                        StatusTone::Info,
-                    ))
-                } else if state.scoped_logs.busy() {
-                    Some((
-                        "Reading summaries",
-                        format!("Worker: {worker_summary}"),
-                        StatusTone::Info,
-                    ))
-                } else {
-                    None
-                };
-                if let Some((strip_title, strip_detail, strip_tone)) = strip {
-                    details = details.child(ui_components::async_status_strip(
-                        "logs-status",
-                        strip_title,
-                        strip_detail,
-                        true,
-                        strip_tone,
-                        preferences,
-                        kit,
-                    ));
-                }
-                if let Some(message) = &state.scoped_logs.message {
-                    details = details.child(line(message.clone(), kit).role("status"));
-                    if !state.scoped_logs.busy()
-                        && matches!(
-                            state.scoped_logs.status,
-                            LogStatus::Unavailable | LogStatus::RestartRequired
-                        )
-                    {
-                        details = details.child(
-                            ActionButton::new("Refresh logs")
-                                .finish(MetalFinish::ObsidianPill)
-                                .on_press(|state: &mut State| state.refresh_operational_logs())
-                                .build(kit, preferences, pointer_ref),
-                        );
-                    }
-                }
-                // A read that already resolved stays resolved while a follow or older read runs.
-                let resolved = matches!(
+            }
+            if state.scoped_logs.rows.is_empty() && state.scoped_logs.busy() && !resolved {
+                details = details.child(ui_components::skeleton_log_table(preferences, kit));
+            } else if !state.scoped_logs.rows.is_empty()
+                || matches!(
                     state.scoped_logs.status,
                     LogStatus::Ready | LogStatus::DisplayLimit
-                );
-                if state.scoped_logs.rows.is_empty() && (!state.scoped_logs.busy() || resolved) {
-                    // Three different states: not read yet, read with no events, and a failed read.
-                    // A failed read shows its own message and Refresh button above.
-                    match state.scoped_logs.status {
-                        LogStatus::Idle => {
-                            details = details
-                                .child(quiet("Logs for this job have not been read yet.", kit));
-                        }
-                        LogStatus::Ready | LogStatus::DisplayLimit => {
-                            details = details.child(quiet(
-                                "No safe operational summaries are available for this job.",
-                                kit,
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-                if state.scoped_logs.rows.is_empty() && state.scoped_logs.busy() && !resolved {
-                    details = details.child(ui_components::skeleton_log_table(preferences, kit));
-                } else if !state.scoped_logs.rows.is_empty()
-                    || matches!(
-                        state.scoped_logs.status,
-                        LogStatus::Ready | LogStatus::DisplayLimit
-                    )
-                {
-                    details = details.child(safe_log_table(
-                        state,
-                        kit,
-                        detail_width,
-                        preferences,
-                        pointer_ref,
-                    ));
-                    if state.scoped_logs.can_load_older() {
-                        details = details.child(
-                            ActionButton::new("Load older summaries")
-                                .key("logs-load-older")
-                                .finish(MetalFinish::ObsidianPill)
-                                .on_press_tx(|state: &mut State, tx| {
-                                    state.log_event(crate::logs::LogEvent::Older, tx)
-                                })
-                                .build(kit, preferences, pointer_ref),
-                        );
-                        if state.scoped_logs.auto_load_older() {
-                            // A one-pixel sentinel, new for every loaded count: coming on screen
-                            // loads one older page, and a page that leaves it on screen loads
-                            // another.
-                            details = details.child(
-                                rune::el()
-                                    .key(format!("logs-near-end-{}", state.scoped_logs.rows.len()))
-                                    .size(1.0, 1.0)
-                                    .a11y_hidden()
-                                    .on_visible(|state: &mut State, on_screen, tx| {
-                                        state.logs_near_end(on_screen, tx)
-                                    }),
-                            );
-                        }
-                    }
-                }
-            }
-            detail_col = detail_col.child(card(state, preferences, tone, details));
-
-            if state.selected_job_id.as_deref() == Some(detail.job.id.as_str()) {
-                let modal_body = rune::col()
-                    .gap(8.0)
-                    .child(line(format!("State: {}", detail.job.state), kit))
-                    .child(line(format!("Phase: {}", detail.job.phase), kit))
-                    .children(
-                        (!error_summary.is_empty()).then(|| line(error_summary, kit).role("alert")),
-                    );
-                ui_components::modal_prompt(
-                    "job-operational-summary",
-                    detail_title,
-                    format!("Job {}", detail.job.id),
-                    true,
-                    460.0,
-                    |state: &mut State| state.selected_job_id = None,
-                    modal_body,
-                    Some(
-                        ActionButton::new("Close")
-                            .finish(MetalFinish::GoldCta)
-                            .on_press(|state: &mut State| state.selected_job_id = None)
-                            .build(kit, preferences, pointer_ref),
-                    ),
+                )
+            {
+                details = details.child(safe_log_table(
+                    state,
                     kit,
-                    layers,
-                );
+                    detail_width,
+                    preferences,
+                    pointer_ref,
+                ));
+                if state.scoped_logs.can_load_older() {
+                    details = details.child(
+                        ActionButton::new("Load older summaries")
+                            .key("logs-load-older")
+                            .finish(MetalFinish::ObsidianPill)
+                            .on_press_tx(|state: &mut State, tx| {
+                                state.log_event(crate::logs::LogEvent::Older, tx)
+                            })
+                            .build(kit, preferences, pointer_ref),
+                    );
+                    if state.scoped_logs.auto_load_older() {
+                        // A one-pixel sentinel, new for every loaded count: coming on screen
+                        // loads one older page, and a page that leaves it on screen loads
+                        // another.
+                        details = details.child(
+                            rune::el()
+                                .key(format!("logs-near-end-{}", state.scoped_logs.rows.len()))
+                                .size(1.0, 1.0)
+                                .a11y_hidden()
+                                .on_visible(|state: &mut State, on_screen, tx| {
+                                    state.logs_near_end(on_screen, tx)
+                                }),
+                        );
+                    }
+                }
             }
         }
+        detail_col = detail_col.child(card(state, preferences, tone, details));
     }
-    body = if side_by_side && show_list && show_detail {
-        // A paged list beside the detail keeps the selection in view while it refreshes.
-        body.child(
-            rune::row()
-                .key("jobs-workbench")
-                .w_full()
-                .gap(JOBS_GAP)
-                .child(list_col.w(JOBS_LIST_WIDTH).shrink())
-                .child(detail_col.grow(1.0).min_w(0.0)),
-        )
-    } else {
-        body.child(list_col).child(detail_col)
-    };
-    scroll(body, "jobs-body")
+    rune::col()
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .child(rune::row().w_full().px(20.0).pt(12.0).child(back))
+        .child(scroll(detail_col, "jobs-logs-body"))
 }
 
 /// The newest log row is at the top of the table. Its drawn position against the table's own
@@ -2657,8 +2027,12 @@ pub(crate) fn maintenance(
         Load::Loading => {
             body = body.child(ui_components::async_status_strip(
                 "maintenance-upload-loading",
-                "Streaming dataset",
-                "Checking CSV columns locally, then streaming to the backend…",
+                "Validating actor CSV",
+                if state.maintenance.github_downloading {
+                    "Downloading the selected CSV from GitHub…"
+                } else {
+                    "Checking the CSV with the backend…"
+                },
                 true,
                 StatusTone::Accent,
                 preferences,
@@ -2667,19 +2041,15 @@ pub(crate) fn maintenance(
         }
         Load::Failed(error) => body = body.child(line(error.clone(), kit).role("alert")),
         Load::Ready(upload) => {
-            let name = state
-                .maintenance
-                .local_dataset
-                .as_ref()
-                .and_then(|selection| selection.path.file_name())
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Selected CSV".into());
-            body = body.child(ui_components::status_pill(
-                format!("{name} · {} validated bytes", upload.dataset.size_bytes),
-                Some(&icons::SEED),
-                StatusTone::Ok,
-                kit,
-            ));
+            body = body.child(
+                ui_components::status_pill(
+                    state.maintenance.dataset_validation_label(upload),
+                    Some(&icons::SEED),
+                    StatusTone::Ok,
+                    kit,
+                )
+                .key("maintenance-dataset-validated"),
+            );
         }
         _ => {}
     }
@@ -2713,47 +2083,88 @@ pub(crate) fn maintenance(
             MaintenanceOperation::SeedActors => Some(DatasetKind::ActorCatalog),
             _ => None,
         };
-        let action_label = match dataset {
-            Some(DatasetKind::ActorCatalog) if cfg!(target_os = "linux") => "Enter actor CSV path",
-            _ => label,
+        let action_label = if dataset.is_some() {
+            "Local CSV"
+        } else {
+            label
         };
-        let mut operation_card = rune::col().padding(10.0).gap(8.0).child(
-            rune::row()
-                .w_full()
-                .center_y()
-                .gap(8.0)
-                .child(
-                    rune::icon(glyph, 15.0)
-                        .color(theme::hex(if focused {
-                            theme::ACCENT_HOVER
+        let mut actions = rune::row().w_full().center_y().flex_wrap().gap(8.0).child(
+            ActionButton::new(action_label)
+                .key(key)
+                .icon(glyph)
+                .finish(finish)
+                .status(preflight_label, preflight_tone)
+                .busy(button_busy)
+                .disabled(reason.is_some())
+                .on_press_tx(move |state: &mut State, tx| {
+                    state.seed_stage = stage_match;
+                    if let Some(kind) = dataset {
+                        state.maintenance.github_csv_url = None;
+                        if cfg!(target_os = "linux") {
+                            state.enter_csv_path(kind, tx);
                         } else {
-                            theme::TEXT_MUTED
-                        }))
-                        .a11y_hidden(),
-                )
-                .child(heading(label, kit))
-                .child(rune::spacer())
-                .child(
-                    ActionButton::new(action_label)
-                        .key(key)
-                        .icon(glyph)
-                        .finish(finish)
-                        .status(preflight_label, preflight_tone)
-                        .busy(button_busy)
+                            state.choose_dataset(kind, tx);
+                        }
+                    } else {
+                        state.preview_maintenance(operation);
+                    }
+                })
+                .build(kit, preferences, pointer_ref),
+        );
+        if dataset.is_some() {
+            actions = actions.child(
+                ActionButton::new("Bundled CSV")
+                    .key(maintenance::BUNDLED_CSV_KEY)
+                    .finish(MetalFinish::Gunmetal)
+                    .disabled(reason.is_some())
+                    .on_press(|state: &mut State| {
+                        state.seed_stage = SeedStage::Seed;
+                        state.stage_bundled_actor_csv();
+                    })
+                    .build(kit, preferences, pointer_ref),
+            );
+            if cfg!(any(test, feature = "native-github-dataset")) {
+                actions = actions.child(
+                    ActionButton::new("GitHub CSV")
+                        .key(maintenance::GITHUB_CSV_KEY)
+                        .finish(MetalFinish::Gunmetal)
                         .disabled(reason.is_some())
-                        .on_press_tx(move |state: &mut State, tx| {
-                            state.seed_stage = stage_match;
-                            match dataset {
-                                Some(kind) if cfg!(target_os = "linux") => {
-                                    state.enter_csv_path(kind, tx);
-                                }
-                                Some(kind) => state.choose_dataset(kind, tx),
-                                None => state.preview_maintenance(operation),
-                            }
+                        .on_press_tx(|state: &mut State, tx| {
+                            state.seed_stage = SeedStage::Seed;
+                            state.open_github_actor_csv(tx);
                         })
                         .build(kit, preferences, pointer_ref),
-                ),
-        );
+                );
+            }
+        }
+        let mut operation_card = rune::col()
+            .padding(10.0)
+            .gap(8.0)
+            .child(
+                rune::row()
+                    .w_full()
+                    .center_y()
+                    .gap(8.0)
+                    .child(
+                        rune::icon(glyph, 15.0)
+                            .color(theme::hex(if focused {
+                                theme::ACCENT_HOVER
+                            } else {
+                                theme::TEXT_MUTED
+                            }))
+                            .a11y_hidden(),
+                    )
+                    .child(heading(label, kit)),
+            )
+            .child(actions);
+        if dataset.is_some() && focused {
+            operation_card = operation_card.children(github_actor_csv_form(
+                state,
+                reason.is_some(),
+                preferences,
+                kit,
+            ));
+        }
         if let Some(reason) = reason {
             operation_card = operation_card.child(quiet(reason, kit));
         } else if focused {
@@ -2796,10 +2207,19 @@ pub(crate) fn maintenance(
             maintenance_confirmation_content(state, confirmation, preferences, kit),
         ));
     }
-    if !matches!(state.maintenance.receipt, Load::Idle) {
-        if let Some(message) = load_message(&state.maintenance.receipt, "", preferences, kit) {
-            body = body.child(message);
-        }
+    if let Some(message) = load_view(
+        &state.maintenance.receipt,
+        "",
+        || {
+            receipt_placeholder(
+                "maintenance-receipt-loading",
+                "Waiting for maintenance receipt",
+                preferences,
+            )
+        },
+        kit,
+    ) {
+        body = body.child(message);
     }
     if let Some(unresolved) = unresolved_actor_reindex_banner(state, preferences, kit) {
         body = body.child(unresolved);
@@ -2809,6 +2229,72 @@ pub(crate) fn maintenance(
     }
     let _ = layers;
     body
+}
+
+fn github_actor_csv_form(
+    state: &State,
+    blocked: bool,
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> Option<El> {
+    if !cfg!(any(test, feature = "native-github-dataset")) {
+        return None;
+    }
+    let url = state.maintenance.github_csv_url.as_ref()?;
+    let downloading = matches!(state.maintenance.upload, Load::Loading);
+    Some(
+        rune::col()
+            .w_full()
+            .gap(8.0)
+            .child(
+                TextInput::new(url)
+                    .label("GitHub CSV URL")
+                    .placeholder("https://raw.githubusercontent.com/…")
+                    .width(None)
+                    .disabled(downloading)
+                    .on_edit(|state: &mut State| {
+                        state
+                            .maintenance
+                            .github_csv_url
+                            .as_mut()
+                            .expect("GitHub URL is visible")
+                    })
+                    .on_change(|state: &mut State, _| state.github_actor_csv_edited())
+                    .build(kit)
+                    .key(maintenance::GITHUB_CSV_URL_KEY),
+            )
+            .child(
+                rune::row()
+                    .gap(8.0)
+                    .flex_wrap()
+                    .child(
+                        ActionButton::new("Download & validate")
+                            .key("maintenance-github-csv-validate")
+                            .finish(MetalFinish::GoldCta)
+                            .disabled(blocked || downloading || url.text.trim().is_empty())
+                            .on_press(|state: &mut State| {
+                                if let Some(url) = &state.maintenance.github_csv_url {
+                                    state.download_github_dataset(
+                                        DatasetKind::ActorCatalog,
+                                        url.text.clone(),
+                                    );
+                                }
+                            })
+                            .build(kit, preferences, None),
+                    )
+                    .child(
+                        ActionButton::new("Close")
+                            .key("maintenance-github-csv-close")
+                            .finish(MetalFinish::Gunmetal)
+                            .on_press_tx(|state: &mut State, tx| {
+                                state.maintenance.github_csv_url = None;
+                                tx.focus(maintenance::GITHUB_CSV_KEY, tx.focus_visible());
+                                tx.scroll_into_view(maintenance::GITHUB_CSV_KEY);
+                            })
+                            .build(kit, preferences, None),
+                    ),
+            ),
+    )
 }
 
 pub(crate) fn csv_path_prompt(
@@ -3218,71 +2704,6 @@ pub(crate) fn unresolved_actor_reindex_banner(
                     ),
             ),
     ))
-}
-
-/// The one footer under the cycle history: a count, then a single local control for continuous
-/// loading, as under the Jobs list. Rows and selection stay put while it changes.
-fn cycles_tail(
-    state: &State,
-    loaded: usize,
-    kit: &Kit,
-    preferences: ViewPreferences,
-    pointer_ref: Option<&rune::Live<[f32; 2]>>,
-) -> El {
-    let more = |label: &'static str| {
-        ActionButton::new(label)
-            .key("cycles-load-more")
-            .finish(MetalFinish::ObsidianPill)
-            .on_press(|state: &mut State| state.more_cycles())
-    };
-    let mut footer = rune::row()
-        .key("cycles-tail")
-        .w_full()
-        .gap(8.0)
-        .center_y()
-        .child(quiet(
-            format!(
-                "{loaded} {}",
-                if loaded == 1 {
-                    "cycle loaded"
-                } else {
-                    "cycles loaded"
-                }
-            ),
-            kit,
-        ));
-    if state.cycles.loading_more() {
-        footer = footer.child(
-            more("Loading more")
-                .busy(true)
-                .build(kit, preferences, pointer_ref),
-        );
-    } else if state.cycles_can_load_more() {
-        let label = if state.cycles.read_error.is_some() {
-            "Retry"
-        } else {
-            "Load more"
-        };
-        footer = footer.child(more(label).build(kit, preferences, pointer_ref));
-        if state.cycles.read_error.is_none() {
-            // A one-pixel sentinel, new for every loaded count: coming on screen loads the next
-            // segment, and a segment that leaves it on screen loads another.
-            footer = footer.child(
-                rune::el()
-                    .key(format!("cycles-near-end-{loaded}"))
-                    .size(1.0, 1.0)
-                    .a11y_hidden()
-                    .on_visible(|state: &mut State, on_screen, _| state.cycles_near_end(on_screen)),
-            );
-        }
-    } else if matches!(&state.cycles.history, Load::Ready(history) if history.next_cursor.is_some())
-    {
-        footer = footer.child(quiet(
-            "View limit reached. Newer cycles load as they arrive.",
-            kit,
-        ));
-    }
-    footer
 }
 
 /// The one footer under the Jobs list: a count, then a single local control for continuous

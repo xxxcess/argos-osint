@@ -1,5 +1,0 @@
-{
-  "events": [
-    { "t": 0.1, "type": "click", "key": "gateway-setup-done" }
-  ]
-}

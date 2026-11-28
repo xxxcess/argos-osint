@@ -17,11 +17,11 @@
 <body>
 <main>
   <h1>Inbox prompt flow</h1>
-  <p>The Embedded companion supplies fresh evidence. It answers exact facts directly and queues model-assisted turns.</p>
+  <p>The Embedded companion freezes authorized evidence, plans a response and verifies the generator's reply before publishing it to Inbox.</p>
   <figure tabindex="0" aria-label="Scrollable prompt flow diagram">
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 896" role="img" aria-labelledby="inbox-prompt-flow-title inbox-prompt-flow-desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 848 800" role="img" aria-labelledby="inbox-prompt-flow-title inbox-prompt-flow-desc">
   <title id="inbox-prompt-flow-title">Inbox prompt flow</title>
-  <desc id="inbox-prompt-flow-desc">Rune sends a registered question or a Jobs or Inbox activity lookup through the Embedded companion’s private Unix socket. Admission checks permissions and builds a fresh workstation snapshot and up to two prior exchanges. Explicit operational questions are answered directly from the snapshot. Broad or conversational turns use a durable queue and one sandboxed Rust-BERT generator with cached incremental decoding. Provisional chunks travel back by cursor. The coordinator checks operational facts and persists validated final text and timestamped citations. Inbox replaces its draft with the canonical reply and shows the model context dial.</desc>
+  <desc id="inbox-prompt-flow-desc">The native composer submits a question through the Embedded companion's private Unix socket. Admission requires a ready generator, resolves the authorized focus and freezes fresh or recorded observations. A separate local journal supplies bounded historical evidence. The leased executor publishes Working and Thinking, then saves the selected plan and its instruction. During Writing, the negotiated generator uses approved options and can return provisional text. Publication verifies the reply under the active lease and revisions. Inbox recovers stages and replies by event cursor.</desc>
   <style>
     text{font-family:Geist,Arial,sans-serif;fill:#242424}
     .label{font-size:22px;font-weight:600}
@@ -36,72 +36,65 @@
       <path d="M 0 0 L 10 5 L 0 10 Z" fill="#555"/>
     </marker>
   </defs>
-  <rect width="1120" height="896" fill="#fff"/>
+  <rect width="848" height="800" fill="#fff"/>
 
   <g class="wire">
-    <path d="M 560 88 V 124"/>
-    <path d="M 560 212 V 248"/>
-    <path d="M 420 360 V 372 H 304 V 384"/>
-    <path d="M 700 360 V 372 H 816 V 384"/>
-    <path d="M 304 472 V 644"/>
-    <path d="M 816 472 V 508"/>
-    <path d="M 816 608 V 644"/>
-    <path d="M 560 752 V 788"/>
+    <path d="M 556 84 V 116"/>
+    <path d="M 264 172 H 288"/>
+    <path d="M 556 224 V 260"/>
+    <path d="M 556 364 V 400"/>
+    <path d="M 556 508 V 544"/>
+    <path d="M 556 636 V 672"/>
   </g>
 
   <g data-card="true">
-    <rect x="360" y="24" width="400" height="64" rx="6" class="node"/>
-    <text x="380" y="52" class="label">Fleetworks Desktop Jobs and Inbox</text>
-    <text x="380" y="76" class="note">A composer turn or typed activity lookup</text>
-  </g>
-  <g data-card="true">
-    <rect x="382" y="124" width="356" height="88" rx="6" class="node"/>
-    <text x="402" y="152" class="label">Embedded companion</text>
-    <text x="402" y="176" class="note">Inherited private Unix socket</text>
-    <text x="402" y="200" class="note">Authenticated framed IPC</text>
+    <rect x="288" y="24" width="536" height="60" rx="6" class="node"/>
+    <text x="308" y="52" class="label">Fleetworks Desktop</text>
+    <text x="308" y="74" class="note">Question submitted by the registered workstation</text>
   </g>
 
   <g data-card="true">
-    <rect x="252" y="248" width="616" height="112" rx="6" class="focus"/>
-    <text x="272" y="280" class="label">Embedded Assistant admission</text>
-    <text x="272" y="304" class="note">Check registration, source visibility and route requirements</text>
-    <text x="272" y="326" class="note">Freeze fresh, scoped observations relevant to the question</text>
-    <text x="272" y="348" class="note">Follow-ups resolve the subject and take fresh observations</text>
+    <rect x="16" y="116" width="248" height="108" rx="6" class="node"/>
+    <text x="32" y="144" class="label">Observation journal</text>
+    <text x="32" y="168" class="note">Local SQLite history</text>
+    <text x="32" y="190" class="note">Scoped events with original</text>
+    <text x="32" y="212" class="note">times and coverage</text>
+  </g>
+  <g data-card="true">
+    <rect x="288" y="116" width="536" height="108" rx="6" class="focus"/>
+    <text x="308" y="144" class="label">Embedded companion admission</text>
+    <text x="308" y="168" class="note">Authorize private IPC and require a ready generator</text>
+    <text x="308" y="190" class="note">Resolve focus with bounded local NLP and routing</text>
+    <text x="308" y="212" class="note">Freeze fresh or historical evidence for the turn</text>
   </g>
 
   <g data-card="true">
-    <rect x="80" y="384" width="448" height="88" rx="6" class="node"/>
-    <text x="100" y="412" class="label">Immediate answer</text>
-    <text x="100" y="436" class="note">Scoped counts and exact activity links</text>
-    <text x="100" y="460" class="note">Read-only lookup creates no turn or job</text>
+    <rect x="288" y="260" width="536" height="104" rx="6" class="focus"/>
+    <text x="308" y="288" class="label">Leased response planning</text>
+    <text x="308" y="312" class="note">Working while the executor prepares the turn</text>
+    <text x="308" y="334" class="note">Thinking while rules select evidence and guidance</text>
+    <text x="308" y="356" class="note">Save one accepted plan and its instruction</text>
   </g>
   <g data-card="true">
-    <rect x="592" y="384" width="448" height="88" rx="6" class="node"/>
-    <text x="612" y="412" class="label">Inference queue</text>
-    <text x="612" y="436" class="note">The QA executor claims the registered turn</text>
-    <text x="612" y="460" class="note">Authorized facts and up to two exchanges</text>
-  </g>
-  <g data-card="true">
-    <rect x="592" y="508" width="448" height="100" rx="6" class="isolated"/>
-    <text x="612" y="536" class="label">Sandboxed Rust-BERT worker</text>
-    <text x="612" y="560" class="note">FLAN-T5 Base or Small</text>
-    <text x="612" y="580" class="note">Incremental decoding with cached attention</text>
-    <text x="612" y="600" class="note">512 input tokens, up to 128 output</text>
+    <rect x="288" y="400" width="536" height="108" rx="6" class="isolated"/>
+    <text x="308" y="428" class="label">Writing in the sandboxed generator</text>
+    <text x="308" y="452" class="note">FLAN-T5 or GPT-2 uses approved response options</text>
+    <text x="308" y="474" class="note">Negotiated tokenizer window and plan fields</text>
+    <text x="308" y="496" class="note">Provisional text streams as ordered draft events</text>
   </g>
 
   <g data-card="true">
-    <rect x="192" y="644" width="736" height="108" rx="6" class="focus"/>
-    <text x="212" y="672" class="label">Validate and commit</text>
-    <text x="212" y="696" class="note">Verify cited spans and preserve source IDs and original observation times</text>
-    <text x="212" y="720" class="note">Use eligible fresh readiness facts when a summary returns no usable selection</text>
-    <text x="212" y="744" class="note">Publish provisional events and commit the verified reply</text>
+    <rect x="288" y="544" width="536" height="92" rx="6" class="node"/>
+    <text x="308" y="572" class="label">Verify and publish</text>
+    <text x="308" y="596" class="note">Check lease, revisions, exact facts and citations</text>
+    <text x="308" y="620" class="note">Commit the verified reply or terminal status</text>
   </g>
 
   <g data-card="true">
-    <rect x="240" y="788" width="640" height="84" rx="6" class="node"/>
-    <text x="260" y="816" class="label">Inbox transcript or inline card</text>
-    <text x="260" y="840" class="note">Recover the canonical turn or resume from its event cursor</text>
-    <text x="260" y="864" class="note">Citations and operator-activated navigation</text>
+    <rect x="288" y="672" width="536" height="100" rx="6" class="node"/>
+    <text x="308" y="700" class="label">Inbox transcript</text>
+    <text x="308" y="724" class="note">Recover stage, draft or final turn by event cursor</text>
+    <text x="308" y="748" class="note">Browse retained exchanges and timestamped sources</text>
   </g>
 </svg>
   </figure>

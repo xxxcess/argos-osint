@@ -1,7 +1,9 @@
 //! Selected native workstation destinations. Topology presentation belongs to Intel Web.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use fleetworks_contracts::capabilities::Capabilities;
-use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use fleetworks_contracts::readiness::ReadinessCheck;
 use fleetworks_contracts::readiness::ReadinessCheckId;
@@ -22,7 +24,6 @@ use crate::accessibility::ViewPreferences;
 use crate::app::DossierFacet;
 use crate::app::Load;
 use crate::app::Page;
-use crate::app::SeedStage;
 use crate::app::State;
 use crate::brain::Association;
 use crate::connection::ConnectionStatus;
@@ -33,6 +34,7 @@ use crate::material;
 use crate::material::MetalFinish;
 use crate::pairing::PairingFailure;
 use crate::pairing::PairingStage;
+use crate::search_catalog::SearchCategory;
 use crate::theme;
 use crate::theme::StatusTone;
 use crate::ui_components;
@@ -92,7 +94,7 @@ pub(crate) fn page(state: &State, cx: &mut Cx<State>, kit: &Kit, layers: &mut Ve
     match state.page {
         Page::Workstation | Page::Workspaces | Page::Profile => workstation(state, cx, kit, layers),
         Page::Brain => brain(state, cx, kit),
-        Page::Seed | Page::Jobs | Page::Atlas | Page::Tools | Page::Models => {
+        Page::Seed | Page::Jobs | Page::Tools | Page::Models => {
             let log_width = cx
                 .layout_size("scoped-logs-table")
                 .map(|size| size[0])
@@ -103,33 +105,6 @@ pub(crate) fn page(state: &State, cx: &mut Cx<State>, kit: &Kit, layers: &mut Ve
                 .unwrap_or(340.0);
             crate::backend_views::page(state, cx, kit, layers, log_width)
         }
-    }
-}
-
-fn connection_status(state: &State) -> String {
-    match &state.connection.status {
-        ConnectionStatus::Disconnected => {
-            if state.is_local_backend() {
-                "Embedded backend is stopped".into()
-            } else {
-                "Distributed gateway is disconnected".into()
-            }
-        }
-        ConnectionStatus::Connecting => {
-            if state.is_local_backend() {
-                "Starting the embedded backend…".into()
-            } else {
-                "Checking distributed gateway authentication and compatibility…".into()
-            }
-        }
-        ConnectionStatus::Connected => {
-            if state.is_local_backend() {
-                "Connected to the embedded backend".into()
-            } else {
-                "Connected to a compatible distributed gateway".into()
-            }
-        }
-        ConnectionStatus::Failed(error) => error.clone(),
     }
 }
 
@@ -216,15 +191,8 @@ fn local_capabilities_summary(
     kit: &Kit,
 ) -> El {
     let assessment = assess_local_capabilities(capabilities);
-    let features_label = if capabilities.features.is_empty() {
-        "none advertised".to_owned()
-    } else {
-        capabilities.features.join(", ")
-    };
-    let build_label = capabilities.build.as_ref().map_or_else(
-        || "unknown build".to_owned(),
-        |build| format!("{} ({})", build.version, build.revision),
-    );
+    let features_label = advertised_features(capabilities);
+    let build_label = backend_build_label(capabilities);
     let mut section = rune::col()
         .key("local-capabilities-card")
         .gap(8.0)
@@ -269,21 +237,46 @@ fn local_capabilities_summary(
                     kit,
                 )),
         );
-    if !assessment.warnings.is_empty() {
-        section = section.child(
-            ui_components::async_status_strip(
-                "local-capability-warnings",
-                "Optional capabilities unavailable",
-                assessment.warnings.join(" "),
-                false,
-                StatusTone::Warn,
-                preferences,
-                kit,
-            )
-            .role("status"),
-        );
-    }
+    section = section.children(local_capability_warnings(
+        &assessment.warnings,
+        preferences,
+        kit,
+    ));
     section
+}
+
+fn advertised_features(capabilities: &Capabilities) -> String {
+    if capabilities.features.is_empty() {
+        "None advertised".to_owned()
+    } else {
+        capabilities.features.join(", ")
+    }
+}
+
+fn backend_build_label(capabilities: &Capabilities) -> String {
+    capabilities.build.as_ref().map_or_else(
+        || "Unknown build".to_owned(),
+        |build| format!("{} ({})", build.version, build.revision),
+    )
+}
+
+fn local_capability_warnings(
+    warnings: &[String],
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> Option<El> {
+    (!warnings.is_empty()).then(|| {
+        ui_components::async_status_strip(
+            "local-capability-warnings",
+            "Optional capabilities unavailable",
+            warnings.join(" "),
+            false,
+            StatusTone::Warn,
+            preferences,
+            kit,
+        )
+        .role("status")
+    })
 }
 
 fn local_runtime_diagnostics(
@@ -475,7 +468,7 @@ fn local_backend_setup_card(
                 preferences,
                 kit,
             ))
-            .child(registration_status(state, kit));
+            .child(registration_status(state, preferences, kit));
         if let Some(capabilities) = &state.connection.capabilities {
             body = body.child(local_capabilities_summary(capabilities, preferences, kit));
         }
@@ -507,33 +500,30 @@ fn local_backend_setup_card(
         }
         actions = actions
             .child(stop_btn)
-            .child(crate::backend_views::switch_to_distributed(
-                state,
-                preferences,
-                kit,
-            ));
+            .child(switch_to_distributed(state, preferences, kit));
         body = body.child(actions);
     } else {
         let connecting = state.connection.status == ConnectionStatus::Connecting;
-        let start_btn = ActionButton::new("Start Embedded Backend")
-            .key("connect-local")
-            .icon(&icons::WORKSTATION)
-            .finish(MetalFinish::GoldCta)
-            .busy(connecting)
-            .disabled(connecting)
-            .on_press(|state: &mut State| state.connect_local())
-            .build(kit, preferences, pointer_ref);
+        let saving_resources = state.resource_save_pending();
+        let start_btn = ActionButton::new(if saving_resources {
+            "Saving resource preferences…"
+        } else {
+            "Start Embedded Backend"
+        })
+        .key("connect-local")
+        .icon(&icons::WORKSTATION)
+        .finish(MetalFinish::GoldCta)
+        .busy(connecting || saving_resources)
+        .disabled(connecting || saving_resources)
+        .on_press(|state: &mut State| state.connect_local())
+        .build(kit, preferences, pointer_ref);
         let actions = if narrow {
             rune::col().w_full().gap(8.0)
         } else {
             rune::row().w_full().gap(8.0)
         }
         .child(start_btn)
-        .child(crate::backend_views::switch_to_distributed(
-            state,
-            preferences,
-            kit,
-        ));
+        .child(switch_to_distributed(state, preferences, kit));
         body = body
             .child(actions)
             .child(binary_strip)
@@ -571,6 +561,16 @@ pub(crate) fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
     )
 }
 
+fn switch_to_distributed(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    ActionButton::new("Switch to Distributed")
+        .key("switch-remote-gateway")
+        .disabled(
+            state.connection.status == ConnectionStatus::Connecting || state.local_backend.stopping,
+        )
+        .on_press_tx(State::open_distributed_setup)
+        .build(kit, preferences, None)
+}
+
 pub(crate) fn setup_gateway_content(
     state: &State,
     kit: &Kit,
@@ -602,7 +602,7 @@ pub(crate) fn setup_gateway_content(
         &icons::KEY,
         "Setup Gateway",
         Some(if state.is_local_backend() {
-            crate::submission::ATLAS_DISTRIBUTED_REQUIREMENT
+            "Start the bundled companion to connect over a private local socket."
         } else if cfg!(target_os = "macos") {
             "Pair once via macOS Keychain. Accepted jobs persist independently."
         } else {
@@ -756,7 +756,7 @@ fn pairing_status(
                 preferences,
                 kit,
             ))
-            .child(registration_status(state, kit))
+            .child(registration_status(state, preferences, kit))
             .child(crate::readiness_cards::setup_section(
                 state,
                 preferences,
@@ -946,7 +946,7 @@ fn pairing_status(
     material::luminous_card(body, card_tone, false, preferences, pointer_ref, shadow_ref)
 }
 
-fn registration_status(state: &State, kit: &Kit) -> El {
+fn registration_status(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
     if !state.connected() {
         return quiet("Connect to a gateway to register this workstation.", kit);
     }
@@ -960,7 +960,12 @@ fn registration_status(state: &State, kit: &Kit) -> El {
         .key("workstation-registered");
     }
     match &state.registration.receipt {
-        Load::Pending | Load::Loading => quiet("Registering this workstation…", kit).role("status"),
+        Load::Pending | Load::Loading => ui_components::skeleton_text_value(
+            "Registering this workstation…",
+            132.0,
+            StatusTone::Info,
+            preferences,
+        ),
         Load::Failed(error) => line(error.clone(), kit).role("alert"),
         _ => quiet(
             "Workstation registration unavailable. Permitted shared backend reads remain usable.",
@@ -969,139 +974,21 @@ fn registration_status(state: &State, kit: &Kit) -> El {
     }
 }
 
-fn workstation_registration_tag(state: &State, kit: &Kit) -> El {
-    let (backend, icon) = if state.is_local_backend() {
-        ("Embedded", &icons::WORKSTATION)
-    } else {
-        ("Distributed", &icons::SERVER)
-    };
-    let registration = if state.connected() {
-        state.registration.context.as_ref()
-    } else {
-        None
-    };
-    let (label, tone) = if let Some(context) = registration {
-        (context.registration_id.as_str(), StatusTone::Ok)
-    } else if state.connected() {
-        match state.registration.receipt {
-            Load::Pending | Load::Loading => ("Registering…", StatusTone::Info),
-            Load::Failed(_) => ("Registration failed", StatusTone::Err),
-            _ => ("Unregistered", StatusTone::Neutral),
-        }
-    } else {
-        ("Unregistered", StatusTone::Neutral)
-    };
-    rune::row()
-        .key("workstation-registration-tag")
-        .role("status")
-        .label(if registration.is_some() {
-            format!("{backend} registration ID {label}")
-        } else {
-            format!("{backend} · {label}")
-        })
-        .min_w(0.0)
-        .max_w(520.0)
-        .shrink()
-        .min_h(22.0)
-        .center_y()
-        .gap(6.0)
-        .px(8.0)
-        .py(3.0)
-        .radius(6.0)
-        .fill(tone.bg().alpha(kit.c.bg_button_neutral.a))
-        .border(1.0, tone.border())
-        .child(rune::icon(icon, 14.0).color(tone.fg()).a11y_hidden())
-        .child(
-            rune::text(format!("{backend} · {label}"))
-                .min_w(0.0)
-                .shrink()
-                .font(kit.ty.small_medium)
-                .color(tone.fg())
-                .wrap_anywhere()
-                .selectable(registration.is_some())
-                .a11y_hidden(),
-        )
-}
-
-pub(crate) const WORKSTATION_ASSISTANT: &str = "workstation-open-assistant";
-
 fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -> El {
     let preferences = state
         .accessibility
         .for_view(state.fixture, cx.is_reduced_motion());
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
 
-    let transport = match &state.connection.status {
-        ConnectionStatus::Connected => ("Connected", StatusTone::Ok),
-        ConnectionStatus::Connecting => ("Connecting", StatusTone::Warn),
-        ConnectionStatus::Failed(_) => ("Offline", StatusTone::Err),
-        ConnectionStatus::Disconnected => ("Disconnected", StatusTone::Neutral),
-    };
-    let deployment = state
-        .connection
-        .capabilities
-        .as_ref()
-        .and_then(|capabilities| capabilities.deployment_id.as_deref())
-        .filter(|id| state.connected() && !id.is_empty());
-    let transport_kind = if state.is_local_backend() {
-        "IPC"
-    } else if state.connection.origin.text.starts_with("https://") {
-        "HTTPS"
-    } else {
-        "HTTP"
-    };
-    let mut body = rune::col().gap(8.0).child(
-        rune::col()
-            .key("workstation-status-header")
-            .role("region")
-            .label("Workstation Status")
-            .w_full()
-            .child(
-                rune::row()
-                    .w_full()
-                    .min_w(0.0)
-                    .flex_wrap()
-                    .center_y()
-                    .gap(6.0)
-                    .child(workstation_registration_tag(state, kit))
-                    .child(
-                        ui_components::status_pill(
-                            format!("{transport_kind} · {}", transport.0),
-                            None,
-                            transport.1,
-                            kit,
-                        )
-                        .key("connection-status")
-                        .label(format!("Transport: {}", transport.0))
-                        .description(transport_kind),
-                    )
-                    .children(state.connected().then(|| {
-                        let (health, tone) = crate::readiness_cards::workstation_health(state);
-                        ui_components::status_pill(health, None, tone, kit)
-                            .key("workstation-health")
-                    }))
-                    .children(state.inbox_qa_visible().then(|| {
-                        ActionButton::new("Open Assistant")
-                            .key(WORKSTATION_ASSISTANT)
-                            .finish(MetalFinish::Gunmetal)
-                            .on_press(|state: &mut State| {
-                                if state.inbox_qa_visible() && !state.has_active_confirmation() {
-                                    state.open_inbox_from(WORKSTATION_ASSISTANT);
-                                }
-                            })
-                            .build(kit, preferences, pointer_ref)
-                    })),
-            ),
-    );
-    let mut services = rune::col()
-        .key("workstation-services")
-        .w_full()
-        .gap(8.0)
-        .child(heading("Services", kit).role("heading"));
+    let mut body = rune::col()
+        .key("workstation-status-content")
+        .role("region")
+        .label("Workstation Status")
+        .gap(8.0);
     if state.connected() {
         if state.registration.context.is_none() {
             if state.can_register() {
-                services = services.child(
+                body = body.child(
                     ActionButton::new("Retry registration")
                         .key("workstation-register")
                         .finish(MetalFinish::Gunmetal)
@@ -1110,44 +997,14 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                 );
             }
         } else {
-            let actor = summarize_actor_search(state);
-            let prefer_actor = actor.needs_seed
-                || actor.building
-                || actor.background_indexing
-                || actor.status_label == "Queued"
-                || state.maintenance.pending_reindex.is_some()
-                || state
-                    .maintenance_disabled_reason(MaintenanceOperation::ReindexActors)
-                    .is_none()
-                    && !actor.can_search;
-            let active_operation = workstation_active_operation(state, preferences, kit);
-            let issue = crate::readiness_cards::primary_issue(
+            body = body.children(crate::readiness_cards::primary_issue(
                 state,
                 crate::readiness_cards::PrimaryIssueScope::Workstation {
-                    include_other_blockers: !prefer_actor && active_operation.is_none(),
+                    include_other_blockers: false,
                 },
                 preferences,
                 kit,
-            );
-            let show_actor_action = issue.is_none() && active_operation.is_none();
-            let trailing_operation = if issue.is_none() {
-                active_operation
-            } else {
-                None
-            };
-            services = services
-                .children(issue)
-                .child(actor_search_summary_card(
-                    state,
-                    preferences,
-                    kit,
-                    actor,
-                    show_actor_action,
-                ))
-                .children(trailing_operation);
-            if state.permission(Permission::ReadWorkstationActivity) {
-                services = services.child(workstation_job_counts(state, preferences, kit));
-            }
+            ));
         }
         if state.confirm_maintenance_dialog {
             if let Some(confirmation) = &state.maintenance.confirmation {
@@ -1173,7 +1030,7 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
             }
         }
     } else {
-        services = services.child(
+        body = body.child(
             ActionButton::new("Setup Gateway")
                 .key("workstation-setup-gateway")
                 .icon(&icons::KEY)
@@ -1182,197 +1039,202 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                 .build(kit, preferences, pointer_ref),
         );
     }
-    body = body.child(services);
     body = body.child(crate::readiness_cards::workstation_section(
         state,
         preferences,
         kit,
     ));
 
-    let mut diagnostics = rune::col()
-        .gap(8.0)
-        .key("gateway-backend-card")
-        .child(line(connection_status(state), kit))
-        .children(deployment.map(|id| quiet(format!("Deployment {id}"), kit)));
-    if let Load::Failed(error) = &state.registration.receipt {
-        diagnostics = diagnostics.child(quiet(error.clone(), kit).role("alert"));
-    }
-    if state.is_local_backend() {
-        diagnostics = diagnostics
-            .child(
-                quiet(
-                    format!("Private 0700 state dir: {}", state.local_state_dir_label()),
-                    kit,
-                )
-                .key("workstation-local-state-dir"),
-            )
-            .children(local_runtime_diagnostics(state, preferences, kit));
-        if state.connected() {
-            if let Some(capabilities) = &state.connection.capabilities {
-                diagnostics =
-                    diagnostics.child(local_capabilities_summary(capabilities, preferences, kit));
-            }
-            diagnostics = diagnostics.child(
-                ActionButton::new("Stop Embedded Backend")
-                    .key("workstation-stop-local-backend")
-                    .finish(MetalFinish::Gunmetal)
-                    .disabled(state.local_backend.stopping)
-                    .on_press(|state: &mut State| state.stop_local_backend())
-                    .build(kit, preferences, pointer_ref),
-            );
-        }
-    } else {
-        diagnostics = diagnostics.child(quiet(state.connection.origin.text.clone(), kit));
-    }
     scroll(
         body.child(
-            Collapsible::new("Diagnostics", state.workstation_diagnostics_open)
-                .on_toggle(|state: &mut State| {
-                    state.workstation_diagnostics_open = !state.workstation_diagnostics_open;
-                })
-                .child(diagnostics)
-                .build(kit)
-                .key("workstation-diagnostics"),
+            rune::col()
+                .key("workstation-diagnostics")
+                .w_full()
+                .gap(6.0)
+                .child(
+                    crate::readiness_cards::section_disclosure_trigger(
+                        "Diagnostics",
+                        state.workstation_diagnostics_open,
+                        kit,
+                    )
+                    .on_press(|state: &mut State| {
+                        state.workstation_diagnostics_open = !state.workstation_diagnostics_open;
+                    }),
+                )
+                .children(
+                    state
+                        .workstation_diagnostics_open
+                        .then(|| workstation_diagnostics(state, preferences, kit)),
+                ),
         ),
         "workstation-body",
     )
 }
 
-fn workstation_job_counts(
-    state: &State,
-    preferences: crate::accessibility::ViewPreferences,
-    kit: &Kit,
-) -> El {
-    let counts = state.registration.context.as_ref().and_then(|context| {
-        state.scoped_jobs.page.as_ref().and_then(|page| {
-            let scope = &page.activity_scope;
-            (state.permission(Permission::ReadWorkstationActivity)
-                && page.dashboard_counts_scope == "unfiltered_top_level_workstation_activity"
-                && scope.deployment_id == context.deployment_id
-                && scope.workstation_id == context.workstation_id
-                && scope.scope_revision == context.scope_revision)
-                .then_some(page.counts.as_ref())
-                .flatten()
-        })
-    });
-    let last_known = counts.is_some() && state.scoped_jobs.message.is_some();
-    let mut tiles = rune::row().w_full().gap(6.0);
-    for (key, name, count) in [
-        (
-            "workstation-jobs-queued",
-            "Queued",
-            counts.map(|counts| counts.queued),
-        ),
-        (
-            "workstation-jobs-running",
-            "Running",
-            counts.map(|counts| counts.active),
-        ),
-        (
-            "workstation-jobs-retrying",
-            "Retrying",
-            counts.map(|counts| counts.retrying),
-        ),
-    ] {
-        let value = count.map(|count| count.to_string());
-        let label = format!("{name}: {}", value.as_deref().unwrap_or("Unavailable"));
-        let description = if last_known {
-            "Last known workstation job count. Open Jobs & Logs."
+fn workstation_diagnostics(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    let local = state.is_local_backend();
+    let backend = if local { "Embedded" } else { "Distributed" };
+    let transport = if local {
+        "IPC"
+    } else if state.connection.origin.text.starts_with("https://") {
+        "HTTPS"
+    } else {
+        "HTTP"
+    };
+    let status = match state.connection.status {
+        ConnectionStatus::Connected => "Connected",
+        ConnectionStatus::Connecting => "Connecting",
+        ConnectionStatus::Failed(_) => "Offline",
+        ConnectionStatus::Disconnected => "Disconnected",
+    };
+    let registration = if state.connected() {
+        state.registration.context.as_ref().map_or_else(
+            || match state.registration.receipt {
+                Load::Pending | Load::Loading => "Registering…",
+                Load::Failed(_) => "Registration failed",
+                _ => "Unregistered",
+            },
+            |context| context.registration_id.as_str(),
+        )
+    } else {
+        "Unregistered"
+    };
+    let registration_value = if state.connected()
+        && state.registration.context.is_none()
+        && matches!(state.registration.receipt, Load::Pending | Load::Loading)
+    {
+        ui_components::skeleton_text_value("Registering…", 130.0, StatusTone::Info, preferences)
+    } else {
+        line(registration, kit).wrap_anywhere()
+    };
+    let transport_value = if matches!(state.connection.status, ConnectionStatus::Connecting) {
+        ui_components::skeleton_text_value("Connecting…", 122.0, StatusTone::Cyan, preferences)
+    } else {
+        line(format!("{transport} · {status}"), kit)
+    };
+    let mut details = rune::col()
+        .key("workstation-connection-details")
+        .w_full()
+        .gap(3.0)
+        .child(heading("Backend connection", kit).role("heading"))
+        .child(diagnostic_field("Backend", backend, kit))
+        .child(diagnostic_row("Transport", transport_value, kit))
+        .child(
+            diagnostic_row("Registration ID", registration_value, kit)
+                .key("workstation-registration-id"),
+        );
+    if state.connected() {
+        let (health, _) = crate::readiness_cards::workstation_health(state);
+        let value = if matches!(state.readiness, Load::Pending | Load::Loading) {
+            ui_components::skeleton_text_value(health, 116.0, StatusTone::Info, preferences)
         } else {
-            "Workstation job count. Open Jobs & Logs."
+            line(health, kit)
         };
-        tiles = tiles.child(material::canvas_tile(
-            rune::row()
-                .key(key)
-                .role("button")
-                .label(label)
-                .description(description)
-                .focusable(true)
-                .focus_ring(2.0, 0.0, kit.c.border_focus)
-                .min_w(0.0)
-                .min_h(32.0)
-                .grow(1.0)
-                .padding(6.0)
-                .center_y()
-                .flex_wrap()
-                .gap(4.0)
-                .child(quiet(name, kit).selectable(false).a11y_hidden())
-                .child(
-                    rune::text(value.unwrap_or_else(|| "—".to_owned()))
-                        .font(kit.ty.body_medium)
-                        .color(kit.c.text_base)
-                        .a11y_hidden(),
-                )
-                .on_press(|state: &mut State| {
-                    state.select_activity_tab(crate::logs::ActivityTab::Jobs);
-                    state.navigate(Page::Jobs);
-                }),
-            false,
-            preferences,
-        ));
+        details = details.child(diagnostic_row("Health", value, kit));
+        if let Some(id) = state
+            .connection
+            .capabilities
+            .as_ref()
+            .and_then(|capabilities| capabilities.deployment_id.as_deref())
+            .filter(|id| !id.is_empty())
+        {
+            details = details.child(diagnostic_field("Deployment", id, kit));
+        }
+        if let Load::Failed(error) = &state.registration.receipt {
+            details = details.child(line(error.as_str(), kit).role("alert"));
+        }
     }
-    rune::col()
-        .key("workstation-jobs-counts")
-        .role("group")
-        .label("Workstation jobs")
+    if let ConnectionStatus::Failed(error) = &state.connection.status {
+        details = details.child(line(error.as_str(), kit).role("alert"));
+    }
+    details = if local {
+        details.child(
+            diagnostic_field("State directory", state.local_state_dir_label(), kit)
+                .key("workstation-local-state-dir"),
+        )
+    } else {
+        details.child(diagnostic_field(
+            "Gateway URL",
+            state.connection.origin.text.as_str(),
+            kit,
+        ))
+    };
+    let mut body = rune::col()
+        .key("gateway-backend-card")
+        .w_full()
         .min_w(0.0)
-        .gap(4.0)
-        .children(last_known.then(|| {
-            unsynced_glyph(
-                "workstation-jobs-unsynced",
-                "Last known workstation job counts. Open Jobs & Logs for details.",
-                kit,
-            )
-        }))
-        .child(tiles)
+        .padding(8.0)
+        .gap(16.0)
+        .child(details);
+    if local {
+        if state.connected() {
+            if let Some(capabilities) = &state.connection.capabilities {
+                let assessment = assess_local_capabilities(capabilities);
+                body = body.child(
+                    rune::col()
+                        .key("workstation-advertised-capabilities")
+                        .w_full()
+                        .gap(6.0)
+                        .child(heading("Advertised capabilities", kit).role("heading"))
+                        .child(diagnostic_field(
+                            "API version",
+                            capabilities.api_version.to_string(),
+                            kit,
+                        ))
+                        .child(diagnostic_field(
+                            "Build",
+                            backend_build_label(capabilities),
+                            kit,
+                        ))
+                        .child(diagnostic_field(
+                            "Features",
+                            advertised_features(capabilities),
+                            kit,
+                        ))
+                        .children(local_capability_warnings(
+                            &assessment.warnings,
+                            preferences,
+                            kit,
+                        )),
+                );
+            }
+        }
+        body = body.children(local_runtime_diagnostics(state, preferences, kit));
+        if state.connected() {
+            body = body.child(
+                rune::row().child(
+                    ActionButton::new("Stop Embedded Backend")
+                        .key("workstation-stop-local-backend")
+                        .finish(MetalFinish::Gunmetal)
+                        .disabled(state.local_backend.stopping)
+                        .on_press(State::stop_local_backend)
+                        .build(
+                            kit,
+                            preferences,
+                            (!preferences.matte()).then_some(&state.pointer_offset),
+                        ),
+                ),
+            );
+        }
+    }
+    body
 }
 
-fn workstation_active_operation(
-    state: &State,
-    preferences: ViewPreferences,
-    kit: &Kit,
-) -> Option<El> {
-    let record = state
-        .maintenance
-        .operation_job(MaintenanceOperation::SeedActors)?;
-    if record
-        .detail
-        .as_ref()
-        .is_some_and(|detail| !crate::backend::job_is_active(&detail.job.state))
-    {
-        return None;
-    }
-    let (label, phase) = record.detail.as_ref().map_or(("Queued", ""), |detail| {
-        let label = if detail.job.state == "running" {
-            "Running"
-        } else {
-            "Queued"
-        };
-        (label, detail.job.phase.as_str())
-    });
-    let job_id = record.job_id.clone();
-    Some(
-        rune::row()
-            .key("workstation-active-operation")
-            .flex_wrap()
-            .center_y()
-            .gap(6.0)
-            .child(heading("Seed actors", kit))
-            .child(ui_components::status_pill(
-                label,
-                None,
-                StatusTone::Info,
-                kit,
-            ))
-            .children((!phase.is_empty()).then(|| quiet(phase.to_owned(), kit)))
-            .child(
-                ActionButton::new("View job")
-                    .key("workstation-active-job")
-                    .icon(&icons::JOBS)
-                    .on_press(move |state: &mut State| state.open_job(&job_id))
-                    .build(kit, preferences, None),
-            ),
-    )
+fn diagnostic_field(label: &str, value: impl Into<String>, kit: &Kit) -> El {
+    diagnostic_row(label, line(value, kit).wrap_anywhere(), kit)
+}
+
+fn diagnostic_row(label: &str, value: El, kit: &Kit) -> El {
+    rune::row()
+        .w_full()
+        .min_w(0.0)
+        .min_h(32.0)
+        .gap(8.0)
+        .px(8.0)
+        .py(4.0)
+        .center_y()
+        .child(quiet(label, kit).w(132.0))
+        .child(rune::col().grow(1.0).min_w(0.0).child(value))
 }
 
 /// Small, muted unsynced indicator for last-good data whose refresh is out of sync.
@@ -1393,203 +1255,6 @@ pub(crate) fn unsynced_glyph(key: &str, reason: impl Into<String>, kit: &Kit) ->
                 .color(kit.c.text_muted)
                 .a11y_hidden(),
         )
-}
-
-struct ActorSearchSummary {
-    status_label: &'static str,
-    tone: StatusTone,
-    next_action: String,
-    unsynced_reason: Option<&'static str>,
-    can_search: bool,
-    building: bool,
-    background_indexing: bool,
-    stage: Option<String>,
-    scanned: Option<u64>,
-    total: Option<u64>,
-    needs_seed: bool,
-}
-
-fn summarize_actor_search(state: &State) -> ActorSearchSummary {
-    let reindex_job = active_actor_reindex(state);
-    let receipt_job = queued_actor_reindex_id(state);
-    let (catalog_check, search_check, observed_at) = match &state.readiness {
-        Load::Ready(readiness) => (
-            readiness
-                .checks
-                .iter()
-                .find(|check| check.id == ReadinessCheckId::ActorCatalog),
-            readiness
-                .checks
-                .iter()
-                .find(|check| check.id == ReadinessCheckId::ActorSearch),
-            Some(readiness.observed_at.as_str()),
-        ),
-        _ => (None, None, None),
-    };
-    let search_fresh = search_check.is_some_and(|check| state.readiness_check_fresh(check));
-    let capability_ready = state
-        .connection
-        .capabilities
-        .as_ref()
-        .is_some_and(|capabilities| capabilities.require_actor_search().is_ok());
-
-    let unsynced_reason = (observed_at.is_some()
-        && (!search_fresh || state.readiness_error.is_some()))
-    .then_some("Actor search observation unsynced. Open Status checks for details.");
-
-    let paused = search_check.is_some_and(actor_search_is_paused);
-    let catalog_needs_data =
-        catalog_check.is_some_and(|check| actor_catalog_needs_data(state, check));
-    let background_indexing =
-        search_check.is_some_and(|check| actor_search_is_background_indexing(state, check));
-    let can_query_current_index = capability_ready
-        && search_fresh
-        && search_check.is_some_and(|check| check.state == ReadinessState::Ready);
-
-    let (status_label, tone, next_action, can_search, building, needs_seed) = if state
-        .maintenance
-        .pending_reindex
-        .is_some()
-    {
-        (
-            "Needs attention",
-            StatusTone::Warn,
-            "Check request status or clear the unresolved actor index attempt before rebuilding."
-                .to_owned(),
-            false,
-            false,
-            false,
-        )
-    } else if let Some(job) = reindex_job {
-        let (label, guidance) = match job.state.as_str() {
-            "queued" | "pending" => ("Queued", "The actor index request is queued."),
-            "retry_scheduled" => ("Retrying", "The actor index job is scheduled to retry."),
-            _ => ("Building", "The actor index job is running."),
-        };
-        (
-            label,
-            StatusTone::Info,
-            guidance.to_owned(),
-            can_query_current_index,
-            true,
-            false,
-        )
-    } else if receipt_job.is_some() {
-        (
-            "Queued",
-            StatusTone::Info,
-            "Actor index request is queued on the backend; follow progress in Jobs.".to_owned(),
-            can_query_current_index,
-            false,
-            false,
-        )
-    } else if background_indexing {
-        (
-            "Background indexing",
-            StatusTone::Info,
-            crate::readiness_cards::ACTOR_INDEX_CATCH_UP.to_owned(),
-            false,
-            false,
-            false,
-        )
-    } else if catalog_needs_data {
-        (
-            "Needs data",
-            StatusTone::Warn,
-            "Seed an actor CSV catalog before building the search index.".to_owned(),
-            false,
-            false,
-            true,
-        )
-    } else if let Some(check) = search_check {
-        if check.state == ReadinessState::Ready && search_fresh {
-            (
-                "Ready",
-                StatusTone::Ok,
-                "Actor search is ready; open Search actors to query the catalog.".to_owned(),
-                can_query_current_index,
-                false,
-                false,
-            )
-        } else if paused {
-            (
-                "Paused",
-                StatusTone::Warn,
-                "Indexing is paused or write-paced on the backend. Open Status checks for details."
-                    .to_owned(),
-                false,
-                false,
-                false,
-            )
-        } else if check.state == ReadinessState::NotReady {
-            (
-                "Not built",
-                StatusTone::Warn,
-                "Click Build actor index to generate the shared backend search projection."
-                    .to_owned(),
-                false,
-                false,
-                false,
-            )
-        } else if check.state == ReadinessState::Degraded || !search_fresh {
-            (
-                "Needs attention",
-                StatusTone::Warn,
-                "Refresh checks or open Status checks for details on actor search.".to_owned(),
-                false,
-                false,
-                false,
-            )
-        } else {
-            (
-                    "Unavailable",
-                    StatusTone::Err,
-                    "Actor search status is unavailable. Refresh checks or open Status checks for details."
-                        .to_owned(),
-                    false,
-                    false,
-                    false,
-                )
-        }
-    } else {
-        (
-            if matches!(state.readiness, Load::Pending | Load::Loading) {
-                "Checking"
-            } else {
-                "Unavailable"
-            },
-            StatusTone::Neutral,
-            "Refresh checks to inspect actor catalog and search index readiness.".to_owned(),
-            false,
-            false,
-            false,
-        )
-    };
-
-    let (stage, scanned, total) = match reindex_job {
-        Some(job) => (
-            (!job.phase.is_empty()).then(|| job.phase.clone()),
-            job.progress_done
-                .and_then(|value| u64::try_from(value).ok()),
-            job.progress_total
-                .and_then(|value| u64::try_from(value).ok()),
-        ),
-        None => (None, None, None),
-    };
-
-    ActorSearchSummary {
-        status_label,
-        tone,
-        next_action,
-        unsynced_reason,
-        can_search,
-        building,
-        background_indexing,
-        stage,
-        scanned,
-        total,
-        needs_seed,
-    }
 }
 
 pub(crate) fn actor_search_is_background_indexing(state: &State, check: &ReadinessCheck) -> bool {
@@ -1672,190 +1337,6 @@ pub(crate) fn queued_actor_reindex_id(state: &State) -> Option<&str> {
     (!observed && !id.trim().is_empty()).then_some(id)
 }
 
-fn open_workstation_seed(state: &mut State) {
-    if summarize_actor_search(state).needs_seed {
-        state.seed_stage = SeedStage::Seed;
-        state.navigate(Page::Seed);
-    }
-}
-
-fn workstation_search_action() -> ActionButton {
-    ActionButton::new("Search actors")
-        .key("workstation-search-actors")
-        .icon(&icons::BRAIN)
-        .on_press(|state: &mut State| {
-            if summarize_actor_search(state).can_search {
-                state.navigate(Page::Brain);
-            }
-        })
-}
-
-fn actor_search_summary_card(
-    state: &State,
-    preferences: ViewPreferences,
-    kit: &Kit,
-    summary: ActorSearchSummary,
-    show_actor_action: bool,
-) -> El {
-    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
-    let disabled_reason = state.maintenance_disabled_reason(MaintenanceOperation::ReindexActors);
-    let refreshing =
-        state.readiness_pending() || matches!(state.readiness, Load::Pending | Load::Loading);
-    let busy_submit =
-        state.maintenance.busy() || matches!(state.maintenance.receipt, Load::Loading);
-
-    let (status_label, tone) =
-        if summary.status_label == "Ready" && summary.unsynced_reason.is_some() {
-            ("Unsynced", StatusTone::Warn)
-        } else {
-            (summary.status_label, summary.tone)
-        };
-    let status_slot = rune::row().w(132.0).center_y().child(
-        ui_components::status_pill(status_label, None, tone, kit).key("actor-search-status-tag"),
-    );
-
-    let relevant_job = active_actor_reindex(state)
-        .map(|job| job.id.as_str())
-        .or_else(|| queued_actor_reindex_id(state));
-    let primary = if state.maintenance.pending_reindex.is_some() {
-        ActionButton::new("Check request")
-            .key("workstation-check-index-request")
-            .icon(&icons::REFRESH)
-            .disabled(state.maintenance.busy())
-            .on_press(|state: &mut State| state.reconcile_actor_reindex())
-    } else if summary.needs_seed {
-        ActionButton::new("Seed actors…")
-            .key("workstation-open-seed")
-            .icon(&icons::SEED)
-            .on_press(open_workstation_seed)
-    } else if let Some(job_id) = relevant_job {
-        let id = job_id.to_owned();
-        ActionButton::new("View job")
-            .key("workstation-view-index-job")
-            .icon(&icons::JOBS)
-            .on_press(move |state: &mut State| state.open_job(&id))
-    } else if summary.can_search {
-        workstation_search_action()
-    } else if disabled_reason.is_none() && !busy_submit && !summary.background_indexing {
-        ActionButton::new("Build actor index")
-            .key(crate::maintenance::WORKSTATION_REINDEX_ACTION_KEY)
-            .icon(&icons::BRAIN)
-            .on_press(|state: &mut State| {
-                state.preview_maintenance(MaintenanceOperation::ReindexActors)
-            })
-    } else {
-        let failed = matches!(state.readiness, Load::Failed(_));
-        ActionButton::new(if failed { "Retry" } else { "Refresh checks" })
-            .key(if failed {
-                "workstation-readiness-retry"
-            } else {
-                "workstation-refresh-readiness"
-            })
-            .icon(&icons::REFRESH)
-            .busy(refreshing)
-            .disabled(refreshing)
-            .on_press(|state: &mut State| state.refresh_readiness())
-    };
-    let primary = primary
-        .finish(MetalFinish::Gunmetal)
-        .build(kit, preferences, pointer_ref)
-        .w(146.0);
-    let primary = if summary.needs_seed {
-        primary.on_key(|state: &mut State, event, tx| {
-            if event.key != rune::Key::Enter || event.mods != rune::Mods::default() {
-                return false;
-            }
-            if !tx.key_repeat() {
-                open_workstation_seed(state);
-            }
-            true
-        })
-    } else {
-        primary
-    };
-    let details_toggle = ActionButton::new(if state.maintenance.reindex_details_open {
-        "Hide details"
-    } else {
-        "Details"
-    })
-    .key("workstation-index-details-toggle")
-    .finish(MetalFinish::ObsidianPill)
-    .on_press(|state: &mut State| {
-        state.maintenance.reindex_details_open = !state.maintenance.reindex_details_open;
-    })
-    .build(kit, preferences, pointer_ref)
-    .w(96.0);
-    let mut card_body = rune::col()
-        .padding(10.0)
-        .gap(6.0)
-        .key("actor-search-summary-card")
-        .child(
-            rune::row()
-                .w_full()
-                .gap(6.0)
-                .center_y()
-                .flex_wrap()
-                .child(heading("Actor search", kit).min_w(104.0))
-                .child(status_slot)
-                .child(
-                    rune::row()
-                        .w(146.0)
-                        .h(32.0)
-                        .children(show_actor_action.then_some(primary)),
-                )
-                .child(details_toggle),
-        );
-    if state.maintenance.reindex_details_open {
-        let mut details_col = rune::col().gap(4.0).child(quiet(summary.next_action, kit));
-        if summary.building {
-            let stage = summary.stage.as_deref().unwrap_or(summary.status_label);
-            let progress = match (summary.scanned, summary.total) {
-                (Some(done), Some(total)) if total > 0 => {
-                    format!("{stage} · {done} / {total} scanned")
-                }
-                (Some(done), _) => format!("{stage} · {done} scanned"),
-                (None, _) => stage.to_owned(),
-            };
-            details_col = details_col.child(quiet(progress, kit));
-        }
-        if let Some(pending) = &state.maintenance.pending_reindex {
-            details_col = details_col.child(quiet(
-                format!("Pending request: {}", pending.request.request_id),
-                kit,
-            ));
-        }
-        if let Some(reason) = disabled_reason {
-            details_col = details_col.child(quiet(reason, kit));
-        }
-        if let Some(reason) = summary.unsynced_reason {
-            details_col = details_col.child(quiet(reason.to_owned(), kit));
-        }
-        card_body = card_body.child(
-            details_col
-                .children(
-                    (summary.can_search && relevant_job.is_some())
-                        .then(|| workstation_search_action().build(kit, preferences, pointer_ref)),
-                )
-                .children(crate::backend_views::actor_index_receipt_banner(
-                    state,
-                    preferences,
-                    kit,
-                ))
-                .children(crate::backend_views::unresolved_actor_reindex_banner(
-                    state,
-                    preferences,
-                    kit,
-                )),
-        );
-    }
-
-    material::glass(
-        card_body.radius(12.0),
-        material::GlassSurface::Panel,
-        preferences,
-    )
-}
-
 fn index_state_label(state: IndexState) -> (&'static str, StatusTone) {
     match state {
         IndexState::Ready => ("Search ready", StatusTone::Ok),
@@ -1874,11 +1355,49 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
     let preferences = state
         .accessibility
         .for_view(state.fixture, cx.is_reduced_motion());
-    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
-    let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
+    if let Some(category) = state.search_category {
+        let back = ActionButton::new("Back to search")
+            .key("search-back")
+            .icon(&icons::CHEVRON_LEFT)
+            .finish(MetalFinish::Gunmetal)
+            .on_press_tx(move |state: &mut State, tx| {
+                state.close_search_category();
+                tx.wake_after(std::time::Duration::from_millis(200));
+                tx.focus(search_category_key(category), tx.focus_visible());
+            })
+            .build(kit, preferences, None);
+        let records = match category {
+            SearchCategory::Actors => actor_catalog_records(state, preferences, kit),
+            SearchCategory::Articles => article_records(state, true, preferences, kit),
+        };
+        let body = rune::col()
+            .child(
+                rune::row()
+                    .center_y()
+                    .gap(12.0)
+                    .child(back)
+                    .child(heading(search_category_title(category), kit).role("heading")),
+            )
+            .child(records);
+        let viewport = scroll(body, "search-category-results");
+        if category == SearchCategory::Actors {
+            let scrolled = Rc::new(Cell::new(false));
+            let offset = Rc::clone(&scrolled);
+            return viewport
+                .on_scroll_offset(move |position| offset.set(position.offset[1] > 0.0))
+                .on_at_bottom(move |state: &mut State, at_bottom| {
+                    // A page that fits may start at the bottom. It still offers Load more.
+                    if at_bottom && scrolled.get() && state.actor_catalog.continue_automatically() {
+                        state.load_actor_catalog();
+                    }
+                });
+        }
+        return viewport;
+    }
+
     let search = TextInput::new(&state.brain.query)
-        .label("Search actors")
-        .placeholder("Search actors")
+        .label("Search")
+        .placeholder("Search actors and articles")
         .width(None)
         .on_edit(|state: &mut State| &mut state.brain.query)
         .on_change(|state: &mut State, tx| state.query_edited(tx))
@@ -1886,27 +1405,107 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
         .on_submit(|state: &mut State, _| state.search_now())
         .build(kit)
         .key("actor-search");
-    let mut list = rune::col()
-        .gap(8.0)
-        .child(ui_components::section_header(
-            &icons::BRAIN,
-            "Search actors",
-            Some("Type a name or alias to inspect intelligence dossiers"),
-            None,
-            None,
-            kit,
-        ))
-        .child(search);
-    match &state.brain.results {
-        Load::Idle => {
-            list = list.child(
-                quiet(
-                    "Enter a name or alias to search the shared actor catalog.",
+    let mut landing = rune::col()
+        .w_full()
+        .items_center()
+        .pt(32.0)
+        .gap(18.0)
+        .child(
+            rune::col()
+                .key("search-landing-bar")
+                .w_frac(0.5)
+                .child(search),
+        )
+        .child(
+            rune::row()
+                .gap(20.0)
+                .justify_center()
+                .child(category_avatar(SearchCategory::Actors, &icons::BRAIN, kit))
+                .child(category_avatar(
+                    SearchCategory::Articles,
+                    &icons::SOURCES,
                     kit,
-                )
-                .key("search-prompt"),
-            );
-        }
+                )),
+        );
+    if !matches!(state.brain.results, Load::Idle) {
+        landing = landing.child(
+            rune::col()
+                .w_full()
+                .gap(8.0)
+                .child(heading("Actors", kit).role("heading"))
+                .child(actor_search_results(state, preferences, kit)),
+        );
+    }
+    if !matches!(state.search_articles.status, Load::Idle) {
+        landing = landing.child(
+            rune::col()
+                .w_full()
+                .gap(8.0)
+                .child(heading("Articles", kit).role("heading"))
+                .child(article_records(state, false, preferences, kit)),
+        );
+    }
+    scroll(landing, "actor-results")
+}
+
+fn search_category_title(category: SearchCategory) -> &'static str {
+    match category {
+        SearchCategory::Actors => "Actors",
+        SearchCategory::Articles => "Articles",
+    }
+}
+
+fn search_category_key(category: SearchCategory) -> &'static str {
+    match category {
+        SearchCategory::Actors => "search-category-actors",
+        SearchCategory::Articles => "search-category-articles",
+    }
+}
+
+fn category_avatar(category: SearchCategory, icon: &'static rune::Icon, kit: &Kit) -> El {
+    let title = search_category_title(category);
+    rune::col()
+        .key(search_category_key(category))
+        .role("button")
+        .label(title)
+        .focusable(true)
+        .focus_ring(2.0, 2.0, kit.c.border_focus)
+        .items_center()
+        .w(86.0)
+        .gap(6.0)
+        .padding(6.0)
+        .radius(8.0)
+        .hover(kit.c.layer_02)
+        .child(
+            rune::row()
+                .size(46.0, 46.0)
+                .radius(23.0)
+                .center()
+                .fill(kit.c.layer_01)
+                .border(1.0, StatusTone::Accent.border())
+                .child(
+                    rune::icon(icon, 20.0)
+                        .color(StatusTone::Accent.fg())
+                        .a11y_hidden(),
+                ),
+        )
+        .child(heading(title, kit).a11y_hidden())
+        .on_press_tx(move |state: &mut State, tx| {
+            state.close_search_category();
+            state.search_category = Some(category);
+            match category {
+                SearchCategory::Actors => state.load_actor_catalog(),
+                SearchCategory::Articles => state.browse_articles(),
+            }
+            tx.focus("search-back", tx.focus_visible());
+        })
+}
+
+fn actor_search_results(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
+    let mut list = rune::col().w_full().gap(8.0);
+    match &state.brain.results {
+        Load::Idle => {}
         Load::Pending | Load::Loading => {
             // Debounce and the first fetch share one results-shaped skeleton: no narration, no
             // layout change when the request starts.
@@ -1945,86 +1544,7 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
                 list = list.child(quiet("No matching actors.", kit).key("search-empty"));
             }
             for (index, hit) in response.rows.iter().enumerate() {
-                let selected = state.brain.highlighted == Some(index);
-                let expanded = state.brain.showing_detail
-                    && state.brain.selected_actor.as_deref() == Some(hit.actor_id.as_str());
-                let tile = material::interactive_tile(
-                    rune::row()
-                        .w_full()
-                        .padding(8.0)
-                        .gap(8.0)
-                        .center_y()
-                        .child(ui_components::status_dot(
-                            if selected {
-                                StatusTone::Accent
-                            } else {
-                                StatusTone::Violet
-                            },
-                            preferences,
-                        ))
-                        .child(
-                            rune::col()
-                                .grow(1.0)
-                                .gap(2.0)
-                                .child(
-                                    rune::text(hit.label.clone())
-                                        .font(kit.ty.ui_medium)
-                                        .color(theme::hex(theme::TEXT_PRIMARY)),
-                                )
-                                .child(quiet(
-                                    hit.summary.clone().unwrap_or_else(|| hit.actor_id.clone()),
-                                    kit,
-                                )),
-                        )
-                        .child(
-                            rune::icon(
-                                if expanded {
-                                    &icons::CHEVRON_DOWN
-                                } else {
-                                    &icons::CHEVRON_RIGHT
-                                },
-                                14.0,
-                            )
-                            .color(kit.c.icon_muted)
-                            .a11y_hidden(),
-                        ),
-                    selected,
-                    if selected {
-                        StatusTone::Accent
-                    } else {
-                        StatusTone::Violet
-                    },
-                    preferences,
-                    pointer_ref,
-                    shadow_ref,
-                )
-                .key(format!("actor-hit-{}", hit.actor_id))
-                .role("button")
-                .label(hit.label.clone())
-                .expanded(expanded)
-                .focusable(true)
-                .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT))
-                .press(theme::hex(theme::SELECTION_SURFACE))
-                .on_press(move |state: &mut State| state.toggle_actor(index))
-                .on_key(move |state: &mut State, event, tx| {
-                    if event.key == rune::Key::Enter && event.mods == rune::Mods::default() {
-                        if !tx.key_repeat() {
-                            state.toggle_actor(index);
-                        }
-                        true
-                    } else {
-                        false
-                    }
-                });
-                let mut record = rune::col()
-                    .key(format!("actor-record-{}", hit.actor_id))
-                    .w_full()
-                    .gap(8.0)
-                    .child(tile);
-                if expanded {
-                    record = record.child(dossier(state, preferences, kit));
-                }
-                list = list.child(record);
+                list = list.child(actor_record(state, hit, Some(index), preferences, kit));
             }
             if response.truncated {
                 list = list.child(quiet(
@@ -2034,7 +1554,295 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
             }
         }
     }
-    scroll(list, "actor-results")
+    list
+}
+
+fn actor_record(
+    state: &State,
+    hit: &fleetworks_contracts::search::ActorSearchHit,
+    index: Option<usize>,
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> El {
+    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
+    let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
+    let selected = index.is_some() && state.brain.highlighted == index;
+    let expanded = state.brain.showing_detail
+        && state.brain.selected_actor.as_deref() == Some(hit.actor_id.as_str());
+    let id = hit.actor_id.clone();
+    let key_id = id.clone();
+    let tile = material::interactive_tile(
+        rune::row()
+            .w_full()
+            .padding(8.0)
+            .gap(8.0)
+            .center_y()
+            .child(ui_components::status_dot(
+                if selected {
+                    StatusTone::Accent
+                } else {
+                    StatusTone::Violet
+                },
+                preferences,
+            ))
+            .child(
+                rune::col()
+                    .grow(1.0)
+                    .gap(2.0)
+                    .child(
+                        rune::text(hit.label.clone())
+                            .font(kit.ty.ui_medium)
+                            .color(theme::hex(theme::TEXT_PRIMARY)),
+                    )
+                    .child(quiet(
+                        hit.summary
+                            .clone()
+                            .or_else(|| hit.actor_type.clone())
+                            .unwrap_or_else(|| hit.actor_id.clone()),
+                        kit,
+                    )),
+            )
+            .child(
+                rune::icon(
+                    if expanded {
+                        &icons::CHEVRON_DOWN
+                    } else {
+                        &icons::CHEVRON_RIGHT
+                    },
+                    14.0,
+                )
+                .color(kit.c.icon_muted)
+                .a11y_hidden(),
+            ),
+        selected,
+        if selected {
+            StatusTone::Accent
+        } else {
+            StatusTone::Violet
+        },
+        preferences,
+        pointer_ref,
+        shadow_ref,
+    )
+    .key(format!("actor-hit-{}", hit.actor_id))
+    .role("button")
+    .label(hit.label.clone())
+    .expanded(expanded)
+    .focusable(true)
+    .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT))
+    .press(theme::hex(theme::SELECTION_SURFACE))
+    .on_press(move |state: &mut State| state.toggle_actor_record(id.clone(), index))
+    .on_key(move |state: &mut State, event, tx| {
+        if event.key == rune::Key::Enter && event.mods == rune::Mods::default() {
+            if !tx.key_repeat() {
+                state.toggle_actor_record(key_id.clone(), index);
+            }
+            true
+        } else {
+            false
+        }
+    });
+    let mut record = rune::col()
+        .key(format!("actor-record-{}", hit.actor_id))
+        .w_full()
+        .gap(8.0)
+        .child(tile);
+    if expanded {
+        record = record.child(dossier(state, preferences, kit));
+    }
+    record
+}
+
+fn actor_catalog_records(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    let catalog = &state.actor_catalog;
+    let mut list = rune::col().w_full().gap(8.0);
+    for hit in &catalog.rows {
+        list = list.child(actor_record(state, hit, None, preferences, kit));
+    }
+    if let Some(error) = &catalog.error {
+        list = list.child(line(error, kit).role("alert"));
+    } else if catalog.busy && catalog.rows.is_empty() {
+        return list.child(ui_components::skeleton_actor_results(preferences, kit));
+    } else if catalog.rows.is_empty() {
+        return list.child(quiet("No actors in the catalog.", kit));
+    }
+    if catalog.at_limit() && catalog.next.is_some() {
+        return list.child(quiet(
+            "Browse limit reached. Use Search to find a specific actor.",
+            kit,
+        ));
+    }
+    if catalog.busy || catalog.next.is_some() || catalog.error.is_some() {
+        list = list.child(
+            ActionButton::new(if catalog.error.is_some() {
+                "Retry"
+            } else {
+                "Load more"
+            })
+            .key("actor-catalog-more")
+            .finish(MetalFinish::Gunmetal)
+            .busy(catalog.busy)
+            .disabled(catalog.busy)
+            .on_press(State::load_actor_catalog)
+            .build(kit, preferences, None),
+        );
+    }
+    list
+}
+
+fn article_records(state: &State, browse: bool, preferences: ViewPreferences, kit: &Kit) -> El {
+    let articles = &state.search_articles;
+    let mut list = rune::col().w_full().gap(8.0);
+    if browse {
+        let day = TextInput::new(&articles.browse_day)
+            .label("Article date (UTC)")
+            .placeholder("YYYY-MM-DD")
+            .on_edit(|state: &mut State| &mut state.search_articles.browse_day)
+            .on_submit(|state: &mut State, _| state.browse_articles())
+            .build(kit);
+        list = list.child(
+            rune::row()
+                .gap(8.0)
+                .center_y()
+                .flex_wrap()
+                .child(day)
+                .child(
+                    ActionButton::new("Show date")
+                        .finish(MetalFinish::Gunmetal)
+                        .on_press(State::browse_articles)
+                        .build(kit, preferences, None),
+                ),
+        );
+    }
+    if browse {
+        list = list.children(
+            articles
+                .applied_day()
+                .map(|day| quiet(format!("UTC date · {day}"), kit)),
+        );
+    }
+    match &articles.status {
+        Load::Idle => {}
+        Load::Pending | Load::Loading => {
+            let mut pending = rune::col()
+                .role("status")
+                .label("Loading articles")
+                .gap(8.0);
+            for _ in 0..3 {
+                pending = pending.child(
+                    rune::col()
+                        .w_full()
+                        .padding(8.0)
+                        .gap(4.0)
+                        .radius(6.0)
+                        .fill(kit.c.layer_01)
+                        .child(material::skeleton_block(
+                            Some(0.55),
+                            None,
+                            13.0,
+                            4.0,
+                            StatusTone::Accent,
+                            preferences,
+                        ))
+                        .child(material::skeleton_block(
+                            Some(0.28),
+                            None,
+                            10.0,
+                            4.0,
+                            StatusTone::Accent,
+                            preferences,
+                        )),
+                );
+            }
+            list = list.child(pending);
+        }
+        Load::Failed(error) => {
+            list = list.child(line(error, kit).role("alert")).child(
+                ActionButton::new("Retry articles")
+                    .disabled(!articles.can_retry())
+                    .finish(MetalFinish::Gunmetal)
+                    .on_press(State::retry_articles)
+                    .build(kit, preferences, None),
+            );
+        }
+        Load::Ready(results) => {
+            if results.rows.is_empty() {
+                return list.child(quiet(
+                    if browse {
+                        "No articles for this date."
+                    } else {
+                        "No matching articles."
+                    },
+                    kit,
+                ));
+            }
+            for article in &results.rows {
+                let mut entry = rune::col()
+                    .key(format!("search-article-{}-{}", article.run_id, article.id))
+                    .w_full()
+                    .padding(8.0)
+                    .gap(4.0)
+                    .radius(6.0)
+                    .fill(kit.c.layer_01)
+                    .child(heading(&article.title, kit))
+                    .child(quiet(
+                        format!("{} · {}", article.source_name, article.published_at),
+                        kit,
+                    ));
+                if let Some(excerpt) = &article.excerpt {
+                    entry = entry.child(quiet(excerpt.as_str(), kit));
+                }
+                list = list.child(entry);
+            }
+            if let Some(error) = articles.tail_error() {
+                list = list.child(line(error, kit).role("alert"));
+            } else if results.truncated {
+                list = list.child(quiet(
+                    "Article results are bounded. Narrow the search to see other matches.",
+                    kit,
+                ));
+            }
+            if articles.tail_loading()
+                || articles.can_load_more()
+                || articles.tail_error().is_some()
+            {
+                list = list.child(
+                    ActionButton::new(if articles.tail_error().is_some() {
+                        "Retry"
+                    } else {
+                        "Load more"
+                    })
+                    .key("search-articles-more")
+                    .finish(MetalFinish::Gunmetal)
+                    .busy(articles.tail_loading())
+                    .disabled(articles.tail_loading())
+                    .on_press(State::load_more_articles)
+                    .build(kit, preferences, None),
+                );
+            }
+            if browse
+                && articles.can_load_more()
+                && articles.tail_error().is_none()
+                && !articles.tail_loading()
+            {
+                list = list.child(
+                    rune::el()
+                        .key(format!("search-articles-tail-{}", results.rows.len()))
+                        .size(1.0, 1.0)
+                        .a11y_hidden()
+                        .on_visible(|state: &mut State, visible, _| {
+                            if visible
+                                && state.search_category == Some(SearchCategory::Articles)
+                                && state.search_articles.tail_error().is_none()
+                            {
+                                state.load_more_articles();
+                            }
+                        }),
+                );
+            }
+        }
+    }
+    list
 }
 
 fn dossier(state: &State, preferences: crate::accessibility::ViewPreferences, kit: &Kit) -> El {
@@ -2269,19 +2077,14 @@ mod tests {
         for size in [(1180.0, 780.0), (640.0, 480.0)] {
             let runtime = runtime(Page::Workstation, false, size);
             let tree = runtime.accessibility_json().to_string();
-            for label in [
-                "Workstation Status",
-                "Transport: Disconnected",
-                "Unregistered",
-                "Status checks · offline",
-            ] {
+            for label in ["Workstation Status", "Status checks · offline"] {
                 assert!(tree.contains(label), "missing {label} at {size:?}");
             }
             assert!(runtime.find("workstation-diagnostics/trigger").is_some());
             assert!(runtime.find("status-checks-toggle/trigger").is_some());
             assert!(runtime.find("backend-readiness-checks").is_none());
             assert!(runtime.find("gateway-backend-card").is_none());
-            assert!(runtime.find("workstation-services").is_some());
+            assert!(runtime.find("workstation-services").is_none());
             assert!(runtime.find("workstation-jobs-counts").is_none());
             assert!(!tree.contains("6 checks"));
             assert!(!tree.contains("Workstation activity: registration required"));
@@ -2321,7 +2124,7 @@ mod tests {
             guarded.frame(0.0);
             let guarded_tree = guarded.accessibility_json().to_string();
             assert!(guarded_tree.contains("Workstation Status"));
-            assert!(!guarded_tree.contains("Brain Search"));
+            assert!(guarded.find("nav-brain").is_none());
 
             let mut connected = Runtime::new(
                 crate::tests::registered_fixture(),
@@ -2334,20 +2137,17 @@ mod tests {
             );
             connected.frame(0.0);
             let connected_tree = connected.accessibility_json().to_string();
-            for label in [
-                "Workstation Status",
-                "Services",
-                "Distributed registration ID synthetic-registration",
-                "Transport: Connected",
-            ] {
+            for label in ["Workstation Status", "Status checks"] {
                 assert!(
                     connected_tree.contains(label),
                     "missing connected {label} at {size:?}"
                 );
             }
-            assert!(connected.find("workstation-status-header").is_some());
-            assert!(connected.find("workstation-services").is_some());
-            assert!(connected.find("workstation-jobs-counts").is_some());
+            assert!(connected.find("workstation-status-header").is_none());
+            assert!(connected.find("workstation-registration-id").is_none());
+            assert!(connected.find("workstation-health").is_none());
+            assert!(connected.find("workstation-services").is_none());
+            assert!(connected.find("workstation-jobs-counts").is_none());
             assert!(connected.find("host-resources-card").is_none());
             assert!(connected.find("toolbar-telemetry").is_some());
 
@@ -2380,10 +2180,21 @@ mod tests {
                 &mut clock,
             );
             assert!(connected.find("gateway-backend-card").is_some());
-            assert!(connected
-                .accessibility_json()
-                .to_string()
-                .contains("Deployment synthetic-deployment"));
+            let diagnostics_tree = connected.accessibility_json().to_string();
+            for label in [
+                "Backend connection",
+                "Registration ID",
+                "synthetic-registration",
+                "Deployment",
+                "synthetic-deployment",
+                "Gateway URL",
+            ] {
+                assert!(
+                    diagnostics_tree.contains(label),
+                    "missing {label} at {size:?}"
+                );
+            }
+            assert!(connected.find("workstation-stop-local-backend").is_none());
         }
     }
 
@@ -2730,6 +2541,10 @@ mod tests {
     #[test]
     fn compact_workstation_keeps_first_action_visible_and_focused_on_refresh() {
         use crate::accessibility::FixtureAccessibility;
+        use fleetworks_contracts::connect::RegistrationReceipt;
+        use fleetworks_contracts::context::Permission;
+        use fleetworks_contracts::readiness::ReadinessAction;
+        use fleetworks_contracts::readiness::ReadinessActionId;
         use fleetworks_contracts::readiness::ReadinessCheck;
         use fleetworks_contracts::readiness::WorkstationReadiness;
 
@@ -2739,6 +2554,14 @@ mod tests {
                 reduced_motion,
                 ..FixtureAccessibility::default()
             });
+            initial.backend.profile = Load::Ready(crate::backend::ProfileSnapshot {
+                configuration_revision: 0,
+                configuration_format: 1,
+                accounts: Vec::new(),
+                tool_credentials: Vec::new(),
+                setup_required: false,
+                portable_schema_version: 4,
+            });
             let mut catalog = ReadinessCheck::new(
                 ReadinessCheckId::ActorCatalog,
                 ReadinessState::NotReady,
@@ -2747,11 +2570,29 @@ mod tests {
                 "2026-11-14T22:00:00Z".into(),
             );
             catalog.fresh_for_ms = 30_000;
-            initial.readiness = Load::Ready(WorkstationReadiness::new(
+            catalog.actions.push(ReadinessAction::new(
+                ReadinessActionId::SeedActors,
+                Permission::MaintainBackend,
+                true,
+            ));
+            let context = initial
+                .registration
+                .context
+                .as_ref()
+                .expect("registered fixture");
+            let mut readiness = WorkstationReadiness::new(
                 "synthetic-deployment".into(),
                 "2026-11-14T22:00:00Z".into(),
                 vec![catalog],
+            );
+            readiness.registration = Some(RegistrationReceipt::new(
+                context.deployment_id.clone(),
+                context.workstation_id.clone(),
+                context.registration_id.clone(),
+                context.workstation_ip,
+                context.registration_revision,
             ));
+            initial.readiness = Load::Ready(readiness);
             initial.readiness_received_at = Some(0.0);
             let mut runtime = Runtime::new(
                 initial,
@@ -2764,7 +2605,7 @@ mod tests {
             );
             runtime.frame(0.0);
             runtime.frame(1.0 / 60.0);
-            let key = "workstation-open-seed";
+            let key = "readiness-action-actor_catalog-SeedActors";
             let elements = runtime.elements();
             let action = elements
                 .iter()
@@ -2798,7 +2639,7 @@ mod tests {
             assert_eq!(after.scrolled, action.scrolled);
             assert_eq!(after.visible, after.rect);
             runtime.key(KeyEvent {
-                key: Key::Enter,
+                key: Key::Text(" ".into()),
                 mods: Mods::default(),
             });
             runtime.frame(4.0 / 60.0);
@@ -2808,7 +2649,7 @@ mod tests {
     }
 
     #[test]
-    fn workstation_hero_card_covers_actor_search_states_details_and_confirmation_escape() {
+    fn workstation_actor_search_row_exposes_details_and_guarded_actions() {
         use fleetworks_contracts::context::Permission;
         use fleetworks_contracts::readiness::{
             ReadinessAction, ReadinessActionId, ReadinessCheck, ReadinessCheckId, ReadinessState,
@@ -2881,240 +2722,28 @@ mod tests {
         clock += 1.0 / 60.0;
         rt.frame(clock);
 
-        // Toggle bounded Details disclosure on the Workstation hero card.
-        assert!(rt.find("actor-search-summary-card").is_some());
-        click_within(
-            &mut rt,
-            "workstation-index-details-toggle",
-            (1280.0, 800.0),
-            &mut clock,
-        );
-        assert!(rt.state.maintenance.reindex_details_open);
-        click_within(
-            &mut rt,
-            "workstation-index-details-toggle",
-            (1280.0, 800.0),
-            &mut clock,
-        );
-        assert!(!rt.state.maintenance.reindex_details_open);
-
-        let details_position = rt.find("workstation-index-details-toggle").unwrap();
-        let scenarios = [
-            (
-                ReadinessState::NotReady,
-                ReadinessState::NotReady,
-                "not_seeded",
-                "Needs data",
-            ),
-            (
-                ReadinessState::NotReady,
-                ReadinessState::Running,
-                "index_catching_up",
-                "Needs data",
-            ),
-            (
-                ReadinessState::Ready,
-                ReadinessState::NotReady,
-                "not_built",
-                "Not built",
-            ),
-            (
-                ReadinessState::Ready,
-                ReadinessState::Running,
-                "index_catching_up",
-                "Background indexing",
-            ),
-            (
-                ReadinessState::Ready,
-                ReadinessState::NotReady,
-                "paused",
-                "Paused",
-            ),
-            (
-                ReadinessState::Ready,
-                ReadinessState::Degraded,
-                "failed",
-                "Needs attention",
-            ),
-            (
-                ReadinessState::Ready,
-                ReadinessState::Unavailable,
-                "unavailable",
-                "Unavailable",
-            ),
-        ];
-        for (cat_state, search_state, reason, label) in scenarios {
-            rt.update(move |state, _| {
-                if let crate::app::Load::Ready(readiness) = &mut state.readiness {
-                    readiness.checks.retain(|c| {
-                        !matches!(
-                            c.id,
-                            ReadinessCheckId::ActorCatalog | ReadinessCheckId::ActorSearch
-                        )
-                    });
-                    let mut cat = ReadinessCheck::new(
-                        ReadinessCheckId::ActorCatalog,
-                        cat_state,
-                        "cat".into(),
-                        "Catalog check".into(),
-                        "2026-11-14T22:00:00Z".into(),
-                    );
-                    cat.fresh_for_ms = 30_000;
-                    let mut search = ReadinessCheck::new(
-                        ReadinessCheckId::ActorSearch,
-                        search_state,
-                        reason.into(),
-                        format!("Explanation for {label}"),
-                        "2026-11-14T22:00:00Z".into(),
-                    );
-                    search.fresh_for_ms = 30_000;
-                    search.actions.push(ReadinessAction::new(
-                        ReadinessActionId::RebuildActorIndex,
-                        Permission::MaintainBackend,
-                        true,
-                    ));
-                    readiness.checks.push(cat);
-                    readiness.checks.push(search);
-                }
-            });
-            clock += 1.0 / 60.0;
-            rt.frame(clock);
-            let tree = rt.accessibility_json().to_string();
-            assert!(tree.contains("Connected"));
-            let status = rt
-                .elements()
-                .into_iter()
-                .find(|element| element.path.ends_with("actor-search-status-tag"))
-                .expect("actor search status tag");
-            assert_eq!(status.label.as_deref(), Some(label));
-            let position = rt.find("workstation-index-details-toggle").unwrap();
-            assert!((position.0 - details_position.0).abs() < 0.5);
-            assert!((position.1 - details_position.1).abs() < 0.5);
-            if cat_state == ReadinessState::NotReady {
-                assert!(rt.find("workstation-open-seed").is_some());
-                assert!(rt.find("workstation-build-actor-index").is_none());
-            }
-            if search_state == ReadinessState::Running {
-                assert!(rt.find("workstation-view-index-job").is_none());
-                assert!(rt.find("workstation-build-actor-index").is_none());
-                assert!(
-                    app::sidebar_row_badge(&rt.state, Page::Jobs).is_none(),
-                    "readiness alone must not contribute to the jobs badge",
-                );
-                if cat_state == ReadinessState::Ready {
-                    click_within(
-                        &mut rt,
-                        "workstation-index-details-toggle",
-                        (1280.0, 800.0),
-                        &mut clock,
-                    );
-                    assert!(rt
-                        .accessibility_json()
-                        .to_string()
-                        .contains(crate::readiness_cards::ACTOR_INDEX_CATCH_UP));
-                    click_within(
-                        &mut rt,
-                        "workstation-index-details-toggle",
-                        (1280.0, 800.0),
-                        &mut clock,
-                    );
-                }
-            }
-        }
-
-        // Building state with an unknown total exposes a phase and the observed count.
-        rt.update(|state, _| {
-            if let crate::app::Load::Ready(readiness) = &mut state.readiness {
-                if let Some(c) = readiness
-                    .checks
-                    .iter_mut()
-                    .find(|c| c.id == ReadinessCheckId::ActorSearch)
-                {
-                    c.state = ReadinessState::NotReady;
-                    c.reason_code = "building".into();
-                }
-            }
-            let job: crate::backend::ActivityJob = serde_json::from_value(serde_json::json!({
-                "id": "job-build-1",
-                "app": "worker",
-                "operation": "actor_reindex",
-                "title": "Actor index",
-                "state": "running",
-                "phase": "scanning",
-                "progress_done": 128,
-                "progress_total": null,
-                "error_summary": "",
-                "private_details_available": false,
-                "activity_actions_available": false,
-                "status_only": false
-            }))
-            .unwrap();
-            state.backend.jobs = crate::app::Load::Ready(crate::backend::ActivityJobs {
-                rows: vec![job],
-                activity_scope: fleetworks_contracts::context::ActivityScope::for_workstation(
-                    state.registration.context.as_ref().unwrap(),
-                ),
-                relation_counts_available: false,
-                activity_actions_available: false,
-            });
-        });
-        clock += 1.0 / 60.0;
-        rt.frame(clock);
-        let building_tree = rt.accessibility_json().to_string();
-        assert!(building_tree.contains("Building"));
-        assert!(!building_tree.contains("scanning · 128 scanned"));
-        assert!(rt.find("workstation-view-index-job").is_some());
-        assert!(rt.find("workstation-build-actor-index").is_none());
-        click_within(
-            &mut rt,
-            "workstation-index-details-toggle",
-            (1280.0, 800.0),
-            &mut clock,
-        );
-        let details = rt.accessibility_json().to_string();
-        assert!(details.contains("scanning · 128 scanned"));
-        assert!(!details.contains('%'));
-
-        rt.update(|state, _| {
-            if let Load::Ready(readiness) = &mut state.readiness {
+        const SIZE: (f32, f32) = (1280.0, 800.0);
+        const BUILD: &str = "workstation-build-actor-index";
+        const DETAILS: &str = "readiness-action-actor_search";
+        const SEARCH: &str = "workstation-search-actors";
+        let set_search = |rt: &mut Runtime<State>, value, reason: &str| {
+            rt.update(|state, _| {
+                let Load::Ready(readiness) = &mut state.readiness else {
+                    panic!("expected readiness");
+                };
                 let check = readiness
                     .checks
                     .iter_mut()
                     .find(|check| check.id == ReadinessCheckId::ActorSearch)
                     .expect("actor search check");
-                check.state = ReadinessState::Ready;
-                check.reason_code = "index_reader_visible".into();
-            }
-        });
-        clock += 1.0 / 60.0;
-        rt.frame(clock);
-        assert!(rt.find("workstation-view-index-job").is_some());
-        assert!(rt.find("workstation-search-actors").is_some());
+                check.state = value;
+                check.reason_code = reason.into();
+            });
+        };
 
-        rt.update(|state, _| {
-            state.backend.jobs = Load::Idle;
-            if let Load::Ready(readiness) = &mut state.readiness {
-                let check = readiness
-                    .checks
-                    .iter_mut()
-                    .find(|check| check.id == ReadinessCheckId::ActorSearch)
-                    .expect("actor search check");
-                check.state = ReadinessState::NotReady;
-                check.reason_code = "not_built".into();
-            }
-        });
-        clock += 1.0 / 60.0;
-        rt.frame(clock);
-        // The single actionable build control still opens its confirmation.
-        click_within(
-            &mut rt,
-            "workstation-build-actor-index",
-            (1280.0, 800.0),
-            &mut clock,
-        );
+        assert!(rt.find("actor-search-summary-card").is_none());
+        click_within(&mut rt, BUILD, SIZE, &mut clock);
         assert!(rt.state.confirm_maintenance_dialog);
-        let dialog_tree = rt.accessibility_json().to_string();
-        assert!(dialog_tree.contains("Shared backend catalog"));
         assert!(rt.find("maintenance-confirm").is_some());
         assert!(rt.find("maintenance-cancel").is_some());
         rt.key(KeyEvent {
@@ -3126,36 +2755,21 @@ mod tests {
         assert!(!rt.state.confirm_maintenance_dialog);
         assert!(rt.state.maintenance.confirmation.is_none());
 
-        // Ready state offers Search actors which navigates directly to Page::Brain.
-        rt.update(|state, _| {
-            if let crate::app::Load::Ready(readiness) = &mut state.readiness {
-                if let Some(c) = readiness
-                    .checks
-                    .iter_mut()
-                    .find(|c| c.id == ReadinessCheckId::ActorSearch)
-                {
-                    c.state = ReadinessState::Ready;
-                    c.reason_code = "ready".into();
-                }
-            }
-        });
+        set_search(&mut rt, ReadinessState::Running, "index_catching_up");
         clock += 1.0 / 60.0;
         rt.frame(clock);
-        assert!(rt.find("workstation-index-details-toggle").is_some());
-        click_within(
-            &mut rt,
-            "workstation-index-details-toggle",
-            (1280.0, 800.0),
-            &mut clock,
-        );
-        assert!(rt.find("workstation-index-details-toggle").is_some());
-        assert!(!rt.state.maintenance.reindex_details_open);
-        click_within(
-            &mut rt,
-            "workstation-search-actors",
-            (1280.0, 800.0),
-            &mut clock,
-        );
+        assert!(rt.find(BUILD).is_none());
+        click_within(&mut rt, DETAILS, SIZE, &mut clock);
+        assert!(rt.find("readiness-details-actor_search").is_some());
+        assert!(rt
+            .accessibility_json()
+            .to_string()
+            .contains(crate::readiness_cards::ACTOR_INDEX_CATCH_UP));
+
+        set_search(&mut rt, ReadinessState::Ready, "index_reader_visible");
+        clock += 1.0 / 60.0;
+        rt.frame(clock);
+        click_within(&mut rt, SEARCH, SIZE, &mut clock);
         assert_eq!(rt.state.page, Page::Brain);
     }
 

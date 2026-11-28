@@ -19,9 +19,12 @@ use argos_osint_core::storage::upload_ticket;
 use argos_osint_core::storage::upload_ticket::UploadTicketBinding;
 use axum::body::Bytes;
 use axum::http::StatusCode;
+use chrono::Utc;
 use fleetworks_contracts::capabilities::Capabilities;
 use fleetworks_contracts::capabilities::CONNECT_REGISTRY_FEATURE;
 use fleetworks_contracts::chat::ChatSourceKind;
+use fleetworks_contracts::chat::QA_GPT2_GENERATORS_FEATURE;
+use fleetworks_contracts::chat::QA_HISTORY_FEATURE;
 use fleetworks_contracts::chat::QA_MODEL_SETTINGS_FEATURE;
 use fleetworks_contracts::chat::QA_TRIAGE_FEATURE;
 use fleetworks_contracts::context::CredentialPurpose;
@@ -54,6 +57,8 @@ use crate::connect;
 use crate::cycle_history;
 use crate::datasets;
 use crate::host_metrics;
+use crate::inbox_qa::context::GeneratorState;
+use crate::inbox_qa::context::Observer;
 use crate::maintenance;
 use crate::operational_logs;
 use crate::operations;
@@ -155,6 +160,7 @@ pub struct LocalGateway {
     services: PrivateServices,
     qa: crate::inbox_qa::QaTarget,
     qa_availability: crate::inbox_qa::QaRuntimeAvailability,
+    context: Option<Arc<Observer>>,
     capability_config: LocalCapabilityConfig,
     job_cursors: Arc<activity_paging::JobsCursors>,
     log_cursors: Arc<operational_logs::LogCursors>,
@@ -190,6 +196,7 @@ impl LocalGateway {
             state,
             qa,
             qa_availability: crate::inbox_qa::QaRuntimeAvailability::default(),
+            context: None,
             services,
             capability_config,
             job_cursors: Arc::new(activity_paging::JobsCursors::new()),
@@ -207,6 +214,15 @@ impl LocalGateway {
         runtime: Arc<dyn crate::inbox_qa::decision::DecisionRuntime>,
     ) -> Self {
         self.qa = self.qa.with_decision(runtime);
+        self
+    }
+
+    /// Attach the optional Embedded observation journal shared with assistant admission.
+    #[must_use]
+    pub fn with_workstation_context(mut self, observer: Arc<Observer>) -> Self {
+        self.qa = self.qa.with_context(Arc::clone(&observer));
+        self.qa_availability = self.qa_availability.with_context(Arc::clone(&observer));
+        self.context = Some(observer);
         self
     }
 
@@ -309,6 +325,7 @@ impl LocalGateway {
             | IpcOperation::QaTurnSubmit(_)
             | IpcOperation::QaRelatedActivity(_)
             | IpcOperation::QaLatest
+            | IpcOperation::QaHistory
             | IpcOperation::QaEvents(_)
             | IpcOperation::QaCancel(_)) => {
                 Box::pin(self.dispatch_qa_op(principal, registration, op)).await
@@ -322,6 +339,7 @@ impl LocalGateway {
             | IpcOperation::ModelsDefaults
             | IpcOperation::ProfileRead
             | IpcOperation::ActorsSearch(_)
+            | IpcOperation::ActorsBrowse(_)
             | IpcOperation::ActorDetail(_)
             | IpcOperation::ArticlesList(_)
             | IpcOperation::ArticlesSearch(_)
@@ -365,7 +383,7 @@ impl LocalGateway {
                     _ => Permission::ReadBackend,
                 }
             }
-            IpcOperation::QaLatest | IpcOperation::QaEvents(_) => {
+            IpcOperation::QaLatest | IpcOperation::QaHistory | IpcOperation::QaEvents(_) => {
                 Permission::ReadWorkstationActivity
             }
             IpcOperation::QaTurnSubmit(_) | IpcOperation::QaCancel(_) => {
@@ -391,16 +409,24 @@ impl LocalGateway {
                 )
                 .await?,
             ),
-            IpcOperation::QaSettingsUpdate(request) => json_payload(
-                inbox_qa::update_request(
+            IpcOperation::QaSettingsUpdate(request) => {
+                let settings = inbox_qa::update_request(
                     &self.state,
                     &context,
                     &self.qa,
                     request,
                     Some(&self.qa_availability),
                 )
-                .await?,
-            ),
+                .await?;
+                if !settings.enabled {
+                    if let (Some(observer), Ok(generation)) =
+                        (&self.context, i64::try_from(settings.generation))
+                    {
+                        observer.record_generator(generation, GeneratorState::Disabled, None);
+                    }
+                }
+                json_payload(settings)
+            }
             IpcOperation::QaTurnSubmit(request) => json_payload(
                 inbox_qa::submit_request(
                     &self.state,
@@ -417,6 +443,9 @@ impl LocalGateway {
             ),
             IpcOperation::QaLatest => {
                 json_payload(inbox_qa::latest_request(&self.state, &context).await?)
+            }
+            IpcOperation::QaHistory => {
+                json_payload(inbox_qa::history_request(&self.state, &context).await?)
             }
             IpcOperation::QaEvents(query) => json_payload(
                 inbox_qa::events_request(&self.state, &context, &self.qa, query).await?,
@@ -491,6 +520,12 @@ impl LocalGateway {
                     .await?,
                 ))
             }
+            IpcOperation::ActorsBrowse(query) => {
+                self.require_global_read(principal, registration).await?;
+                Ok(IpcPayload::Json(
+                    actor_dossier::browse_value(&self.state, &query).await?,
+                ))
+            }
             IpcOperation::ActorDetail(query) => {
                 self.require_global_read(principal, registration).await?;
                 Ok(IpcPayload::Json(
@@ -560,10 +595,14 @@ impl LocalGateway {
                     sort: query.sort,
                     cursor: query.cursor,
                 };
-                Ok(IpcPayload::Json(
+                let observed_at = Utc::now().timestamp_millis();
+                let value =
                     activity_paging::jobs_value(&self.state, &context, &self.job_cursors, paging)
-                        .await?,
-                ))
+                        .await?;
+                if let Some(observer) = &self.context {
+                    observer.record_jobs(&context, &value, observed_at);
+                }
+                Ok(IpcPayload::Json(value))
             }
             IpcOperation::JobDetail(query) => {
                 let context = self
@@ -585,9 +624,12 @@ impl LocalGateway {
                     text: None,
                     since: None,
                 };
-                Ok(IpcPayload::Json(
-                    activity::job_value(&self.state, &context, detail).await?,
-                ))
+                let observed_at = Utc::now().timestamp_millis();
+                let value = activity::job_value(&self.state, &context, detail).await?;
+                if let Some(observer) = &self.context {
+                    observer.record_jobs(&context, &value, observed_at);
+                }
+                Ok(IpcPayload::Json(value))
             }
             IpcOperation::ToolResult(query) => {
                 let context = self
@@ -1280,6 +1322,10 @@ impl LocalGateway {
             crate::inbox_qa::FEATURE,
             QA_TRIAGE_FEATURE,
             QA_MODEL_SETTINGS_FEATURE,
+            QA_HISTORY_FEATURE,
+            QA_GPT2_GENERATORS_FEATURE,
+            fleetworks_contracts::chat::QA_INBOX_NOTIFICATIONS_FEATURE,
+            fleetworks_contracts::chat::QA_JOB_NOTIFICATION_LOGS_FEATURE,
         ]
         .into_iter()
         .map(str::to_owned)
@@ -1318,7 +1364,7 @@ impl LocalGateway {
         } else {
             None
         };
-        let value = workstation::read_value(
+        let report = workstation::read_report(
             &self.state,
             principal,
             owners,
@@ -1327,7 +1373,11 @@ impl LocalGateway {
             true,
         )
         .await?;
-        Ok(IpcPayload::Json(value))
+        let payload = json_payload(&report)?;
+        if let Some(observer) = &self.context {
+            observer.record_readiness(&report.checks);
+        }
+        Ok(payload)
     }
 
     async fn handle_dataset_upload_start(
@@ -1459,7 +1509,16 @@ impl LocalGateway {
         let mut part = session.part.take().ok_or_else(|| {
             DispatchError::new(StatusCode::NOT_FOUND, "Dataset upload destination closed")
         })?;
-        part.write_chunk(&data).await.map_err(crate::internal)?;
+        part.write_chunk(&data).await.map_err(|error| {
+            if error.kind() == std::io::ErrorKind::StorageFull {
+                DispatchError::new(
+                    StatusCode::INSUFFICIENT_STORAGE,
+                    "Insufficient space within the Embedded disk allowance; start a new upload when space is available",
+                )
+            } else {
+                crate::internal(error).into()
+            }
+        })?;
         check_upload_live(&entry)?;
         session.digest.update(&data);
         session.written_bytes = next_offset;
@@ -2278,19 +2337,36 @@ mod tests {
         ));
 
         // Registered context from another principal is rejected.
-        let wrong_ctx = gateway
+        for operation in [IpcOperation::JobsList(jobs_query), IpcOperation::QaHistory] {
+            let wrong_ctx = gateway
+                .dispatch(&other_principal, Some(&registration), operation)
+                .await;
+            assert!(matches!(
+                wrong_ctx,
+                IpcOutcome::Err {
+                    status: 403 | 401 | 409,
+                    ..
+                }
+            ));
+        }
+
+        let without_activity = AuthenticatedPrincipal::for_local_ipc(
+            principal.credential_id(),
+            principal.scope_id(),
+            principal.access_epoch(),
+            vec![Permission::ReadBackend],
+        )
+        .expect("same principal without activity permission");
+        let denied_history = gateway
             .dispatch(
-                &other_principal,
+                &without_activity,
                 Some(&registration),
-                IpcOperation::JobsList(jobs_query),
+                IpcOperation::QaHistory,
             )
             .await;
         assert!(matches!(
-            wrong_ctx,
-            IpcOutcome::Err {
-                status: 403 | 401 | 409,
-                ..
-            }
+            denied_history,
+            IpcOutcome::Err { status: 403, .. }
         ));
 
         // Capability gating rejects disabled operations with 503.

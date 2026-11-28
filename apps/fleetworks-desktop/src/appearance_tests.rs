@@ -187,25 +187,30 @@ fn actual_readiness_view_distinguishes_stale_ready_and_unverified_inference() {
         vec![ready, inference],
     ));
     runtime.state.readiness_received_at = Some(0.0);
+    runtime.reduced_motion = true;
     runtime.frame(0.0);
-    let collapsed = runtime.accessibility_json().to_string();
-    assert!(collapsed.contains("Status checks · 2 unresolved"));
-    assert!(!collapsed.contains("passed"));
-    assert!(runtime.find("readiness-trigger-gateway").is_none());
+    assert!(runtime.find("readiness-trigger-gateway").is_some());
     assert!(runtime
         .find("readiness-trigger-classifier_inference")
-        .is_none());
+        .is_some());
 
     runtime.update(|_, tx| tx.focus("status-checks-toggle", true));
     runtime.frame(1.0 / 60.0);
     assert!(runtime.elements().iter().any(|element| {
         element.focused && element.path.ends_with("/status-checks-toggle/trigger")
     }));
-    runtime.key(KeyEvent {
+    let space = || KeyEvent {
         key: Key::Text(" ".into()),
         mods: Mods::default(),
-    });
+    };
+    runtime.key(space());
     runtime.frame(2.0 / 60.0);
+    let collapsed = runtime.accessibility_json().to_string();
+    assert!(collapsed.contains("Status checks · 2 unresolved"));
+    assert!(!collapsed.contains("passed"));
+    assert!(runtime.find("readiness-trigger-gateway").is_none());
+    runtime.key(space());
+    runtime.frame(3.0 / 60.0);
 
     let tree = runtime.accessibility_json().to_string();
     let unsynced_glyph = runtime
@@ -229,13 +234,134 @@ fn actual_readiness_view_distinguishes_stale_ready_and_unverified_inference() {
     runtime.update(|state, _| {
         state.connection.status = crate::connection::ConnectionStatus::Disconnected;
     });
-    runtime.frame(3.0 / 60.0);
+    runtime.frame(4.0 / 60.0);
     let offline = runtime.accessibility_json().to_string();
     assert!(offline.contains("Status checks · offline"));
     assert!(offline.contains("Connect a backend to see status checks."));
     assert!(!offline.contains("Gateway: Last ready"));
     assert!(!offline.contains("Atlas BERT inference"));
     assert!(runtime.find("readiness-status-table").is_none());
+}
+
+#[test]
+fn status_checks_count_only_applicable_observations_and_keep_real_failures() {
+    use fleetworks_workstation::native::BackendKind;
+
+    let observed = "2026-01-01T00:00:00Z";
+    let check = move |id, state, reason: &str| {
+        let mut check =
+            ReadinessCheck::new(id, state, reason.into(), String::new(), observed.into());
+        check.fresh_for_ms = 30_000;
+        check
+    };
+    for (backend, size, show_unknown) in [
+        (BackendKind::Local, (640.0, 480.0), false),
+        (BackendKind::Remote, (1280.0, 800.0), true),
+    ] {
+        let mut state = crate::tests::registered_fixture();
+        state.backend_kind = backend;
+        state.workstation_status_checks_open = true;
+        state.workstation_diagnostics_open = true;
+        state.readiness = Load::Ready(WorkstationReadiness::new(
+            "synthetic-deployment".into(),
+            observed.into(),
+            vec![
+                check(
+                    ReadinessCheckId::Gateway,
+                    ReadinessState::Ready,
+                    "gateway_reachable",
+                ),
+                check(
+                    ReadinessCheckId::Jobs,
+                    ReadinessState::Unknown,
+                    "owner_not_configured",
+                ),
+                check(
+                    ReadinessCheckId::Control,
+                    ReadinessState::NotApplicable,
+                    "distributed_service_only",
+                ),
+            ],
+        ));
+        state.readiness_received_at = Some(0.0);
+        let mut runtime = Runtime::new(
+            state,
+            app::view,
+            size,
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.frame(0.0);
+        let tree = runtime.accessibility_json().to_string();
+        assert!(tree.contains(if show_unknown {
+            "Status checks · 1 passed · 1 unresolved"
+        } else {
+            "Status checks · 1 passed"
+        }));
+        assert!(tree.contains(if show_unknown {
+            "Checks unresolved"
+        } else {
+            "Workstation ready"
+        }));
+        assert_eq!(
+            runtime.find("readiness-trigger-jobs").is_some(),
+            show_unknown
+        );
+        assert!(runtime.find("readiness-trigger-control").is_none());
+
+        runtime.update(move |state, _| {
+            let Load::Ready(readiness) = &mut state.readiness else {
+                panic!("expected scoped fixture readiness");
+            };
+            readiness.checks.extend([
+                check(
+                    ReadinessCheckId::Brain,
+                    ReadinessState::NotReady,
+                    "process_not_ready",
+                ),
+                check(
+                    ReadinessCheckId::ClassifierInference,
+                    ReadinessState::Unknown,
+                    "model_unverified",
+                ),
+            ]);
+        });
+        runtime.frame(0.1);
+        let tree = runtime.accessibility_json().to_string();
+        assert!(tree.contains("Brain: Failed"));
+        assert!(tree.contains("Atlas BERT inference: Unknown"));
+        assert!(tree.contains("Service failure"));
+        assert!(tree.contains("1 failed"));
+        assert!(runtime.find("readiness-critical").is_some());
+
+        runtime.update(|state, _| {
+            let Load::Ready(readiness) = &mut state.readiness else {
+                panic!("expected scoped fixture readiness");
+            };
+            readiness
+                .checks
+                .retain(|check| check.state == ReadinessState::NotApplicable);
+        });
+        runtime.frame(0.2);
+        let tree = runtime.accessibility_json().to_string();
+        assert!(tree.contains("Status checks · none applicable"));
+        assert!(tree.contains("No applicable status checks"));
+        assert!(tree.contains("Health unchecked"));
+        assert!(runtime.find("readiness-status-table").is_none());
+
+        runtime.update(|state, _| {
+            state.set_backend_kind(if show_unknown {
+                BackendKind::Local
+            } else {
+                BackendKind::Remote
+            });
+        });
+        runtime.frame(0.3);
+        assert!(matches!(runtime.state.readiness, Load::Idle));
+        assert!(runtime.find("readiness-status-table").is_none());
+    }
 }
 
 #[test]

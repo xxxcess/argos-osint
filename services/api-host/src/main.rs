@@ -17,6 +17,8 @@ mod qa_worker;
 mod queue_client;
 mod reset_services;
 mod setup_jobs;
+#[cfg(all(unix, feature = "embedded"))]
+mod workstation_context;
 
 use anyhow::{ensure, Result};
 use argos_osint_core::storage::{self, home::Layout};

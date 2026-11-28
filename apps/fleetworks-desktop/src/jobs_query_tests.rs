@@ -665,7 +665,7 @@ fn scheduler_discovers_new_work_while_a_completed_job_with_unavailable_logs_is_s
     assert_ne!(
         runtime.state.scoped_jobs.reads_begun(),
         before,
-        "the list is re-read even though log recovery owns the active path"
+        "the list is re-read while historical logs are unavailable"
     );
     assert_eq!(runtime.state.jobs_discovery_at, 105.0);
     assert_eq!(
@@ -940,14 +940,33 @@ fn jobs_nav_badge_counts_in_progress_buckets_omits_unknown_and_clears_on_authori
 }
 
 #[test]
-fn workstation_job_tiles_use_scoped_counts_and_open_jobs() {
+fn workstation_jobs_status_action_opens_the_jobs_tab() {
     use crate::app;
     use crate::app::Page;
     use crate::logs::ActivityTab;
+    use fleetworks_contracts::readiness::ReadinessCheck;
+    use fleetworks_contracts::readiness::ReadinessCheckId;
+    use fleetworks_contracts::readiness::ReadinessState;
+    use fleetworks_contracts::readiness::WorkstationReadiness;
 
-    let mut state = registered_app();
+    const ACTION: &str = "readiness-open-jobs";
+    const OBSERVED: &str = "2026-11-12T12:00:00Z";
+    let mut state = crate::tests::registered_fixture();
     state.page = Page::Workstation;
     state.activity_tab = ActivityTab::Logs;
+    let mut jobs = ReadinessCheck::new(
+        ReadinessCheckId::Jobs,
+        ReadinessState::Ready,
+        "jobs_ready".into(),
+        "The dispatcher is ready.".into(),
+        OBSERVED.into(),
+    );
+    jobs.fresh_for_ms = 60_000;
+    state.complete_readiness(Ok(WorkstationReadiness::new(
+        "synthetic-deployment".into(),
+        OBSERVED.into(),
+        vec![jobs],
+    )));
     let mut runtime = Runtime::new(
         state,
         app::view,
@@ -959,99 +978,26 @@ fn workstation_job_tiles_use_scoped_counts_and_open_jobs() {
     );
     runtime.reduced_motion = true;
     runtime.frame(0.0);
-    let label_for = |runtime: &Runtime<app::State>, key: &str| {
-        runtime
-            .elements()
-            .into_iter()
-            .find(|element| element.key.as_deref() == Some(key) && !element.exiting)
-            .and_then(|element| element.label)
-    };
-    let keys = [
-        ("workstation-jobs-queued", "Queued"),
-        ("workstation-jobs-running", "Running"),
-        ("workstation-jobs-retrying", "Retrying"),
-    ];
-    for (key, label) in keys {
-        let unavailable = format!("{label}: Unavailable");
-        assert_eq!(
-            label_for(&runtime, key).as_deref(),
-            Some(unavailable.as_str())
-        );
-    }
-
-    runtime.update(|state, _| {
-        state.request_jobs(JobsEvent::Apply);
-        let ticket = state
-            .scoped_jobs
-            .active_ticket()
-            .expect("registered jobs read")
-            .clone();
-        let mut reply = page(&ticket.binding, 1, None);
-        reply.counts = Some(JobsDashboardCounts {
-            active: 2,
-            queued: 3,
-            retrying: 0,
-            failed: 4,
-            completed_recent: 9,
-        });
-        state.complete_scoped_jobs(ticket, Ok(reply));
+    assert!(runtime.find("workstation-jobs-counts").is_none());
+    runtime.update(|_, tx| {
+        tx.scroll_into_view(ACTION);
+        tx.focus(ACTION, true);
     });
     runtime.frame(1.0 / 60.0);
-    for ((key, _), expected) in keys
-        .into_iter()
-        .zip(["Queued: 3", "Running: 2", "Retrying: 0"])
-    {
-        assert_eq!(label_for(&runtime, key).as_deref(), Some(expected));
-    }
-
-    runtime.update(|state, _| {
-        state.request_jobs(JobsEvent::Poll);
-        let ticket = state
-            .scoped_jobs
-            .active_ticket()
-            .expect("registered poll")
-            .clone();
-        let mut reply = page(&ticket.binding, 1, None);
-        reply.counts = None;
-        reply.observed_at = "2026-11-12T12:01:00Z".into();
-        state.complete_scoped_jobs(ticket, Ok(reply));
-    });
-    runtime.frame(2.0 / 60.0);
-    for (key, label) in keys {
-        let unavailable = format!("{label}: Unavailable");
-        assert_eq!(
-            label_for(&runtime, key).as_deref(),
-            Some(unavailable.as_str())
-        );
-    }
-
-    runtime.update(|state, tx| {
-        state.request_jobs(JobsEvent::Poll);
-        let ticket = state
-            .scoped_jobs
-            .active_ticket()
-            .expect("registered poll")
-            .clone();
-        let mut reply = page(&ticket.binding, 1, None);
-        reply.observed_at = "2026-11-12T12:02:00Z".into();
-        state.complete_scoped_jobs(ticket, Ok(reply));
-        tx.scroll_into_view("workstation-jobs-queued");
-        tx.focus("workstation-jobs-queued", true);
-    });
-    runtime.frame(3.0 / 60.0);
-    let queued = runtime
+    let action = runtime
         .elements()
         .into_iter()
-        .find(|element| element.key.as_deref() == Some("workstation-jobs-queued"))
-        .expect("visible Jobs link");
-    assert_eq!(queued.visible, queued.rect);
-    assert_eq!(queued.scrolled[0], 0.0);
-    assert!(queued.focused);
+        .find(|element| element.key.as_deref() == Some(ACTION) && !element.exiting)
+        .expect("Jobs status action");
+    assert_eq!(action.role, "button");
+    assert_eq!(action.label.as_deref(), Some("Open Jobs & Logs"));
+    assert_eq!(action.visible, action.rect);
+    assert!(action.focused);
     runtime.key(rune::KeyEvent {
         key: rune::Key::Text(" ".into()),
         mods: rune::Mods::default(),
     });
-    runtime.frame(4.0 / 60.0);
+    runtime.frame(2.0 / 60.0);
     assert_eq!(runtime.state.page, Page::Jobs);
     assert_eq!(runtime.state.activity_tab, ActivityTab::Jobs);
 }

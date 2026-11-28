@@ -1,5 +1,6 @@
 //! Native Inbox question answering over authenticated HTTP and private IPC.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::Deserialize;
@@ -8,6 +9,7 @@ use serde::Serialize;
 use crate::context::MutationContext;
 use crate::qa_worker::QaContextUsage;
 pub use crate::qa_worker::QaModelTarget;
+use crate::readiness::ReadinessCheckId;
 
 use super::identity;
 use super::request_id;
@@ -21,12 +23,21 @@ use super::MAX_INPUT_BYTES;
 pub const QA_SETTINGS_PATH: &str = "/api/v2/workstation/chat/settings";
 pub const QA_TURNS_PATH: &str = "/api/v2/workstation/chat/turns";
 pub const QA_LATEST_PATH: &str = "/api/v2/workstation/chat/latest";
+/// Read retained terminal exchanges over private Embedded IPC.
+pub const QA_HISTORY_PATH: &str = "/api/v2/workstation/chat/history";
 pub const QA_EVENTS_PATH: &str = "/api/v2/workstation/chat/events";
 pub const QA_CANCEL_PATH: &str = "/api/v2/workstation/chat/cancel";
 /// Embedded capability for direct Assistant answers and inline triage.
 pub const QA_TRIAGE_FEATURE: &str = "inbox-qa-triage-v1";
 /// Embedded capability for independently revisioned generator and decision preferences.
 pub const QA_MODEL_SETTINGS_FEATURE: &str = "inbox-qa-model-settings-v1";
+pub const QA_GPT2_GENERATORS_FEATURE: &str = "inbox-qa-gpt2-v1";
+/// Embedded capability for browsing a registration's retained Inbox exchanges.
+pub const QA_HISTORY_FEATURE: &str = "inbox-qa-history-v1";
+/// Embedded capability for accepting a bounded summary of native Inbox notices.
+pub const QA_INBOX_NOTIFICATIONS_FEATURE: &str = "inbox-qa-notifications-v1";
+/// Embedded capability for attaching recent job logs to an Inbox notification explanation.
+pub const QA_JOB_NOTIFICATION_LOGS_FEATURE: &str = "inbox-qa-job-notification-logs-v1";
 /// Read-only related activity lookup over private Embedded IPC.
 pub const QA_RELATED_ACTIVITY_PATH: &str = "/api/v2/workstation/chat/related-activity";
 
@@ -37,6 +48,12 @@ pub const QA_EVIDENCE_VERSION: &str = "1";
 /// The Inbox displays at most three independent findings across at most 60 words.
 pub const QA_MAX_FINDINGS: usize = 3;
 pub const QA_MAX_WORDS: usize = 60;
+/// Maximum number of exchanges retained per registration.
+pub const QA_MAX_RETAINED_TURNS: usize = 16;
+/// Number of native Inbox notification topics that may accompany a question.
+pub const QA_MAX_INBOX_NOTIFICATION_GROUPS: usize = 3;
+/// Maximum notices retained in the native Inbox.
+pub const QA_MAX_INBOX_NOTIFICATION_ITEMS: u8 = 50;
 
 /// The selected backend's inference lifecycle.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -86,10 +103,26 @@ pub enum QaAvailabilityReason {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum QaGeneratorPreference {
-    #[default]
     Automatic,
     FlanT5Small,
     FlanT5Base,
+    #[default]
+    Gpt2Small,
+    Gpt2Medium,
+}
+
+impl QaGeneratorPreference {
+    /// The configured target for a named choice, independent of worker readiness.
+    #[must_use]
+    pub const fn explicit_target(self) -> Option<QaModelTarget> {
+        match self {
+            Self::Automatic => None,
+            Self::FlanT5Small => Some(QaModelTarget::FlanT5Small),
+            Self::FlanT5Base => Some(QaModelTarget::FlanT5Base),
+            Self::Gpt2Small => Some(QaModelTarget::Gpt2Small),
+            Self::Gpt2Medium => Some(QaModelTarget::Gpt2Medium),
+        }
+    }
 }
 
 /// Saved decision policy, as well as the effective rules or local scorer.
@@ -336,7 +369,98 @@ impl fmt::Debug for QaRelatedActivity {
     }
 }
 
-/// One question. Evidence is always selected by the authorized backend.
+/// Fixed categories of native Inbox observations. Jobs are aggregated without an identifier.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaInboxNotificationTopic {
+    Connection,
+    Jobs,
+    Readiness(ReadinessCheckId),
+}
+
+/// Highest visual severity among the unread notices in a group, or among its read notices.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaInboxNotificationSeverity {
+    Informational,
+    Warning,
+    Critical,
+}
+
+/// Counts observed by the submitting desktop. This value confers no authority.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct QaInboxNotificationGroup {
+    pub topic: QaInboxNotificationTopic,
+    pub severity: QaInboxNotificationSeverity,
+    pub unread: u8,
+    pub total: u8,
+}
+
+impl QaInboxNotificationGroup {
+    #[must_use]
+    pub const fn new(
+        topic: QaInboxNotificationTopic,
+        severity: QaInboxNotificationSeverity,
+        unread: u8,
+        total: u8,
+    ) -> Self {
+        Self {
+            topic,
+            severity,
+            unread,
+            total,
+        }
+    }
+}
+
+impl fmt::Display for QaInboxNotificationGroup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let topic = match self.topic {
+            QaInboxNotificationTopic::Connection => "connection",
+            QaInboxNotificationTopic::Jobs => "job activity",
+            QaInboxNotificationTopic::Readiness(check) => check.as_str(),
+        };
+        let severity = match self.severity {
+            QaInboxNotificationSeverity::Informational => "informational",
+            QaInboxNotificationSeverity::Warning => "warning",
+            QaInboxNotificationSeverity::Critical => "critical",
+        };
+        write!(
+            f,
+            "{}, {severity} ({} unread of {})",
+            topic.replace('_', " "),
+            self.unread,
+            self.total
+        )
+    }
+}
+
+/// Whether the question asks about the operator's visible Inbox notices.
+#[must_use]
+pub fn is_inbox_notification_question(question: &str) -> bool {
+    let mut names_inbox = false;
+    let mut refers_to_local_items = false;
+    for word in question.split(|ch: char| !ch.is_ascii_alphabetic()) {
+        names_inbox |= ["inbox", "notification", "notifications"]
+            .iter()
+            .any(|candidate| word.eq_ignore_ascii_case(candidate));
+        refers_to_local_items |= [
+            "my", "our", "these", "unread", "current", "recent", "latest", "today", "here",
+        ]
+        .iter()
+        .any(|candidate| word.eq_ignore_ascii_case(candidate));
+        if names_inbox && refers_to_local_items {
+            return true;
+        }
+    }
+    false
+}
+
+/// One question. The backend selects evidence and may receive a native Inbox observation.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -346,6 +470,12 @@ pub struct QaTurnRequest {
     pub question: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<ChatSourceReference>,
+    /// A summary of the submitting desktop's Inbox for an explicit notification question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbox_notifications: Option<Vec<QaInboxNotificationGroup>>,
+    /// The operator opened this job source from an Inbox notification.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub job_notification: bool,
 }
 
 impl fmt::Debug for QaTurnRequest {
@@ -367,9 +497,28 @@ impl QaTurnRequest {
             context,
             question,
             source,
+            inbox_notifications: None,
+            job_notification: false,
         };
         request.validate()?;
         Ok(request)
+    }
+
+    /// Attach a bounded Inbox summary to a question for a compatible Embedded companion.
+    pub fn with_inbox_notifications(
+        mut self,
+        groups: Vec<QaInboxNotificationGroup>,
+    ) -> Result<Self, ChatInputError> {
+        self.inbox_notifications = Some(groups);
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Request recent authorized log excerpts for an explicitly selected job notification.
+    pub fn with_job_notification(mut self) -> Result<Self, ChatInputError> {
+        self.job_notification = true;
+        self.validate()?;
+        Ok(self)
     }
 
     /// Validate the shape and bounds before resolving evidence or reserving worker capacity.
@@ -379,6 +528,14 @@ impl QaTurnRequest {
         }
         if let Some(source) = &self.source {
             source.validate()?;
+        }
+        if self.job_notification
+            && self
+                .source
+                .as_ref()
+                .is_none_or(|source| source.kind != ChatSourceKind::Job)
+        {
+            return Err(ChatInputError::InvalidJobNotification);
         }
         if self.question.trim().is_empty() {
             return Err(ChatInputError::EmptyInput);
@@ -392,6 +549,26 @@ impl QaTurnRequest {
             .any(|c| c.is_control() && c != '\n' && c != '\t')
         {
             return Err(ChatInputError::ControlCharacter);
+        }
+        if let Some(groups) = &self.inbox_notifications {
+            if self.source.is_some()
+                || !is_inbox_notification_question(&self.question)
+                || groups.len() > QA_MAX_INBOX_NOTIFICATION_GROUPS
+            {
+                return Err(ChatInputError::InvalidInboxNotifications);
+            }
+            let mut topics = BTreeSet::new();
+            let mut total = 0_u16;
+            for group in groups {
+                total += u16::from(group.total);
+                if group.total == 0
+                    || group.unread > group.total
+                    || total > u16::from(QA_MAX_INBOX_NOTIFICATION_ITEMS)
+                    || !topics.insert(group.topic)
+                {
+                    return Err(ChatInputError::InvalidInboxNotifications);
+                }
+            }
         }
         Ok(())
     }
@@ -489,6 +666,17 @@ pub enum QaTurnNotice {
     ObservationUnavailable,
 }
 
+/// Why a negotiated worker could not answer this turn.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaTurnLimitation {
+    CapabilityUnavailable,
+    QuestionTooLong,
+    #[serde(other)]
+    Unknown,
+}
+
 /// A conversational reply that asks for input or explains supported assistance.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -533,6 +721,21 @@ impl QaMeasurement {
     }
 }
 
+/// The age and origin of a cited observation. Missing metadata in older
+/// responses retains the original timestamp and label.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaEvidenceProvenance {
+    Current,
+    PreviousObservation,
+    Historical {
+        sequence: u64,
+        coverage_start_ms: i64,
+        has_gaps: bool,
+    },
+}
+
 /// A verified, cited span. The offsets count Unicode scalar values in the source passage.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
@@ -543,6 +746,8 @@ pub struct QaFinding {
     pub start: u32,
     pub end: u32,
     pub observed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<QaEvidenceProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measurement: Option<QaMeasurement>,
 }
@@ -571,19 +776,48 @@ impl QaFinding {
             start,
             end,
             observed_at,
+            provenance: None,
             measurement: None,
         }
     }
 }
 
-/// The authoritative latest exchange and its highest committed event sequence.
+/// Actual executor work within a running turn, independent of model readiness.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaTurnStage {
+    Working,
+    Thinking,
+    Writing,
+    #[serde(other)]
+    Unknown,
+}
+
+/// The authoritative exchange and its highest committed event sequence.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct QaTurn {
     pub turn_id: String,
     pub request_id: String,
     pub question: String,
+    /// The backend admission time in UTC Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_at: Option<i64>,
+    /// The terminal transition time in UTC Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<i64>,
+    /// Elapsed milliseconds from backend request receipt through the terminal transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_time_ms: Option<u64>,
+    /// The backend resolved this turn using a previous exchange.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub used_previous_exchange: bool,
     pub state: QaTurnState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<QaTurnStage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limitation: Option<QaTurnLimitation>,
     pub findings: Vec<QaFinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<QaTurnNotice>,
@@ -623,7 +857,13 @@ impl QaTurn {
             turn_id,
             request_id,
             question,
+            accepted_at: None,
+            completed_at: None,
+            response_time_ms: None,
+            used_previous_exchange: false,
             state: QaTurnState::Queued,
+            stage: None,
+            limitation: None,
             findings: Vec::new(),
             notice: None,
             conversation: None,
@@ -644,6 +884,8 @@ impl QaTurn {
 pub struct QaEvent {
     pub sequence: u64,
     pub state: QaTurnState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<QaTurnStage>,
     pub finding: Option<QaFinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provisional_delta: Option<String>,
@@ -656,6 +898,7 @@ impl QaEvent {
         Self {
             sequence,
             state,
+            stage: None,
             finding,
             provisional_delta: None,
         }
@@ -682,6 +925,17 @@ impl QaEventPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_configured_generator_default_preserves_legacy_wire_fallbacks() {
+        let preference = QaGeneratorPreference::default();
+        assert_eq!(preference, QaGeneratorPreference::Gpt2Small);
+        assert_eq!(preference.explicit_target(), Some(QaModelTarget::Gpt2Small));
+        let automatic: QaGeneratorPreference = serde_json::from_str(r#""automatic""#).unwrap();
+        assert_eq!(automatic, QaGeneratorPreference::Automatic);
+        assert_eq!(automatic.explicit_target(), None);
+        assert_eq!(QaModelTarget::default(), QaModelTarget::FlanT5Small);
+    }
 
     #[test]
     fn assistant_preferences_are_independent_of_legacy_toggles() {
@@ -757,6 +1011,105 @@ mod tests {
     }
 
     #[test]
+    fn inbox_notification_context_accepts_only_bounded_typed_local_observations() {
+        let legacy = serde_json::json!({
+            "request_id": "request-1",
+            "context": {
+                "registration_id": "registration-1",
+                "expected_registration_revision": 1,
+                "expected_context_revision": 1,
+            },
+            "question": "what are my most important notifications?",
+        });
+        let request = serde_json::from_value::<QaTurnRequest>(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&request).unwrap(), legacy);
+
+        let group = QaInboxNotificationGroup::new(
+            QaInboxNotificationTopic::Readiness(ReadinessCheckId::Registration),
+            QaInboxNotificationSeverity::Warning,
+            1,
+            2,
+        );
+        let request = request.with_inbox_notifications(vec![group]).unwrap();
+        assert_eq!(group.to_string(), "registration, warning (1 unread of 2)");
+        let valid = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            serde_json::from_value::<QaTurnRequest>(valid.clone()).unwrap(),
+            request
+        );
+
+        let invalid_groups = [
+            vec![group, group],
+            vec![QaInboxNotificationGroup::new(
+                group.topic,
+                group.severity,
+                3,
+                2,
+            )],
+            vec![
+                QaInboxNotificationGroup::new(group.topic, group.severity, 1, 50),
+                QaInboxNotificationGroup::new(
+                    QaInboxNotificationTopic::Connection,
+                    group.severity,
+                    1,
+                    1,
+                ),
+            ],
+        ];
+        for groups in invalid_groups {
+            assert_eq!(
+                request.clone().with_inbox_notifications(groups),
+                Err(ChatInputError::InvalidInboxNotifications)
+            );
+        }
+
+        let mut unrelated = request;
+        unrelated.question = "How do browser notifications work?".into();
+        assert_eq!(
+            unrelated.validate(),
+            Err(ChatInputError::InvalidInboxNotifications)
+        );
+        let mut injected = valid;
+        injected["inbox_notifications"][0]["title"] = serde_json::json!("untrusted text");
+        assert!(serde_json::from_value::<QaTurnRequest>(injected).is_err());
+    }
+
+    #[test]
+    fn job_notification_requires_an_explicit_job_and_cannot_supply_its_logs() {
+        let legacy = serde_json::json!({
+            "request_id": "notification-1",
+            "context": {
+                "registration_id": "registration-1",
+                "expected_registration_revision": 1,
+                "expected_context_revision": 1,
+            },
+            "question": "What happened with this job?",
+        });
+        let mut request = serde_json::from_value::<QaTurnRequest>(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&request).unwrap(), legacy);
+        assert_eq!(
+            request.clone().with_job_notification(),
+            Err(ChatInputError::InvalidJobNotification)
+        );
+        request.source =
+            Some(ChatSourceReference::new(ChatSourceKind::Readiness, "jobs".into()).unwrap());
+        assert_eq!(
+            request.clone().with_job_notification(),
+            Err(ChatInputError::InvalidJobNotification)
+        );
+        request.source =
+            Some(ChatSourceReference::new(ChatSourceKind::Job, "import-42".into()).unwrap());
+        let request = request.with_job_notification().unwrap();
+        let mut wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            serde_json::from_value::<QaTurnRequest>(wire.clone()).unwrap(),
+            request
+        );
+        wire["job_log_tail"] = serde_json::json!(["An invented message."]);
+        assert!(serde_json::from_value::<QaTurnRequest>(wire).is_err());
+    }
+
+    #[test]
     fn embedded_availability_reason_is_optional_and_typed() {
         let mut settings = QaSettings::new(true, QaPhase::Unavailable, 1, 1, false);
         let legacy = serde_json::to_value(settings).unwrap();
@@ -785,6 +1138,25 @@ mod tests {
                 settings
             );
         }
+    }
+
+    #[test]
+    fn turn_stage_and_limitations_decode_from_optional_transport_fields() {
+        let mut turn = QaTurn::queued("turn".into(), "request".into(), "Current status?".into());
+        let legacy = serde_json::to_value(&turn).unwrap();
+        let decoded: QaTurn = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(legacy.get("stage").is_none());
+        assert!(legacy.get("limitation").is_none());
+        assert_eq!(decoded, turn);
+
+        turn.state = QaTurnState::Running;
+        turn.stage = Some(QaTurnStage::Thinking);
+        let reading = QaEventPage::new(turn, Vec::new(), true);
+        let serialized = serde_json::to_value(&reading).unwrap();
+        assert_eq!(serialized["turn"]["stage"], "thinking");
+        let decoded: QaEventPage = serde_json::from_value(serialized).unwrap();
+        assert_eq!(decoded.turn.stage, Some(QaTurnStage::Thinking));
+        assert!(decoded.gap);
     }
 
     #[test]

@@ -42,6 +42,7 @@ import {
 } from "@argos/ui";
 import { OrbitScene } from "./landing/OrbitScene";
 import { IntelStatusBar, JobDropUp, type StatusJob } from "./shell/IntelShell";
+import { intelLoadingTints } from "./shell/intel-theme";
 import { ActorDossierView } from "./views/actor/ActorDossierView";
 import { Topology } from "./topology/Topology";
 import { HomeView } from "./views/HomeView";
@@ -671,7 +672,9 @@ function PageJobs({
             id: "days",
             label: "Retained days",
             state: daysError ? "failed" : daysPending ? "running" : "succeeded",
-            detail: daysError ?? (daysPending ? "Loading" : "Ready"),
+            detail: daysError ?? "Ready",
+            loading:
+              daysPending && !daysError ? "Loading retained days…" : undefined,
           },
           {
             id: "feed",
@@ -681,9 +684,13 @@ function PageJobs({
               : feedFetching
                 ? "running"
                 : "succeeded",
-            detail:
-              feedError ??
-              (feedLoading ? "Loading" : feedFetching ? "Refreshing" : "Ready"),
+            detail: feedError ?? "Ready",
+            loading:
+              !feedError && feedFetching
+                ? feedLoading
+                  ? "Loading article feed…"
+                  : "Refreshing article feed…"
+                : undefined,
           },
         ]
       : screen === "topology"
@@ -698,9 +705,11 @@ function PageJobs({
                   : seed
                     ? "succeeded"
                     : "idle",
-              detail:
-                resolveError ??
-                (resolving ? "Finding memory" : seed ? "Open" : "No selection"),
+              detail: resolveError ?? (seed ? "Open" : "No selection"),
+              loading:
+                resolving && !resolveError
+                  ? "Finding retained Brain memory…"
+                  : undefined,
             },
           ]
         : [];
@@ -716,7 +725,11 @@ function PageJobs({
               : actorFetching
                 ? "running"
                 : "succeeded",
-            detail: actorError || (actorFetching ? "Reading actor" : "Ready"),
+            detail: actorError || "Ready",
+            loading:
+              actorFetching && !actorError
+                ? "Reading actor dossier…"
+                : undefined,
           },
         ]}
       />
@@ -836,7 +849,11 @@ function Focus({
   const relatedContent = (
     <View style={{ gap: 16, minWidth: 0 }}>
       {!related.data && related.isLoading ? (
-        <LoadingState label="Loading related leads…" compact />
+        <LoadingState
+          label="Loading related leads…"
+          compact
+          tint={intelLoadingTints.article}
+        />
       ) : null}
       {related.error && <Notice>{related.error.message}</Notice>}
       <View style={{ gap: 12, minWidth: 0, width: "100%" }}>
@@ -865,7 +882,11 @@ function Focus({
         <EmptyState title="No related leads">No retained leads.</EmptyState>
       ) : null}
       {related.isFetchingNextPage ? (
-        <LoadingState label="Loading more related leads…" compact />
+        <LoadingState
+          label="Loading more related leads…"
+          compact
+          tint={intelLoadingTints.article}
+        />
       ) : null}
       {related.hasNextPage && (
         <Button

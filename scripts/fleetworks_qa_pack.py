@@ -23,7 +23,9 @@ MODEL = {
     "model/vocab.txt": "eeaa9875b23b04b4c54ef759d03db9d1ba1554838f8fb26c5d96fa551df93d02",
     "model/rust_model.ot": "8a9f9b2f153ac9ff230aca4548fa3286be9d2f9ea4eb7e9169665b1a8e983f44",
 }
-DEFAULT_CHAT_MODEL = "flan-t5-small"
+DEFAULT_CHAT_MODEL = "gpt2-small"
+LEGACY_CHAT_MODEL = "flan-t5-small"
+DEFAULT_PACK_MODELS = (DEFAULT_CHAT_MODEL, LEGACY_CHAT_MODEL)
 MODEL_REGISTRY = Path(__file__).resolve().parents[1] / "crates" / "fleetworks-contracts" / "src" / "qa_models.json"
 CHAT_MODELS = json.loads(MODEL_REGISTRY.read_text(encoding="utf-8"))
 CHAT_MODELS_BY_REVISION = {pin["revision"]: model for model, pin in CHAT_MODELS.items()}
@@ -33,7 +35,6 @@ GENERATOR_FILES = {
 }
 GENERATOR_PATHS = frozenset(name for files in GENERATOR_FILES.values() for name in files)
 GENERATOR_REVISION = CHAT_MODELS[DEFAULT_CHAT_MODEL]["revision"]
-GENERATOR = GENERATOR_FILES[DEFAULT_CHAT_MODEL]
 TARGETS = {
     "x86_64-unknown-linux-gnu": ("elf", 62, ".so"),
     "aarch64-unknown-linux-gnu": ("elf", 183, ".so"),
@@ -46,7 +47,11 @@ EXECUTABLES = {WORKER, LISTENER}
 MANIFEST = "manifest.json"
 MAX_BASE_COMPRESSED = 512 * 1024 * 1024
 MAX_BASE_UNPACKED = 1024 * 1024 * 1024
-MAX_GENERATOR_BYTES = 310_000_000
+GENERATOR_LIMITS = {
+    model: sum(size for size, _ in files.values()) for model, files in GENERATOR_FILES.items()
+}
+GENERATOR_LIMITS[LEGACY_CHAT_MODEL] = 310_000_000
+MAX_GENERATOR_BYTES = max(GENERATOR_LIMITS[model] for model in DEFAULT_PACK_MODELS)
 MAX_COMPRESSED = MAX_BASE_COMPRESSED + MAX_GENERATOR_BYTES
 MAX_UNPACKED = MAX_BASE_UNPACKED + MAX_GENERATOR_BYTES
 MAX_FILES = 32
@@ -189,14 +194,9 @@ def count_base_bytes(name: str, size: int, remaining: int, generator: dict) -> i
     return size
 
 
-def generator_limit(model: str) -> int:
-    return (MAX_GENERATOR_BYTES if model == DEFAULT_CHAT_MODEL
-            else sum(size for size, _ in GENERATOR_FILES[model].values()))
-
-
 def model_for_pack(manifest: dict) -> str | None:
     if manifest["model_revision"] == MODEL_REVISION:
-        return DEFAULT_CHAT_MODEL if GENERATOR_PATHS & manifest["files"].keys() else None
+        return LEGACY_CHAT_MODEL if GENERATOR_PATHS & manifest["files"].keys() else None
     return CHAT_MODELS_BY_REVISION[manifest["model_revision"]]
 
 
@@ -284,12 +284,13 @@ def build(args: argparse.Namespace) -> dict:
     with tempfile.TemporaryDirectory(prefix=".qa-pack-", dir=args.output.parent) as staging:
         root = Path(staging)
         requested_model = getattr(args, "chat_model", None)
-        model = requested_model or DEFAULT_CHAT_MODEL
-        expected_generator = GENERATOR_FILES[model]
         install = {name: args.model / Path(name).name for name in MODEL}
         install = {name: path for name, path in install.items() if path.exists() or path.is_symlink()}
         check(not install or install.keys() == MODEL.keys(), "extractive model source inventory is incomplete")
-        check(not install or model == DEFAULT_CHAT_MODEL, "legacy extractor can only share the Small generator")
+        model = requested_model or (LEGACY_CHAT_MODEL if install else DEFAULT_CHAT_MODEL)
+        expected_generator = GENERATOR_FILES[model]
+        check(not install or model == LEGACY_CHAT_MODEL,
+              "legacy extractor can only share the FLAN-T5 Small generator")
         revision = MODEL_REVISION if install else CHAT_MODELS[model]["revision"]
         generator = args.model / "generator"
         if generator.exists() or generator.is_symlink():
@@ -332,7 +333,7 @@ def build(args: argparse.Namespace) -> dict:
         write_archive(root, temporary, files)
         archive_bytes = temporary.stat().st_size
         has_generator = expected_generator.keys() <= files.keys()
-        limit = MAX_BASE_COMPRESSED + (generator_limit(model) if has_generator else 0)
+        limit = MAX_BASE_COMPRESSED + (GENERATOR_LIMITS[model] if has_generator else 0)
         check(archive_bytes <= limit, "compressed QA pack exceeds its size limit")
         archive_digest = sha256(temporary)
         os.link(temporary, args.output)
@@ -348,16 +349,25 @@ def build(args: argparse.Namespace) -> dict:
         return receipt
 
 
-def extract(archive: Path, root: Path, target: str, chat_model: str = DEFAULT_CHAT_MODEL) -> None:
+def extract(archive: Path, root: Path, target: str, chat_model: str | None = None) -> None:
     total = 0
     seen: set[str] = set()
+    candidates = DEFAULT_PACK_MODELS if chat_model is None else (chat_model,)
     with tarfile.open(archive, mode="r:gz") as tar:
         for entry in tar:
             name = entry.name
             check(len(seen) <= MAX_FILES and name not in seen and entry.isfile()
                   and not entry.pax_headers and (name == MANIFEST or allowed_file(name, target)),
                   "pack contains an invalid, duplicate, or excessive archive entry")
-            total += count_base_bytes(name, entry.size, MAX_BASE_UNPACKED - total, GENERATOR_FILES[chat_model])
+            if name in GENERATOR_PATHS:
+                # Shared filenames may identify either compatible default until
+                # later entries narrow the inventory to one pinned checkpoint.
+                candidates = tuple(model for model in candidates
+                                   if name in GENERATOR_FILES[model]
+                                   and entry.size == GENERATOR_FILES[model][name][0])
+                check(candidates, f"{name} does not match the pinned generator size")
+            else:
+                total += count_base_bytes(name, entry.size, MAX_BASE_UNPACKED - total, {})
             seen.add(name)
             dest = root / name
             parent = root
@@ -375,8 +385,8 @@ def extract(archive: Path, root: Path, target: str, chat_model: str = DEFAULT_CH
 def install(args: argparse.Namespace) -> dict:
     check(is_digest(args.archive_sha256), "a trusted archive SHA-256 is required")
     requested_model = getattr(args, "chat_model", None)
-    model = requested_model or DEFAULT_CHAT_MODEL
-    limit = MAX_BASE_COMPRESSED + generator_limit(model)
+    limit = (MAX_COMPRESSED if requested_model is None
+             else MAX_BASE_COMPRESSED + GENERATOR_LIMITS[requested_model])
     check(args.archive.is_file() and not args.archive.is_symlink()
           and 0 < args.archive.stat().st_size <= limit, "QA pack archive is missing or oversized")
     parent = args.output.parent.resolve(strict=True)
@@ -407,12 +417,12 @@ def install(args: argparse.Namespace) -> dict:
         check(sha256(archive) == args.archive_sha256, "pack archive SHA-256 mismatch")
         root = Path(tmp) / "pack"
         root.mkdir(mode=0o700)
-        extract(archive, root, args.target, model)
+        extract(archive, root, args.target, requested_model)
         data = verify_directory(root, args.target, args.manifest_sha256)
         installed_model = model_for_pack(data)
-        check((requested_model is None and installed_model is None) or installed_model == model,
+        check(requested_model is None or installed_model == requested_model,
               "verified pack does not contain the requested chat model")
-        check(installed_model is not None or archive.stat().st_size <= MAX_BASE_COMPRESSED,
+        check(archive.stat().st_size <= MAX_BASE_COMPRESSED + GENERATOR_LIMITS.get(installed_model, 0),
               "compressed QA pack exceeds its size limit")
         check(not target.exists() and not target.is_symlink(), "QA pack destination already exists")
         root.rename(target)

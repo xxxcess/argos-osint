@@ -1,4 +1,4 @@
-use fleetworks_contracts::chat::ChatSourceKind;
+use fleetworks_contracts::chat::{is_inbox_notification_question, ChatSourceKind};
 use fleetworks_contracts::readiness::ReadinessCheckId;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -13,9 +13,11 @@ pub(super) enum Question {
     Readiness(ReadinessCheckId),
     ReadinessExplanation(ReadinessCheckId),
     StatusChecks(StatusChecks),
+    StatusChecksFollowUp(StatusChecks, Option<usize>),
     Metric(Metric),
     HostResources,
     JobsSummary,
+    RunningJobList,
     ContextStatus(ChatSourceKind),
     ContextLogs(ChatSourceKind),
     Configuration,
@@ -41,6 +43,7 @@ impl Question {
 pub(super) enum StatusChecks {
     All,
     Passed,
+    NotPassed,
     Unresolved,
     Failed,
 }
@@ -67,25 +70,32 @@ const GREETINGS: &[&str] = &[
     "hello",
     "hey",
 ];
+const CURRENT_TIME: &[&str] = &[" right now", " currently", " at the moment", " now"];
 
 /// Match the whole question so additional subjects or qualifiers cannot silently change its scope.
 pub(super) fn classify(question: &str) -> Question {
-    let intent = classify_simple(question);
-    if intent != Question::Unsupported {
-        return intent;
-    }
-    let normalized = question.to_ascii_lowercase();
-    if let Some((first, second)) = normalized.split_once(" and ") {
-        let first = classify_simple(first.trim_end_matches([',', ' ']));
-        let second = classify_simple(second);
-        if first != second && is_operational(first) && is_operational(second) {
-            return Question::ChooseSubject;
+    let normalized = question
+        .to_ascii_lowercase()
+        .replace(['_', '-'], " ")
+        .replace('’', "'")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let normalized = trim_sentence_end(&normalized);
+    let mut intent = classify_simple(normalized);
+    if intent == Question::Unsupported {
+        if let Some((first, second)) = normalized.split_once(" and ") {
+            let first = classify_simple(trim_sentence_end(first.trim_end_matches([',', ' '])));
+            let second = classify_simple(second);
+            if first != second && is_operational(first) && is_operational(second) {
+                intent = Question::ChooseSubject;
+            }
         }
     }
-    Question::Unsupported
+    intent
 }
 
-fn is_operational(intent: Question) -> bool {
+pub(super) fn is_operational(intent: Question) -> bool {
     matches!(
         intent,
         Question::ExplainSelected
@@ -95,6 +105,7 @@ fn is_operational(intent: Question) -> bool {
             | Question::Metric(_)
             | Question::HostResources
             | Question::JobsSummary
+            | Question::RunningJobList
             | Question::ContextStatus(_)
             | Question::ContextLogs(_)
             | Question::Configuration
@@ -102,15 +113,142 @@ fn is_operational(intent: Question) -> bool {
     )
 }
 
+/// Keep explicit requests about local state on the evidence path even when
+/// there is no supported observation for the particular question.
+pub(super) fn refers_to_workstation(question: &str) -> bool {
+    if is_inbox_notification_question(question) {
+        return true;
+    }
+    let mut scoped = false;
+    let mut operational_subject = false;
+    let mut previous = "";
+    let normalized = question.to_ascii_lowercase();
+    for word in normalized.split(|ch: char| !ch.is_ascii_alphabetic()) {
+        if word.is_empty() {
+            continue;
+        }
+        if matches!(
+            (previous, word),
+            ("workstation", "status" | "configuration" | "logs")
+                | ("embedded", "backend")
+                | ("this" | "my" | "our", "workstation" | "backend" | "inbox")
+        ) {
+            return true;
+        }
+        scoped |= matches!(
+            word,
+            "my" | "our" | "this" | "these" | "current" | "recent" | "latest" | "here"
+        );
+        operational_subject |= matches!(
+            word,
+            "workstation"
+                | "backend"
+                | "notification"
+                | "notifications"
+                | "inbox"
+                | "readiness"
+                | "cpu"
+                | "gpu"
+                | "ram"
+                | "memory"
+                | "disk"
+                | "processor"
+                | "datastore"
+                | "indexing"
+        );
+        previous = word;
+    }
+    scoped && operational_subject
+}
+
+const MIXED_SEPARATORS: &[&str] = &[
+    "? ",
+    ". ",
+    "; ",
+    ", and ",
+    " and also ",
+    " and ",
+    " given ",
+    " based on ",
+];
+
+/// Find a recognized workstation clause and an independent general question.
+/// The renderer can still answer the workstation clause if the rest depends on local state.
+pub(super) fn contextual_subject(question: &str) -> Option<(Question, Option<&str>)> {
+    let folded = question.to_ascii_lowercase();
+    let mut grounded_only = None;
+    for &separator in MIXED_SEPARATORS {
+        for (offset, _) in folded.match_indices(separator) {
+            let punctuation = usize::from(matches!(separator, "? " | ". "));
+            let left = question[..offset + punctuation].trim();
+            let right = question[offset + separator.len()..].trim();
+            for (local, other) in [(left, right), (right, left)] {
+                let local = classify(local);
+                if is_operational(local) && classify(other) == Question::Unsupported {
+                    if general_clause(other) {
+                        return Some((local, Some(other)));
+                    }
+                    grounded_only.get_or_insert(local);
+                }
+            }
+        }
+    }
+    grounded_only.map(|intent| (intent, None))
+}
+
+pub(super) fn general_clause(text: &str) -> bool {
+    let folded = text.to_ascii_lowercase();
+    let scoped = folded
+        .split(|ch: char| !ch.is_ascii_alphabetic())
+        .any(|word| {
+            matches!(
+                word,
+                "my" | "our" | "your" | "this" | "these" | "those" | "here" | "it" | "its" | "them"
+            )
+        });
+    let nested_workstation_clause = folded
+        .split(['?', '.', ';'])
+        .flat_map(|sentence| sentence.split(" and "))
+        .flat_map(|clause| clause.split(" given "))
+        .flat_map(|clause| clause.split(" based on "))
+        .any(|clause| {
+            let clause = clause.trim_matches([' ', ',']);
+            is_operational(classify(clause.strip_prefix("also ").unwrap_or(clause)))
+        });
+    !scoped
+        && !refers_to_workstation(text)
+        && !nested_workstation_clause
+        && matches!(
+            folded.split_whitespace().next(),
+            Some(
+                "what"
+                    | "what's"
+                    | "why"
+                    | "how"
+                    | "how's"
+                    | "when"
+                    | "where"
+                    | "who"
+                    | "which"
+                    | "is"
+                    | "are"
+                    | "can"
+                    | "could"
+                    | "would"
+                    | "should"
+                    | "does"
+                    | "do"
+                    | "explain"
+                    | "describe"
+                    | "define"
+                    | "compare"
+                    | "summarize"
+                    | "tell"
+            )
+        )
+}
+
 fn classify_simple(question: &str) -> Question {
-    let normalized = question
-        .to_ascii_lowercase()
-        .replace(['_', '-'], " ")
-        .replace('’', "'")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let question = trim_sentence_end(&normalized);
     if GREETINGS.contains(&question) {
         return Question::Greeting;
     }
@@ -146,11 +284,7 @@ fn classify_simple(question: &str) -> Question {
     if let Some(intent) = conversational_intent(question) {
         return intent;
     }
-    let question = strip_any_suffix(
-        question,
-        &[" right now", " currently", " at the moment", " now"],
-    )
-    .unwrap_or(question);
+    let question = strip_any_suffix(question, CURRENT_TIME).unwrap_or(question);
     let request =
         strip_any_prefix(question, &["could you please ", "can you please "]).unwrap_or(question);
     let query = strip_article(
@@ -183,11 +317,28 @@ fn classify_simple(question: &str) -> Question {
     if jobs_summary(current_query) {
         return Question::JobsSummary;
     }
+    if matches!(
+        workstation_jobs_query(current_query),
+        "what jobs are running"
+            | "which jobs are running"
+            | "what jobs are currently running"
+            | "which jobs are currently running"
+            | "running jobs"
+            | "list running jobs"
+            | "list current running jobs"
+            | "list currently running jobs"
+            | "jobs that are running"
+    ) {
+        return Question::RunningJobList;
+    }
     if let Some(metric) = metric(current_query) {
         return Question::Metric(metric);
     }
     if let Some(checks) = status_checks(current_query) {
         return Question::StatusChecks(checks);
+    }
+    if let Some(intent) = status_checks_follow_up(current_query) {
+        return intent;
     }
     if let Some(check) = readiness(question, query) {
         return Question::Readiness(check);
@@ -202,6 +353,7 @@ fn classify_simple(question: &str) -> Question {
         query,
         "what happened with this job"
             | "what happened with this indexing job"
+            | "what happened with this readiness check"
             | "what happened to this job"
             | "why did this job fail"
             | "why did this indexing job fail"
@@ -210,24 +362,30 @@ fn classify_simple(question: &str) -> Question {
         return Question::ExplainSelected;
     }
     let context = match query {
-        "status of this job" | "state of this job" | "current job status" => {
-            Some(ChatSourceKind::Job)
-        }
-        "status of this cycle" | "state of this cycle" | "current cycle status" => {
-            Some(ChatSourceKind::Cycle)
-        }
+        "status of this job"
+        | "state of this job"
+        | "current job status"
+        | "how's this job doing"
+        | "is this job still running" => Some(ChatSourceKind::Job),
+        "status of this cycle"
+        | "state of this cycle"
+        | "current cycle status"
+        | "how's this cycle doing"
+        | "has this cycle finished" => Some(ChatSourceKind::Cycle),
         _ => None,
     };
     if let Some(context) = context {
         return Question::ContextStatus(context);
     }
     let log_source = match current_query {
-        "logs for this job" | "job log summary" | "summarize the logs for this job" => {
-            Some(ChatSourceKind::Job)
-        }
-        "logs for this cycle" | "cycle log summary" | "summarize the logs for this cycle" => {
-            Some(ChatSourceKind::Cycle)
-        }
+        "logs for this job"
+        | "job log summary"
+        | "summarize the logs for this job"
+        | "any errors or warnings for this job" => Some(ChatSourceKind::Job),
+        "logs for this cycle"
+        | "cycle log summary"
+        | "summarize the logs for this cycle"
+        | "any errors or warnings for this cycle" => Some(ChatSourceKind::Cycle),
         _ => None,
     };
     if let Some(source) = log_source {
@@ -240,6 +398,7 @@ fn classify_simple(question: &str) -> Question {
             | "backend mode"
             | "assistant configuration"
             | "which backend is this workstation using"
+            | "which backend am i connected to"
             | "active assistant model"
             | "which assistant model is active"
             | "which model is the assistant using"
@@ -292,6 +451,10 @@ fn conversational_intent(question: &str) -> Option<Question> {
         "what did i just ask"
         | "what did i ask you"
         | "what did i just say"
+        | "what was my last question"
+        | "what did you just say"
+        | "what was your last answer"
+        | "recap the last exchange"
         | "what were we talking about"
         | "what were we just talking about"
         | "recap our conversation" => Question::Recall,
@@ -326,6 +489,7 @@ fn status_checks(query: &str) -> Option<StatusChecks> {
             "summarise ",
             "explain ",
             "which ",
+            "what ",
             "why are ",
             "how many ",
             "are there any ",
@@ -366,10 +530,41 @@ fn status_check_group(group: &str) -> Option<StatusChecks> {
     let group = group.strip_prefix("still ").unwrap_or(group);
     Some(match group {
         "green" | "passed" | "passing" | "ready" => StatusChecks::Passed,
+        "not passed" => StatusChecks::NotPassed,
         "red" | "failed" | "failing" => StatusChecks::Failed,
         "unresolved" | "need attention" | "needs attention" => StatusChecks::Unresolved,
         _ => return None,
     })
+}
+
+fn status_checks_follow_up(query: &str) -> Option<Question> {
+    let query = strip_any_prefix(
+        query,
+        &[
+            "can you ",
+            "could you ",
+            "would you ",
+            "what about ",
+            "list ",
+            "name ",
+            "which ",
+        ],
+    )
+    .unwrap_or(query);
+    let query = strip_any_prefix(query, &["list ", "name ", "the "]).unwrap_or(query);
+    if matches!(query, "ones" | "those" | "them" | "of those") {
+        return Some(Question::StatusChecksFollowUp(StatusChecks::All, None));
+    }
+    let (count, group) = query
+        .split_once(' ')
+        .and_then(|(first, rest)| Some((first.parse::<usize>().ok()?, rest)))
+        .map_or((None, query), |(count, rest)| (Some(count), rest));
+    let group = strip_any_suffix(group, &[" one", " ones"])
+        .or_else(|| strip_any_prefix(group, &["ones ", "of those ", "those ", "that "]))?;
+    Some(Question::StatusChecksFollowUp(
+        status_check_group(group)?,
+        count,
+    ))
 }
 
 fn metric(query: &str) -> Option<Metric> {
@@ -377,8 +572,12 @@ fn metric(query: &str) -> Option<Metric> {
         return Some(metric);
     }
 
-    let jobs_query = strip_any_suffix(query, &[" on this workstation", " for this workstation"])
-        .unwrap_or(query);
+    let jobs_query = workstation_jobs_query(query);
+    let presence_query =
+        strip_any_prefix(jobs_query, &["are there ", "are ", "do we have "]).unwrap_or(jobs_query);
+    if let Some(metric) = short_job_count(presence_query) {
+        return Some(metric);
+    }
     let failed_query = strip_any_suffix(
         jobs_query,
         &[" in the last 24 hours", " in the past 24 hours"],
@@ -400,14 +599,7 @@ fn metric(query: &str) -> Option<Metric> {
         .strip_prefix("workstation ")
         .unwrap_or(jobs_query);
     match (jobs_query, count_subject.is_some()) {
-        (
-            "queued job count"
-            | "job queue depth"
-            | "are any jobs queued"
-            | "are there any queued jobs"
-            | "are there any jobs in the queue",
-            _,
-        )
+        ("queued job count" | "job queue depth", _)
         | (
             "queued jobs"
             | "jobs are queued"
@@ -417,13 +609,7 @@ fn metric(query: &str) -> Option<Metric> {
             | "jobs are waiting in the queue",
             true,
         ) => Some(Metric::QueuedJobs),
-        (
-            "running job count"
-            | "are jobs running"
-            | "are any jobs running"
-            | "are there any jobs running",
-            _,
-        )
+        ("running job count" | "are jobs running", _)
         | (
             "running jobs"
             | "jobs are running"
@@ -431,7 +617,7 @@ fn metric(query: &str) -> Option<Metric> {
             | "jobs are in progress",
             true,
         ) => Some(Metric::RunningJobs),
-        ("retrying job count" | "are any jobs retrying" | "are any jobs waiting to retry", _)
+        ("retrying job count", _)
         | (
             "retrying jobs"
             | "jobs are retrying"
@@ -445,6 +631,29 @@ fn metric(query: &str) -> Option<Metric> {
     }
 }
 
+fn workstation_jobs_query(query: &str) -> &str {
+    strip_any_suffix(query, &[" on this workstation", " for this workstation"]).unwrap_or(query)
+}
+
+fn short_job_count(query: &str) -> Option<Metric> {
+    let query = strip_any_suffix(query, CURRENT_TIME).unwrap_or(query);
+    Some(match query {
+        "any queued jobs" | "any jobs queued" | "any jobs in the queue" => Metric::QueuedJobs,
+        "any running jobs"
+        | "any jobs running"
+        | "any jobs currently running"
+        | "any jobs still running"
+        | "any jobs in progress" => Metric::RunningJobs,
+        "any retrying jobs" | "any jobs retrying" | "any jobs waiting to retry" => {
+            Metric::RetryingJobs
+        }
+        "any failed jobs in the last 24 hours" | "any failed jobs in the past 24 hours" => {
+            Metric::FailedJobs
+        }
+        _ => return None,
+    })
+}
+
 fn host_resource_query(query: &str) -> &str {
     let host_query = strip_any_prefix(
         query,
@@ -453,6 +662,10 @@ fn host_resource_query(query: &str) -> &str {
             "api host ",
             "backend host's ",
             "backend host ",
+            "workstation's ",
+            "workstation ",
+            "this workstation's ",
+            "this workstation ",
             "our ",
         ],
     )
@@ -463,6 +676,12 @@ fn host_resource_query(query: &str) -> &str {
             " on the api host",
             " of the api host",
             " on the backend host",
+            " on this workstation",
+            " on the workstation",
+            " on workstation",
+            " in this workstation",
+            " in the workstation",
+            " in workstation",
         ],
     )
     .unwrap_or(host_query);
@@ -479,11 +698,22 @@ fn host_resources(query: &str) -> bool {
     let query =
         strip_any_prefix(query, &["how is ", "how's ", "how are we doing on "]).unwrap_or(query);
     let query = host_resource_query(strip_article(query));
-    let usage = strip_any_suffix(query, &[" usage", " utilization", " utilisation"]);
+    let usage = strip_any_suffix(
+        query,
+        &[
+            " usage",
+            " utilization",
+            " utilisation",
+            " consumption",
+            " use",
+        ],
+    );
     match usage.unwrap_or(query) {
         "resources"
         | "host resources"
         | "system resources"
+        | "resource snapshot"
+        | "host resource snapshot"
         | "cpu, memory, and disk"
         | "cpu, memory and disk"
         | "cpu memory and disk"
@@ -538,6 +768,8 @@ fn host_usage(query: &str) -> Option<Metric> {
             " are we using",
             " we are using",
             " we're using",
+            " is the api host using",
+            " is the backend host using",
         ],
     ) {
         return host_resource(strip_any_prefix(usage, &["the ", "our "]).unwrap_or(usage));
@@ -561,10 +793,8 @@ fn host_resource(resource: &str) -> Option<Metric> {
 }
 
 fn jobs_summary(query: &str) -> bool {
-    let query = strip_any_suffix(query, &[" on this workstation", " for this workstation"])
-        .unwrap_or(query);
     matches!(
-        query,
+        workstation_jobs_query(query),
         "job counts"
             | "workstation job counts"
             | "job activity"
@@ -573,6 +803,8 @@ fn jobs_summary(query: &str) -> bool {
             | "jobs summary"
             | "summary of jobs"
             | "overview of jobs"
+            | "job queue overview"
+            | "how busy is the job queue"
             | "summarize jobs"
             | "summarise jobs"
             | "how are the jobs doing"
@@ -618,6 +850,8 @@ fn readiness(question: &str, query: &str) -> Option<ReadinessCheckId> {
                 &[
                     " not ready",
                     " not applicable",
+                    " ready for use",
+                    " ready to use",
                     " ready",
                     " healthy",
                     " working",
@@ -668,6 +902,8 @@ fn summary(question: &str, query: &str) -> bool {
     if matches!(
         question,
         "how's everything"
+            | "how's everything doing"
+            | "how's everything looking"
             | "how is everything"
             | "how is everything doing"
             | "how is everything looking"
@@ -678,6 +914,7 @@ fn summary(question: &str, query: &str) -> bool {
             | "is anything wrong"
             | "any problems with this workstation"
             | "any problems with the workstation"
+            | "any blockers on this workstation"
             | "are there any problems with this workstation"
             | "is anything wrong with this workstation"
     ) {
@@ -686,6 +923,20 @@ fn summary(question: &str, query: &str) -> bool {
     let query = strip_any_prefix(question, &["summarize ", "summarise "]).unwrap_or(query);
     let query = strip_article(query);
     let query = strip_any_prefix(query, &["overall ", "current "]).unwrap_or(query);
+    if let Some(subject) = strip_any_prefix(
+        query,
+        &[
+            "can you give me the big picture on ",
+            "could you give me the big picture on ",
+            "give me the big picture on ",
+            "big picture on ",
+        ],
+    ) {
+        return matches!(
+            subject,
+            "this workstation" | "the workstation" | "the backend"
+        );
+    }
     health_subject(query)
         .or_else(|| how_is_subject(question))
         .or_else(|| {
@@ -708,7 +959,13 @@ fn health_subject(query: &str) -> Option<&str> {
     .or_else(|| {
         strip_any_suffix(
             query,
-            &[" status update", " status", " readiness", " health"],
+            &[
+                " status update",
+                " status",
+                " readiness",
+                " health",
+                " health summary",
+            ],
         )
     })
 }
@@ -736,12 +993,15 @@ fn strip_any_suffix<'a>(value: &'a str, patterns: &[&str]) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::classify;
     use super::Metric;
     use super::Question;
     use super::StatusChecks;
     use fleetworks_contracts::chat::ChatSourceKind;
     use fleetworks_contracts::readiness::ReadinessCheckId;
+
+    fn classify(prompt: &str) -> Question {
+        super::classify(prompt)
+    }
 
     #[test]
     fn recognizes_standalone_greetings() {
@@ -763,6 +1023,10 @@ mod tests {
             ("Thanks, has that changed?", Question::FollowUp),
             ("Could you check again?", Question::FollowUp),
             ("What does this mean?", Question::ExplainSelected),
+            (
+                "What happened with this readiness check?",
+                Question::ExplainSelected,
+            ),
             ("Explain this, please.", Question::ExplainSelected),
             ("What is happening here?", Question::ExplainSelected),
             ("Tell me about this.", Question::ExplainSelected),
@@ -875,9 +1139,96 @@ mod tests {
     }
 
     #[test]
+    fn matches_scoped_job_shorthand() {
+        for (question, metric) in [
+            ("any jobs running?", Metric::RunningJobs),
+            (
+                "Any   running jobs on this workstation right now ?",
+                Metric::RunningJobs,
+            ),
+            ("Any jobs currently running?", Metric::RunningJobs),
+            ("Any jobs still running?", Metric::RunningJobs),
+            ("Any jobs in the queue?", Metric::QueuedJobs),
+            ("Any jobs waiting to retry?", Metric::RetryingJobs),
+            ("Any failed jobs in the last 24 hours?", Metric::FailedJobs),
+        ] {
+            assert_eq!(classify(question), Question::Metric(metric), "{question}");
+        }
+
+        for question in [
+            "Are any jobs running?",
+            "Do we have any jobs in progress right now?",
+        ] {
+            assert_eq!(
+                classify(question),
+                Question::Metric(Metric::RunningJobs),
+                "{question}"
+            );
+        }
+    }
+
+    #[test]
+    fn binds_natural_workstation_queries_to_known_evidence() {
+        for (question, expected) in [
+            (
+                "How much RAM is the API host using?",
+                Question::Metric(Metric::Memory),
+            ),
+            (
+                "Could you check the host resource snapshot?",
+                Question::HostResources,
+            ),
+            (
+                "How busy is the job queue on this workstation?",
+                Question::JobsSummary,
+            ),
+            (
+                "Is the actor index ready for use?",
+                Question::Readiness(ReadinessCheckId::ActorSearch),
+            ),
+            (
+                "Please show the workstation health summary.",
+                Question::Summary,
+            ),
+            ("Any blockers on this workstation?", Question::Summary),
+            (
+                "How's this job doing?",
+                Question::ContextStatus(ChatSourceKind::Job),
+            ),
+            (
+                "Has this cycle finished?",
+                Question::ContextStatus(ChatSourceKind::Cycle),
+            ),
+            (
+                "Any errors or warnings for this job?",
+                Question::ContextLogs(ChatSourceKind::Job),
+            ),
+            (
+                "Any errors or warnings for this cycle?",
+                Question::ContextLogs(ChatSourceKind::Cycle),
+            ),
+            ("Which backend am I connected to?", Question::Configuration),
+        ] {
+            assert_eq!(classify(question), expected, "{question}");
+        }
+    }
+
+    #[test]
     fn recognizes_grouped_resource_and_job_observations() {
         for (question, intent) in [
             ("What is our resource usage?", Question::HostResources),
+            (
+                "what is the current resource consumption in workstation?",
+                Question::HostResources,
+            ),
+            (
+                "What is this workstation’s resource use?",
+                Question::HostResources,
+            ),
+            (
+                "Show disk usage on this workstation.",
+                Question::Metric(Metric::Disk),
+            ),
             (
                 "What are the current host resources?",
                 Question::HostResources,
@@ -898,6 +1249,25 @@ mod tests {
             ),
         ] {
             assert_eq!(classify(question), intent, "{question}");
+        }
+    }
+
+    #[test]
+    fn distinguishes_running_job_names_from_running_job_counts() {
+        for prompt in [
+            "What jobs are running?",
+            "Which jobs are currently running on this workstation?",
+            "Show me running jobs.",
+            "List current running jobs.",
+        ] {
+            assert_eq!(classify(prompt), Question::RunningJobList, "{prompt}");
+        }
+        for prompt in ["How many jobs are running?", "Any jobs running?"] {
+            assert_eq!(
+                classify(prompt),
+                Question::Metric(Metric::RunningJobs),
+                "{prompt}"
+            );
         }
     }
 
@@ -979,6 +1349,37 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_contextual_status_check_fragments_without_reclassifying_explicit_questions() {
+        let cases = [
+            ("what are the 7 failed one?", StatusChecks::Failed, Some(7)),
+            (
+                "What about the 7 unresolved ones?",
+                StatusChecks::Unresolved,
+                Some(7),
+            ),
+            ("Which ones failed?", StatusChecks::Failed, None),
+            ("Which of those passed?", StatusChecks::Passed, None),
+            ("Could you list them?", StatusChecks::All, None),
+            ("Which ones?", StatusChecks::All, None),
+        ];
+        for (text, selection, count) in cases {
+            assert_eq!(
+                classify(text),
+                Question::StatusChecksFollowUp(selection, count),
+                "{text}",
+            );
+        }
+        assert_eq!(
+            classify("Which status checks failed?"),
+            Question::StatusChecks(StatusChecks::Failed),
+        );
+        for unrelated in ["Which of those jobs failed?", "What are the 7 recipes?"] {
+            assert_eq!(classify(unrelated), Question::Unsupported);
+        }
+        assert_eq!(classify("What was your last answer?"), Question::Recall);
+    }
+
+    #[test]
     fn routes_workstation_status_checks_to_a_scoped_direct_answer() {
         for (prompt, selection) in [
             (
@@ -997,6 +1398,10 @@ mod tests {
             ("Show me the workstation status checks.", StatusChecks::All),
             ("what are tthe green status check?", StatusChecks::Passed),
             ("Which status checks have passed?", StatusChecks::Passed),
+            (
+                "What status checks have not passed?",
+                StatusChecks::NotPassed,
+            ),
             ("How many green checks are there?", StatusChecks::Passed),
             ("Which backend status checks are red?", StatusChecks::Failed),
         ] {
@@ -1024,10 +1429,20 @@ mod tests {
         for question in [
             "How many jobs are running across all workstations?",
             "How many jobs failed in the last 7 days?",
+            "Any jobs running on another workstation?",
+            "Do we have any jobs running across all workstations?",
+            "Any jobs running yesterday?",
+            "Any failed jobs in the last 7 days?",
+            "Any jobs running and stop them?",
+            "Any jobs running? Change the config.",
+            "Any errors or warnings for this job since last week?",
+            "How much RAM is the API host using for this user?",
+            "Which backend am I connected to and what's its token?",
             "Job counts across all workstations.",
             "How are my jobs doing?",
-            "What jobs are running?",
-            "Show me running jobs.",
+            "Which jobs are running across all workstations?",
+            "List running jobs on someone else's workstation.",
+            "Show me running jobs and stop them.",
             "What is the CPU temperature?",
             "What is the one-minute CPU load?",
             "How much memory is free?",
@@ -1040,6 +1455,9 @@ mod tests {
             "List unresolved status checks for all workstations.",
             "Which status checks are green on my laptop?",
             "What is CPU, memory, and disk usage on my laptop?",
+            "What is the current resource consumption in workstation A?",
+            "What is resource consumption on another workstation?",
+            "What is resource consumption by the Assistant process?",
             "What is CPU, memory, and disk usage by user?",
             "What is CPU, memory, disk, and GPU usage?",
             "What is the memory usage? Include gateway status.",

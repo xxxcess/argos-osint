@@ -287,3 +287,30 @@ fn selection_respects_wire_budget() {
         })
         .expect("wire budget invariant");
 }
+
+/// The conversation parser may only retain bounded, valid UTF-8 position hints.
+#[test]
+fn conversation_features_validate_input_coordinates() {
+    use argos_osint_core::nlp::conversation::Features;
+
+    let mut runner = TestRunner::new(config());
+    runner
+        .run(
+            &(any::<String>(), 0..100usize, 0..100usize),
+            |(text, a, b)| {
+                let span = Span {
+                    start_byte: a.min(b),
+                    end_byte: a.max(b),
+                };
+                let mut features = Features::terminal(Status::Complete);
+                features.references.push(span);
+                prop_assert_eq!(
+                    features.validate(&text),
+                    text.len() <= fleetworks_contracts::chat::MAX_INPUT_BYTES
+                        && span.slice(&text).is_some()
+                );
+                Ok(())
+            },
+        )
+        .expect("conversation offsets must name source bytes");
+}

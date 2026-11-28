@@ -2,13 +2,17 @@
 
 use std::time::Duration;
 
+use argos_osint_core::jobs_view::task_label;
+use argos_osint_core::provider_diag;
 use argos_osint_core::storage::inbox_qa::MAX_EVIDENCE_AGE_MS;
 use argos_osint_core::storage::jobs_view;
 use chrono::DateTime;
 use chrono::Utc;
 use fleetworks_contracts::chat::ChatSourceKind;
+use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::chat::QaMeasurement;
 use fleetworks_contracts::chat::QaMeasurementUnit;
+use fleetworks_contracts::chat::QA_MAX_FINDINGS;
 use fleetworks_contracts::context::Permission;
 use tokio::time::Instant;
 
@@ -28,6 +32,77 @@ pub(super) struct Fact {
     pub(super) text: String,
     pub(super) observed_at: DateTime<Utc>,
     pub(super) measurement: QaMeasurement,
+}
+
+pub(super) struct RunningJobs {
+    pub(super) count: u64,
+    pub(super) names: Vec<(ChatSourceReference, String)>,
+    pub(super) observed_at: DateTime<Utc>,
+}
+
+/// Observe the exact running bucket, keeping private job names out of status-only rows.
+pub(super) async fn running_jobs(
+    state: &ApiState,
+    context: &ResolvedRequest,
+    boundary: i64,
+    deadline: Instant,
+) -> Option<RunningJobs> {
+    tokio::time::timeout_at(deadline, async {
+        let scope = activity::scope_for_request(&state.repo, context, None)
+            .await
+            .ok()?;
+        let observed_at = super::observation_start(boundary).await;
+        let (count, rows) = jobs_view::running_activity_jobs(
+            state.repo.db(),
+            context.scope_id(),
+            &scope,
+            QA_MAX_FINDINGS - 1,
+        )
+        .await
+        .ok()?;
+        if !fresh(observed_at, boundary, Utc::now()) {
+            return None;
+        }
+        let names = rows
+            .into_iter()
+            .filter_map(|row| {
+                let title = running_job_name(&row);
+                let source = ChatSourceReference::new(ChatSourceKind::Job, row.job_id).ok()?;
+                Some((source, title))
+            })
+            .collect();
+        Some(RunningJobs {
+            count,
+            names,
+            observed_at,
+        })
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+fn running_job_name(row: &jobs_view::RunningActivityJob) -> String {
+    let label = if row.title.trim().is_empty() {
+        task_label(&row.operation).replace('_', " ")
+    } else {
+        row.title.clone()
+    };
+    let sanitized = provider_diag::sanitize(&label);
+    let name = sanitized
+        .split(|character: char| character.is_whitespace() || character.is_control())
+        .filter(|word| !word.is_empty())
+        .take(16)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let name = if name.is_empty() {
+        format!("Job {}", row.job_id)
+    } else {
+        name
+    };
+    name[..name.floor_char_boundary(100.min(name.len()))]
+        .trim_end()
+        .to_owned()
 }
 
 /// Capture the available measurements from the authorized host and Jobs scope.
@@ -466,7 +541,7 @@ mod tests {
         .unwrap();
         // Only job execution state is synthetic. The provenance and membership
         // checked below were produced by ordinary registration/dispatch admission.
-        db.query("UPDATE $job SET state='running' RETURN NONE")
+        db.query("UPDATE $job SET state='running', title='Intelligence summary batch' RETURN NONE")
             .bind(("job", RecordId::new("job", "metric-fixture-job")))
             .await
             .unwrap()
@@ -522,6 +597,20 @@ mod tests {
                 )
             );
             assert_eq!(fact.text, text);
+            let running = running_jobs(&state, request, 0, Instant::now() + Duration::from_secs(4))
+                .await
+                .unwrap();
+            assert_eq!(running.count, expected as u64);
+            let expected_names = if expected == 1 {
+                vec![(
+                    ChatSourceReference::new(ChatSourceKind::Job, "metric-fixture-job".into())
+                        .unwrap(),
+                    "Intelligence summary batch".into(),
+                )]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(running.names, expected_names);
         }
 
         db.query("UPDATE $job SET state='failed', finished_at=<datetime>$at RETURN NONE")

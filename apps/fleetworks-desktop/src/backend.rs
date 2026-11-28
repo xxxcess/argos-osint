@@ -19,36 +19,6 @@ use crate::connection::GatewayEffects;
 use crate::connection::RequestTask;
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct Article {
-    pub id: String,
-    pub title: String,
-    pub description: String,
-    pub source_name: String,
-    pub published_at: String,
-    pub category: String,
-    #[serde(default)]
-    pub categories: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ArticlePage {
-    pub rows: Vec<Article>,
-    pub next_cursor: Option<String>,
-    pub revision: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct ArticleQuery {
-    pub day: String,
-    pub category: String,
-    pub search: String,
-    pub sort: &'static str,
-    pub limit: u16,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
 pub struct ToolDefinition {
     pub id: String,
     pub name: String,
@@ -169,6 +139,10 @@ pub struct ActivityJob {
     pub operation: String,
     pub state: String,
     pub phase: String,
+    #[serde(default)]
+    pub active_since: String,
+    #[serde(default)]
+    pub finished_at: String,
     pub progress_done: Option<i64>,
     pub progress_total: Option<i64>,
     pub error_summary: String,
@@ -227,7 +201,6 @@ pub struct JobLogs {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ReadKind {
-    Articles,
     Tools,
     Models,
     Profile,
@@ -244,7 +217,6 @@ impl ReadKind {
 
 #[derive(Clone, Debug)]
 pub enum ReadRequest {
-    Articles(ArticleQuery),
     Tools,
     Models,
     Profile,
@@ -256,7 +228,6 @@ pub enum ReadRequest {
 impl ReadRequest {
     pub fn kind(&self) -> ReadKind {
         match self {
-            Self::Articles(_) => ReadKind::Articles,
             Self::Tools => ReadKind::Tools,
             Self::Models => ReadKind::Models,
             Self::Profile => ReadKind::Profile,
@@ -268,7 +239,6 @@ impl ReadRequest {
 }
 
 pub(crate) enum ReadResult {
-    Articles(ArticlePage),
     Tools(ToolCatalog),
     Models(ModelDefaults),
     Profile(ProfileSnapshot),
@@ -277,10 +247,6 @@ pub(crate) enum ReadResult {
 }
 
 pub struct Backend {
-    pub article_day: TextEdit,
-    pub article_category: TextEdit,
-    pub article_search: TextEdit,
-    pub articles: Load<ArticlePage>,
     pub tools: Load<ToolCatalog>,
     pub selected_tool: Option<String>,
     pub tool_inputs: TextEdit,
@@ -300,10 +266,6 @@ pub struct Backend {
 impl Default for Backend {
     fn default() -> Self {
         Self {
-            article_day: TextEdit::new(""),
-            article_category: TextEdit::new("all"),
-            article_search: TextEdit::new(""),
-            articles: Load::Idle,
             tools: Load::Idle,
             selected_tool: None,
             tool_inputs: TextEdit::new("{}"),
@@ -365,7 +327,6 @@ impl Backend {
 
     fn loading(&mut self, kind: ReadKind) {
         match kind {
-            ReadKind::Articles => self.articles = Load::Loading,
             ReadKind::Tools if matches!(self.tools, Load::Ready(_)) => {}
             ReadKind::Tools => self.tools = Load::Loading,
             ReadKind::Models if matches!(self.models, Load::Ready(_)) => {}
@@ -387,7 +348,6 @@ impl Backend {
     pub(crate) fn failed(&mut self, kind: ReadKind, error: String) {
         self.refresh_errors.remove(&kind);
         match kind {
-            ReadKind::Articles => self.articles = Load::Failed(error),
             ReadKind::Tools => self.tools = Load::Failed(error),
             ReadKind::Models => self.models = Load::Failed(error),
             ReadKind::Profile => self.profile = Load::Failed(error),
@@ -449,16 +409,6 @@ impl State {
 
     pub fn refresh_page(&mut self) {
         match self.page {
-            Page::Atlas => {
-                self.backend_read(ReadRequest::Models);
-                self.refresh_cycles();
-                if self.atlas_advertised()
-                    && self.permission(Permission::ReadBackend)
-                    && !self.readiness_pending()
-                {
-                    self.refresh_readiness();
-                }
-            }
             Page::Seed => {
                 self.refresh_readiness();
                 self.poll_maintenance_receipt_jobs();
@@ -485,23 +435,6 @@ impl State {
         }
     }
 
-    pub fn next_articles(&mut self) {
-        let Load::Ready(page) = &self.backend.articles else {
-            return;
-        };
-        let Some(cursor) = &page.next_cursor else {
-            return;
-        };
-        self.backend_read(ReadRequest::Articles(ArticleQuery {
-            day: self.backend.article_day.text.clone(),
-            category: self.backend.article_category.text.clone(),
-            search: self.backend.article_search.text.clone(),
-            sort: "latest",
-            limit: 30,
-            cursor: Some(cursor.clone()),
-        }));
-    }
-
     pub fn select_job(&mut self, id: &str) {
         self.select_activity_tab(crate::logs::ActivityTab::Jobs);
         let switching = self.backend.selected_job.as_deref() != Some(id);
@@ -522,6 +455,25 @@ impl State {
         self.selected_log_job_changed(id);
         self.backend.logs = Load::Idle;
         self.backend_read(ReadRequest::JobDetail { id: id.to_owned() });
+    }
+
+    /// Leave the job log view without resetting the bounded job list or any submitted action.
+    pub(crate) fn back_to_jobs(&mut self) -> Option<String> {
+        let id = self.backend.selected_job.take()?;
+        self.backend.detail = Load::Idle;
+        self.backend.logs = Load::Idle;
+        self.job_actions.confirmation = None;
+        self.job_actions.message = None;
+        for kind in [ReadKind::JobDetail, ReadKind::Logs] {
+            self.backend.requests.remove(&kind);
+            self.backend.refresh_errors.remove(&kind);
+            let revision = self.backend.revisions.entry(kind).or_default();
+            *revision = revision.wrapping_add(1);
+        }
+        self.scoped_logs
+            .select_target(crate::logs::LogTarget::Workstation);
+        self.select_activity_tab(crate::logs::ActivityTab::Jobs);
+        Some(id)
     }
 
     /// Cross-page links still resolve through the current registered node; the
@@ -644,7 +596,6 @@ impl State {
         self.backend.requests.remove(&kind);
         let previous_configuration_revision = self.configuration_revision();
         match result {
-            Ok(ReadResult::Articles(page)) => self.backend.articles = Load::Ready(page),
             Ok(ReadResult::Tools(catalog)) => {
                 self.backend.tools = Load::Ready(catalog);
                 self.backend.clear_refresh_error(ReadKind::Tools);
@@ -666,6 +617,9 @@ impl State {
             }
             Ok(ReadResult::JobDetail(detail)) => {
                 if self.backend.selected_job.as_deref() == Some(&detail.job.id) {
+                    let reveal_logs = self.page == Page::Jobs
+                        && self.activity_tab == crate::logs::ActivityTab::Logs
+                        && !matches!(&self.backend.detail, Load::Ready(_));
                     let (transitioned, finished_active) = match &self.backend.detail {
                         Load::Ready(previous) if previous.job.id == detail.job.id => {
                             let changed = previous.job.state != detail.job.state
@@ -693,6 +647,9 @@ impl State {
                     }
                     self.backend.detail = Load::Ready(*detail);
                     self.sync_operational_logs_with_selected_job(transitioned);
+                    if reveal_logs {
+                        self.reveal_control(crate::logs::SECTION_KEY);
+                    }
                     if finished_active && !self.fixture {
                         self.refresh_readiness();
                     }
@@ -774,10 +731,6 @@ async fn read(
         limit: u16,
     }
     match request {
-        ReadRequest::Articles(query) => client
-            .get_with_query("/api/v1/articles", &query)
-            .await
-            .map(ReadResult::Articles),
         ReadRequest::Tools => client.get("/api/v1/tools").await.map(ReadResult::Tools),
         ReadRequest::Models => client
             .get("/api/v1/models/defaults")

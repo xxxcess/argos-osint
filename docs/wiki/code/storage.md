@@ -15,6 +15,7 @@ SurrealDB owns domain data. Jobs is moving operational state to SQLite and deliv
 | Memory publication and graph projection | [publisher.rs](../../../crates/argos-osint-core/src/storage/publisher.rs), [memory.rs](../../../crates/argos-osint-core/src/storage/memory.rs), [graph.rs](../../../crates/argos-osint-core/src/storage/graph.rs) |
 | Vector and lexical recall | [embeddings.rs](../../../crates/argos-osint-core/src/storage/embeddings.rs), [recall.rs](../../../crates/argos-osint-core/src/storage/recall.rs) |
 | Transitional SurrealDB job execution | [jobs.rs](../../../crates/argos-osint-core/src/storage/jobs.rs) |
+| Embedded workstation observation journal | [Companion lifecycle](../../../services/api-host/src/local_ipc.rs), [SQLite engine](../../../crates/fleetworks-jobs/src/workstation_context.rs) |
 | Atlas dispatch outbox | [job_dispatch.rs](../../../crates/argos-osint-core/src/storage/job_dispatch.rs) |
 | Jobs dashboard page | [jobs_view.rs](../../../crates/argos-osint-core/src/storage/jobs_view.rs), [jobs view contracts](../../../crates/argos-osint-core/tests/storage_jobs_view.rs) |
 | Contract verification | [tests/](../../../crates/argos-osint-core/tests), [shared harness](../../../crates/argos-osint-core/tests/support), [test_surreal.py](../../../scripts/test_surreal.py) |
@@ -26,6 +27,18 @@ Run storage contracts through the harness; a skipped test is not a pass. Agents 
 ## Fleetworks network storage
 
 Bootstrap authenticates as the database root, applies the schema and provisions a database-scoped Editor account for API and worker processes. Runtime processes verify the exact schema version. Disk modes retain the database identity across restarts. A fresh memory store has a new identity, so Atlas rejects deliveries tied to a previous store. The outbox is transactional with job submission, while the Jobs-owned embedded queue transports wake-up messages. See the [network startup instructions](fleetworks.md#run-the-network-api-and-workers) and the [Atlas deployment guide](../../../deploy/atlas-dispatch.md).
+
+## Embedded workstation observation journal
+
+The Embedded companion opens `context/workstation-context.sqlite3` under its protected state directory and holds the installation state lock while the journal is open. The companion owns the file lifecycle. The `fleetworks-jobs` crate supplies the SQLite engine using the same pinned dependency as its operational store. SurrealDB remains authoritative for jobs, registration and Assistant turns. Journal writes run after source reads or successful lifecycle changes, in transactions separate from domain writes. [Companion state layout](../../../services/api-host/src/local_ipc.rs) · [Journal engine](../../../crates/fleetworks-jobs/src/workstation_context.rs)
+
+One blocking worker owns the SQLite connection. Embedded startup can proceed while that worker opens the database and runs migrations. Observations can enter the bounded queue during startup, and history queries keep their 100 ms deadline. The journal uses WAL, full synchronization and versioned migrations. Its current state and change event commit together when a newer scoped observation changes the tracked state. Repeated observations update freshness without repeating events, and older revisions cannot replace a newer state. Events keep their local sequence, source observation time and recording time.
+
+The allowlist includes readiness, authorized Jobs List and Job Detail observations, and backend and generator lifecycle states. These records describe what the companion observed during ordinary reads and lifecycle transitions. They do not provide an exhaustive audit of job execution. The observer derives scope from the current registration, checks current visibility on read and stores typed operational states and reason codes. The journal contains no credentials, raw logs, prompts, plan notes or generated text. [Typed observation boundary](../../../crates/argos-osint-api/src/inbox_qa/context.rs)
+
+The worker's queue accepts up to 256 items, drains observation batches up to 32 and limits each payload to 2 KiB. Retention caps events at seven days or 10,000 entries, prunes expired terminal current-state rows and checkpoints WAL. Reads return up to 20 candidates. The database and its WAL and shared-memory sidecars share a 64 MiB high-water mark. Saturation, restarts and unavailable intervals reduce reported coverage. The companion suspends collection when maintenance cannot recover capacity. A failed journal leaves live operational reads available and preserves files for diagnosis.
+
+The journal remains local to the Embedded installation and validates the deployment identity at open. It has no export or synchronization endpoint. Turning inference off clears Assistant conversation state in SurrealDB, while ordinary Embedded reads can continue to contribute observations until they expire. [Assistant freshness and retention](assistant-chat-contract.md#conversation-and-retention)
 
 ## Dataset upload ownership
 

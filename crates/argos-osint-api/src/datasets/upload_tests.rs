@@ -524,15 +524,27 @@ fn actor_upload_validation_is_record_bounded_and_cancellable() {
 
 #[tokio::test]
 async fn cancelled_http_owner_cannot_release_a_running_validation_slot() {
+    let root = tempfile::tempdir().expect("temporary staging parent");
+    let parent = root
+        .path()
+        .canonicalize()
+        .expect("canonical staging parent");
+    let mut store = DatasetStore::open(parent.join("uploads")).expect("owned staging root");
     let slots = Arc::new(Semaphore::new(1));
+    store.uploads = Arc::clone(&slots);
     let owner = Arc::new(slots.clone().try_acquire_owned().expect("stream slot"));
     let (entered, ready) = tokio::sync::oneshot::channel();
     let (release, wait) = std::sync::mpsc::channel();
-    let worker = spawn_validation(Arc::clone(&owner), move || {
-        entered.send(()).expect("test still waiting");
-        wait.recv().expect("deterministic release barrier");
-        Ok(())
-    });
+    let worker = store.spawn_validation(
+        Arc::clone(&owner),
+        DatasetKind::ActorCatalog,
+        0,
+        move || {
+            entered.send(()).expect("test still waiting");
+            wait.recv().expect("deterministic release barrier");
+            Ok(())
+        },
+    );
     ready.await.expect("actual blocking worker entered");
     // This is the owner dropped by a cancelled HTTP stage; the production
     // validation wrapper independently holds capacity until CPU work settles.

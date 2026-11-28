@@ -5,13 +5,7 @@ use fleetworks_contracts::context::JobRequestAssociation;
 use fleetworks_contracts::context::OriginSource;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::context::RegisteredContext;
-use fleetworks_contracts::readiness::AtlasCyclePreflight;
-use fleetworks_contracts::readiness::AtlasKeyPresence;
-use fleetworks_contracts::readiness::ReadinessState;
 use fleetworks_contracts::readiness::WorkstationReadiness;
-use fleetworks_workstation::native::BackendKind;
-use rune::Env;
-use rune::Runtime;
 use rune::TextEdit;
 
 use super::AcceptedReceipt;
@@ -24,7 +18,6 @@ use super::SubmissionPhase;
 use super::ToolReceipt;
 use super::ToolResultView;
 use super::ToolStatusView;
-use crate::app;
 use crate::app::Intent;
 use crate::app::Load;
 use crate::app::Page;
@@ -33,10 +26,7 @@ use crate::backend::ActivityJob;
 use crate::backend::JobDetail;
 use crate::backend::ProfileSnapshot;
 use crate::backend::ToolCatalog;
-use crate::backend::ToolCredentialMetadata;
 use crate::backend::ToolDefinition;
-use crate::configuration::ConfigurationAction;
-use crate::configuration::ConfigurationSaved;
 use crate::connection::ConnectionStatus;
 
 fn fixture() -> State {
@@ -49,7 +39,7 @@ fn fixture() -> State {
         Permission::SubmitInteractive,
         Permission::ReadWorkstationActivity,
     ];
-    capabilities.features = vec!["atlas-cycles".into(), "tool-execution".into()];
+    capabilities.features = vec!["tool-execution".into()];
     capabilities.deployment_id = Some("synthetic-deployment".into());
     capabilities.configuration_epoch = Some("synthetic-config".into());
     state.connection.capabilities = Some(capabilities);
@@ -76,16 +66,6 @@ fn fixture() -> State {
         Vec::new(),
     );
     readiness.registration = Some(receipt);
-    let mut preflight = AtlasCyclePreflight::new(
-        ReadinessState::Ready,
-        ReadinessState::Ready,
-        AtlasKeyPresence::Saved,
-        AtlasKeyPresence::Saved,
-        AtlasKeyPresence::Saved,
-        AtlasKeyPresence::Saved,
-    );
-    preflight.configuration_revision = Some(0);
-    readiness.atlas_preflight = Some(preflight);
     state.complete_readiness(Ok(readiness));
     state.backend.profile = Load::Ready(ProfileSnapshot {
         configuration_revision: 0,
@@ -121,6 +101,8 @@ fn detail(id: &str, kind: SubmissionKind, private: bool) -> JobDetail {
             operation: kind.operation().into(),
             state: "queued".into(),
             phase: "queued".into(),
+            active_since: String::new(),
+            finished_at: String::new(),
             progress_done: None,
             progress_total: None,
             error_summary: String::new(),
@@ -138,11 +120,11 @@ fn detail(id: &str, kind: SubmissionKind, private: bool) -> JobDetail {
     }
 }
 
-fn receipt(kind: SubmissionKind) -> AcceptedReceipt {
-    match kind {
-        SubmissionKind::Atlas => AcceptedReceipt::Atlas(serde_json::from_value(serde_json::json!({"job_id":"opaque-server-atlas-job","run_id":"opaque-server-run"})).expect("reported fixture receipt")),
-        SubmissionKind::Tool => AcceptedReceipt::Tool(ToolReceipt { call_id: "opaque-server-tool-job".into(), job_id: Some("opaque-server-tool-job".into()) }),
-    }
+fn receipt() -> AcceptedReceipt {
+    AcceptedReceipt::Tool(ToolReceipt {
+        call_id: "opaque-server-tool-job".into(),
+        job_id: Some("opaque-server-tool-job".into()),
+    })
 }
 
 fn reply(state: &mut State, intent: &Intent) {
@@ -160,7 +142,7 @@ fn reply(state: &mut State, intent: &Intent) {
         }
         Intent::PostInteractive { kind } => {
             let revision = state.submissions.lane(*kind).revision();
-            state.complete_submission_post(*kind, revision, Ok(receipt(*kind)));
+            state.complete_submission_post(*kind, revision, Ok(receipt()));
         }
         Intent::VerifyInteractive { kind } => {
             let lane = state.submissions.lane(*kind);
@@ -203,7 +185,7 @@ fn reply(state: &mut State, intent: &Intent) {
                 Vec::new(),
             );
             let association = JobRequestAssociation::new(
-                receipt(*kind).job_candidate().to_owned(),
+                receipt().job_candidate().to_owned(),
                 origin,
                 "2026-01-01T00:00:00Z".into(),
             );
@@ -239,13 +221,13 @@ fn uncertain_once(state: &mut State, intent: &Intent) {
 fn explicit_server_revision_zero_allows_fresh_setup_but_missing_revision_does_not() {
     let mut state = fixture();
     assert_eq!(state.configuration_revision(), Some(0));
-    state.preview_atlas_cycle();
-    assert!(state.submissions.atlas.confirmation.is_some());
-    state.submissions.atlas.confirmation = None;
+    state.preview_tool_run();
+    assert!(state.submissions.tools.confirmation.is_some());
+    state.submissions.tools.confirmation = None;
     state.backend.profile = Load::Idle;
     assert_eq!(state.configuration_revision(), None);
-    state.preview_atlas_cycle();
-    assert!(state.submissions.atlas.confirmation.is_none());
+    state.preview_tool_run();
+    assert!(state.submissions.tools.confirmation.is_none());
     assert!(
         state.intents.is_empty(),
         "unknown configuration cannot create a request"
@@ -350,333 +332,6 @@ fn receipt_requires_matching_authorized_job_and_private_eligibility_for_results(
         before,
         "shared private results must not be requested"
     );
-}
-
-#[test]
-fn production_cycle_confirmation_uses_shared_handlers_and_navigation_never_resubmits() {
-    let mut state = fixture();
-    state.page = Page::Atlas;
-    let mut runtime = Runtime::new(
-        state,
-        app::view,
-        (1180.0, 780.0),
-        Env {
-            system_dark: true,
-            scale: 1.0,
-        },
-    );
-    runtime.frame(0.0);
-    assert!(runtime.find("tool-submit-preview").is_none());
-    assert!(runtime.find("atlas-submit-confirm").is_none());
-    for (step, key) in ["atlas-submit-preview", "atlas-submit-confirm"]
-        .into_iter()
-        .enumerate()
-    {
-        runtime.update(|_, tx| tx.scroll_into_view(key));
-        runtime.frame((step * 2 + 1) as f64 / 60.0);
-        let (x, y) = runtime
-            .find(key)
-            .expect("allowlisted production cycle control");
-        runtime.pointer_down(x, y);
-        runtime.pointer_up(x, y);
-        runtime.frame((step * 2 + 2) as f64 / 60.0);
-        if step == 0 {
-            assert!(
-                !runtime
-                    .state
-                    .intents
-                    .iter()
-                    .any(|intent| matches!(intent, Intent::PostInteractive { .. })),
-                "review is not consent to submit"
-            );
-        }
-    }
-    assert_eq!(
-        runtime.state.submissions.atlas.phase,
-        SubmissionPhase::Verified
-    );
-    assert!(matches!(
-        runtime.state.submissions.atlas.receipt,
-        Some(AcceptedReceipt::Atlas(_))
-    ));
-    assert!(
-        runtime
-            .accessibility_json()
-            .to_string()
-            .contains("Completion pending"),
-        "accepted receipts never invent completion"
-    );
-    runtime.update(|state, _| state.navigate(Page::Tools));
-    runtime.frame(6.0 / 60.0);
-    runtime.update(|state, _| state.navigate(Page::Atlas));
-    runtime.frame(7.0 / 60.0);
-    let posts = runtime
-        .state
-        .intents
-        .iter()
-        .filter(|intent| matches!(intent, Intent::PostInteractive { .. }))
-        .count();
-    assert_eq!(
-        posts, 1,
-        "revisiting the destination never resubmits accepted work"
-    );
-}
-
-#[test]
-fn distributed_atlas_prerequisites_gate_creation_and_open_the_missing_key_editor() {
-    let mut state = fixture();
-    state.page = Page::Atlas;
-    state
-        .connection
-        .capabilities
-        .as_mut()
-        .unwrap()
-        .permissions
-        .push(Permission::ManageConfiguration);
-    let Load::Ready(readiness) = &mut state.readiness else {
-        panic!("registered readiness fixture");
-    };
-    let preflight = readiness.atlas_preflight.as_mut().unwrap();
-    preflight.rust_bert = ReadinessState::NotReady;
-    preflight.currents = AtlasKeyPresence::Missing;
-    let mut runtime = Runtime::new(state, app::view, (640.0, 480.0), Env::default());
-    runtime.reduced_motion = true;
-    runtime.frame(0.0);
-    let tree = runtime.accessibility_json().to_string();
-    assert!(tree.contains("Ask the gateway operator to check the Rust-BERT worker and checkpoint"));
-    assert!(tree.contains("Configure the Currents API key in Tool Box"));
-    assert!(tree.contains("Saved keys still need provider authentication"));
-
-    runtime.update(|state, _| {
-        let Load::Ready(readiness) = &mut state.readiness else {
-            panic!("registered readiness fixture");
-        };
-        let preflight = readiness.atlas_preflight.as_mut().unwrap();
-        preflight.rust_bert = ReadinessState::Ready;
-    });
-    runtime.frame(0.021);
-    assert!(runtime
-        .accessibility_json()
-        .to_string()
-        .contains("Add a Currents API key using Configure API keys"));
-    runtime.update(|state, tx| {
-        state.preview_atlas_cycle();
-        tx.scroll_into_view("atlas-key-open-currents");
-    });
-    runtime.frame(0.042);
-    assert!(runtime.state.submissions.atlas.confirmation.is_none());
-    assert!(!runtime.state.intents.iter().any(|intent| matches!(
-        intent,
-        Intent::SubmitInteractive { .. } | Intent::PostInteractive { .. }
-    )));
-
-    let (x, y) = runtime
-        .find("atlas-key-open-currents")
-        .expect("missing key link");
-    assert!((0.0..640.0).contains(&x) && (0.0..480.0).contains(&y));
-    runtime.pointer_down(x, y);
-    runtime.pointer_up(x, y);
-    runtime.frame(0.063);
-    assert_eq!(runtime.state.page, Page::Tools);
-    assert!(runtime.state.tool_key_dialog);
-    assert_eq!(runtime.state.configuration.tool_provider.text, "currents");
-}
-
-#[test]
-fn embedded_atlas_links_to_setup_without_stopping_the_companion() {
-    let mut state = fixture();
-    state.page = Page::Atlas;
-    state.backend_kind = BackendKind::Local;
-    state.connection.origin = TextEdit::new("local://embedded");
-    let mut runtime = Runtime::new(state, app::view, (640.0, 480.0), Env::default());
-    runtime.reduced_motion = true;
-    runtime.frame(0.0);
-    assert!(runtime
-        .accessibility_json()
-        .to_string()
-        .contains(super::ATLAS_DISTRIBUTED_REQUIREMENT));
-    assert!(runtime.find("atlas-prerequisites").is_none());
-    let (x, y) = runtime
-        .find("atlas-open-distributed-setup")
-        .expect("Distributed setup link");
-    assert!((0.0..640.0).contains(&x) && (0.0..480.0).contains(&y));
-    runtime.pointer_down(x, y);
-    runtime.pointer_up(x, y);
-    runtime.frame(0.021);
-    assert!(runtime.state.settings_open);
-    assert!(!runtime.state.setup_gateway);
-    assert_eq!(runtime.state.backend_kind, BackendKind::Local);
-    assert!(runtime.state.connected());
-    assert!(runtime.find("switch-remote-gateway").is_some());
-    assert!(runtime
-        .accessibility_json()
-        .to_string()
-        .contains(super::ATLAS_DISTRIBUTED_REQUIREMENT));
-}
-
-#[test]
-fn atlas_provider_keys_save_in_news_cycles_and_wait_for_current_readiness() {
-    let mut state = fixture();
-    state.page = Page::Atlas;
-    state.clock = 0.0;
-    state
-        .connection
-        .capabilities
-        .as_mut()
-        .unwrap()
-        .permissions
-        .push(Permission::ManageConfiguration);
-    let Load::Ready(profile) = &mut state.backend.profile else {
-        panic!("configuration fixture")
-    };
-    profile.tool_credentials = ["gnews", "newsdata", "newsapi", "currents"]
-        .into_iter()
-        .map(|provider| ToolCredentialMetadata {
-            provider: provider.into(),
-            primary_present: provider != "currents",
-            fallback_present: false,
-        })
-        .collect();
-    let Load::Ready(ready) = &mut state.readiness else {
-        panic!("readiness fixture")
-    };
-    ready.atlas_preflight.as_mut().unwrap().currents = AtlasKeyPresence::Missing;
-
-    let mut runtime = Runtime::new(state, app::view, (640.0, 480.0), Env::default());
-    runtime.reduced_motion = true;
-    runtime.frame(0.0);
-    runtime.frame(0.01);
-    assert!(runtime
-        .state
-        .submission_disabled_reason(SubmissionKind::Atlas)
-        .is_some());
-
-    let opener = "atlas-configure-provider-keys";
-    for key in [opener, "atlas-preflight-refresh", "atlas-submit-preview"] {
-        let visible = runtime
-            .elements()
-            .into_iter()
-            .find(|element| element.key.as_deref() == Some(key))
-            .unwrap();
-        assert_eq!(
-            visible.visible, visible.rect,
-            "{key} must fit the compact News Cycles viewport"
-        );
-    }
-    runtime.update(|_, tx| tx.focus(opener, true));
-    runtime.frame(0.021);
-    runtime.key(rune::KeyEvent {
-        key: rune::Key::Text(" ".into()),
-        mods: rune::Mods::default(),
-    });
-    runtime.frame(0.042);
-    assert!(runtime.state.tool_key_dialog);
-    for key in ["gnews", "newsdata", "newsapi", "currents"] {
-        let editor = format!("atlas-key-edit-{key}");
-        let element = runtime
-            .elements()
-            .into_iter()
-            .find(|el| el.key.as_deref() == Some(editor.as_str()))
-            .expect("provider edit action");
-        assert_eq!(
-            element.visible, element.rect,
-            "{key} editor action must fit the compact dialog"
-        );
-        assert!(element.focusable);
-    }
-
-    fn click(runtime: &mut Runtime<State>, key: &str, at: f64) {
-        runtime.update(|_, tx| tx.scroll_into_view(key));
-        runtime.frame(at);
-        let (x, y) = runtime.find(key).expect("visible credential control");
-        assert!((0.0..640.0).contains(&x) && (0.0..480.0).contains(&y));
-        runtime.pointer_down(x, y);
-        runtime.pointer_up(x, y);
-        runtime.frame(at + 0.021);
-    }
-    click(&mut runtime, "atlas-key-edit-currents", 0.063);
-    runtime.update(|state, _| {
-        state
-            .configuration
-            .tool_fallback
-            .replace_text("fixture-key-never-visible");
-        state.configuration_edited();
-    });
-    runtime.frame(0.105);
-    let tree = runtime.accessibility_json().to_string();
-    assert!(tree.contains("Primary API key") && tree.contains("Fallback API key"));
-    assert!(!tree.contains("fixture-key-never-visible"));
-    click(&mut runtime, "tool-credentials-preview", 0.126);
-    assert!(runtime.state.configuration.confirmation.is_some());
-    assert!(!runtime
-        .state
-        .intents
-        .iter()
-        .any(|intent| matches!(intent, Intent::Configuration { .. })));
-    click(&mut runtime, "configuration-confirm", 0.168);
-    assert!(runtime.state.intents.contains(&Intent::Configuration {
-        action: ConfigurationAction::ToolCredentials
-    }));
-
-    runtime.update(|state, _| {
-        state.intents.clear();
-        state.complete_configuration(
-            state.connection.epoch,
-            state.configuration.revision,
-            state.configuration.draft_revision,
-            0,
-            ConfigurationAction::ToolCredentials,
-            Ok(ConfigurationSaved {
-                saved: true,
-                configuration_revision: 1,
-            }),
-        );
-        let Load::Ready(profile) = &mut state.backend.profile else {
-            panic!("profile fixture")
-        };
-        profile.configuration_revision = 1;
-    });
-    runtime.frame(0.21);
-    assert_eq!(runtime.state.page, Page::Atlas);
-    assert!(runtime.state.tool_key_dialog);
-    assert!(runtime.state.configuration.tool_fallback.text.is_empty());
-    assert!(runtime.find("atlas-key-sources").is_some());
-    assert!(runtime.state.intents.contains(&Intent::Readiness));
-    assert!(runtime
-        .state
-        .submission_disabled_reason(SubmissionKind::Atlas)
-        .is_some());
-
-    runtime.update(|state, _| {
-        let Load::Ready(readiness) = &state.readiness else {
-            panic!("readiness fixture")
-        };
-        let mut refreshed = readiness.clone();
-        let preflight = refreshed.atlas_preflight.as_mut().unwrap();
-        preflight.configuration_revision = Some(1);
-        preflight.currents = AtlasKeyPresence::Saved;
-        state.complete_readiness(Ok(refreshed));
-    });
-    runtime.frame(0.231);
-    assert!(runtime
-        .state
-        .submission_disabled_reason(SubmissionKind::Atlas)
-        .is_none());
-    runtime.key(rune::KeyEvent {
-        key: rune::Key::Escape,
-        mods: rune::Mods::default(),
-    });
-    runtime.frame(0.252);
-    assert!(!runtime.state.tool_key_dialog);
-    assert!(runtime
-        .elements()
-        .into_iter()
-        .any(|el| el.key.as_deref() == Some(opener) && el.focused));
-    assert!(!runtime
-        .state
-        .intents
-        .iter()
-        .any(|intent| matches!(intent, Intent::PostInteractive { .. })));
 }
 
 #[test]

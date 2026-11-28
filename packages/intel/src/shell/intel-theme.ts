@@ -59,6 +59,12 @@ export const intelKindFills = {
   link: "rgba(255,106,150,0.14)",
   focus: intelColors.selectionSurface,
 };
+export const intelLoadingTints = {
+  search: { baseColor: "#20363D", sheenColor: "rgba(116,216,221,0.06)" },
+  article: { baseColor: "#263831", sheenColor: "rgba(146,215,177,0.06)" },
+  actor: { baseColor: "#382D26", sheenColor: "rgba(221,175,130,0.06)" },
+  dossier: { baseColor: "#2E283F", sheenColor: "rgba(182,156,224,0.06)" },
+};
 export const intelEffects = {
   accentGlow: "none",
   cardShadow: "none",

@@ -642,6 +642,59 @@ pub async fn activity_job_counts(
     Ok(counts)
 }
 
+/// Name data for a private job in the registered workstation's running cohort.
+#[derive(SurrealValue)]
+#[non_exhaustive]
+pub struct RunningActivityJob {
+    pub job_id: String,
+    pub title: String,
+    pub operation: String,
+}
+
+/// Read the scoped running total and a bounded page of permitted names from one snapshot.
+pub async fn running_activity_jobs(
+    db: &Surreal<Any>,
+    authority_scope: &str,
+    scope: &ActivityScope,
+    limit: usize,
+) -> Result<(u64, Vec<RunningActivityJob>)> {
+    validate_activity_scope(authority_scope, scope)?;
+    require_activity_schema(db).await?;
+    let matched = format!(
+        "parent = NONE AND kind != 'service' AND state = 'running' AND {ELIGIBLE} AND ({})",
+        activity_membership()
+    );
+    let query = format!(
+        "SELECT VALUE count() FROM job WHERE {matched} GROUP ALL;
+         SELECT record::id(id) AS job_id,
+           IF string::len(title) <= 256 {{ title }} ELSE {{ '' }} AS title,
+           IF string::len(operation) <= 256 {{ operation }} ELSE {{ '' }} AS operation, updated_at
+         FROM job WHERE {matched} AND ({}) ORDER BY updated_at DESC, job_id LIMIT $limit;",
+        activity_private()
+    );
+    let committed = run_tx(db, RetryPolicy::default(), |tx| {
+        let query = query.clone();
+        async move {
+            let mut response = run(
+                &tx,
+                tx.query(query)
+                    .bind(("activity_scope", authority_scope.to_owned()))
+                    .bind(("activity_deployment", scope.deployment_id.clone()))
+                    .bind(("activity_node", scope.workstation_id.clone()))
+                    .bind(("cutoff", cutoff(Utc::now())))
+                    .bind(("limit", limit.clamp(1, 200) as i64)),
+            )
+            .await?;
+            let counts: Vec<i64> = take(&mut response, 0)?;
+            let rows: Vec<RunningActivityJob> = take(&mut response, 1)?;
+            Ok((counts.first().copied().unwrap_or_default(), rows))
+        }
+    })
+    .await?;
+    let (count, rows) = committed.value;
+    Ok((u64::try_from(count)?, rows))
+}
+
 /// Count failed top-level workstation jobs which finished in the 24 hours ending at `at`.
 pub async fn activity_failed_jobs(
     db: &Surreal<Any>,

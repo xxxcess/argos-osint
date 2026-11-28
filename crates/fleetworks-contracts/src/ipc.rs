@@ -44,6 +44,7 @@ use crate::chat::QaTurnRequest;
 use crate::chat::CHAT_TURNS_PATH;
 use crate::chat::QA_CANCEL_PATH;
 use crate::chat::QA_EVENTS_PATH;
+use crate::chat::QA_HISTORY_PATH;
 use crate::chat::QA_LATEST_PATH;
 use crate::chat::QA_RELATED_ACTIVITY_PATH;
 use crate::chat::QA_SETTINGS_PATH;
@@ -74,7 +75,9 @@ use crate::readiness::MaintenanceRequest;
 use crate::readiness::ACTOR_SEED_PATH;
 use crate::readiness::CLASSIFIER_TRAIN_PATH;
 use crate::readiness::WORKSTATION_READINESS_PATH;
+use crate::search::ActorBrowseQuery;
 use crate::search::ActorSearchQuery;
+use crate::search::ACTOR_BROWSE_PATH;
 use crate::search::ACTOR_DETAIL_PATH;
 use crate::search::ACTOR_REINDEX_PATH;
 use crate::search::ACTOR_SEARCH_PATH;
@@ -679,6 +682,7 @@ pub enum IpcOperation {
     ModelsDefaults,
     ProfileRead,
     ActorsSearch(ActorSearchQuery),
+    ActorsBrowse(ActorBrowseQuery),
     ActorDetail(ActorDetailQuery),
     ArticlesList(ArticlesListQuery),
     ArticlesSearch(ArticlesSearchQuery),
@@ -726,6 +730,7 @@ pub enum IpcOperation {
     QaTurnSubmit(QaTurnRequest),
     QaRelatedActivity(QaRelatedActivityRequest),
     QaLatest,
+    QaHistory,
     QaEvents(QaEventQuery),
     QaCancel(QaCancelRequest),
     ModelRoleSet(ModelRoleSetRequest),
@@ -753,6 +758,7 @@ impl fmt::Debug for IpcOperation {
             Self::ModelsDefaults => f.write_str("ModelsDefaults"),
             Self::ProfileRead => f.write_str("ProfileRead"),
             Self::ActorsSearch(q) => f.debug_tuple("ActorsSearch").field(q).finish(),
+            Self::ActorsBrowse(_) => f.write_str("ActorsBrowse(..)"),
             Self::ActorDetail(q) => f.debug_tuple("ActorDetail").field(q).finish(),
             Self::ArticlesList(q) => f.debug_tuple("ArticlesList").field(q).finish(),
             Self::ArticlesSearch(q) => f.debug_tuple("ArticlesSearch").field(q).finish(),
@@ -814,6 +820,7 @@ impl fmt::Debug for IpcOperation {
             Self::QaTurnSubmit(_) => f.write_str("QaTurnSubmit(..)"),
             Self::QaRelatedActivity(_) => f.write_str("QaRelatedActivity(..)"),
             Self::QaLatest => f.write_str("QaLatest"),
+            Self::QaHistory => f.write_str("QaHistory"),
             Self::QaEvents(_) => f.write_str("QaEvents(..)"),
             Self::QaCancel(_) => f.write_str("QaCancel(..)"),
             Self::ModelRoleSet(r) => f.debug_tuple("ModelRoleSet").field(r).finish(),
@@ -852,6 +859,7 @@ impl IpcOperation {
         "models_defaults",
         "profile_read",
         "actors_search",
+        "actors_browse",
         "actor_detail",
         "articles_list",
         "articles_search",
@@ -889,6 +897,7 @@ impl IpcOperation {
         "qa_turn_submit",
         "qa_related_activity",
         "qa_latest",
+        "qa_history",
         "qa_events",
         "qa_cancel",
         "model_role_set",
@@ -912,6 +921,7 @@ impl IpcOperation {
             Self::ModelsDefaults => "models_defaults",
             Self::ProfileRead => "profile_read",
             Self::ActorsSearch(_) => "actors_search",
+            Self::ActorsBrowse(_) => "actors_browse",
             Self::ActorDetail(_) => "actor_detail",
             Self::ArticlesList(_) => "articles_list",
             Self::ArticlesSearch(_) => "articles_search",
@@ -950,6 +960,7 @@ impl IpcOperation {
             Self::QaTurnSubmit(_) => "qa_turn_submit",
             Self::QaRelatedActivity(_) => "qa_related_activity",
             Self::QaLatest => "qa_latest",
+            Self::QaHistory => "qa_history",
             Self::QaEvents(_) => "qa_events",
             Self::QaCancel(_) => "qa_cancel",
             Self::ModelRoleSet(_) => "model_role_set",
@@ -974,6 +985,7 @@ impl IpcOperation {
             Self::ModelsDefaults => (IpcMethod::Get, MODELS_DEFAULTS_PATH),
             Self::ProfileRead => (IpcMethod::Get, PROFILE_PATH),
             Self::ActorsSearch(_) => (IpcMethod::Get, ACTOR_SEARCH_PATH),
+            Self::ActorsBrowse(_) => (IpcMethod::Get, ACTOR_BROWSE_PATH),
             Self::ActorDetail(_) => (IpcMethod::Get, ACTOR_DETAIL_PATH),
             Self::ArticlesList(_) => (IpcMethod::Get, ARTICLES_PATH),
             Self::ArticlesSearch(_) => (IpcMethod::Get, ARTICLES_SEARCH_PATH),
@@ -1011,6 +1023,7 @@ impl IpcOperation {
             Self::QaTurnSubmit(_) => (IpcMethod::Post, QA_TURNS_PATH),
             Self::QaRelatedActivity(_) => (IpcMethod::Post, QA_RELATED_ACTIVITY_PATH),
             Self::QaLatest => (IpcMethod::Get, QA_LATEST_PATH),
+            Self::QaHistory => (IpcMethod::Get, QA_HISTORY_PATH),
             Self::QaEvents(_) => (IpcMethod::Get, QA_EVENTS_PATH),
             Self::QaCancel(_) => (IpcMethod::Post, QA_CANCEL_PATH),
             Self::ModelRoleSet(_) => (IpcMethod::Post, MODELS_DEFAULTS_SET_PATH),
@@ -1039,6 +1052,7 @@ impl IpcOperation {
             LOGS_PATH => Ok(Self::LogsPage(LogQuery::default())),
             QA_SETTINGS_PATH => Ok(Self::QaSettings),
             QA_LATEST_PATH => Ok(Self::QaLatest),
+            QA_HISTORY_PATH => Ok(Self::QaHistory),
             _ => Err(ClientError::InvalidRoute),
         }
     }
@@ -1052,6 +1066,7 @@ impl IpcOperation {
         let value = query_to_json_object(query)?;
         match route {
             ACTOR_SEARCH_PATH => decode_query(value).map(Self::ActorsSearch),
+            ACTOR_BROWSE_PATH => decode_query(value).map(Self::ActorsBrowse),
             ACTOR_DETAIL_PATH => decode_query(value).map(Self::ActorDetail),
             ARTICLES_PATH => decode_query(value).map(Self::ArticlesList),
             ARTICLES_SEARCH_PATH => decode_query(value).map(Self::ArticlesSearch),
@@ -2810,6 +2825,7 @@ mod tests {
             TOOLS_PATH,
             MODELS_DEFAULTS_PATH,
             PROFILE_PATH,
+            QA_HISTORY_PATH,
         ] {
             let op = IpcOperation::from_get(route).unwrap();
             assert_eq!(op.into_typed_route(), (IpcMethod::Get, route));
@@ -2818,6 +2834,12 @@ mod tests {
         let op =
             IpcOperation::from_get_with_query(ACTOR_DETAIL_PATH, &[("id", "actor-1")]).unwrap();
         assert_eq!(op.into_typed_route(), (IpcMethod::Get, ACTOR_DETAIL_PATH));
+
+        let browse = ActorBrowseQuery::new(Some("actor-1".into()), 2).unwrap();
+        let op = IpcOperation::from_get_with_query(ACTOR_BROWSE_PATH, &browse).unwrap();
+        assert_eq!(op.into_typed_route(), (IpcMethod::Get, ACTOR_BROWSE_PATH));
+        assert_eq!(op.operation_name(), "actors_browse");
+        assert_eq!(op, IpcOperation::ActorsBrowse(browse));
 
         let op = IpcOperation::from_get_with_query(
             LOGS_PATH,

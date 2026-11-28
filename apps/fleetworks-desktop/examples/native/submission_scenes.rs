@@ -3,18 +3,11 @@
 use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::JobRequestAssociation;
 use fleetworks_contracts::context::OriginSource;
-use fleetworks_contracts::readiness::AtlasCyclePreflight;
-use fleetworks_contracts::readiness::AtlasKeyPresence;
-use fleetworks_contracts::readiness::ReadinessState;
-use fleetworks_contracts::readiness::WorkstationReadiness;
 use fleetworks_desktop::app::Intent;
-use fleetworks_desktop::app::Load;
 use fleetworks_desktop::backend::ActivityJob;
 use fleetworks_desktop::backend::JobDetail;
-use fleetworks_desktop::backend::ToolCredentialMetadata;
 use fleetworks_desktop::submission::AcceptedReceipt;
 use fleetworks_desktop::submission::SubmissionAttempt;
-use fleetworks_desktop::submission::SubmissionFailure;
 use fleetworks_desktop::submission::SubmissionKind;
 use fleetworks_desktop::submission::ToolReceipt;
 use fleetworks_desktop::submission::ToolResultView;
@@ -22,97 +15,18 @@ use fleetworks_desktop::submission::ToolStatusView;
 use fleetworks_desktop::Page;
 use fleetworks_desktop::State;
 
-fn setup(state: &mut State, kind: SubmissionKind) {
+pub fn tools_preview(state: &mut State) {
     super::registered(state);
     super::profile_ready(state);
-    if kind == SubmissionKind::Tool {
-        super::tools_ready(state);
-    }
-    if let Some(capabilities) = &mut state.connection.capabilities {
-        capabilities
-            .features
-            .extend(["atlas-cycles".into(), "tool-execution".into()]);
-    }
-    state.page = match kind {
-        SubmissionKind::Atlas => Page::Atlas,
-        SubmissionKind::Tool => Page::Tools,
-    };
-    if kind == SubmissionKind::Atlas {
-        let mut readiness = WorkstationReadiness::new(
-            "synthetic-deployment".into(),
-            "2026-01-01T00:00:00Z".into(),
-            Vec::new(),
-        );
-        if let Load::Ready(receipt) = &state.registration.receipt {
-            readiness.registration = Some(receipt.clone());
-        }
-        let mut preflight = AtlasCyclePreflight::new(
-            ReadinessState::Ready,
-            ReadinessState::Ready,
-            AtlasKeyPresence::Saved,
-            AtlasKeyPresence::Saved,
-            AtlasKeyPresence::Saved,
-            AtlasKeyPresence::Saved,
-        );
-        preflight.configuration_revision = state.configuration_revision();
-        readiness.atlas_preflight = Some(preflight);
-        state.readiness = Load::Ready(readiness);
-        state.readiness_received_at = Some(0.0);
-    }
+    super::tools_ready(state);
+    state.page = Page::Tools;
     state.backend.tool_inputs = rune::TextEdit::new("{\"email\":\"fixture@example.test\"}");
-}
-
-pub fn atlas_preview(state: &mut State) {
-    setup(state, SubmissionKind::Atlas);
-    state.preview_atlas_cycle();
-}
-pub fn atlas_prerequisites(state: &mut State) {
-    setup(state, SubmissionKind::Atlas);
-    if let Load::Ready(readiness) = &mut state.readiness {
-        if let Some(preflight) = &mut readiness.atlas_preflight {
-            preflight.rust_bert = ReadinessState::NotReady;
-            preflight.newsapi = AtlasKeyPresence::Unchecked;
-            preflight.currents = AtlasKeyPresence::Missing;
-        }
-    }
-}
-pub fn atlas_provider_keys(state: &mut State) {
-    atlas_prerequisites(state);
-    if let Load::Ready(profile) = &mut state.backend.profile {
-        profile.tool_credentials = ["gnews", "newsdata", "newsapi", "currents"]
-            .into_iter()
-            .map(|provider| ToolCredentialMetadata {
-                provider: provider.into(),
-                primary_present: matches!(provider, "gnews" | "newsdata"),
-                fallback_present: false,
-            })
-            .collect();
-    }
-    state.tool_key_dialog = true;
-}
-pub fn atlas_accepted(state: &mut State) {
-    atlas_preview(state);
-    state.confirm_submission(SubmissionKind::Atlas);
-}
-pub fn tools_preview(state: &mut State) {
-    setup(state, SubmissionKind::Tool);
     state.preview_tool_run();
 }
 pub fn tools_result(state: &mut State) {
     tools_preview(state);
     state.confirm_submission(SubmissionKind::Tool);
     state.refresh_tool_result();
-}
-
-pub fn atlas_uncertain(state: &mut State) {
-    atlas_preview(state);
-    state.fixture_effect = Some(uncertain_effect);
-    state.confirm_submission(SubmissionKind::Atlas);
-}
-
-pub fn atlas_resolved(state: &mut State) {
-    atlas_uncertain(state);
-    state.resolve_submission(SubmissionKind::Atlas);
 }
 
 pub fn tools_shared(state: &mut State) {
@@ -138,21 +52,6 @@ pub fn tools_result_error(state: &mut State) {
     state.refresh_tool_result();
 }
 
-fn uncertain_effect(state: &mut State, intent: &Intent) {
-    if let Intent::PostInteractive { kind } = intent {
-        let revision = state.submissions.lane(*kind).revision();
-        state.complete_submission_post(
-            *kind,
-            revision,
-            Err(SubmissionFailure::Uncertain(
-                "Synthetic response lost after delivery".into(),
-            )),
-        );
-    } else {
-        super::reply(state, intent);
-    }
-}
-
 fn result_error_effect(state: &mut State, intent: &Intent) {
     if matches!(intent, Intent::InteractiveToolResult) {
         let revision = state.submissions.tools.revision();
@@ -174,6 +73,8 @@ fn detail(id: &str, kind: SubmissionKind, private: bool) -> JobDetail {
             operation: kind.operation().into(),
             state: "queued".into(),
             phase: "queued".into(),
+            active_since: String::new(),
+            finished_at: String::new(),
             progress_done: None,
             progress_total: None,
             error_summary: String::new(),
@@ -206,10 +107,10 @@ pub fn reply(state: &mut State, intent: &Intent) -> bool {
         }
         Intent::PostInteractive { kind } => {
             let revision = state.submissions.lane(*kind).revision();
-            let receipt = match kind {
-                SubmissionKind::Atlas => AcceptedReceipt::Atlas(serde_json::from_value(serde_json::json!({"job_id":"opaque-server-atlas-job","run_id":"opaque-server-run"})).expect("synthetic server receipt")),
-                SubmissionKind::Tool => AcceptedReceipt::Tool(ToolReceipt { call_id: "opaque-server-tool-job".into(), job_id: Some("opaque-server-tool-job".into()) }),
-            };
+            let receipt = AcceptedReceipt::Tool(ToolReceipt {
+                call_id: "opaque-server-tool-job".into(),
+                job_id: Some("opaque-server-tool-job".into()),
+            });
             state.complete_submission_post(*kind, revision, Ok(receipt));
         }
         Intent::VerifyInteractive { kind } => {
@@ -261,12 +162,8 @@ pub fn reply(state: &mut State, intent: &Intent) -> bool {
                     attempt.snapshot.configuration_revision,
                     Vec::new(),
                 );
-                let id = match kind {
-                    SubmissionKind::Atlas => "opaque-server-atlas-job",
-                    SubmissionKind::Tool => "opaque-server-tool-job",
-                };
                 Ok(JobRequestAssociation::new(
-                    id.into(),
+                    "opaque-server-tool-job".into(),
                     origin,
                     "2026-01-01T00:00:00Z".into(),
                 ))

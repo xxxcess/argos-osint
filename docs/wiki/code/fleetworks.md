@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Architecture](architecture.md) · [Deployment guide](../../../deploy/README.md)
 
-Fleetworks Desktop is the API-only macOS and Linux x86_64 control hub. Its sidebar lists Actor Maintenance, News Cycles, Brain Search, Tool Box, Model Assignments and Jobs & Logs. The startup wizard guides actor seeding, indexing and workstation health review. The health checklist shows Atlas BERT inference from the selected backend. The sidebar opens Workstation Status and Workstation Settings. The **Actor search** card reserves space for a labeled status tag and shows progress and next steps under **Details**. **Settings → General** shows the app name and version. **Settings → Connection** walks through Embedded and Distributed setup. The Inbox shows notifications and a grounded QA transcript when backend inference is enabled. Backend resources remain shared within permissions, while activity is attributed to the registered workstation. Start with [native connections](native-connections.md), [protected identity](native-workspaces.md), the [design system](native-design-system.md) and [native build/fixture guide](../../../apps/fleetworks-desktop/README.md). App launch never launches the backend or Intel Web.
+Fleetworks Desktop is the API-only macOS and Linux x86_64 control hub. Its sidebar lists Actor Maintenance, Search, Tool Box, Model Assignments and Jobs & Logs. The startup wizard guides actor seeding, indexing and workstation health review. The health checklist follows the selected backend and includes Atlas BERT inference for Distributed. The sidebar opens Workstation Status and Workstation Settings. Workstation Status opens with the status checks expanded. Each row offers a matching icon action, including actor search or index progress when available. **Settings → General** shows the app name and version. **Settings → Connection** walks through Embedded and Distributed setup. The Inbox shows notifications and a grounded QA transcript when backend inference is enabled. Backend resources remain shared within permissions, while activity is attributed to the registered workstation. Start with [native connections](native-connections.md), [protected identity](native-workspaces.md), the [design system](native-design-system.md) and [native build/fixture guide](../../../apps/fleetworks-desktop/README.md). Embedded startup requires an explicit action. Operators manage Distributed and Intel Web separately.
 
 Distributed Linux domain services share the network datastore. Jobs exclusively owns its SQLite operational logs and embedded RocksDB queue; [actor discovery](actor-search.md) has a separate private Tantivy service. The [isolated native-review deployment](../../../deploy/README.md) builds backend-only images and leaves web/client launch independent. Backend network readers accept explicit current-format configuration and saved credentials; they do not migrate historical files or revive environment provider keys during ordinary reads.
 
@@ -14,13 +14,19 @@ Venture, the six Fleetworks terminal clients and the legacy `argos` executable a
 
 The [native connection guide](native-connections.md#backend-types-and-parity) describes both backend types and their shared contracts. [Verification status](https://github.com/xxxcess/argos-osint/blob/15577471cf1e6d0472e918b96ff6868f4834fccf/.planning/2026-11-12-native-pairing-implementation/acceptance.md) distinguishes implemented behavior from pending runtime/platform evidence.
 
+On macOS, Quick Start builds the app and companion from `nightly`, an open PR targeting `nightly`, or a commit. Use `--start-embedded` to start the companion in the private Quick Start profile after launch. [macOS Quick Start](../../../apps/fleetworks-desktop/README.md#macos-quick-start)
+
+For manual packaging on macOS or Linux x86_64, run the candidate helper.
+
 ```sh
 python3 scripts/fleetworks_candidate.py build-native --target host --profile debug
 ```
 
-The helper prints the complete `.app` (macOS) or bundle directory (Linux) and manifest paths. Add `--open` only for an intended GUI launch. In **Setup Gateway**, select **Embedded** and choose **Start Embedded Backend** for the bundled companion. For a managed gateway, select **Distributed**, enter its URL and choose **Connect**. The operator approves the displayed request and code. The app authenticates, saves access in Keychain or Secret Service (or process memory in session-only mode) and registers the installation. Saved access reconnects to that exact origin/deployment. Explicit `--api-origin` + `--api-token-file` retains operator/headless file mode. [Connection flow](native-connections.md)
+The helper prints the complete `.app` (macOS) or bundle directory (Linux) and manifest paths. Add `--open` to launch the app. Select a workstation folder to start the bundled Embedded companion. For a managed gateway, open **Settings → Connection**, switch to **Distributed**, enter its URL and choose **Connect**. The operator approves the displayed request and code. The app authenticates, saves access in Keychain or Secret Service (or process memory in session-only mode) and registers the installation. Saved access reconnects to that exact origin/deployment. Explicit `--api-origin` + `--api-token-file` retains operator/headless file mode. [Connection flow](native-connections.md)
 
 Protected settings initialize without creating a default child. The opaque backend workstation ID is the Connect ID; optional mutable IP metadata does not define identity. New contexts and activity queries contain no workspace narrowing. Existing folders and immutable historical origins remain preserved. [Identity ownership](native-workspaces.md)
+
+**Settings → Resources** sets independent CPU, memory, and disk shares for the Embedded companion. Each starts at 40% and can be changed to 60% or 80%. The saved shares take effect the next time Embedded starts. [How Embedded applies the shares](native-connections.md#embedded-resource-settings)
 
 <a id="launch-the-compose-stack"></a>
 
@@ -34,7 +40,7 @@ python3 deploy/native_review.py up
 
 `native_review.py up` preserves existing credentials/data (and never overwrites an existing root `compose.env`), checks the Docker context and daemon architecture against `PLATFORM`, builds the `backend` Bake group (`runtime`, `surrealdb`, `search-index`), stops and recreates the Compose containers with `--force-recreate --detach --wait`, and runs `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug --open` on supported macOS and Linux x86_64 hosts (pass `--backend-only` to skip the native step; unsupported hosts such as Linux ARM64 skip it cleanly). Edit the private, Git-ignored root `compose.env` for local settings and keep the same Compose project for `ps`, `logs` and `down`. Stop preserves data; no startup resets configuration or rotates credentials.
 
-Optional Intel Web and Atlas services require explicit deployment configuration. The browser authenticates its Connect form with an already registered Connect ID; the ID alone grants no authority. Use native News Cycles to submit collection work when a real worker is advertised. [Deployment](../../../deploy/README.md) · [Atlas](../../../deploy/atlas-dispatch.md)
+Optional Intel Web and Atlas services require explicit deployment configuration. The browser authenticates its Connect form with an already registered Connect ID; the ID alone grants no authority. The registered Distributed API accepts Atlas collection requests when a worker is advertised. [Deployment](../../../deploy/README.md) · [Atlas](../../../deploy/atlas-dispatch.md)
 
 ## Run the network API and workers
 

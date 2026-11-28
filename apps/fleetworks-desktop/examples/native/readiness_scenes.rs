@@ -12,6 +12,8 @@ use fleetworks_desktop::app::Load;
 use fleetworks_desktop::connection::ConnectionStatus;
 use fleetworks_desktop::Page;
 use fleetworks_desktop::State;
+use fleetworks_workstation::native::BackendKind;
+use rune::TextEdit;
 
 const OBSERVED: &str = "2026-01-01T00:00:00Z";
 
@@ -113,6 +115,31 @@ pub fn mixed_status_checks(state: &mut State) {
             "owner_unavailable",
             "The Control service is unavailable in this configuration.",
         ));
+    }
+}
+
+pub fn embedded_status_checks(state: &mut State) {
+    mixed_status_checks(state);
+    state.backend_kind = BackendKind::Local;
+    state.connection.origin = TextEdit::new("local://embedded");
+    if let Load::Ready(readiness) = &mut state.readiness {
+        readiness
+            .checks
+            .retain(|check| !check.id.requires_distributed_backend());
+        readiness.checks.extend([
+            check(
+                ReadinessCheckId::Jobs,
+                ReadinessState::NotApplicable,
+                "distributed_service_only",
+                "Embedded handles jobs in process.",
+            ),
+            check(
+                ReadinessCheckId::Control,
+                ReadinessState::Unknown,
+                "owner_not_configured",
+                "This older companion has no separate control service.",
+            ),
+        ]);
     }
 }
 

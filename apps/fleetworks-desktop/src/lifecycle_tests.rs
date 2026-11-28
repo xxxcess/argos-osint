@@ -168,8 +168,10 @@ fn maintenance_result_shows_safe_candidate_but_never_raw_report_or_shared_detail
         "private_details_available":true,"activity_actions_available":false,
         "maintenance_result":{"operation":"classifier_train","engine":"natural","candidate_model_id":"synthetic-candidate",
             "state":"trained_not_activated","dataset_sha256":"a".repeat(64),"raw_report":{"api_key":"synthetic-private-report"},"server_path":"/synthetic/server-path"}});
-    state.backend.detail =
-        Load::Ready(serde_json::from_value(detail).expect("safe optional Jobs result"));
+    let detail: crate::backend::JobDetail =
+        serde_json::from_value(detail).expect("safe optional Jobs result");
+    state.backend.selected_job = Some(detail.job.id.clone());
+    state.backend.detail = Load::Ready(detail);
     let mut runtime = Runtime::new(
         state,
         app::view,

@@ -137,6 +137,7 @@ mod embedded {
     use argos_osint_api::actor_search::ActorSearchBackend;
     use argos_osint_api::classifier_activation::ActivationArtifacts;
     use argos_osint_api::datasets::DatasetStore;
+    use argos_osint_api::inbox_qa::context;
     use argos_osint_api::local_dispatch::LocalCapabilityConfig;
     use argos_osint_api::local_dispatch::LocalGateway;
     use argos_osint_api::workstation::ReadinessOwners;
@@ -144,15 +145,17 @@ mod embedded {
     use argos_osint_api::AuthenticatedPrincipal;
     use argos_osint_api::PrivateServices;
     use argos_osint_api::SearchClient;
+    use argos_osint_core::hardware;
     use argos_osint_core::storage::bootstrap;
     use argos_osint_core::storage::connect_registry;
     use argos_osint_core::storage::jobs_client;
     use argos_osint_core::storage::open::Target;
     use argos_osint_core::storage::repo::Repository;
     use argos_osint_core::storage::server;
-    use fleetworks_contracts::actor_index::ActorIndexLimits;
     use fleetworks_contracts::context::Permission;
     use fleetworks_contracts::context::RegisteredContext;
+    use fleetworks_contracts::embedded_resources::read_preferences;
+    use fleetworks_contracts::embedded_resources::ResourceAllocation;
     use fleetworks_contracts::ipc::read_frame;
     use fleetworks_contracts::ipc::write_frame;
     use fleetworks_contracts::ipc::IpcEnvelope;
@@ -188,6 +191,7 @@ mod embedded {
     use crate::native_worker;
     use crate::native_worker::LocalWorkerConfig;
     use crate::queue_client::Client;
+    use crate::workstation_context;
 
     const LOCK_FILENAME: &str = ".local-backend.lock";
     const SOURCE_EPOCH_FILENAME: &str = "source-epoch";
@@ -222,6 +226,33 @@ mod embedded {
         jobs: PathBuf,
         search: PathBuf,
         staged_datasets: PathBuf,
+        context: Option<PathBuf>,
+    }
+
+    fn allocate_resources(root: &Path) -> ResourceAllocation {
+        let preferences = read_preferences(root).unwrap_or_else(|error| {
+            tracing::warn!(
+                code = "embedded_resource_preferences_unavailable",
+                kind = ?error.kind(),
+                "Using default Embedded resource preferences"
+            );
+            Default::default()
+        });
+        let resources = ResourceAllocation::from_available(
+            preferences,
+            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
+            hardware::process_resident_bytes().unwrap_or(0),
+            hardware::available_memory_bytes(),
+            hardware::filesystem_available_bytes(root).unwrap_or(0),
+        );
+        tracing::info!(
+            code = "embedded_resource_allocation",
+            cpu_workers = resources.cpu_threads,
+            memory_headroom_bytes = resources.memory_headroom_bytes,
+            disk_budget_bytes = resources.disk_budget_bytes,
+            "Provisioned Embedded bulk work"
+        );
+        resources
     }
 
     pub(super) async fn run_embedded(
@@ -251,11 +282,13 @@ mod embedded {
         worker_config: Option<LocalWorkerConfig>,
         qa_broker: Client,
         model_admission: Arc<tokio::sync::Mutex<()>>,
+        decision: Arc<crate::qa_decision::Supervisor>,
+        context_journal: Option<(Arc<workstation_context::Journal>, Arc<context::Observer>)>,
         helpers: Option<HelperChildren>,
         _jobs_store: Store,
         _search_service: Arc<SearchService>,
         _engine_slot: Arc<EngineSlot>,
-        _lock: StateDirLock,
+        _lock: Arc<StateDirLock>,
     }
 
     impl LocalBackendContext {
@@ -307,10 +340,12 @@ mod embedded {
             })
             .await??;
 
-            let limits = ActorIndexLimits {
-                writer_memory_bytes: 32 * 1024 * 1024,
-                ..ActorIndexLimits::default()
-            };
+            let resources = tokio::task::spawn_blocking({
+                let root = layout.root.clone();
+                move || allocate_resources(&root)
+            })
+            .await?;
+            let limits = resources.actor_index_limits();
             let meter = Arc::new(
                 Meter::new(layout.search.clone(), limits.clone())?.with_unused_memory_reclaim(),
             );
@@ -337,7 +372,9 @@ mod embedded {
 
             let dataset_store = tokio::task::spawn_blocking({
                 let staged = layout.staged_datasets.clone();
-                move || DatasetStore::open(staged)
+                move || {
+                    DatasetStore::open(staged).map(|store| store.with_embedded_resources(resources))
+                }
             })
             .await??;
             let activation = tokio::task::spawn_blocking({
@@ -348,14 +385,14 @@ mod embedded {
 
             let nlp_enabled = warm_local_nlp().await;
 
-            let readiness = ReadinessOwners::new(deployment.deployment_id.clone(), Vec::new())?
-                .with_platform_display_name(deployment.platform_display_name.clone())?
-                .with_local_nlp(nlp_enabled)
-                .with_local_classifier(
-                    argos_osint_core::classifier::readiness::ClassifierHome::new(
-                        layout.root.clone(),
-                    ),
-                );
+            let readiness =
+                ReadinessOwners::embedded(deployment.deployment_id.clone(), nlp_enabled)?
+                    .with_platform_display_name(deployment.platform_display_name.clone())?
+                    .with_local_classifier(
+                        argos_osint_core::classifier::readiness::ClassifierHome::new(
+                            layout.root.clone(),
+                        ),
+                    );
             let search_backend: Arc<dyn ActorSearchBackend> =
                 Arc::new(LocalActorSearchBackend(Arc::clone(&search_service)));
             let services = PrivateServices::default()
@@ -378,15 +415,31 @@ mod embedded {
                 jobs_enabled: true,
             };
             let model_admission = Arc::new(tokio::sync::Mutex::new(()));
-            let decision = crate::qa_decision::Supervisor::new(
+            let decision = Arc::new(crate::qa_decision::Supervisor::new(
                 repo.clone(),
                 layout.root.clone(),
                 Arc::clone(&model_admission),
-            );
-            let gateway = Arc::new(
-                LocalGateway::new(state, services, capability_config)?
-                    .with_qa_decision(Arc::new(decision)),
-            );
+            ));
+            let mut gateway = LocalGateway::new(state, services, capability_config)?
+                .with_qa_decision(decision.clone());
+            let lock = Arc::new(lock);
+            let context_journal = if let Some(path) = layout.context {
+                let journal = Arc::new(workstation_context::Journal::start(
+                    path,
+                    deployment.deployment_id.clone(),
+                    Arc::clone(&lock),
+                ));
+                let observer = Arc::new(context::Observer::new(
+                    journal.clone(),
+                    deployment.deployment_id.clone(),
+                    deployment.configuration_epoch.clone(),
+                ));
+                gateway = gateway.with_workstation_context(Arc::clone(&observer));
+                Some((journal, observer))
+            } else {
+                None
+            };
+            let gateway = Arc::new(gateway);
 
             let principal = AuthenticatedPrincipal::for_local_ipc(
                 "local-ipc-workstation",
@@ -408,6 +461,9 @@ mod embedded {
                 relinquish_on_shutdown: true,
             };
 
+            if let Some((_, observer)) = &context_journal {
+                observer.record_backend(context::Lifecycle::Ready);
+            }
             tracing::info!(
                 role = "local-ipc",
                 nlp = nlp_enabled,
@@ -424,6 +480,8 @@ mod embedded {
                 worker_config: Some(worker_config),
                 qa_broker,
                 model_admission,
+                decision,
+                context_journal,
                 helpers: Some(helpers),
                 _jobs_store: jobs_store,
                 _search_service: search_service,
@@ -462,6 +520,7 @@ mod embedded {
                 model,
                 "embedded".to_owned(),
                 Some(self.gateway.qa_runtime_availability()),
+                self.decision.clone(),
                 async move {
                     let _ = qa_signal.await;
                 },
@@ -488,6 +547,10 @@ mod embedded {
             report_shutdown_phase("qa_stopped");
             if let Some(helpers) = self.helpers.take() {
                 helpers.shutdown().await;
+            }
+            if let Some((journal, observer)) = self.context_journal.take() {
+                observer.record_backend(context::Lifecycle::Stopping);
+                journal.shutdown().await;
             }
             result
         }
@@ -611,6 +674,17 @@ mod embedded {
             ensure_private_dir(subdir)?;
         }
 
+        let context_dir = root.join("context");
+        let context_path = context_dir.join(workstation_context::DB_NAME);
+        let context = match ensure_private_dir(&context_dir)
+            .and_then(|()| workstation_context::prepare_path(&context_path))
+        {
+            Ok(()) => Some(context_path),
+            Err(_) => {
+                tracing::warn!(code = "embedded_workstation_context_path_unavailable");
+                None
+            }
+        };
         Ok((
             StateLayout {
                 root,
@@ -618,6 +692,7 @@ mod embedded {
                 jobs,
                 search,
                 staged_datasets,
+                context,
             },
             lock,
         ))
@@ -1129,6 +1204,55 @@ mod embedded {
             );
             // Second concurrent lock on the exact same state directory must fail closed.
             assert!(prepare_state_layout(&valid).is_err());
+        }
+
+        #[test]
+        fn embedded_preferences_load_only_from_private_regular_files() {
+            use fleetworks_contracts::embedded_resources::EmbeddedResourcePreferences;
+            use fleetworks_contracts::embedded_resources::ResourcePreset;
+            use fleetworks_contracts::embedded_resources::FILE_NAME;
+
+            let directory = tempfile::tempdir().expect("temporary root");
+            let state = directory.path().join("state");
+            let (layout, _lock) = prepare_state_layout(&state).expect("private state");
+            assert_eq!(
+                read_preferences(&layout.root).unwrap(),
+                EmbeddedResourcePreferences::default()
+            );
+            let file = layout.root.join(FILE_NAME);
+            let outside = directory.path().join("outside.json");
+            fs::write(&outside, br#"{"cpu":"80","memory":"60","disk":"40"}"#).unwrap();
+            fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
+            std::os::unix::fs::symlink(&outside, &file).unwrap();
+            assert!(read_preferences(&layout.root).is_err());
+            fs::remove_file(&file).unwrap();
+            fs::rename(&outside, &file).unwrap();
+            assert_eq!(
+                read_preferences(&layout.root).unwrap(),
+                EmbeddedResourcePreferences {
+                    cpu: ResourcePreset::Eighty,
+                    memory: ResourcePreset::Sixty,
+                    disk: ResourcePreset::Forty,
+                }
+            );
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(read_preferences(&layout.root).is_err());
+        }
+
+        #[test]
+        fn insecure_context_path_disables_only_the_journal() {
+            let dir = tempfile::tempdir().expect("temporary root");
+            let state = dir.path().join("state");
+            ensure_private_dir(&state).expect("private state");
+            let outside = dir.path().join("untouched-context");
+            ensure_private_dir(&outside).expect("private external context");
+            std::os::unix::fs::symlink(&outside, state.join("context")).expect("context symlink");
+
+            let (layout, _lock) = prepare_state_layout(&state).expect("ordinary state opens");
+            assert!(layout.context.is_none());
+            assert!(layout.jobs.is_dir());
+            assert!(layout.surreal.is_dir());
+            assert!(!outside.join(workstation_context::DB_NAME).exists());
         }
 
         #[test]

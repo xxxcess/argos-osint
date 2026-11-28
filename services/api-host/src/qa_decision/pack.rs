@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use anyhow::ensure;
 use anyhow::Result;
+use argos_osint_api::inbox_qa::decision::DecisionTask;
 use fleetworks_contracts::chat::QaDecisionAvailabilityReason as Reason;
 use fleetworks_contracts::chat::QaDecisionPreference as Preference;
 use serde::Deserialize;
@@ -23,6 +24,7 @@ const WORKER: &str = "llama-server";
 
 pub(super) struct Qualification {
     preference: Preference,
+    task: DecisionTask,
     target: &'static str,
     pub(super) alias: &'static str,
     runtime_revision: &'static str,
@@ -63,7 +65,10 @@ struct Model {
     sha256: String,
 }
 
-pub(super) fn qualified(preference: Preference) -> Option<&'static Qualification> {
+pub(super) fn qualified(
+    preference: Preference,
+    task: DecisionTask,
+) -> Option<&'static Qualification> {
     let alias = match preference {
         Preference::Julia1Q8 => "julia-1",
         Preference::VllmD3EdgeQ8 => "vllm-d3-edge",
@@ -71,7 +76,10 @@ pub(super) fn qualified(preference: Preference) -> Option<&'static Qualification
     };
     let target = current_target()?;
     QUALIFIED.iter().find(|record| {
-        record.preference == preference && record.target == target && record.alias == alias
+        record.preference == preference
+            && record.target == target
+            && record.alias == alias
+            && record.task == task
     })
 }
 
@@ -203,6 +211,7 @@ mod tests {
     fn qualification_matches_both_revisions() {
         let mut fixture = Qualification {
             preference: Preference::Julia1Q8,
+            task: DecisionTask::RelatedActivity,
             target: "x86_64-unknown-linux-gnu",
             alias: "julia-1",
             runtime_revision: "d141011c25781519123be51019441cd710260cb2",
@@ -215,8 +224,10 @@ mod tests {
         assert!(pinned_model(&fixture).is_ok());
         fixture.model_revision = "unapproved";
         assert!(pinned_model(&fixture).is_err());
-        assert!(qualified(Preference::Julia1Q8).is_none());
-        assert!(qualified(Preference::VllmD3EdgeQ8).is_none());
+        for task in [DecisionTask::RelatedActivity, DecisionTask::ResponsePlan] {
+            assert!(qualified(Preference::Julia1Q8, task).is_none());
+            assert!(qualified(Preference::VllmD3EdgeQ8, task).is_none());
+        }
     }
 
     #[test]

@@ -2626,6 +2626,7 @@ dependencies = [
  "anyhow",
  "fleetworks-contracts",
  "getrandom 0.4.3",
+ "libc",
  "rustix 1.1.5",
  "secret-service",
  "security-framework",

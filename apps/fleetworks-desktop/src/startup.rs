@@ -543,7 +543,7 @@ fn folder_grid(state: &State, preferences: ViewPreferences, kit: &Kit, width: f3
             rune::col().gap(7.0).child(startup_error(error, kit)).child(
                 ActionButton::new("Retry folder access")
                     .key("startup-workspaces-retry")
-                    .on_press(|state: &mut State| state.initialize_workspaces(None))
+                    .on_press(State::retry_workspace_access)
                     .build(kit, preferences, None),
             ),
         ),

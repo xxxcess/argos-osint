@@ -101,6 +101,85 @@ fn approve(
         .expect("approved durable pair")
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn apfs_device_renumbering_retains_saved_folders_and_pairing() {
+    use crate::native::state;
+    use crate::native::volume;
+    use crate::native::CONNECTIONS_FILE;
+
+    let (_temporary, home) = home();
+    let container = NativeContainer::open(&home).expect("profile with a retained legacy child");
+    let marker = container.installation_marker().to_owned();
+    let default = container
+        .ensure_local_backend_state_dir("embedded")
+        .expect("default Embedded directory");
+    let embedded_data = default.join("existing-data");
+    std::fs::write(&embedded_data, b"retained").expect("synthetic Embedded data");
+    let folder = home.join("saved-embedded-folder");
+    let profiles = container
+        .add_local_backend_folder(0, folder.clone())
+        .expect("saved Embedded directory");
+    let store = FakeKeychain::default();
+    let pairing = approve(&container, ORIGIN, "synthetic-request-a", &store);
+
+    // Simulate a v1 installation whose volume had a different device number at creation.
+    let stale_device = container.root_object.device ^ 1;
+    std::fs::remove_file(container.root().join(volume::FILE)).expect("remove new volume binding");
+    for file in [state::CATALOG_FILE, CONNECTIONS_FILE, PAIRING_FILE] {
+        let (mut catalog, object) = fs::read_json::<serde_json::Value>(&container.root_fd, file)
+            .expect("existing v1 catalog");
+        catalog["root_object"]["device"] = stale_device.into();
+        if file == state::CATALOG_FILE {
+            catalog["workspaces"][0]["object"]["device"] = stale_device.into();
+        }
+        fs::write_json(&container.root_fd, file, &catalog, Some(object))
+            .expect("record the older mount device");
+    }
+    drop(container);
+
+    let error = NativeContainer::open_settings(&home)
+        .err()
+        .expect("first binding of a renumbered device needs an explicit retry");
+    assert!(
+        error.to_string().contains("Retry folder access"),
+        "{error:#}"
+    );
+    let repaired = NativeContainer::retry_settings_access(&home).expect("reopen owned APFS root");
+    assert_eq!(repaired.installation_marker(), marker);
+    assert_eq!(
+        repaired.connection_profiles().expect("saved profiles"),
+        profiles
+    );
+    assert_eq!(repaired.pairing_catalog().expect("saved pairing"), pairing);
+    assert_eq!(
+        repaired.paired_credential(ORIGIN, &store).unwrap(),
+        secret(ACCESS)
+    );
+    assert_eq!(
+        repaired.ensure_local_backend_state_dir("embedded").unwrap(),
+        default
+    );
+    assert_eq!(
+        repaired.validate_local_backend_state_dir(&folder).unwrap(),
+        folder
+    );
+    assert_eq!(std::fs::read(&embedded_data).unwrap(), b"retained");
+    assert!(repaired.default_workspace().is_err());
+    drop(repaired);
+
+    let reopened = NativeContainer::open_settings(&home).expect("reopen using the volume UUID");
+    assert_eq!(reopened.installation_marker(), marker);
+    assert_eq!(
+        reopened.pairing_catalog().expect("reopened pairing"),
+        pairing
+    );
+    assert!(
+        NativeContainer::open(&home).is_err(),
+        "legacy root checks still require an exact device"
+    );
+}
+
 #[test]
 fn nonsecret_catalog_reopens_selected_pair_without_changing_legacy_state_or_token_files() {
     let (_temporary, path) = home();

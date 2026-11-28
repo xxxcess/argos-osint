@@ -162,7 +162,7 @@ impl NativeContainer {
         changes: &[JobNoticeChange],
     ) -> Result<JobNoticeHistory> {
         anyhow::ensure!(super::valid_marker(authority), "Invalid Inbox authority");
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         let name = format!(".native-inbox-jobs-{authority}.json");
         let (mut journal, object) =
             self.read_notice_journal::<JobNoticeHistory>(&name, authority)?;
@@ -261,7 +261,7 @@ impl NativeContainer {
                     version: VERSION,
                     authority: authority.to_owned(),
                     installation_marker: self.installation_marker.clone(),
-                    root_object: self.root_object,
+                    root_object: self.catalog_root_object,
                     history: T::default(),
                 },
                 None,
@@ -272,7 +272,7 @@ impl NativeContainer {
                     journal.version == VERSION
                         && journal.authority == authority
                         && journal.installation_marker == self.installation_marker
-                        && journal.root_object == self.root_object,
+                        && journal.root_object == self.catalog_root_object,
                     "Inbox history ownership or format requires repair"
                 );
                 (journal, Some(object))

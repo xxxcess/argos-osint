@@ -106,6 +106,12 @@ impl Resolution {
 /// An attachment from an earlier composer action can survive a new question.
 /// Ignore it only when the question can stand on its own without the source.
 pub(super) fn ignores_selected_source(question: &str, intent: Question) -> bool {
+    if matches!(
+        intent,
+        Question::Greeting | Question::Acknowledgement | Question::Help
+    ) {
+        return true;
+    }
     if intent != Question::Unsupported || !question::general_clause(question) {
         return false;
     }
@@ -728,6 +734,23 @@ mod tests {
 
     fn complete() -> Features {
         Features::terminal(Status::Complete)
+    }
+
+    #[test]
+    fn a_standalone_greeting_drops_the_job_attachment_even_without_parsing() {
+        let job = ChatSourceReference::new(ChatSourceKind::Job, "missing-job".into()).unwrap();
+        for status in [Status::Complete, Status::Disabled] {
+            let greeting = resolve(
+                "hi",
+                Some(&job),
+                question::classify("hi"),
+                &Features::terminal(status),
+                None,
+                None,
+            );
+            assert_eq!(greeting.intent, Question::Greeting);
+            assert!(greeting.source.is_none());
+        }
     }
 
     fn interval() -> Interval {

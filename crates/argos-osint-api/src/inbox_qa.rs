@@ -57,7 +57,7 @@ pub(crate) const FEATURE: &str = "inbox-qa-v2";
 const MAX_ADMISSION_FRESHNESS_RETRIES: usize = 4;
 const ADMISSION_FRESHNESS_BACKOFF: Duration = Duration::from_millis(50);
 const MAX_SUMMARY_PASSAGES: usize = 6;
-const JOB_NOTIFICATION_LOG_DEADLINE: Duration = Duration::from_secs(1);
+const JOB_LOG_TAIL_DEADLINE: Duration = Duration::from_secs(1);
 
 /// Cancellation remains observable to subscribers that join after it was raised.
 #[derive(Clone)]
@@ -944,13 +944,15 @@ pub(crate) async fn submit_request(
         }
     }
     require_evidence_permission(context, intent, routed_request.source.as_ref())?;
-    routed_request.job_notification &= intent == Question::ExplainSelected
-        && !used_previous
-        && !contextual
-        && routed_request.source == request.source;
     let runtime = SnapshotRuntime {
         intent,
         contextual,
+        job_log_source: attached_job_log_source(
+            intent,
+            request.source.as_ref(),
+            routed_request.source.as_ref(),
+            used_previous,
+        ),
         generation: setting.generation,
         history_generation: setting.history_generation,
         availability,
@@ -1140,6 +1142,7 @@ struct Snapshot {
 struct SnapshotRuntime<'a> {
     intent: Question,
     contextual: bool,
+    job_log_source: Option<&'a ChatSourceReference>,
     generation: i64,
     history_generation: i64,
     availability: &'a QaRuntimeAvailability,
@@ -1152,6 +1155,25 @@ struct SnapshotRuntime<'a> {
     focus: Option<&'a nlp::conversation::Focus>,
     pending: Option<&'a nlp::conversation::PendingClarification>,
     parser_status: nlp::Status,
+}
+
+fn attached_job_log_source<'a>(
+    intent: Question,
+    original: Option<&'a ChatSourceReference>,
+    resolved: Option<&ChatSourceReference>,
+    used_previous: bool,
+) -> Option<&'a ChatSourceReference> {
+    original.filter(|source| {
+        !used_previous
+            && source.kind == ChatSourceKind::Job
+            && Some(*source) == resolved
+            && matches!(
+                intent,
+                Question::ExplainSelected
+                    | Question::ContextStatus(ChatSourceKind::Job)
+                    | Question::ContextLogs(ChatSourceKind::Job)
+            )
+    })
 }
 
 fn dialogue_kind(
@@ -1310,8 +1332,25 @@ async fn snapshot(
         .await
         .map_err(|_| current_health_unavailable())?
     };
-    // Independent observations run together when a turn needs both.
-    let (health, measurements) = tokio::join!(
+    let collect_job_log_tail = async {
+        let source = runtime.job_log_source?;
+        let (activity, _) = selected_activity.as_ref()?;
+        if activity.status == "unknown" {
+            return None;
+        }
+        let model = runtime.availability.ready_model(runtime.generation)?;
+        let observed_at = observation_start(boundary).await;
+        let log_deadline = deadline.min(Instant::now() + JOB_LOG_TAIL_DEADLINE);
+        let read =
+            crate::operational_logs::qa_job_tail(state, context, &source.id, model.input_tokens());
+        let excerpts = tokio::time::timeout_at(log_deadline, read)
+            .await
+            .ok()?
+            .ok()?;
+        (!excerpts.is_empty()).then_some((source, observed_at, excerpts))
+    };
+    // Independent observations share the admission deadline.
+    let (health, measurements, job_log_tail) = tokio::join!(
         health_probe,
         metrics::collect_snapshot(
             state,
@@ -1321,6 +1360,7 @@ async fn snapshot(
             boundary,
             deadline
         ),
+        collect_job_log_tail,
     );
     let health = health.ok().flatten();
     let selected_readiness = match (readiness_source, registration.as_ref()) {
@@ -1370,7 +1410,6 @@ async fn snapshot(
     let mut observed_state = None;
     let mut guidance = None;
     let mut status_check_tally = None;
-    let mut job_log_tail = None;
     match intent {
         Question::Readiness(check) | Question::ReadinessExplanation(check) => {
             let explanation = matches!(intent, Question::ReadinessExplanation(_));
@@ -1502,51 +1541,48 @@ async fn snapshot(
                 }
             }
         }
-        Question::ContextStatus(kind) => {
-            if let (Some(source), Some((activity, at))) = (source, &selected_activity) {
-                if source.kind == kind
-                    && activity.status != "unknown"
-                    && at.timestamp_millis() > boundary
-                {
-                    observed_state = Some(activity.status);
-                    push(
-                        source.clone(),
-                        activity.label.into(),
-                        format!("{} is {}.", activity.label, activity.status),
-                        *at,
-                        None,
-                        false,
-                    );
-                }
-            }
-        }
-        Question::ContextLogs(kind) => {
-            if let (Some(source), Some((activity, _))) = (
+        Question::ContextStatus(kind) | Question::ContextLogs(kind) => {
+            if let (Some(source), Some((activity, observed_at))) = (
                 source.filter(|source| source.kind == kind),
                 &selected_activity,
             ) {
-                let label = activity.label;
-                let at = observation_start(boundary).await;
-                let counts = tokio::time::timeout_at(
-                    deadline,
-                    crate::operational_logs::qa_job_counts(state, context, &source.id, at),
-                )
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .flatten();
-                if let Some(counts) = counts {
-                    push(
-                        source.clone(),
-                        format!("{label} logs"),
-                        format!(
-                            "{label} recorded {} log entries over the last hour, including {} at error severity and {} at warning severity.",
-                            counts.total, counts.error, counts.warn,
-                        ),
-                        at,
-                        None,
-                        false,
-                    );
+                if matches!(intent, Question::ContextStatus(_)) || runtime.job_log_source.is_some()
+                {
+                    if activity.status != "unknown" && observed_at.timestamp_millis() > boundary {
+                        observed_state = Some(activity.status);
+                        push(
+                            source.clone(),
+                            activity.label.into(),
+                            format!("{} is {}.", activity.label, activity.status),
+                            *observed_at,
+                            None,
+                            false,
+                        );
+                    }
+                } else {
+                    let label = activity.label;
+                    let at = observation_start(boundary).await;
+                    let counts = tokio::time::timeout_at(
+                        deadline,
+                        crate::operational_logs::qa_job_counts(state, context, &source.id, at),
+                    )
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten();
+                    if let Some(counts) = counts {
+                        push(
+                            source.clone(),
+                            format!("{label} logs"),
+                            format!(
+                                "{label} recorded {} log entries over the last hour, including {} at error severity and {} at warning severity.",
+                                counts.total, counts.error, counts.warn,
+                            ),
+                            at,
+                            None,
+                            false,
+                        );
+                    }
                 }
             }
         }
@@ -1605,44 +1641,22 @@ async fn snapshot(
                         false,
                     );
                 }
-                let collect_job_logs = async {
-                    if !request.job_notification
-                        || source.kind != ChatSourceKind::Job
-                        || observed_state.is_none()
-                    {
-                        return None;
-                    }
-                    let model = runtime.availability.ready_model(runtime.generation)?;
-                    let observed_at = observation_start(boundary).await;
-                    let log_deadline = deadline.min(Instant::now() + JOB_NOTIFICATION_LOG_DEADLINE);
-                    let read = crate::operational_logs::qa_job_tail(
-                        state,
-                        context,
-                        &source.id,
-                        model.input_tokens(),
-                    );
-                    let excerpts = tokio::time::timeout_at(log_deadline, read)
-                        .await
-                        .ok()?
-                        .ok()?;
-                    (!excerpts.is_empty()).then_some((source, observed_at, excerpts))
-                };
-                let related_status = async {
-                    // The scoped job row describes active work. Waiting for a separate
-                    // readiness observation can spend this row's inference budget.
-                    let check = activity.check.filter(|_| {
-                        activity.status != "running" && context.permits(Permission::ReadBackend)
-                    })?;
-                    triage::current_status(
+                // A separate readiness lookup can spend the job observation's
+                // freshness budget. An attachment already supplies its subject.
+                if let Some(check) = activity.check.filter(|_| {
+                    runtime.job_log_source.is_none()
+                        && activity.status != "running"
+                        && context.permits(Permission::ReadBackend)
+                }) {
+                    related_activity = triage::current_status(
                         target,
                         state,
                         runtime.generation,
                         check.as_str(),
                         deadline,
                     )
-                    .await
-                };
-                (job_log_tail, related_activity) = tokio::join!(collect_job_logs, related_status);
+                    .await;
+                }
             }
         }
         Question::Summary => {
@@ -1695,8 +1709,8 @@ async fn snapshot(
             limit_contextual_evidence(&mut passages, &mut sources);
         }
     }
-    // Keep the lifecycle observation available for follow-ups. The supporting
-    // logs are supplemental evidence only for this explicit notification turn.
+    // Keep the lifecycle observation available for follow-ups. The tail is
+    // supplemental evidence for the explicitly attached job alone.
     if let Some((source, observed_at, excerpts)) = job_log_tail {
         append_job_log_tail(&mut passages, &mut sources, source, observed_at, excerpts);
     }
@@ -2103,6 +2117,32 @@ pub(crate) async fn cancel_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_explicit_job_used_by_a_job_question_selects_log_tail() {
+        let job = ChatSourceReference::new(ChatSourceKind::Job, "active-seed".into()).unwrap();
+        let unrelated =
+            ChatSourceReference::new(ChatSourceKind::Job, "another-job".into()).unwrap();
+        for prompt in [
+            "What happened with this job?",
+            "How's this job doing?",
+            "Summarize the logs for this job",
+        ] {
+            let intent = question::classify(prompt);
+            assert_eq!(
+                attached_job_log_source(intent, Some(&job), Some(&job), false),
+                Some(&job),
+                "{prompt}"
+            );
+            assert!(attached_job_log_source(intent, Some(&job), Some(&unrelated), false).is_none());
+            assert!(attached_job_log_source(intent, None, Some(&job), false).is_none());
+            assert!(attached_job_log_source(intent, Some(&job), Some(&job), true).is_none());
+        }
+        assert!(
+            attached_job_log_source(question::classify("hi"), Some(&job), Some(&job), false)
+                .is_none()
+        );
+    }
 
     #[test]
     fn all_supported_facts_use_the_generator_when_evidence_is_available() {

@@ -44,6 +44,7 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(2);
 const WARM_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const STOP_TIMEOUT: Duration = Duration::from_secs(8);
 const TURN_TIMEOUT: Duration = Duration::from_secs(30);
+const SETTLED_TURN_DRAIN: Duration = Duration::from_secs(2);
 const OPERATIONAL_COMMIT_RESERVE_MS: i64 = 500;
 const WARM_RETRY: Duration = Duration::from_secs(10);
 
@@ -306,14 +307,14 @@ impl Executor {
                 }
                 Ok(Ok(None)) => {}
                 _ => {
-                    tracing::warn!(qa_queue_stage = "claim", "Inbox QA queue claim unavailable");
-                    self.record_availability(
-                        generation,
-                        Some(QaAvailabilityReason::WorkerStartFailed),
-                    );
-                    self.unload().await;
-                    loaded = None;
-                    next_warm = Instant::now() + WARM_RETRY;
+                    // The replica and worker heartbeat still governs the resident model.
+                    if Instant::now() >= next_queue_notice {
+                        next_queue_notice = Instant::now() + WARM_RETRY;
+                        tracing::warn!(
+                            qa_queue_stage = "claim",
+                            "Inbox QA queue claim unavailable"
+                        );
+                    }
                 }
             }
             self.pause(stop).await;
@@ -556,11 +557,17 @@ impl Executor {
                 },
                 true,
             ),
-            RunResult::FailedTerminal => (
+            RunResult::EvidenceExpired { keep_warm } => (
+                DeliveryOutcome::Complete {
+                    result_ref: "qa_terminal",
+                },
+                keep_warm,
+            ),
+            RunResult::FailedTerminal { keep_warm } => (
                 DeliveryOutcome::Failed {
                     reason: "qa_inference_failed",
                 },
-                false,
+                keep_warm,
             ),
             RunResult::Stopped => (
                 DeliveryOutcome::Relinquish {
@@ -642,7 +649,10 @@ impl Executor {
             return RunResult::Error;
         };
         let budget = inference_budget(evidence, Utc::now().timestamp_millis());
-        if budget.is_zero() || evidence.request.dialogue.is_none() {
+        if budget.is_zero() {
+            return self.finish_expired_evidence(lease).await;
+        }
+        if evidence.request.dialogue.is_none() {
             return RunResult::Error;
         }
         let mut publication = Publication::new(model_target);
@@ -657,11 +667,14 @@ impl Executor {
         let mut model_finished = false;
         let mut model_polled = false;
         let mut received_event = false;
-        let result = loop {
+        let mut result = loop {
             tokio::select! {
                 biased;
                 () = stop.cancelled() => break RunResult::Stopped,
                 () = tokio::time::sleep_until(deadline) => {
+                    if uses_fresh_evidence(evidence) {
+                        break self.finish_expired_evidence(lease).await;
+                    }
                     tracing::warn!(qa_turn_stage = "turn_deadline", "Inbox QA turn exceeded its budget");
                     break RunResult::Error;
                 }
@@ -717,12 +730,53 @@ impl Executor {
             }
         };
         if model_polled && !model_finished {
-            if !matches!(result, RunResult::Completed) {
-                cancel.cancel();
+            match &mut result {
+                RunResult::EvidenceExpired { keep_warm }
+                | RunResult::FailedTerminal { keep_warm } => {
+                    // The turn has settled. Keep the model only after its validated terminal frame.
+                    *keep_warm =
+                        drain_worker_terminal(inference.as_mut(), &mut receiver, stop).await;
+                    if !*keep_warm {
+                        tracing::warn!(
+                            qa_turn_stage = "worker_terminal_drain",
+                            "Inbox QA worker did not settle after the turn ended"
+                        );
+                    }
+                }
+                other => {
+                    if !matches!(other, RunResult::Completed) {
+                        cancel.cancel();
+                    }
+                    let _ = timeout(STOP_TIMEOUT, inference).await;
+                }
             }
-            let _ = timeout(STOP_TIMEOUT, inference).await;
         }
         result
+    }
+
+    async fn finish_expired_evidence(&self, lease: &DeliveryLease) -> RunResult {
+        match timeout(
+            AUTH_TIMEOUT,
+            store::publish(&self.repo, lease, QaTurnState::InsufficientContext, None),
+        )
+        .await
+        {
+            Ok(Ok(true)) => {
+                tracing::info!(
+                    qa_turn_stage = "evidence_expired",
+                    "Inbox QA evidence expired"
+                );
+                RunResult::EvidenceExpired { keep_warm: true }
+            }
+            Ok(Ok(false)) => RunResult::Fenced,
+            _ => {
+                tracing::warn!(
+                    qa_turn_stage = "evidence_expired_publication",
+                    "Inbox QA evidence expiry could not be recorded"
+                );
+                RunResult::Error
+            }
+        }
     }
 
     async fn prepare(
@@ -732,6 +786,9 @@ impl Executor {
         stop: &CancellationToken,
     ) -> RunResult {
         let budget = inference_budget(evidence, Utc::now().timestamp_millis());
+        if budget.is_zero() {
+            return self.finish_expired_evidence(lease).await;
+        }
         let prepare = async {
             let Some(context) = store::begin_planning(&self.repo, lease).await? else {
                 return Ok(RunResult::Fenced);
@@ -797,6 +854,9 @@ impl Executor {
                         RunResult::Error
                     }
                     Err(_) => {
+                        if budget <= AUTH_TIMEOUT {
+                            return self.finish_expired_evidence(lease).await;
+                        }
                         tracing::warn!(qa_turn_stage = "plan_timeout", "Inbox QA response preparation exceeded its budget");
                         RunResult::Error
                     }
@@ -824,10 +884,33 @@ impl Executor {
 enum RunResult {
     More,
     Completed,
-    FailedTerminal,
+    EvidenceExpired { keep_warm: bool },
+    FailedTerminal { keep_warm: bool },
     Stopped,
     Fenced,
     Error,
+}
+
+async fn drain_worker_terminal(
+    inference: impl Future<Output = Result<()>>,
+    receiver: &mut mpsc::Receiver<QaWorkerEvent>,
+    stop: &CancellationToken,
+) -> bool {
+    let drain = async {
+        tokio::pin!(inference);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut inference => return result.is_ok(),
+                Some(_) = receiver.recv() => {}
+            }
+        }
+    };
+    tokio::select! {
+        biased;
+        () = stop.cancelled() => false,
+        result = timeout(SETTLED_TURN_DRAIN, drain) => matches!(result, Ok(true)),
+    }
 }
 
 fn cited_finding(
@@ -885,8 +968,16 @@ fn is_contextual(evidence: &FrozenEvidence) -> bool {
         .is_some_and(|dialogue| dialogue.kind == QaDialogueKind::Contextual)
 }
 
+fn uses_fresh_evidence(evidence: &FrozenEvidence) -> bool {
+    evidence
+        .request
+        .dialogue
+        .as_ref()
+        .is_some_and(|dialogue| dialogue.kind.uses_evidence())
+}
+
 fn inference_budget(evidence: &FrozenEvidence, now_ms: i64) -> Duration {
-    if !is_operational(evidence) && !is_contextual(evidence) {
+    if !uses_fresh_evidence(evidence) {
         return TURN_TIMEOUT;
     }
     let deadline = evidence
@@ -1044,14 +1135,16 @@ impl Publication {
                 reply,
                 ..
             } => {
+                let now_ms = Utc::now().timestamp_millis();
                 let (state, reply, findings) = match outcome {
+                    QaWorkerOutcome::Answered
+                        if uses_fresh_evidence(evidence)
+                            && !observation_is_fresh(evidence.sampled_at_ms, now_ms) =>
+                    {
+                        (QaTurnState::InsufficientContext, None, Vec::new())
+                    }
                     QaWorkerOutcome::Answered => {
-                        match self.accepted_reply(
-                            evidence,
-                            context,
-                            reply,
-                            Utc::now().timestamp_millis(),
-                        ) {
+                        match self.accepted_reply(evidence, context, reply, now_ms) {
                             Some((reply, findings)) => {
                                 (QaTurnState::Answered, Some(reply), findings)
                             }
@@ -1093,7 +1186,7 @@ impl Publication {
             return Ok(RunResult::Fenced);
         }
         Ok(if state == QaTurnState::Failed {
-            RunResult::FailedTerminal
+            RunResult::FailedTerminal { keep_warm: true }
         } else {
             RunResult::Completed
         })
@@ -1114,6 +1207,64 @@ mod tests {
     use fleetworks_contracts::qa_worker::QaWorkerRequest;
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_turn_drain_consumes_late_frames_to_keep_the_worker() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let stop = CancellationToken::new();
+        let inference = async move {
+            sleep(Duration::from_millis(100)).await;
+            sender
+                .send(QaWorkerEvent::Delta {
+                    turn_id: "expired-turn".into(),
+                    sequence: 1,
+                    text: "Late response".into(),
+                })
+                .await
+                .unwrap();
+            sender
+                .send(QaWorkerEvent::Complete {
+                    turn_id: "expired-turn".into(),
+                    sequence: 2,
+                    outcome: QaWorkerOutcome::InsufficientContext,
+                    context: None,
+                    reply: None,
+                })
+                .await
+                .unwrap();
+            Ok(())
+        };
+
+        assert!(drain_worker_terminal(inference, &mut receiver, &stop).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_turn_requires_reap_if_drain_fails_times_out_or_stops() {
+        let (_sender, mut receiver) = mpsc::channel(1);
+        let stop = CancellationToken::new();
+        assert!(
+            !drain_worker_terminal(
+                std::future::ready(Err(anyhow!("invalid worker terminal"))),
+                &mut receiver,
+                &stop,
+            )
+            .await
+        );
+
+        let started = Instant::now();
+        assert!(!drain_worker_terminal(std::future::pending(), &mut receiver, &stop).await);
+        assert!(started.elapsed() >= SETTLED_TURN_DRAIN);
+
+        stop.cancel();
+        assert!(
+            !drain_worker_terminal(
+                async { panic!("a stopped service must not resume the worker") },
+                &mut receiver,
+                &stop,
+            )
+            .await
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn retries_recording_confirmed_reap_without_repeating_shutdown() {

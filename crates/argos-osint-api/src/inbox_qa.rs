@@ -1628,9 +1628,11 @@ async fn snapshot(
                     (!excerpts.is_empty()).then_some((source, observed_at, excerpts))
                 };
                 let related_status = async {
-                    let check = activity
-                        .check
-                        .filter(|_| context.permits(Permission::ReadBackend))?;
+                    // The scoped job row describes active work. Waiting for a separate
+                    // readiness observation can spend this row's inference budget.
+                    let check = activity.check.filter(|_| {
+                        activity.status != "running" && context.permits(Permission::ReadBackend)
+                    })?;
                     triage::current_status(
                         target,
                         state,

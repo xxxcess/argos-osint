@@ -1295,12 +1295,7 @@ pub(crate) fn poll_jobs(state: &mut State, now: f64, tx: &mut Tx) -> bool {
 fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
     state.clock = now;
     let mut changed = false;
-    if state.startup.active() && !state.setup_gateway {
-        state.startup.begin(now);
-        if let Some(wait) = state.startup.next_wake(now) {
-            tx.wake_after(Duration::from_secs_f64(wait));
-        }
-        // Redraw the orbit's final pose even when this poll schedules no subsequent frame.
+    if state.poll_startup_intro(now, tx) {
         return true;
     }
     changed |= state.startup.poll_flight(now, tx);

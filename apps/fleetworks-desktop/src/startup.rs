@@ -42,7 +42,7 @@ const SETUP_MARK: &str = "startup-setup-mark";
 const RAIL_SLOT: &str = "startup-rail-mark-slot";
 const SETUP_SECONDS: f64 = 0.22;
 const RAIL_SECONDS: f64 = 0.21;
-const WIRING_HOLD_SECONDS: f64 = 1.0;
+const WIRING_HOLD_SECONDS: f64 = 2.0;
 const EMBEDDED_STAGE: &str = "startup-embedded-stage";
 pub(crate) const CONNECTION_DOT: &str = "startup-wiring-step-connection";
 pub(crate) const REGISTRATION_DOT: &str = "startup-wiring-step-registration";
@@ -122,6 +122,7 @@ pub struct Startup {
     pub(crate) csv_inputs: startup_data::CsvInputs,
     started_at: Option<f64>,
     settled: bool,
+    awaiting_intro: bool,
     reduced_motion: Cell<bool>,
     mark_rect: Cell<Option<[f32; 4]>>,
     target_id: Option<String>,
@@ -157,6 +158,7 @@ impl Startup {
     }
 
     fn reset_setup(&mut self) {
+        self.awaiting_intro = false;
         self.wiring = None;
         self.data_step = None;
         self.data_reset = [false; 2];
@@ -194,6 +196,13 @@ impl Startup {
                 dock,
             })
         });
+    }
+
+    fn dock_setup(&mut self, now: f64) {
+        self.awaiting_intro = false;
+        self.docked_pose = self.seconds(now) as f32;
+        self.start_flight(Dock::Setup, now);
+        self.settled = true;
     }
 
     pub(crate) fn poll_flight(&mut self, now: f64, tx: &mut Tx) -> bool {
@@ -302,7 +311,7 @@ pub(crate) fn view(
     if preferences.reduced_motion {
         root = root.instant_changes();
     }
-    if state.setup_gateway {
+    if state.setup_gateway && !state.startup.awaiting_intro {
         remember_mark(state, cx, SETUP_MARK);
         let docking = state.startup.flying_to(Dock::Setup, preferences);
         let setup_mark_height = 47.0;
@@ -482,8 +491,9 @@ fn folder_grid(state: &State, preferences: ViewPreferences, kit: &Kit, width: f3
     let available = (width - 32.0).max(20.0);
     let columns = (((available + GAP) / (TILE_WIDTH + GAP)).floor() as usize).clamp(1, 4);
     let tile_width = TILE_WIDTH.min(available);
-    let can_select =
-        (state.fixture || state.workspaces.container.is_some()) && !state.local_backend.stopping;
+    let can_select = !state.startup.awaiting_intro
+        && (state.fixture || state.workspaces.container.is_some())
+        && !state.local_backend.stopping;
     let targets = state.embedded_targets();
     let mut grid = rune::col()
         .key("startup-folder-grid")
@@ -516,6 +526,12 @@ fn folder_grid(state: &State, preferences: ViewPreferences, kit: &Kit, width: f3
         }
     }
     let status = match &state.workspaces.snapshot {
+        _ if state.startup.awaiting_intro => Some(ui_components::skeleton_text_value(
+            "Opening workstation",
+            150.0,
+            StatusTone::Cyan,
+            preferences,
+        )),
         Load::Failed(error) => Some(
             rune::col().gap(7.0).child(startup_error(error, kit)).child(
                 ActionButton::new("Retry folder access")
@@ -991,14 +1007,36 @@ impl State {
         self.choose_startup_destination(BackendKind::Local);
         self.startup.wiring = Some(Wiring::default());
         self.connect_local();
+        if !self.startup.awaiting_intro {
+            self.wake_for_setup_dock(tx);
+        }
+    }
+
+    fn wake_for_setup_dock(&self, tx: &mut Tx) {
         if self.startup.reduced_motion.get() {
             tx.settle();
         }
         if self.startup.flight.is_some() {
             tx.wake_after(Duration::from_secs_f64(1.0 / 60.0));
         } else {
-            tx.focus(EMBEDDED_STAGE, tx.by_keys());
+            tx.focus(EMBEDDED_STAGE, tx.by_keys() || tx.focus_visible());
+            tx.wake_after(Duration::ZERO);
         }
+    }
+
+    pub(crate) fn poll_startup_intro(&mut self, now: f64, tx: &mut Tx) -> bool {
+        if !self.startup.active() || (self.setup_gateway && !self.startup.awaiting_intro) {
+            return false;
+        }
+        self.startup.begin(now);
+        if let Some(wait) = self.startup.next_wake(now) {
+            tx.wake_after(Duration::from_secs_f64(wait));
+        } else if self.startup.awaiting_intro {
+            self.startup.dock_setup(now);
+            self.wake_for_setup_dock(tx);
+        }
+        // Render the final pose even when no subsequent frame is needed.
+        true
     }
 
     pub(crate) fn poll_startup_wiring(&mut self, now: f64, tx: &mut Tx) -> bool {
@@ -1065,9 +1103,11 @@ impl State {
         }
         // An outstanding profile read can populate the catalog but must respect the explicit choice.
         self.connection_profiles.initial_selection_applied = true;
-        self.startup.docked_pose = self.startup.seconds(self.clock) as f32;
-        self.startup.start_flight(Dock::Setup, self.clock);
-        self.startup.settled = true;
+        self.startup.awaiting_intro =
+            kind == BackendKind::Local && self.startup.next_wake(self.clock).is_some();
+        if !self.startup.awaiting_intro {
+            self.startup.dock_setup(self.clock);
+        }
         self.set_backend_kind(kind);
         self.setup_gateway = true;
         self.prefill_startup_distributed_url();
@@ -1266,7 +1306,8 @@ mod tests {
             runtime.frame(0.03);
             key(&mut runtime, rune::Key::Enter);
             runtime.frame(0.30);
-            tick(&mut runtime, 0.95);
+            tick(&mut runtime, 3.02);
+            tick(&mut runtime, 3.25);
             assert_eq!(runtime.state.backend_kind, BackendKind::Local);
             assert_eq!(
                 runtime.state.connection.status,
@@ -1313,14 +1354,16 @@ mod tests {
         runtime.update(|state, tx| {
             state.clock = clock;
             state.startup.begin(0.0);
-            state.startup.poll_flight(clock, tx);
-            state.poll_startup_wiring(clock, tx);
+            if !state.poll_startup_intro(clock, tx) {
+                state.startup.poll_flight(clock, tx);
+                state.poll_startup_wiring(clock, tx);
+            }
         });
         runtime.frame(0.02);
     }
 
     #[test]
-    fn ready_wiring_stages_hold_beneath_the_docked_logo_before_opening_data_setup() {
+    fn early_folder_selection_allows_the_intro_and_ready_checklists_to_finish() {
         for (size, reduced) in [
             ((640.0, 480.0), false),
             ((640.0, 480.0), true),
@@ -1332,33 +1375,21 @@ mod tests {
             let (chooser, _) = runtime.presented("startup-orbit").expect("chooser mark");
             click(&mut runtime, LOCAL);
             runtime.frame(0.02);
-            assert_eq!(runtime.state.startup.docked_pose, 1.0);
+            assert_eq!(
+                runtime.state.connection.status,
+                ConnectionStatus::Connecting
+            );
+            assert!(runtime.state.intents.contains(&Intent::Connect));
             if reduced {
                 assert!(runtime.find("startup-stage-starting").is_some());
                 assert_opaque(&runtime, "startup-embedded-stage");
             } else {
+                assert!(runtime.find("startup-choose").is_some());
                 assert!(runtime.find("startup-stage-starting").is_none());
-            }
-            tick(&mut runtime, 1.11);
-            let (dock, _) = runtime.presented(SETUP_MARK).expect("setup mark slot");
-            if reduced {
                 assert!(runtime.find("startup-orbit-flight").is_none());
-            } else {
-                let (in_flight, _) = runtime
-                    .presented("startup-orbit-flight")
-                    .expect("handoff frame");
-                assert!(in_flight[2] > dock[2] && in_flight[2] < chooser[2]);
-                assert!((in_flight[2] / in_flight[3] - chooser[2] / chooser[3]).abs() < 0.01);
             }
-            tick(&mut runtime, 1.24);
-            assert_eq!(runtime.presented(SETUP_MARK).unwrap().1, 1.0);
-            assert!(runtime.find("startup-stage-starting").is_some());
-            assert!(runtime
-                .accessibility_json()
-                .to_string()
-                .contains("Private backend connection: Checking"));
 
-            // Both responses can arrive before the first checklist has been held.
+            // Embedded can complete both requests while the intro is still visible.
             runtime.update(|state, _| {
                 state.page = app::Page::Brain;
                 state.connection.status = ConnectionStatus::Connected;
@@ -1389,24 +1420,46 @@ mod tests {
                     ],
                 );
             });
-            tick(&mut runtime, 1.25);
+            let checklist_at = if reduced {
+                1.05
+            } else {
+                tick(&mut runtime, 2.99);
+                assert!(runtime.find("startup-choose").is_some());
+                assert!(runtime.find("startup-orbit-flight").is_none());
+                assert!(runtime.find("startup-wiring-connection-checks").is_none());
+                tick(&mut runtime, 3.0);
+                assert_eq!(runtime.state.startup.docked_pose, INTRO_SECONDS as f32);
+                tick(&mut runtime, 3.11);
+                let (dock, _) = runtime.presented(SETUP_MARK).expect("setup mark slot");
+                let (in_flight, _) = runtime
+                    .presented("startup-orbit-flight")
+                    .expect("handoff frame");
+                assert!(in_flight[2] > dock[2] && in_flight[2] < chooser[2]);
+                assert!((in_flight[2] / in_flight[3] - chooser[2] / chooser[3]).abs() < 0.01);
+                assert!(runtime.find("startup-wiring-connection-checks").is_none());
+                3.23
+            };
+            tick(&mut runtime, checklist_at);
+            assert_eq!(runtime.presented(SETUP_MARK).unwrap().1, 1.0);
             assert!(runtime
                 .accessibility_json()
                 .to_string()
                 .contains("Private backend connection: Passed"));
-            tick(&mut runtime, 2.24);
+            tick(&mut runtime, checklist_at + 1.99);
             assert!(runtime.find("startup-wiring-connection-checks").is_some());
             assert!(runtime.find("startup-wiring-registration-checks").is_none());
 
-            tick(&mut runtime, 2.26);
+            let registering_at = checklist_at + 2.01;
+            tick(&mut runtime, registering_at);
             let tree = runtime.accessibility_json().to_string();
             assert!(tree.contains("Registered workstation access: Passed"));
             assert!(tree.contains("Step 2 of 5"));
-            tick(&mut runtime, 3.25);
+            tick(&mut runtime, registering_at + 1.99);
             assert!(runtime.find("startup-wiring-registration-checks").is_some());
             assert!(runtime.find("startup-data-setup").is_none());
 
-            tick(&mut runtime, 3.27);
+            let data_setup_at = registering_at + 2.01;
+            tick(&mut runtime, data_setup_at);
             assert!(runtime.find("startup-data-setup").is_some());
             assert!(runtime.find("startup-open-workstation").is_none());
             assert!(!runtime
@@ -1420,7 +1473,7 @@ mod tests {
             assert_eq!(runtime.state.page, app::Page::Workstation);
             assert!(runtime.find("screen-workstation").is_some());
             assert_eq!(runtime.find("startup-orbit-flight").is_some(), !reduced);
-            tick(&mut runtime, 3.51);
+            tick(&mut runtime, data_setup_at + 0.24);
             assert!(runtime.find("startup-orbit-flight").is_none());
             let (rail, opacity) = runtime.presented("brand-mark").expect("landed rail mark");
             assert_eq!(opacity, 1.0);
@@ -1452,7 +1505,7 @@ mod tests {
             state.registration.receipt = Load::Loading;
         });
         tick(&mut runtime, 4.0);
-        tick(&mut runtime, 5.1);
+        tick(&mut runtime, 6.1);
         tick(&mut runtime, 10.0);
         assert!(runtime
             .accessibility_json()

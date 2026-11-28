@@ -15,11 +15,11 @@ All materials are visible in the first frame. The [static SVG](../../../assets/b
 | Item | Contract |
 | --- | --- |
 | Native folder picker | Start with the complete orbital mark and fade the folder tiles into view in staggered 440 ms entrances. Play the core motion for 3 seconds, then hold the final pose. |
-| Setup | The selected form opens immediately. Move the current orbit pose into the setup header over about 220 ms and keep the mark there through start, registration, failure and retry. Start Embedded Backend and Connect remain explicit. Back restores focus to the selected tile and returns the settled mark without replay. |
-| Data setup | Center the active stage and controls below the settled mark. Four dots indicate actor catalog, actor index, classifier, and workstation checks. Keep the same content envelope through confirmation, progress, and outcome. |
+| Setup | Selecting a folder starts Embedded while the opening finishes. Move the completed orbit pose into the setup header over about 220 ms and keep the mark there through connection, registration, failure and retry. Hold each passing connection and registration checklist for two seconds. Back restores focus to the selected tile and returns the settled mark without replay. |
+| Data setup | Center the active stage and controls below the settled mark. Progress dots mark connection, registration, actor catalog, actor index, optional inference, and workstation checks. Keep the same content envelope through confirmation, progress, and outcome. |
 | Enter workstation | Mount Workstation Status after setup. Move the mark into the wide or compact sidebar rail over about 200 ms and settle into the static crescent and core. |
 | Scope | One startup presentation; no replay on navigation, dialog close, refresh or in-app reconnect |
-| Reduced motion / asset failure | Show the complete static mark directly at each destination. Chooser, form and workstation input follow the same timing. |
+| Reduced motion / asset failure | Show the complete static mark directly at each destination. Reduced Motion skips the opening delay and keeps the two-second checklist hold. |
 | After startup | Ordinary pages are static apart from useful local activity; no full-canvas decorative motion loop |
 
 Measure the complete scene envelope before sizing. Use a centered contain transform with uniform scale: `s = min(availableWidth / envelopeWidth, availableHeight / envelopeHeight)`. Calculate available dimensions after page insets, keep the envelope inside the measured native window, and convert logical points to physical pixels only at rasterization. Do not size by the sphere alone or stretch an 800×450 rectangle. Recheck at minimum 640×480, compact 800×1100, baseline 1180×780 and wide 1440×900, with 1×/2× scale and enlarged text. Logo scaling must not push the setup form outside the available viewport.

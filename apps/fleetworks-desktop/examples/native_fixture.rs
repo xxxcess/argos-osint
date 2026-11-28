@@ -876,7 +876,8 @@ mod native {
             scenes: &[
                 ("backend-choice", startup_data_scenes::folders),
                 ("backend-choice-opening", |state| {
-                    state.startup = fleetworks_desktop::startup::Startup::cold_launch();
+                    // The short docking scripts sample the handoff after the intro settles.
+                    state.fixture_show_backend_choice();
                 }),
                 ("backend-choice-matte", |state| {
                     review_appearance(state, startup_data_scenes::folders, ReviewAppearance::Matte);

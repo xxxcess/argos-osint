@@ -823,8 +823,8 @@ fn embedded_stage(state: &State, preferences: ViewPreferences, kit: &Kit) -> (&'
             )
             .child(checks)
             .child(views::quiet(state.local_state_dir_label(), kit).wrap_anywhere())
-            .children(detail)
-            .child(footer),
+            .child(footer)
+            .children(detail),
         preferences,
     );
     let slide = rune::col()
@@ -1434,6 +1434,8 @@ mod tests {
         tick(&mut runtime, 1.0);
         click(&mut runtime, LOCAL);
         runtime.update(|state, _| {
+            state.local_backend.binary_status =
+                BinaryDiscoveryStatus::Ready("/fixture/bundle/argos-api-host".into());
             state.connection.status =
                 ConnectionStatus::Failed("The private backend timed out.".into());
         });

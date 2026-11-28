@@ -12,6 +12,7 @@ use fleetworks_contracts::search::ActorSearchHit;
 use fleetworks_contracts::search::MAX_ACTOR_BROWSE_CURSOR_BYTES;
 use serde::{Deserialize, Serialize};
 use surrealdb::engine::any::Any;
+use surrealdb::method::Query;
 use surrealdb::types::RecordId;
 use surrealdb::types::RecordIdKey;
 use surrealdb::types::RecordIdKeyRange;
@@ -251,37 +252,28 @@ struct BrowseRow {
     subtype: Option<String>,
 }
 
+// In SurrealDB 3.3.4, a directly bound range becomes a literal RecordIdScan that
+// collects the range before filtering or applying LIMIT. The parameter nested in
+// an array keeps the typed range dynamic so the forward scan can stop at LIMIT.
+const BROWSE_QUERY: &str = "
+    SELECT id,
+        IF bytes::len(type::bytes(display_name)) <= 1024 { display_name } ELSE { NONE } AS display_name,
+        IF bytes::len(type::bytes(subtype)) <= 64 { subtype } ELSE { NONE } AS subtype
+    FROM array::first([$actors])
+    WHERE scope_key = $scope AND type::is_string(record::id(id))
+        AND bytes::len(type::bytes(record::id(id))) <= $cursor_bytes
+        AND string::trim(record::id(id)) != ''
+        AND !string::matches(record::id(id), $control_pattern)
+        AND type::record('memory', record::id(id)).lifecycle = 'active'
+        AND type::record('memory', record::id(id)).memory_kind = 'actor'
+        AND !record::exists(type::record('brain_actor_redirect', record::id(id)))
+    ORDER BY id ASC LIMIT $limit";
+
 /// Read a keyset page of active, unredirected actors in the shared canonical catalog.
 /// The record range starts after the supplied key so later pages never revisit earlier keys.
 pub async fn browse(repo: &Repository, query: &ActorBrowseQuery) -> Result<ActorBrowsePage> {
     query.validate()?;
-    let range = RecordId::new(
-        "brain_actor",
-        RecordIdKey::Range(Box::new(RecordIdKeyRange {
-            start: Bound::Excluded(query.cursor.as_deref().unwrap_or_default().into()),
-            end: Bound::Unbounded,
-        })),
-    );
-    let mut result = repo.db()
-        .query(
-            "SELECT id,
-                 IF bytes::len(type::bytes(display_name)) <= 1024 { display_name } ELSE { NONE } AS display_name,
-                 IF bytes::len(type::bytes(subtype)) <= 64 { subtype } ELSE { NONE } AS subtype
-             FROM $actors
-             WHERE scope_key = $scope AND type::is_string(record::id(id))
-                 AND bytes::len(type::bytes(record::id(id))) <= $cursor_bytes
-                 AND string::trim(record::id(id)) != ''
-                 AND !string::matches(record::id(id), $control_pattern)
-                 AND type::record('memory', record::id(id)).lifecycle = 'active'
-                 AND type::record('memory', record::id(id)).memory_kind = 'actor'
-                 AND !record::exists(type::record('brain_actor_redirect', record::id(id)))
-             ORDER BY id LIMIT $limit",
-        )
-        .bind(("actors", range))
-        .bind(("scope", actor_catalog::SCOPE))
-        .bind(("cursor_bytes", MAX_ACTOR_BROWSE_CURSOR_BYTES as i64))
-        .bind(("control_pattern", r"\p{Cc}"))
-        .bind(("limit", i64::from(query.limit) + 1))
+    let mut result = bind_browse_page(repo.db().query(BROWSE_QUERY), query)
         .await?
         .check()?;
     let records: Vec<BrowseRow> = result.take(0usize)?;
@@ -310,6 +302,22 @@ pub async fn browse(repo: &Repository, query: &ActorBrowseQuery) -> Result<Actor
         None
     };
     Ok(ActorBrowsePage::new(rows, next_cursor))
+}
+
+fn bind_browse_page<'db>(statement: Query<'db, Any>, query: &ActorBrowseQuery) -> Query<'db, Any> {
+    let range = RecordId::new(
+        "brain_actor",
+        RecordIdKey::Range(Box::new(RecordIdKeyRange {
+            start: Bound::Excluded(query.cursor.as_deref().unwrap_or_default().into()),
+            end: Bound::Unbounded,
+        })),
+    );
+    statement
+        .bind(("actors", range))
+        .bind(("scope", actor_catalog::SCOPE))
+        .bind(("cursor_bytes", MAX_ACTOR_BROWSE_CURSOR_BYTES as i64))
+        .bind(("control_pattern", r"\p{Cc}"))
+        .bind(("limit", i64::from(query.limit) + 1))
 }
 
 // ---- Brain discovery: search_actor_names / search_actor_aliases ----------
@@ -1747,6 +1755,40 @@ pub(crate) async fn clean_body(repo: &Repository, article_id: &str) -> Result<Op
 #[cfg(test)]
 mod discovery_tests {
     use super::*;
+
+    #[cfg(feature = "embedded")]
+    #[tokio::test]
+    async fn catalog_browse_pushes_the_filter_and_limit_into_the_ordered_range() {
+        let directory = tempfile::tempdir().expect("isolated browse datastore");
+        let repo = Repository::connect(
+            &crate::storage::open::Target::Embedded {
+                path: directory.path().join("db"),
+            },
+            "catalog",
+            "browse-plan",
+        )
+        .await
+        .expect("embedded browse repository");
+        for cursor in [None, Some("fixture-actor-10".into())] {
+            let page = ActorBrowseQuery::new(cursor, 10).expect("valid page");
+            let statement = repo.db().query(format!("EXPLAIN {BROWSE_QUERY}"));
+            let mut result = bind_browse_page(statement, &page)
+                .await
+                .expect("explain browse")
+                .check()
+                .expect("browse plan");
+            let plan: Option<String> = result.take(0).expect("text plan");
+            let plan = plan.expect("browse has a plan");
+            assert!(
+                plan.lines().any(|line| {
+                    line.contains("DynamicScan")
+                        && line.contains("predicate: ")
+                        && line.contains("limit: ")
+                }),
+                "the actor range must apply eligibility and page bounds during its scan: {plan}",
+            );
+        }
+    }
 
     #[test]
     fn name_reasons_prefer_exact_then_normalized_then_curated() {

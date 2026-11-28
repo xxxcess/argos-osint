@@ -12,6 +12,10 @@ use argos_osint_core::atlas_actor_index::surreal;
 use argos_osint_core::storage::tx::{run_tx, RetryPolicy};
 use argos_osint_core::storage::{actor_bind, actor_catalog};
 use argos_osint_core::store::AtlasArticleRow;
+use fleetworks_contracts::search::ActorBrowseQuery;
+use surrealdb::types::Array;
+use surrealdb::types::RecordId;
+use surrealdb::types::RecordIdKey;
 
 fn actors(count: usize) -> Vec<Actor> {
     (0..count)
@@ -28,6 +32,102 @@ fn actors(count: usize) -> Vec<Actor> {
             metadata: BTreeMap::from([("license".into(), "fixture-only".into())]),
         })
         .collect()
+}
+
+#[tokio::test]
+async fn catalog_browse_fills_ten_rows_across_ineligible_keys_and_ends_at_the_tail() {
+    use argos_osint_core::actor_catalog::SCOPE;
+
+    let Some(server) = support::Server::start() else {
+        return;
+    };
+    let repo = server.repo("catalog", "browse").await;
+    let records = (0..36)
+        .rev()
+        .map(|index| (RecordIdKey::from(format!("browse-{index:02}")), index))
+        .chain([
+            (RecordIdKey::from(" "), 0),
+            (RecordIdKey::from("browse-01\u{85}"), 0),
+            (RecordIdKey::from("x".repeat(257)), 0),
+            (RecordIdKey::from(Array::from(vec![42_i64])), 0),
+        ]);
+    for (key, index) in records {
+        let (scope, kind, lifecycle, redirect) = match index % 6 {
+            1 => (SCOPE, "actor", "deleted", false),
+            2 => (SCOPE, "claim", "active", false),
+            4 => ("unrelated", "actor", "active", false),
+            5 => (SCOPE, "actor", "active", true),
+            _ => (SCOPE, "actor", "active", false),
+        };
+        let (label, subtype) = match index {
+            0 => ("L".repeat(1025), "T".repeat(65)),
+            3 => ("Fixture\u{1b} label".into(), "  organization  ".into()),
+            _ => (format!("Actor {:02}", 36 - index), "organization".into()),
+        };
+        repo.db()
+            .query(
+                "CREATE $memory SET text = 'Private fixture', memory_kind = $kind, lifecycle = $state;
+                 CREATE $actor SET display_name = $label, subtype = $subtype, scope_key = $scope,
+                     created_at = '', updated_at = '';
+                 IF $redirect {
+                     CREATE $alias SET to_actor = 'browse-00', created_at = '';
+                 };",
+            )
+            .bind(("memory", RecordId::new("memory", key.clone())))
+            .bind(("actor", RecordId::new("brain_actor", key.clone())))
+            .bind(("alias", RecordId::new("brain_actor_redirect", key)))
+            .bind(("kind", kind))
+            .bind(("state", lifecycle))
+            .bind(("scope", scope))
+            .bind(("label", label))
+            .bind(("subtype", subtype))
+            .bind(("redirect", redirect))
+            .await
+            .expect("create synthetic browse records")
+            .check()
+            .expect("synthetic browse records are valid");
+    }
+    let expected: Vec<_> = (0..36)
+        .step_by(3)
+        .map(|index| format!("browse-{index:02}"))
+        .collect();
+    let first = actor_catalog::browse(&repo, &ActorBrowseQuery::new(None, 10).unwrap())
+        .await
+        .expect("first browse page");
+    assert_eq!(
+        first
+            .rows
+            .iter()
+            .map(|row| row.actor_id.as_str())
+            .collect::<Vec<_>>(),
+        expected[..10]
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(first.rows[0].label, "browse-00");
+    assert!(first.rows[0].actor_type.is_none());
+    assert_eq!(first.rows[1].label, "browse-03");
+    assert_eq!(first.rows[1].actor_type.as_deref(), Some("organization"));
+    assert_eq!(first.next_cursor.as_deref(), Some("browse-27"));
+    let second = actor_catalog::browse(
+        &repo,
+        &ActorBrowseQuery::new(first.next_cursor, 10).unwrap(),
+    )
+    .await
+    .expect("last browse page");
+    assert_eq!(
+        second
+            .rows
+            .iter()
+            .map(|row| row.actor_id.as_str())
+            .collect::<Vec<_>>(),
+        expected[10..]
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    );
+    assert!(second.next_cursor.is_none());
 }
 
 #[tokio::test]

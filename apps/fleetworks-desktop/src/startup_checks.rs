@@ -3,14 +3,15 @@
 use fleetworks_contracts::readiness::ReadinessCheck;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
+use fleetworks_contracts::readiness::WorkstationReadiness;
 use rune::El;
 use rune_kit::glyphs;
 use rune_kit::Kit;
 
 use crate::accessibility::ViewPreferences;
+use crate::app::Load;
 use crate::app::State;
 use crate::material;
-use crate::startup_data;
 use crate::theme::StatusTone;
 use crate::ui_components;
 
@@ -18,7 +19,6 @@ use crate::ui_components;
 pub(crate) enum CheckStatus {
     Pending,
     Checking,
-    Verifying,
     Passed,
     Failed,
     NeedsSetup,
@@ -46,14 +46,13 @@ pub(crate) fn row(
     let (caption, glyph, tone) = match status {
         CheckStatus::Pending => ("Pending", &glyphs::DASH, StatusTone::Neutral),
         CheckStatus::Checking => ("Checking", &glyphs::DASH, StatusTone::Cyan),
-        CheckStatus::Verifying => ("Verifying", &glyphs::DASH, StatusTone::Cyan),
         CheckStatus::Passed => ("Passed", &glyphs::CHECK, StatusTone::Ok),
         CheckStatus::Failed => ("Failed", &glyphs::CLOSE, StatusTone::Err),
         CheckStatus::NeedsSetup => ("Needs setup", &glyphs::DASH, StatusTone::Warn),
         CheckStatus::NeedsAttention => ("Needs attention", &glyphs::DASH, StatusTone::Warn),
         CheckStatus::Unavailable => ("Unavailable", &glyphs::DASH, StatusTone::Neutral),
     };
-    let value = if matches!(status, CheckStatus::Checking | CheckStatus::Verifying) {
+    let value = if status == CheckStatus::Checking {
         rune::row()
             .h(22.0)
             .center_y()
@@ -88,14 +87,17 @@ pub(crate) fn row(
         .child(value.a11y_hidden())
 }
 
-pub(crate) fn content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
-    readiness_list(
-        state,
-        "startup-data-check",
-        CheckStatus::Pending,
-        preferences,
-        kit,
-    )
+pub(crate) fn scoped_readiness(state: &State) -> Option<&WorkstationReadiness> {
+    let Load::Ready(readiness) = &state.readiness else {
+        return None;
+    };
+    let context = state.registration.context.as_ref()?;
+    let receipt = readiness.registration.as_ref()?;
+    (state.connected()
+        && readiness.deployment_id == context.deployment_id
+        && receipt.registration_id == context.registration_id
+        && receipt.revision == context.registration_revision)
+        .then_some(readiness)
 }
 
 pub(crate) fn embedded_content(
@@ -109,24 +111,11 @@ pub(crate) fn embedded_content(
     } else {
         CheckStatus::Unavailable
     };
-    readiness_list(
-        state,
-        "startup-wiring-health-check",
-        missing,
-        preferences,
-        kit,
-    )
-}
-
-fn readiness_list(
-    state: &State,
-    key: &str,
-    missing: CheckStatus,
-    preferences: ViewPreferences,
-    kit: &Kit,
-) -> El {
-    let checks = startup_data::scoped_readiness(state).map(|readiness| &readiness.checks);
-    let mut list = list(&format!("{key}list"), "Workstation health checks");
+    let checks = scoped_readiness(state).map(|readiness| &readiness.checks);
+    let mut list = list(
+        "startup-wiring-health-checklist",
+        "Workstation health checks",
+    );
     for (id, title) in [
         (ReadinessCheckId::Gateway, "Gateway"),
         (ReadinessCheckId::Datastore, "Datastore"),
@@ -148,7 +137,7 @@ fn readiness_list(
         }
         let current = check.filter(|check| state.readiness_check_fresh(check));
         list = list.child(row(
-            &format!("{key}-{}", id.as_str()),
+            &format!("startup-wiring-health-check-{}", id.as_str()),
             title,
             current.map_or(missing, status),
             preferences,

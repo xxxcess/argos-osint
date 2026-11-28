@@ -244,7 +244,6 @@ pub(crate) struct InboxQa {
     settings_loaded: bool,
     details_open: bool,
     sources_open: bool,
-    startup_seen: bool,
     pending_inference: Option<bool>,
     pending_decision: bool,
     decision_save_error: Option<&'static str>,
@@ -273,7 +272,6 @@ impl Default for InboxQa {
             settings_loaded: false,
             details_open: false,
             sources_open: false,
-            startup_seen: false,
             pending_inference: None,
             pending_decision: false,
             decision_save_error: None,
@@ -873,7 +871,6 @@ impl State {
             || qa.settings_change_pending()
             || self.inbox.open
             || self.settings_open
-            || self.startup.data_setup_active()
             || qa.pending.is_some()
             || qa.active().is_some();
         if watch_settings && now >= qa.next_settings_at {
@@ -1727,15 +1724,6 @@ pub(crate) fn assistant_settings_content(state: &State, kit: &Kit) -> El {
             )
         }))
         .child(decision_settings_content(state, decision, kit))
-}
-
-pub(crate) fn setup_choice(state: &State) -> bool {
-    state.supports_inbox_qa() && !state.inbox_qa.startup_seen
-}
-
-pub(crate) fn continue_setup(state: &mut State, tx: &mut Tx) {
-    state.inbox_qa.startup_seen = true;
-    tx.focus("startup-data-stage", true);
 }
 
 fn citation_kind(kind: ChatSourceKind) -> &'static str {

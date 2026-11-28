@@ -2027,8 +2027,12 @@ pub(crate) fn maintenance(
         Load::Loading => {
             body = body.child(ui_components::async_status_strip(
                 "maintenance-upload-loading",
-                "Streaming dataset",
-                "Checking CSV columns locally, then streaming to the backend…",
+                "Validating actor CSV",
+                if state.maintenance.github_downloading {
+                    "Downloading the selected CSV from GitHub…"
+                } else {
+                    "Checking the CSV with the backend…"
+                },
                 true,
                 StatusTone::Accent,
                 preferences,
@@ -2037,19 +2041,15 @@ pub(crate) fn maintenance(
         }
         Load::Failed(error) => body = body.child(line(error.clone(), kit).role("alert")),
         Load::Ready(upload) => {
-            let name = state
-                .maintenance
-                .local_dataset
-                .as_ref()
-                .and_then(|selection| selection.path.file_name())
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Selected CSV".into());
-            body = body.child(ui_components::status_pill(
-                format!("{name} · {} validated bytes", upload.dataset.size_bytes),
-                Some(&icons::SEED),
-                StatusTone::Ok,
-                kit,
-            ));
+            body = body.child(
+                ui_components::status_pill(
+                    state.maintenance.dataset_validation_label(upload),
+                    Some(&icons::SEED),
+                    StatusTone::Ok,
+                    kit,
+                )
+                .key("maintenance-dataset-validated"),
+            );
         }
         _ => {}
     }
@@ -2083,47 +2083,88 @@ pub(crate) fn maintenance(
             MaintenanceOperation::SeedActors => Some(DatasetKind::ActorCatalog),
             _ => None,
         };
-        let action_label = match dataset {
-            Some(DatasetKind::ActorCatalog) if cfg!(target_os = "linux") => "Enter actor CSV path",
-            _ => label,
+        let action_label = if dataset.is_some() {
+            "Local CSV"
+        } else {
+            label
         };
-        let mut operation_card = rune::col().padding(10.0).gap(8.0).child(
-            rune::row()
-                .w_full()
-                .center_y()
-                .gap(8.0)
-                .child(
-                    rune::icon(glyph, 15.0)
-                        .color(theme::hex(if focused {
-                            theme::ACCENT_HOVER
+        let mut actions = rune::row().w_full().center_y().flex_wrap().gap(8.0).child(
+            ActionButton::new(action_label)
+                .key(key)
+                .icon(glyph)
+                .finish(finish)
+                .status(preflight_label, preflight_tone)
+                .busy(button_busy)
+                .disabled(reason.is_some())
+                .on_press_tx(move |state: &mut State, tx| {
+                    state.seed_stage = stage_match;
+                    if let Some(kind) = dataset {
+                        state.maintenance.github_csv_url = None;
+                        if cfg!(target_os = "linux") {
+                            state.enter_csv_path(kind, tx);
                         } else {
-                            theme::TEXT_MUTED
-                        }))
-                        .a11y_hidden(),
-                )
-                .child(heading(label, kit))
-                .child(rune::spacer())
-                .child(
-                    ActionButton::new(action_label)
-                        .key(key)
-                        .icon(glyph)
-                        .finish(finish)
-                        .status(preflight_label, preflight_tone)
-                        .busy(button_busy)
+                            state.choose_dataset(kind, tx);
+                        }
+                    } else {
+                        state.preview_maintenance(operation);
+                    }
+                })
+                .build(kit, preferences, pointer_ref),
+        );
+        if dataset.is_some() {
+            actions = actions.child(
+                ActionButton::new("Bundled CSV")
+                    .key(maintenance::BUNDLED_CSV_KEY)
+                    .finish(MetalFinish::Gunmetal)
+                    .disabled(reason.is_some())
+                    .on_press(|state: &mut State| {
+                        state.seed_stage = SeedStage::Seed;
+                        state.stage_bundled_actor_csv();
+                    })
+                    .build(kit, preferences, pointer_ref),
+            );
+            if cfg!(any(test, feature = "native-github-dataset")) {
+                actions = actions.child(
+                    ActionButton::new("GitHub CSV")
+                        .key(maintenance::GITHUB_CSV_KEY)
+                        .finish(MetalFinish::Gunmetal)
                         .disabled(reason.is_some())
-                        .on_press_tx(move |state: &mut State, tx| {
-                            state.seed_stage = stage_match;
-                            match dataset {
-                                Some(kind) if cfg!(target_os = "linux") => {
-                                    state.enter_csv_path(kind, tx);
-                                }
-                                Some(kind) => state.choose_dataset(kind, tx),
-                                None => state.preview_maintenance(operation),
-                            }
+                        .on_press_tx(|state: &mut State, tx| {
+                            state.seed_stage = SeedStage::Seed;
+                            state.open_github_actor_csv(tx);
                         })
                         .build(kit, preferences, pointer_ref),
-                ),
-        );
+                );
+            }
+        }
+        let mut operation_card = rune::col()
+            .padding(10.0)
+            .gap(8.0)
+            .child(
+                rune::row()
+                    .w_full()
+                    .center_y()
+                    .gap(8.0)
+                    .child(
+                        rune::icon(glyph, 15.0)
+                            .color(theme::hex(if focused {
+                                theme::ACCENT_HOVER
+                            } else {
+                                theme::TEXT_MUTED
+                            }))
+                            .a11y_hidden(),
+                    )
+                    .child(heading(label, kit)),
+            )
+            .child(actions);
+        if dataset.is_some() && focused {
+            operation_card = operation_card.children(github_actor_csv_form(
+                state,
+                reason.is_some(),
+                preferences,
+                kit,
+            ));
+        }
         if let Some(reason) = reason {
             operation_card = operation_card.child(quiet(reason, kit));
         } else if focused {
@@ -2188,6 +2229,72 @@ pub(crate) fn maintenance(
     }
     let _ = layers;
     body
+}
+
+fn github_actor_csv_form(
+    state: &State,
+    blocked: bool,
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> Option<El> {
+    if !cfg!(any(test, feature = "native-github-dataset")) {
+        return None;
+    }
+    let url = state.maintenance.github_csv_url.as_ref()?;
+    let downloading = matches!(state.maintenance.upload, Load::Loading);
+    Some(
+        rune::col()
+            .w_full()
+            .gap(8.0)
+            .child(
+                TextInput::new(url)
+                    .label("GitHub CSV URL")
+                    .placeholder("https://raw.githubusercontent.com/…")
+                    .width(None)
+                    .disabled(downloading)
+                    .on_edit(|state: &mut State| {
+                        state
+                            .maintenance
+                            .github_csv_url
+                            .as_mut()
+                            .expect("GitHub URL is visible")
+                    })
+                    .on_change(|state: &mut State, _| state.github_actor_csv_edited())
+                    .build(kit)
+                    .key(maintenance::GITHUB_CSV_URL_KEY),
+            )
+            .child(
+                rune::row()
+                    .gap(8.0)
+                    .flex_wrap()
+                    .child(
+                        ActionButton::new("Download & validate")
+                            .key("maintenance-github-csv-validate")
+                            .finish(MetalFinish::GoldCta)
+                            .disabled(blocked || downloading || url.text.trim().is_empty())
+                            .on_press(|state: &mut State| {
+                                if let Some(url) = &state.maintenance.github_csv_url {
+                                    state.download_github_dataset(
+                                        DatasetKind::ActorCatalog,
+                                        url.text.clone(),
+                                    );
+                                }
+                            })
+                            .build(kit, preferences, None),
+                    )
+                    .child(
+                        ActionButton::new("Close")
+                            .key("maintenance-github-csv-close")
+                            .finish(MetalFinish::Gunmetal)
+                            .on_press_tx(|state: &mut State, tx| {
+                                state.maintenance.github_csv_url = None;
+                                tx.focus(maintenance::GITHUB_CSV_KEY, tx.focus_visible());
+                                tx.scroll_into_view(maintenance::GITHUB_CSV_KEY);
+                            })
+                            .build(kit, preferences, None),
+                    ),
+            ),
+    )
 }
 
 pub(crate) fn csv_path_prompt(

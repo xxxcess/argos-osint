@@ -46,7 +46,6 @@ pub mod search_articles;
 mod search_catalog;
 pub mod startup;
 mod startup_checks;
-mod startup_data;
 pub mod submission;
 pub mod theme;
 pub mod transfer;

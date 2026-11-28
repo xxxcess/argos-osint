@@ -296,10 +296,9 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
             if toggle is not None or any(screen_bounds(node, atspi) is None for node in (sources, back, citation)):
                 return None
             return citation
-        if screen_bounds(toggle, atspi) is None:
+        # Back restores the trigger while the outgoing panel can still be present in AT-SPI.
+        if screen_bounds(toggle, atspi) is None or any(node is not None for node in (sources, citation, back)):
             return None
-        require(sources is None and citation is None and back is None,
-                "Sources remained visible in the reply view")
         return toggle
 
     def citation_details(citation):
@@ -314,44 +313,56 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
     button("startup-local")
 
     def embedded_checks_observed():
+        stage = find("startup-stage-embedded-health")
         gateway = find("startup-wiring-health-check-gateway")
-        if screen_bounds(gateway, atspi) is not None and gateway.name in (
-            "Gateway: Passed", "Gateway: Unavailable"
-        ):
-            return gateway
+        if (screen_bounds(stage, atspi) is not None and screen_bounds(gateway, atspi) is not None
+                and gateway.name in ("Gateway: Passed", "Gateway: Unavailable")):
+            return stage
         return None
 
     def bundled_actor_ready():
-        ready = find(None, label="Ready to seed")
-        rows = find(None, label=f"Bundled CSV · {BUNDLED_ACTOR_ROWS:,} rows validated")
-        local = find(None, label="Local CSV")
-        seed = find("startup-data-primary", label="Seed actors", button=True)
-        if any(screen_bounds(node, atspi) is None for node in (ready, rows, local, seed)):
+        rows = find("maintenance-dataset-validated", label=f"Bundled CSV · {BUNDLED_ACTOR_ROWS:,} rows validated")
+        local = find("maintenance-seed", button=True)
+        seed = find("maintenance-confirm", button=True)
+        if any(screen_bounds(node, atspi) is None for node in (rows, local, seed)):
             return None
-        require(local.getState().contains(atspi.STATE_ENABLED), "Local CSV is unavailable after validation")
         return True
 
     def require_no_seed():
         require(not any(row.get("op") == "seed_actors" for row in read_journal(journal)),
-                "startup accepted an actor seed without operator confirmation")
+                "the app accepted an actor seed without operator confirmation")
 
     wait_for(embedded_checks_observed, app, "initial Embedded health checks")
     # The new checklist is accessible while the outgoing registration slide is still fading.
     time.sleep(0.5)
-    require(embedded_checks_observed() is not None, "Embedded health slide did not stay visible")
+    health_stage = embedded_checks_observed()
+    require(health_stage is not None, "Embedded health slide did not stay visible")
+    require(not any(node.getRole() == atspi.ROLE_PUSH_BUTTON and screen_bounds(node, atspi) is not None
+                    for node in descendants(health_stage)), "Embedded health slide exposed a button")
     subprocess.run(["scrot", "--overwrite", str(output / "startup-embedded-health.png")],
                    check=True, timeout=5)
-    wait_for(bundled_actor_ready, app, "automatic validation of the bundled actor CSV", timeout=180)
+    wait_for(lambda: find("screen-workstation"), app, "automatic Workstation Status handoff", timeout=8)
     require_no_seed()
-    subprocess.run(["scrot", "--overwrite", str(output / "startup-actor-default.png")], check=True, timeout=5)
+    require(find("workstation-build-actor-index", button=True) is None,
+            "the index build was available before a catalog was seeded")
+    subprocess.run(["scrot", "--overwrite", str(output / "startup-workstation-status.png")],
+                   check=True, timeout=5)
+    button("readiness-action-actor_catalog-SeedActors")
+    button("maintenance-bundled-csv")
+    wait_for(bundled_actor_ready, app, "validated actor CSV from Workstation Status", timeout=180)
+    require_no_seed()
+    subprocess.run(["scrot", "--overwrite", str(output / "workstation-actor-seed-confirmation.png")],
+                   check=True, timeout=5)
+    button("maintenance-cancel")
     state = home / ".fleetworks/local-backend/embedded"
     fd = os.open(state / "qa-pack.json", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     with os.fdopen(fd, "w") as file:
         json.dump(pointer, file)
-    button("startup-data-skip", "Finish later")
+    button("nav-workstation")
+    button("open-workstation-settings")
+    button("settings-category-connection", "Connection")
     button("inbox-qa-toggle", "Turn On")
-    button("startup-inbox-qa-continue")
-    button("startup-data-continue", "Open Workstation")
+    button("settings-close", "Close Settings")
 
     def shown_drawer():
         drawer = find(DRAWER)
@@ -679,7 +690,8 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         "finding_count": len(final["findings"]), "duplicate_findings": 0,
         "first_finding_ms": first_ms, "gate_release_ms": released_ms, "completion_ms": completion_ms,
         "grounded_memory": memory,
-        "startup_actor_validated_rows": BUNDLED_ACTOR_ROWS, "startup_actor_seed_accepted": False,
+        "startup_advanced_without_controls": True,
+        "manual_actor_validated_rows": BUNDLED_ACTOR_ROWS, "actor_seed_accepted": False,
     }
     (output / "streaming.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result))

@@ -367,10 +367,14 @@ fn toggle_details(state: &mut State, id: ReadinessCheckId) {
     }
 }
 
-fn open_actor_maintenance(state: &mut State) {
-    if state.registration.context.is_some() && state.permission(Permission::MaintainBackend) {
+fn open_actor_maintenance(state: &mut State, tx: &mut Tx) {
+    if state
+        .maintenance_disabled_reason(MaintenanceOperation::SeedActors)
+        .is_none()
+    {
         state.seed_stage = SeedStage::Seed;
         state.navigate(Page::Seed);
+        tx.focus(crate::maintenance::SEED_ACTION_KEY, tx.focus_visible());
     }
 }
 
@@ -425,19 +429,6 @@ fn workstation_row_action(state: &State, row: &StatusCheckRow<'_>, kit: &Kit) ->
         );
     }
     match id {
-        ReadinessCheckId::ActorCatalog
-            if registered
-                && state.permission(Permission::MaintainBackend)
-                && row.fresh
-                && row.status == CheckStatus::NeedsData =>
-        {
-            Some(
-                row_icon(&icons::SEED, "Open actor seed setup")
-                    .on_press(open_actor_maintenance)
-                    .build(kit)
-                    .key("readiness-action-actor_catalog-SeedActors"),
-            )
-        }
         ReadinessCheckId::ActorSearch
             if row.status == CheckStatus::Ready
                 && state.permission(Permission::ReadBackend)
@@ -487,6 +478,14 @@ fn check_action(state: &State, row: &StatusCheckRow<'_>, expanded: bool, kit: &K
             })
             .build(kit)
             .key(crate::maintenance::WORKSTATION_REINDEX_ACTION_KEY),
+        Some(ReadinessActionId::SeedActors)
+            if state.page == Page::Workstation && !state.setup_gateway =>
+        {
+            row_icon(&icons::SEED, "Open actor seed setup")
+                .on_press_tx(open_actor_maintenance)
+                .build(kit)
+                .key("readiness-action-actor_catalog-SeedActors")
+        }
         Some(ReadinessActionId::SeedActors) => row_icon(&icons::SEED, "Choose actor CSV")
             .on_press_tx(|state: &mut State, tx| {
                 state.choose_dataset(DatasetKind::ActorCatalog, tx)
@@ -609,13 +608,13 @@ fn check_row(
             .iter()
             .filter(|action| Some(action.id) != primary)
         {
-            if maintenance_action(action.id).is_some()
-                && (!action.allowed || !state.permission(action.permission))
-            {
+            let disabled_operation = maintenance_action(action.id)
+                .filter(|_| !action.allowed || !state.permission(action.permission));
+            if let Some((operation, _)) = disabled_operation {
                 detail = detail.children(
-                    action
-                        .disabled_reason
-                        .as_ref()
+                    state
+                        .maintenance_disabled_reason(operation)
+                        .or_else(|| action.disabled_reason.clone())
                         .map(|reason| quiet(reason, kit)),
                 );
             } else if let Some((button, reason)) =
@@ -840,6 +839,11 @@ fn maintenance_button(
         .finish(MetalFinish::Gunmetal)
         .disabled(reason.is_some())
         .on_press_tx(move |state: &mut State, tx| match operation {
+            MaintenanceOperation::SeedActors
+                if state.page == Page::Workstation && !state.setup_gateway =>
+            {
+                open_actor_maintenance(state, tx);
+            }
             MaintenanceOperation::SeedActors => state.choose_dataset(DatasetKind::ActorCatalog, tx),
             MaintenanceOperation::ReindexActors => state.preview_maintenance(operation),
             _ => {}

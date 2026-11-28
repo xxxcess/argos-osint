@@ -156,6 +156,80 @@ fn actor_seed_button_chooses_csv_without_submitting_a_job() {
     );
 }
 
+#[test]
+fn workstation_seed_action_validates_a_bundled_csv_before_explicit_confirmation() {
+    const SEED_ROW: &str = "readiness-action-actor_catalog-SeedActors";
+    let mut state = state(false);
+    state.page = Page::Workstation;
+    state.backend_kind = fleetworks_workstation::native::BackendKind::Local;
+    state.seed_startup_bundled_dataset_fixture();
+    let mut runtime = runtime(state);
+    let mut clock = 0.0;
+    runtime.update(|_, tx| tx.focus(SEED_ROW, true));
+    clock += 1.0 / 60.0;
+    runtime.frame(clock);
+    runtime.key(rune::KeyEvent {
+        key: rune::Key::Text(" ".into()),
+        mods: rune::Mods::default(),
+    });
+    clock += 1.0 / 60.0;
+    runtime.frame(clock);
+    assert_eq!(runtime.state.page, Page::Seed);
+    assert!(runtime.find(SEED_ACTION_KEY).is_some());
+    let kind = DatasetKind::ActorCatalog;
+    let submission = Intent::Maintenance {
+        operation: MaintenanceOperation::SeedActors,
+    };
+    assert!(!runtime
+        .state
+        .intents
+        .contains(&Intent::UploadDataset { kind }));
+    click(&mut runtime, BUNDLED_CSV_KEY, &mut clock);
+    assert!(runtime
+        .state
+        .intents
+        .contains(&Intent::UploadDataset { kind }));
+    assert!(runtime.find("maintenance-confirm").is_none());
+
+    let mut upload = uploaded(kind);
+    upload.row_count = Some(94_987);
+    runtime.update(|state, _| {
+        state.complete_dataset_upload(
+            state.connection.epoch,
+            state.maintenance.upload_revision,
+            state.origin_revision,
+            kind,
+            Ok(upload),
+        );
+    });
+    clock += 1.0 / 60.0;
+    runtime.frame(clock);
+    assert!(runtime.find("maintenance-dataset-validated").is_some());
+    assert!(runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Bundled CSV · 94,987 rows validated"));
+    assert!(!runtime.state.intents.contains(&submission));
+    click(&mut runtime, "maintenance-confirm", &mut clock);
+    assert!(runtime.state.intents.contains(&submission));
+}
+
+#[test]
+fn manual_github_actor_csv_download_still_requires_an_explicit_action() {
+    let mut runtime = runtime(state(false));
+    let mut clock = 0.0;
+    assert!(runtime.find(GITHUB_CSV_URL_KEY).is_none());
+    click(&mut runtime, GITHUB_CSV_KEY, &mut clock);
+    assert!(runtime.find(GITHUB_CSV_URL_KEY).is_some());
+    let intent = Intent::DownloadGithubDataset {
+        kind: DatasetKind::ActorCatalog,
+    };
+    assert!(!runtime.state.intents.contains(&intent));
+    click(&mut runtime, "maintenance-github-csv-validate", &mut clock);
+    assert!(runtime.state.intents.contains(&intent));
+    assert!(runtime.state.maintenance.confirmation.is_none());
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn opening_csv_entry_accepts_immediate_typing_and_cancel_restores_focus() {
@@ -697,6 +771,47 @@ fn accepted_reseed_cannot_use_a_cached_ready_catalog_to_enable_index() {
     assert!(state
         .maintenance_disabled_reason(MaintenanceOperation::ReindexActors)
         .is_none());
+}
+
+#[test]
+fn manual_index_build_waits_for_seed_and_existing_index_work() {
+    let operation = MaintenanceOperation::ReindexActors;
+    let mut state = state(false);
+    let Load::Ready(readiness) = &mut state.readiness else {
+        panic!("expected scoped readiness fixture");
+    };
+    readiness.checks[1].actions[0].allowed = false;
+    readiness.checks[1].actions[0].disabled_reason = Some("actor_seed_required".into());
+    assert_eq!(
+        state.maintenance_preflight(operation),
+        MaintenancePreflight::ActorCatalogNotSeeded
+    );
+    let Load::Ready(readiness) = &mut state.readiness else {
+        panic!("expected scoped readiness fixture");
+    };
+    readiness.checks[0].state = ReadinessState::Ready;
+    readiness.checks[1].actions[0].allowed = true;
+    readiness.checks[1].actions[0].disabled_reason = None;
+    readiness.checks[1].state = ReadinessState::Running;
+    assert_eq!(
+        state.maintenance_preflight(operation),
+        MaintenancePreflight::ActorIndexInProgress
+    );
+    let Load::Ready(readiness) = &mut state.readiness else {
+        panic!("expected scoped readiness fixture");
+    };
+    readiness.checks[1].state = ReadinessState::NotReady;
+    assert_eq!(
+        state.maintenance_preflight(operation),
+        MaintenancePreflight::Ready
+    );
+    state
+        .maintenance
+        .set_operation_job(operation, "queued-index".into(), false);
+    assert_eq!(
+        state.maintenance_preflight(operation),
+        MaintenancePreflight::ActorIndexInProgress
+    );
 }
 
 #[tokio::test]

@@ -205,6 +205,7 @@ jobs:
             printf 'icd=%s\n' "$icd" >> "$GITHUB_OUTPUT"
           fi
           vulkaninfo --summary | tee "${{ runner.temp }}/linux-native-evidence/vulkaninfo-summary.txt"
+          scripts=apps/fleetworks-desktop/tests/fixtures/scripts
           python3 scripts/fleetworks_verify.py timed --phase linux-native-ui-fixtures -- \
             python3 scripts/fleetworks_verify.py native-ui --agent --require-clean \
             --target ${{ matrix.target }} \
@@ -260,6 +261,15 @@ jobs:
             --scene tools-catalog-ready-matte \
             --scene models-ready \
             --scene models-ready-matte \
+            --scene brain-search-ready \
+            --scene workstation-seed-action \
+            --scene workstation-index-action \
+            --script "brain-search-ready=$scripts/search-browse-actors.json" \
+            --script "workstation-seed-action=$scripts/workstation-seed-action.json" \
+            --script "workstation-index-action=$scripts/workstation-index-action.json" \
+            --script-expect-key brain-search-ready=actor-hit-synthetic-actor-1 \
+            --script-expect-key workstation-seed-action=maintenance-dataset-validated \
+            --script-expect-key workstation-index-action=maintenance-confirm-dialog \
             --size 1280x800 --size 640x480 --scale 1
 
       - name: Capture startup motion and reduced-motion transitions (Lavapipe)
@@ -278,9 +288,8 @@ jobs:
           fi
           evidence="$RUNNER_TEMP/linux-native-evidence/ui"
           scripts=apps/fleetworks-desktop/tests/fixtures/scripts
-          wizard_settled_at=1.0
           capture=(python3 scripts/fleetworks_verify.py native-ui --agent --require-clean
-            --target "$LINUX_TARGET" --revision "$EXPECTED_HEAD" --size 640x480 --size 1280x800 --scale 1 --at 0)
+            --target "$LINUX_TARGET" --revision "$EXPECTED_HEAD" --size 640x480 --size 1280x800 --scale 1)
           chooser=(--scene backend-choice-opening --scene backend-choice-reduced-motion)
 
           "${capture[@]}" "${chooser[@]}" --output "$evidence/startup-dock" --script-at 0.20 \
@@ -295,38 +304,16 @@ jobs:
             --script-expect-key backend-choice-opening=startup-choose \
             --script-expect-key backend-choice-reduced-motion=startup-choose
 
-          "${capture[@]}" --output "$evidence/startup-done" --script-at "$wizard_settled_at" \
+          "${capture[@]}" --output "$evidence/startup-finish" --script-at 4.5 \
             --scene startup-embedded-registered --scene startup-embedded-registered-reduced-motion \
-            --script "startup-embedded-registered=$scripts/startup-done.json" \
-            --script "startup-embedded-registered-reduced-motion=$scripts/startup-done.json" \
-            --script-expect-key startup-embedded-registered=startup-data-reset-seed \
-            --script-expect-key startup-embedded-registered-reduced-motion=startup-data-reset-seed
-
-          "${capture[@]}" --output "$evidence/startup-finish" --script-at 0.45 \
-            --scene startup-embedded-registered --scene startup-embedded-registered-reduced-motion \
-            --script "startup-embedded-registered=$scripts/startup-data-finish.json" \
-            --script "startup-embedded-registered-reduced-motion=$scripts/startup-data-finish.json" \
+            --script "startup-embedded-registered=$scripts/startup-await-workstation.json" \
+            --script "startup-embedded-registered-reduced-motion=$scripts/startup-await-workstation.json" \
             --script-expect-key startup-embedded-registered=screen-workstation \
             --script-expect-key startup-embedded-registered-reduced-motion=screen-workstation
 
-          "${capture[@]}" --scene startup-embedded-registered --output "$evidence/startup-data-reset" --script-at "$wizard_settled_at" \
-            --script "startup-embedded-registered=$scripts/startup-data-reset-seed.json" \
-            --script-expect-key startup-embedded-registered=startup-data-primary
-
-          wizard=()
-          for scene in startup-data-seed startup-data-index startup-data-index-queued startup-data-train startup-data-checks-unavailable; do
-            wizard+=(--scene "$scene" --script "$scene=$scripts/startup-done.json"
-              --script-expect-key "$scene=startup-data-setup")
-          done
-          "${capture[@]}" "${wizard[@]}" --output "$evidence/startup-data" --script-at "$wizard_settled_at"
-
-          "${capture[@]}" --scene startup-data-train --output "$evidence/startup-data-skip" --script-at "$wizard_settled_at" \
-            --script "startup-data-train=$scripts/startup-data-skip-training.json" \
-            --script-expect-key startup-data-train=startup-data-checklist
-
-          "${capture[@]}" --scene startup-health-checks-mixed --output "$evidence/startup-health-checks" --script-at "$wizard_settled_at" \
-            --script "startup-health-checks-mixed=$scripts/startup-done.json" \
-            --script-expect-key startup-health-checks-mixed=startup-data-checklist
+          "${capture[@]}" --output "$evidence/startup-health-checks" --at 0.5 \
+            --scene startup-embedded-health --scene startup-health-checks-mixed \
+            --scene startup-embedded-health-unavailable
           FLEETWORKS_MOTION
 
       - name: Capture the connected toolbar with populated telemetry

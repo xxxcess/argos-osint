@@ -39,6 +39,7 @@ use sha2::Sha256;
 use crate::app::Intent;
 use crate::app::Load;
 use crate::app::Page;
+use crate::app::SeedStage;
 use crate::app::State;
 use crate::backend;
 use crate::backend::JobDetail;
@@ -78,6 +79,14 @@ pub struct CsvPathPrompt {
     pub error: Option<String>,
 }
 
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum CsvSource {
+    #[default]
+    Local,
+    Bundled,
+    Github,
+}
+
 /// Typed preflight verdict for a maintenance operation, derived from readiness and authority state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MaintenancePreflight {
@@ -93,6 +102,7 @@ pub enum MaintenancePreflight {
     ConfigurationRevisionMissing,
     UnresolvedReindexAttempt,
     ActorCatalogNotSeeded,
+    ActorIndexInProgress,
     ConsumerUnavailable,
     UnsupportedOperation,
 }
@@ -128,6 +138,7 @@ impl MaintenancePreflight {
             Self::ActorCatalogNotSeeded => {
                 Some("Complete actor seeding with actors in the database before building the index".into())
             }
+            Self::ActorIndexInProgress => Some("Actor indexing is already in progress.".into()),
             Self::Uploading => Some("Validating and uploading the selected CSV…".into()),
             Self::RequestPending => {
                 Some("A maintenance request is awaiting its acceptance receipt".into())
@@ -153,6 +164,7 @@ impl MaintenancePreflight {
             Self::ConfigurationRevisionMissing => ("Sync config", StatusTone::Warn),
             Self::UnresolvedReindexAttempt => ("Resolve attempt", StatusTone::Warn),
             Self::ActorCatalogNotSeeded => ("Seed actors first", StatusTone::Warn),
+            Self::ActorIndexInProgress => ("Indexing", StatusTone::Info),
             Self::ActionDisabled(_) => ("Unavailable", StatusTone::Warn),
             Self::ConsumerUnavailable | Self::UnsupportedOperation => {
                 ("Unavailable", StatusTone::Err)
@@ -173,6 +185,9 @@ pub struct OperationJobRecord {
 
 const OPERATION_SLOTS: usize = 2;
 pub(crate) const SEED_ACTION_KEY: &str = "maintenance-seed";
+pub(crate) const BUNDLED_CSV_KEY: &str = "maintenance-bundled-csv";
+pub(crate) const GITHUB_CSV_KEY: &str = "maintenance-github-csv";
+pub(crate) const GITHUB_CSV_URL_KEY: &str = "maintenance-github-csv-url";
 pub(crate) const REINDEX_ACTION_KEY: &str = "maintenance-reindex";
 pub(crate) const WORKSTATION_REINDEX_ACTION_KEY: &str = "workstation-build-actor-index";
 pub(crate) const CSV_PATH_KEY: &str = "maintenance-csv-path";
@@ -187,6 +202,8 @@ fn operation_slot(operation: MaintenanceOperation) -> Option<usize> {
 
 pub struct Maintenance {
     pub csv_path_prompt: Option<CsvPathPrompt>,
+    pub(crate) github_csv_url: Option<TextEdit>,
+    csv_source: CsvSource,
     pub local_dataset: Option<LocalDataset>,
     pub datasets: Load<DatasetList>,
     pub upload: Load<DatasetUpload>,
@@ -219,6 +236,8 @@ impl Default for Maintenance {
     fn default() -> Self {
         Self {
             csv_path_prompt: None,
+            github_csv_url: None,
+            csv_source: CsvSource::default(),
             local_dataset: None,
             datasets: Load::Idle,
             upload: Load::Idle,
@@ -250,6 +269,33 @@ impl Default for Maintenance {
 }
 
 impl Maintenance {
+    pub(crate) fn dataset_validation_label(&self, upload: &DatasetUpload) -> String {
+        let file_name = match self.csv_source {
+            CsvSource::Bundled => "Bundled CSV".into(),
+            CsvSource::Github => "GitHub CSV".into(),
+            CsvSource::Local => self
+                .local_dataset
+                .as_ref()
+                .and_then(|selection| selection.path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Selected CSV".into()),
+        };
+        if let Some(rows) = upload.row_count {
+            let mut count = rows.to_string();
+            let mut separator = count.len();
+            while separator > 3 {
+                separator -= 3;
+                count.insert(separator, ',');
+            }
+            format!("{file_name} · {count} rows validated")
+        } else {
+            format!(
+                "{file_name} · {} validated bytes",
+                upload.dataset.size_bytes
+            )
+        }
+    }
+
     #[must_use]
     pub fn operation_job(&self, operation: MaintenanceOperation) -> Option<&OperationJobRecord> {
         let slot = operation_slot(operation)?;
@@ -338,6 +384,8 @@ impl Maintenance {
 
     pub(crate) fn invalidate_origin(&mut self) {
         self.csv_path_prompt = None;
+        self.github_csv_url = None;
+        self.csv_source = CsvSource::default();
         self.local_dataset = None;
         self.selected_dataset = None;
         self.datasets = Load::Idle;
@@ -461,11 +509,6 @@ impl State {
             DatasetKind::ActorCatalog => SEED_ACTION_KEY,
             _ => return,
         };
-        let opener = if self.startup.data_step.is_some() {
-            crate::startup_data::PRIMARY
-        } else {
-            opener
-        };
         tx.focus(opener, tx.focus_visible());
         tx.scroll_into_view(opener);
     }
@@ -499,6 +542,8 @@ impl State {
     }
 
     pub fn select_local_dataset(&mut self, path: PathBuf, kind: DatasetKind) {
+        self.maintenance.csv_source = CsvSource::Local;
+        self.maintenance.github_csv_url = None;
         self.maintenance.local_dataset = Some(LocalDataset { path, kind });
         self.maintenance.upload = Load::Idle;
         self.maintenance.selected_dataset = None;
@@ -507,7 +552,7 @@ impl State {
         self.maintenance.message = None;
     }
 
-    pub(crate) fn bundled_dataset_path(&self, kind: DatasetKind) -> Option<PathBuf> {
+    fn bundled_dataset_path(&self, kind: DatasetKind) -> Option<PathBuf> {
         if self.fixture {
             let pin = bundled_datasets::pin(kind)?;
             return self
@@ -517,38 +562,60 @@ impl State {
         bundled_datasets::installed_path(kind)
     }
 
-    pub(crate) fn stage_bundled_dataset(&mut self, kind: DatasetKind, path: PathBuf) -> bool {
-        if self
-            .startup
-            .data_step
-            .and_then(crate::startup_data::Step::dataset_kind)
-            != Some(kind)
-        {
-            return false;
+    fn actor_seed_screen_active(&self) -> bool {
+        self.page == Page::Seed && self.seed_stage == SeedStage::Seed && !self.setup_gateway
+    }
+
+    pub(crate) fn stage_bundled_actor_csv(&mut self) {
+        if !self.actor_seed_screen_active() {
+            return;
         }
-        let Some(pin) = bundled_datasets::pin(kind) else {
-            return false;
-        };
-        let Some(operation) = dataset_operation(kind) else {
-            return false;
-        };
-        if self.maintenance_disabled_reason(operation).is_some() {
-            return false;
+        if let Some(reason) = self.maintenance_disabled_reason(MaintenanceOperation::SeedActors) {
+            self.maintenance.message = Some(reason);
+            return;
         }
+        let kind = DatasetKind::ActorCatalog;
+        let Some((path, pin)) = self
+            .bundled_dataset_path(kind)
+            .zip(bundled_datasets::pin(kind))
+        else {
+            self.maintenance.message =
+                Some("The bundled actor CSV is unavailable. Choose a local CSV.".into());
+            return;
+        };
+        self.maintenance.csv_path_prompt = None;
         self.select_local_dataset(path, kind);
-        self.request_dataset_upload(Some(pin))
+        self.maintenance.csv_source = CsvSource::Bundled;
+        self.request_dataset_upload(Some(pin));
+    }
+
+    pub(crate) fn open_github_actor_csv(&mut self, tx: &mut Tx) {
+        if !cfg!(any(test, feature = "native-github-dataset")) || !self.actor_seed_screen_active() {
+            return;
+        }
+        self.maintenance.csv_path_prompt = None;
+        self.maintenance.github_csv_url.get_or_insert_with(|| {
+            TextEdit::new(
+                crate::github_dataset::default_url(DatasetKind::ActorCatalog).unwrap_or_default(),
+            )
+        });
+        tx.scroll_into_view(GITHUB_CSV_URL_KEY);
+        tx.focus(GITHUB_CSV_URL_KEY, tx.focus_visible());
+    }
+
+    pub(crate) fn github_actor_csv_edited(&mut self) {
+        if self.maintenance.csv_source == CsvSource::Github {
+            self.maintenance.discard_csv_draft();
+            self.maintenance.selected_dataset = None;
+            self.cancel_maintenance_confirmation();
+        }
     }
 
     pub(crate) fn download_github_dataset(&mut self, kind: DatasetKind, url: String) {
         let Some(operation) = dataset_operation(kind) else {
             return;
         };
-        if self
-            .startup
-            .data_step
-            .and_then(crate::startup_data::Step::dataset_kind)
-            != Some(kind)
-        {
+        if !cfg!(any(test, feature = "native-github-dataset")) || !self.actor_seed_screen_active() {
             return;
         }
         if let Some(reason) = self.maintenance_disabled_reason(operation) {
@@ -556,6 +623,7 @@ impl State {
             return;
         }
         self.maintenance.discard_csv_draft();
+        self.maintenance.csv_source = CsvSource::Github;
         self.maintenance.local_dataset = None;
         self.maintenance.selected_dataset = None;
         self.maintenance.confirmation = None;
@@ -707,6 +775,11 @@ impl State {
                     return MaintenancePreflight::ChecksStale;
                 }
                 if !action.allowed {
+                    if action.disabled_reason.as_deref() == Some("actor_seed_required")
+                        && operation == MaintenanceOperation::ReindexActors
+                    {
+                        return MaintenancePreflight::ActorCatalogNotSeeded;
+                    }
                     return MaintenancePreflight::ActionDisabled(action.disabled_reason.clone());
                 }
                 if self.configuration_revision().is_none() {
@@ -733,6 +806,12 @@ impl State {
                     });
                     if !catalog_ready {
                         return MaintenancePreflight::ActorCatalogNotSeeded;
+                    }
+                    if check.state == ReadinessState::Running
+                        || crate::views::active_actor_reindex(self).is_some()
+                        || crate::views::queued_actor_reindex_id(self).is_some()
+                    {
+                        return MaintenancePreflight::ActorIndexInProgress;
                     }
                 }
                 if matches!(self.maintenance.upload, Load::Loading) {
@@ -786,14 +865,7 @@ impl State {
                 self.maintenance.selected_dataset = Some(upload.dataset.clone());
                 self.maintenance.upload = Load::Ready(upload);
                 self.maintenance.last_request = None;
-                if self
-                    .startup
-                    .data_step
-                    .and_then(crate::startup_data::Step::dataset_kind)
-                    != Some(kind)
-                {
-                    self.maintenance.pending_preview = Some(operation);
-                }
+                self.maintenance.pending_preview = Some(operation);
                 self.refresh_readiness();
                 self.finish_dataset_preview();
             }
@@ -839,8 +911,8 @@ impl State {
             configuration_revision,
             dataset,
         });
-        if self.page == crate::app::Page::Workstation
-            && self.startup.data_step.is_none()
+        if self.page == Page::Workstation
+            && !self.setup_gateway
             && operation == MaintenanceOperation::ReindexActors
         {
             self.confirm_maintenance_dialog = true;
@@ -859,7 +931,11 @@ impl State {
             .confirmation
             .as_ref()
             .and_then(|confirmation| match confirmation.operation {
-                MaintenanceOperation::SeedActors => Some(SEED_ACTION_KEY),
+                MaintenanceOperation::SeedActors => Some(match self.maintenance.csv_source {
+                    CsvSource::Bundled => BUNDLED_CSV_KEY,
+                    CsvSource::Github => GITHUB_CSV_KEY,
+                    CsvSource::Local => SEED_ACTION_KEY,
+                }),
                 MaintenanceOperation::ReindexActors if self.confirm_maintenance_dialog => {
                     Some(WORKSTATION_REINDEX_ACTION_KEY)
                 }
@@ -868,11 +944,6 @@ impl State {
             });
         self.cancel_maintenance_confirmation();
         if let Some(opener) = opener {
-            let opener = if self.startup.data_step.is_some() {
-                crate::startup_data::PRIMARY
-            } else {
-                opener
-            };
             tx.focus(opener, true);
             tx.scroll_into_view(opener);
         }
@@ -1614,7 +1685,6 @@ impl State {
         }
         match admitted.outcome {
             MaintenanceOutcome::Receipt(receipt) if receipt.already_completed => {
-                self.complete_startup_input(receipt.operation);
                 self.maintenance.message = Some(
                     match receipt.operation {
                         MaintenanceOperation::SeedActors => "This actor dataset is already seeded.",
@@ -1629,7 +1699,6 @@ impl State {
                 self.refresh_readiness();
             }
             MaintenanceOutcome::Receipt(receipt) => {
-                self.complete_startup_input(receipt.operation);
                 if receipt.operation == MaintenanceOperation::SeedActors {
                     self.maintenance.seed_accepted_at = Some(receipt.origin.submitted_at.clone());
                 }

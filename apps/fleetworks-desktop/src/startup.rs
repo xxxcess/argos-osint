@@ -25,7 +25,6 @@ use crate::material::MetalFinish;
 use crate::orbit;
 use crate::startup_checks;
 use crate::startup_checks::CheckStatus;
-use crate::startup_data;
 use crate::theme;
 use crate::theme::StatusTone;
 use crate::ui_components;
@@ -45,9 +44,9 @@ const RAIL_SECONDS: f64 = 0.21;
 const WIRING_HOLD_SECONDS: f64 = 2.0;
 const HEALTH_CHECK_WAIT_SECONDS: f64 = 10.0;
 const EMBEDDED_STAGE: &str = "startup-embedded-stage";
-pub(crate) const CONNECTION_DOT: &str = "startup-wiring-step-connection";
-pub(crate) const REGISTRATION_DOT: &str = "startup-wiring-step-registration";
-pub(crate) const HEALTH_CHECKS_DOT: &str = "startup-wiring-step-health-checks";
+const CONNECTION_DOT: &str = "startup-wiring-step-connection";
+const REGISTRATION_DOT: &str = "startup-wiring-step-registration";
+const HEALTH_CHECKS_DOT: &str = "startup-wiring-step-health-checks";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Dock {
@@ -121,11 +120,6 @@ impl Wiring {
 pub struct Startup {
     active: bool,
     wiring: Option<Wiring>,
-    pub(crate) data_step: Option<startup_data::Step>,
-    pub(crate) data_slides: startup_data::DataSlides,
-    pub(crate) data_reset: [bool; 2],
-    pub(crate) data_checks: bool,
-    pub(crate) csv_inputs: startup_data::CsvInputs,
     started_at: Option<f64>,
     settled: bool,
     awaiting_intro: bool,
@@ -150,14 +144,6 @@ impl Startup {
         self.active
     }
 
-    pub(crate) fn data_setup_active(&self) -> bool {
-        self.data_step.is_some() || self.data_checks
-    }
-
-    pub(crate) fn has_wiring_steps(&self) -> bool {
-        self.wiring.is_some()
-    }
-
     pub(crate) fn finish(&mut self) {
         self.active = false;
         self.reset_setup();
@@ -166,11 +152,6 @@ impl Startup {
     fn reset_setup(&mut self) {
         self.awaiting_intro = false;
         self.wiring = None;
-        self.data_step = None;
-        self.data_slides = startup_data::DataSlides::default();
-        self.data_reset = [false; 2];
-        self.data_checks = false;
-        self.csv_inputs = startup_data::CsvInputs::default();
     }
 
     /// Start the orbit clock once, at the first visible frame.
@@ -333,30 +314,7 @@ pub(crate) fn view(
         .instant_changes()
         .opacity(if docking { 0.0 } else { 1.0 })
         .inert();
-        let data_step = state
-            .startup
-            .data_step
-            .filter(|_| state.connected() && state.registration.context.is_some());
-        let data_checks =
-            state.startup.data_checks && state.connected() && state.registration.context.is_some();
-        let (stage, body) = if data_checks {
-            (
-                if crate::inbox_qa::setup_choice(state) {
-                    "startup-stage-inference"
-                } else {
-                    "startup-stage-checks"
-                },
-                startup_data::checks_view(state, preferences, kit),
-            )
-        } else if let Some(step) = data_step {
-            (
-                match step {
-                    startup_data::Step::Seed => "startup-stage-seed",
-                    startup_data::Step::Index => "startup-stage-index",
-                },
-                startup_data::view(state, step, preferences, kit),
-            )
-        } else if state.is_local_backend() {
+        let (stage, body) = if state.is_local_backend() {
             embedded_stage(state, preferences, kit)
         } else {
             (
@@ -380,10 +338,6 @@ pub(crate) fn view(
                                             .build(kit, preferences, None)
                                     },
                                 ),
-                            )
-                            .children(
-                                (state.connected() && state.registration.context.is_some())
-                                    .then(|| continue_setup(preferences, kit)),
                             ),
                     )
                     .child(views::setup_gateway(state, cx, kit)),
@@ -767,20 +721,7 @@ fn back_button(disabled: bool, preferences: ViewPreferences, kit: &Kit) -> El {
         })
 }
 
-fn continue_setup(preferences: ViewPreferences, kit: &Kit) -> El {
-    ActionButton::new("Continue setup")
-        .key("gateway-setup-done")
-        .icon(&icons::SHIELD_CHECK)
-        .finish(MetalFinish::GoldCta)
-        .on_press_tx(State::finish_gateway_setup)
-        .build(kit, preferences, None)
-        .on_key(|state: &mut State, event, tx| {
-            activate_on_return(state, event, tx, State::finish_gateway_setup)
-        })
-}
-
 fn embedded_stage(state: &State, preferences: ViewPreferences, kit: &Kit) -> (&'static str, El) {
-    let guided = state.startup.has_wiring_steps();
     let stage = if state.connected() {
         state
             .startup
@@ -792,13 +733,9 @@ fn embedded_stage(state: &State, preferences: ViewPreferences, kit: &Kit) -> (&'
     };
     let (key, title, dot, checks, detail, next) = match stage {
         WiringStage::Connection => {
-            let (key, detail, next) = connection_actions(state, preferences, kit);
+            let (detail, next) = connection_actions(state, preferences, kit);
             (
-                if guided {
-                    "startup-stage-starting"
-                } else {
-                    key
-                },
+                "startup-stage-starting",
                 "Embedded connection",
                 CONNECTION_DOT,
                 connection_checks(state, preferences, kit),
@@ -807,13 +744,9 @@ fn embedded_stage(state: &State, preferences: ViewPreferences, kit: &Kit) -> (&'
             )
         }
         WiringStage::Registration => {
-            let (key, detail, next) = registration_actions(state, preferences, kit);
+            let (detail, next) = registration_actions(state, preferences, kit);
             (
-                if guided {
-                    "startup-stage-registering"
-                } else {
-                    key
-                },
+                "startup-stage-registering",
                 "Workstation registration",
                 REGISTRATION_DOT,
                 registration_checks(state, preferences, kit),
@@ -838,14 +771,17 @@ fn embedded_stage(state: &State, preferences: ViewPreferences, kit: &Kit) -> (&'
             )
         }
     };
-    let footer = rune::row()
-        .key("startup-embedded-actions")
-        .w_full()
-        .center_y()
-        .gap(8.0)
-        .child(back_button(false, preferences, kit))
-        .child(rune::spacer())
-        .children(next);
+    let has_controls = !matches!(stage, WiringStage::HealthChecks { .. });
+    let footer = has_controls.then(|| {
+        rune::row()
+            .key("startup-embedded-actions")
+            .w_full()
+            .center_y()
+            .gap(8.0)
+            .child(back_button(false, preferences, kit))
+            .child(rune::spacer())
+            .children(next)
+    });
     let body = material::glass_panel(
         rune::col()
             .w_full()
@@ -861,16 +797,44 @@ fn embedded_stage(state: &State, preferences: ViewPreferences, kit: &Kit) -> (&'
                     .tab_index(-1),
             )
             .child(checks)
-            .child(views::quiet(state.local_state_dir_label(), kit).wrap_anywhere())
-            .child(footer)
+            .children(
+                has_controls
+                    .then(|| views::quiet(state.local_state_dir_label(), kit).wrap_anywhere()),
+            )
+            .children(footer)
             .children(detail),
         preferences,
     );
     let slide = rune::col()
         .items_center()
         .child(body)
-        .child(startup_data::step_dots(state, dot, kit));
+        .child(step_dots(dot, kit));
     (key, views::scroll(slide, "startup-stage-scroll"))
+}
+
+fn step_dots(active: &str, kit: &Kit) -> El {
+    let steps = [CONNECTION_DOT, REGISTRATION_DOT, HEALTH_CHECKS_DOT];
+    let mut current = 1;
+    let mut dots = rune::row().key("startup-wiring-dots").center_y().gap(7.0);
+    for (index, step) in steps.into_iter().enumerate() {
+        if step == active {
+            current = index + 1;
+        }
+        dots = dots.child(
+            rune::el()
+                .key(step)
+                .size(7.0, 7.0)
+                .radius(8.0)
+                .fill(if step == active {
+                    kit.c.icon_accent
+                } else {
+                    kit.c.border_strong
+                })
+                .a11y_hidden(),
+        );
+    }
+    dots.role("status")
+        .label(format!("Step {current} of {}", steps.len()))
 }
 
 fn connection_checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
@@ -943,7 +907,7 @@ fn connection_actions(
     state: &State,
     preferences: ViewPreferences,
     kit: &Kit,
-) -> (&'static str, Option<El>, Option<El>) {
+) -> (Option<El>, Option<El>) {
     let start = |title| {
         ActionButton::new(title)
             .key("connect-local")
@@ -954,7 +918,6 @@ fn connection_actions(
     };
     match &state.connection.status {
         ConnectionStatus::Disconnected => (
-            "startup-stage-start",
             match &state.local_backend.binary_status {
                 BinaryDiscoveryStatus::Missing(error) => Some(
                     rune::col()
@@ -966,14 +929,10 @@ fn connection_actions(
             },
             Some(start("Start Embedded")),
         ),
-        ConnectionStatus::Connecting | ConnectionStatus::Connected => {
-            ("startup-stage-starting", None, None)
+        ConnectionStatus::Connecting | ConnectionStatus::Connected => (None, None),
+        ConnectionStatus::Failed(error) => {
+            (Some(startup_error(error, kit)), Some(start("Retry start")))
         }
-        ConnectionStatus::Failed(error) => (
-            "startup-stage-start-failed",
-            Some(startup_error(error, kit)),
-            Some(start("Retry start")),
-        ),
     }
 }
 
@@ -981,16 +940,11 @@ fn registration_actions(
     state: &State,
     preferences: ViewPreferences,
     kit: &Kit,
-) -> (&'static str, Option<El>, Option<El>) {
+) -> (Option<El>, Option<El>) {
     match &state.registration.receipt {
-        _ if state.registration.context.is_some() => (
-            "startup-stage-registered",
-            None,
-            (!state.startup.has_wiring_steps()).then(|| continue_setup(preferences, kit)),
-        ),
-        Load::Pending | Load::Loading => ("startup-stage-registering", None, None),
+        _ if state.registration.context.is_some() => (None, None),
+        Load::Pending | Load::Loading => (None, None),
         receipt => (
-            "startup-stage-registration-retry",
             match receipt {
                 Load::Failed(error) => Some(startup_error(error, kit)),
                 _ => None,
@@ -1063,11 +1017,7 @@ impl State {
     }
 
     pub(crate) fn poll_startup_wiring(&mut self, now: f64, tx: &mut Tx) -> bool {
-        if !self.setup_gateway
-            || !self.is_local_backend()
-            || self.startup.flight.is_some()
-            || self.startup.data_setup_active()
-        {
+        if !self.setup_gateway || !self.is_local_backend() || self.startup.flight.is_some() {
             return false;
         }
         let connected = self.connected();
@@ -1128,7 +1078,7 @@ impl State {
                     self.refresh_readiness();
                 }
             }
-            WiringStage::HealthChecks { .. } => self.finish_gateway_setup(tx),
+            WiringStage::HealthChecks { .. } => self.finish_startup(tx),
         }
         true
     }
@@ -1140,7 +1090,7 @@ impl State {
 
     fn startup_health_observed_at(&self, now: f64) -> bool {
         self.readiness_received_at.is_some()
-            && startup_data::scoped_readiness(self).is_some_and(|readiness| {
+            && startup_checks::scoped_readiness(self).is_some_and(|readiness| {
                 readiness.checks.is_empty()
                     || readiness.checks.iter().any(|check| {
                         self.readiness_check_applies(check)
@@ -1162,6 +1112,16 @@ impl State {
         if self.fixture {
             self.fixture_show_backend_choice();
             self.choose_startup_destination(kind);
+        }
+    }
+
+    /// Begin a connected Embedded fixture on the registration slide.
+    pub fn fixture_show_embedded_registration(&mut self) {
+        if self.fixture {
+            self.startup.wiring = Some(Wiring {
+                stage: WiringStage::Registration,
+                hold_until: None,
+            });
         }
     }
 
@@ -1219,27 +1179,15 @@ impl State {
     }
 
     pub(crate) fn finish_gateway_setup(&mut self, tx: &mut Tx) {
-        if !self.startup.active() {
-            self.setup_gateway = false;
-            if self.settings_open {
-                self.settings_open = false;
-                tx.focus("open-workstation-settings", tx.by_keys());
-            }
+        if self.startup.active() {
+            self.finish_startup(tx);
             return;
         }
-        if !self.connected() || self.registration.context.is_none() {
-            return;
+        self.setup_gateway = false;
+        if self.settings_open {
+            self.settings_open = false;
+            tx.focus("open-workstation-settings", tx.by_keys());
         }
-        self.enter_startup_data();
-        self.backend_read(crate::backend::ReadRequest::Profile);
-        if !self.readiness_pending() {
-            self.refresh_readiness();
-        }
-        self.drive_startup_dataset();
-        if self.startup.reduced_motion.get() {
-            tx.settle();
-        }
-        tx.focus("startup-data-stage", tx.by_keys() || tx.focus_visible());
     }
 
     pub(crate) fn finish_startup(&mut self, tx: &mut Tx) {
@@ -1255,7 +1203,7 @@ impl State {
         self.page = app::Page::Workstation;
         // Mount the shell on this commit, so it does not animate over the mark's own flight.
         tx.instant();
-        tx.focus("nav-workstation", tx.by_keys());
+        tx.focus("nav-workstation", tx.by_keys() || tx.focus_visible());
     }
 }
 
@@ -1266,11 +1214,10 @@ mod tests {
     use crate::app::Intent;
     use fleetworks_contracts::connect::RegistrationReceipt;
     use fleetworks_contracts::context::RegisteredContext;
-    use fleetworks_contracts::readiness::{
-        DatasetKind, DatasetRef, MaintenanceOperation, ReadinessAction, ReadinessActionId,
-        ReadinessCheck, ReadinessCheckId, ReadinessState, WorkstationReadiness,
-    };
-    use fleetworks_contracts::DatasetUpload;
+    use fleetworks_contracts::readiness::ReadinessCheck;
+    use fleetworks_contracts::readiness::ReadinessCheckId;
+    use fleetworks_contracts::readiness::ReadinessState;
+    use fleetworks_contracts::readiness::WorkstationReadiness;
 
     #[test]
     fn opening_clock_runs_once_and_holds_the_last_pose() {
@@ -1443,7 +1390,7 @@ mod tests {
     }
 
     #[test]
-    fn early_folder_selection_allows_the_intro_and_ready_checklists_to_finish() {
+    fn early_folder_selection_finishes_the_intro_and_checklists_before_opening_workstation() {
         for (size, reduced) in [
             ((640.0, 480.0), false),
             ((640.0, 480.0), true),
@@ -1490,15 +1437,7 @@ mod tests {
                     )
                     .unwrap(),
                 );
-                complete_data_checks(
-                    state,
-                    receipt,
-                    [
-                        ReadinessState::Ready,
-                        ReadinessState::Ready,
-                        ReadinessState::NotApplicable,
-                    ],
-                );
+                observe_health_checks(state, receipt, ReadinessState::Ready);
             });
             let checklist_at = if reduced {
                 1.05
@@ -1533,10 +1472,10 @@ mod tests {
             tick(&mut runtime, registering_at);
             let tree = runtime.accessibility_json().to_string();
             assert!(tree.contains("Registered workstation access: Passed"));
-            assert!(tree.contains("Step 2 of 6"));
+            assert!(tree.contains("Step 2 of 3"));
             tick(&mut runtime, registering_at + 1.99);
             assert!(runtime.find("startup-wiring-registration-checks").is_some());
-            assert!(runtime.find("startup-data-setup").is_none());
+            assert!(runtime.find("screen-workstation").is_none());
 
             let health_at = registering_at + 2.01;
             tick(&mut runtime, health_at);
@@ -1544,28 +1483,22 @@ mod tests {
             assert!(tree.contains("Embedded health checks"));
             assert!(tree.contains("Gateway: Passed"));
             assert!(tree.contains("Actor catalog: Passed"));
-            assert!(tree.contains("Step 3 of 6"));
+            assert!(tree.contains("Step 3 of 3"));
+            assert!(runtime.find("startup-embedded-actions").is_none());
+            assert!(runtime.find("startup-back").is_none());
+            assert!(runtime.find("startup-open-workstation").is_none());
             tick(&mut runtime, health_at + 1.99);
             assert!(runtime.find("startup-wiring-health-checklist").is_some());
-            assert!(runtime.find("startup-data-setup").is_none());
+            assert!(runtime.find("screen-workstation").is_none());
 
-            let data_setup_at = health_at + 2.01;
-            tick(&mut runtime, data_setup_at);
-            assert!(runtime.find("startup-data-setup").is_some());
-            assert!(runtime.find("startup-data-checklist").is_some());
-            assert!(runtime.find("startup-open-workstation").is_none());
-            assert!(!runtime
-                .state
-                .intents
-                .iter()
-                .any(|intent| matches!(intent, Intent::Maintenance { .. })));
-            runtime.frame(0.24);
-            click(&mut runtime, "startup-data-continue");
-            runtime.frame(0.02);
+            let workstation_at = health_at + 2.01;
+            tick(&mut runtime, workstation_at);
+            assert!(!runtime.state.startup.active());
             assert_eq!(runtime.state.page, app::Page::Workstation);
             assert!(runtime.find("screen-workstation").is_some());
+            assert!(runtime.find("inbox-qa-toggle").is_none());
             assert_eq!(runtime.find("startup-orbit-flight").is_some(), !reduced);
-            tick(&mut runtime, data_setup_at + 0.24);
+            tick(&mut runtime, workstation_at + 0.24);
             assert!(runtime.find("startup-orbit-flight").is_none());
             let (rail, opacity) = runtime.presented("brand-mark").expect("landed rail mark");
             assert_eq!(opacity, 1.0);
@@ -1591,11 +1524,11 @@ mod tests {
         tick(runtime, 4.01);
         tick(runtime, 6.02);
         assert!(runtime.find("startup-wiring-health-checklist").is_some());
-        assert!(runtime.find("startup-stage-seed").is_none());
+        assert!(runtime.find("screen-workstation").is_none());
     }
 
     #[test]
-    fn embedded_health_checks_show_catalog_and_search_status_before_seed_setup() {
+    fn a_new_workstation_opens_after_the_catalog_and_search_checks() {
         let mut runtime = runtime((640.0, 480.0), true);
         reach_embedded_health_checks(&mut runtime, Load::Idle);
         let tree = runtime.accessibility_json().to_string();
@@ -1618,39 +1551,26 @@ mod tests {
                 context.workstation_ip,
                 context.registration_revision,
             );
-            complete_data_checks(state, receipt, [ReadinessState::NotReady; 3]);
-            let Load::Ready(readiness) = &mut state.readiness else {
-                panic!("expected scoped fixture readiness");
-            };
-            for check in &mut readiness.checks {
-                match check.id {
-                    ReadinessCheckId::ActorCatalog => {
-                        check.reason_code = "database_seed_incomplete".into();
-                    }
-                    ReadinessCheckId::ActorSearch => {
-                        check.reason_code = "index_not_built".into();
-                    }
-                    _ => {}
-                }
-            }
+            observe_health_checks(state, receipt, ReadinessState::NotReady);
         });
         tick(&mut runtime, 7.0);
         let tree = runtime.accessibility_json().to_string();
         assert!(tree.contains("Actor catalog: Needs setup"));
         assert!(tree.contains("Actor search: Needs setup"));
         tick(&mut runtime, 8.99);
-        assert!(runtime.find("startup-stage-seed").is_none());
+        assert!(runtime.find("screen-workstation").is_none());
         tick(&mut runtime, 9.01);
-        assert!(runtime.find("startup-stage-seed").is_some());
-        assert!(!runtime
-            .state
-            .intents
-            .iter()
-            .any(|intent| matches!(intent, Intent::Maintenance { .. })));
+        assert!(runtime.find("screen-workstation").is_some());
+        assert!(!runtime.state.intents.iter().any(|intent| matches!(
+            intent,
+            Intent::Maintenance { .. }
+                | Intent::UploadDataset { .. }
+                | Intent::DownloadGithubDataset { .. }
+        )));
     }
 
     #[test]
-    fn unavailable_embedded_health_checks_allow_data_setup_after_the_hold() {
+    fn unavailable_embedded_health_checks_allow_the_workstation_to_open_after_the_hold() {
         for readiness in [Load::Failed("Checks unreachable".into()), Load::Loading] {
             let mut runtime = runtime((640.0, 480.0), true);
             let pending = matches!(readiness, Load::Loading);
@@ -1674,7 +1594,7 @@ mod tests {
             tick(&mut runtime, unavailable_at + 1.99);
             assert!(runtime.find("startup-wiring-health-checklist").is_some());
             tick(&mut runtime, unavailable_at + 2.01);
-            assert!(runtime.find("startup-stage-seed").is_some());
+            assert!(runtime.find("screen-workstation").is_some());
         }
     }
 
@@ -1708,7 +1628,7 @@ mod tests {
             .accessibility_json()
             .to_string()
             .contains("Registered workstation access: Checking"));
-        assert!(runtime.find("startup-data-setup").is_none());
+        assert!(runtime.find("screen-workstation").is_none());
 
         runtime.update(|state, _| {
             let mut capabilities = fleetworks_contracts::capabilities::Capabilities::default();
@@ -1738,875 +1658,55 @@ mod tests {
         runtime.frame(0.02);
         tick(&mut runtime, 12.3);
         assert!(runtime.find("startup-wiring-connection-checks").is_some());
-        assert!(runtime.find("startup-data-setup").is_none());
+        assert!(runtime.find("screen-workstation").is_none());
     }
 
-    fn complete_data_checks(
+    fn observe_health_checks(
         state: &mut State,
         receipt: RegistrationReceipt,
-        states: [ReadinessState; 3],
+        actor_state: ReadinessState,
     ) {
         let observed = "2026-11-19T00:00:00Z";
-        let mut checks: Vec<_> = [
-            (
-                ReadinessCheckId::ActorCatalog,
-                ReadinessActionId::SeedActors,
-            ),
-            (
-                ReadinessCheckId::ActorSearch,
-                ReadinessActionId::RebuildActorIndex,
-            ),
-            (
-                ReadinessCheckId::ClassifierTraining,
-                ReadinessActionId::TrainClassifier,
-            ),
-        ]
-        .into_iter()
-        .zip(states)
-        .map(|((id, action), observation)| {
-            let mut check = ReadinessCheck::new(
-                id,
-                observation,
-                "synthetic_state".into(),
-                String::new(),
-                observed.into(),
-            );
-            check.fresh_for_ms = 60_000;
-            check.actions.push(ReadinessAction::new(
-                action,
-                fleetworks_contracts::context::Permission::MaintainBackend,
-                true,
-            ));
-            check
-        })
-        .collect();
-        for (id, status, reason, freshness) in [
+        let checks = [
             (
                 ReadinessCheckId::Gateway,
                 ReadinessState::Ready,
                 "gateway_reachable",
-                60_000,
             ),
             (
                 ReadinessCheckId::Jobs,
-                ReadinessState::NotReady,
-                "process_not_ready",
-                60_000,
+                ReadinessState::NotApplicable,
+                "embedded_backend",
             ),
             (
-                ReadinessCheckId::ClassifierInference,
-                ReadinessState::Ready,
-                "model_verified",
-                60_000,
+                ReadinessCheckId::ActorCatalog,
+                actor_state,
+                "database_seed_incomplete",
             ),
             (
-                ReadinessCheckId::Datastore,
-                ReadinessState::Ready,
-                "datastore_reachable",
-                0,
+                ReadinessCheckId::ActorSearch,
+                actor_state,
+                "index_not_built",
             ),
-        ] {
-            let mut check =
-                ReadinessCheck::new(id, status, reason.into(), String::new(), observed.into());
-            check.fresh_for_ms = freshness;
-            checks.push(check);
-        }
+        ]
+        .into_iter()
+        .map(|(id, observation, reason)| {
+            let mut check = ReadinessCheck::new(
+                id,
+                observation,
+                reason.into(),
+                String::new(),
+                observed.into(),
+            );
+            check.fresh_for_ms = 60_000;
+            check
+        })
+        .collect();
         let mut readiness =
             WorkstationReadiness::new(receipt.deployment_id.clone(), observed.into(), checks);
         readiness.registration = Some(receipt);
-        // The motion fixture sets its context without making a real capabilities request.
-        state.readiness = app::Load::Ready(readiness);
+        state.readiness = Load::Ready(readiness);
         state.readiness_received_at = Some(state.clock);
-    }
-
-    fn observe_job(
-        state: &mut State,
-        operation: MaintenanceOperation,
-        wire_operation: &str,
-        job_state: &str,
-        error_summary: &str,
-        result: serde_json::Value,
-    ) {
-        let id = format!("fixture-{wire_operation}");
-        if state.maintenance.operation_job(operation).is_none() {
-            state
-                .maintenance
-                .set_operation_job(operation, id.clone(), false);
-        }
-        let detail = serde_json::from_value(serde_json::json!({
-            "job": {
-                "id": id,
-                "app": "fixture",
-                "title": "Fixture maintenance",
-                "operation": wire_operation,
-                "state": job_state,
-                "phase": "reading data",
-                "progress_done": 8,
-                "progress_total": 20,
-                "error_summary": error_summary,
-                "private_details_available": true,
-                "activity_actions_available": false,
-                "status_only": false
-            },
-            "stages": [],
-            "private_details_available": true,
-            "activity_actions_available": false,
-            "maintenance_result": result
-        }))
-        .expect("valid scoped fixture job detail");
-        state
-            .maintenance
-            .update_operation_job_detail(operation, &id, detail);
-    }
-
-    #[test]
-    fn actor_seed_pressure_uses_only_matching_committed_progress() {
-        let kind = DatasetKind::ActorCatalog;
-        let (mut runtime, _) = data_setup_runtime([ReadinessState::NotReady; 3]);
-        runtime.frame(0.0);
-        click(&mut runtime, "gateway-setup-done");
-        runtime.frame(0.02);
-        let dataset = DatasetRef::new("fixture-actors".into(), kind, "a".repeat(64), 120).unwrap();
-        let mut upload = DatasetUpload::new(dataset.clone(), 60);
-        upload.row_count = Some(94_987);
-        runtime.update(|state, _| {
-            state.complete_dataset_upload(
-                state.connection.epoch,
-                state.maintenance.upload_revision,
-                state.origin_revision(),
-                kind,
-                Ok(upload),
-            );
-        });
-        let checkpoint = serde_json::json!({
-            "operation": "actor_seed",
-            "dataset_sha256": dataset.sha256,
-            "processed": 822,
-            "total": 94_987,
-            "database_seeded": false
-        });
-        for (job_state, error, label, message) in [
-            (
-                "queued",
-                "setup_worker_memory_pressure",
-                "Retrying",
-                "The backend reached its memory limit.",
-            ),
-            (
-                "failed",
-                "setup_worker_disk_pressure",
-                "Needs attention",
-                "Free space in the backend workspace fell below its disk limit.",
-            ),
-            (
-                "failed",
-                "setup_worker_pressure_unavailable",
-                "Needs attention",
-                "The backend could not measure memory use or free workspace space.",
-            ),
-        ] {
-            runtime.update(|state, _| {
-                observe_job(
-                    state,
-                    MaintenanceOperation::SeedActors,
-                    "actor_seed",
-                    job_state,
-                    error,
-                    checkpoint.clone(),
-                );
-            });
-            runtime.frame(0.02);
-            let tree = runtime.accessibility_json().to_string();
-            assert!(tree.contains(label), "{job_state}: {tree}");
-            assert!(tree.contains(message), "{error}: {tree}");
-            assert!(tree.contains("822 / 94,987 actor rows committed"));
-            assert!(!tree.contains("8 / 20 processed"));
-            assert!(!tree.contains("Ready to seed"));
-            assert!(runtime.find("startup-data-continue").is_none());
-            assert!(runtime.find("maintenance-confirm").is_none());
-        }
-
-        let mut other_dataset = checkpoint.clone();
-        other_dataset["dataset_sha256"] = "b".repeat(64).into();
-        let mut seeded = checkpoint;
-        seeded["database_seeded"] = true.into();
-        for result in [other_dataset, seeded, serde_json::Value::Null] {
-            runtime.update(|state, _| {
-                observe_job(
-                    state,
-                    MaintenanceOperation::SeedActors,
-                    "actor_seed",
-                    "failed",
-                    "setup_worker_disk_pressure",
-                    result,
-                );
-            });
-            runtime.frame(0.02);
-            assert!(runtime.find("startup-seed-committed").is_none());
-            assert!(runtime.find("startup-data-continue").is_none());
-        }
-    }
-
-    fn data_setup_runtime(
-        checks: [ReadinessState; 3],
-    ) -> (rune::Runtime<State>, RegistrationReceipt) {
-        let mut runtime = runtime((640.0, 480.0), true);
-        let mut state = crate::tests::registered_fixture();
-        state.startup = Startup::cold_launch();
-        state.setup_gateway = true;
-        state.accessibility.fixture_override = Some(FixtureAccessibility {
-            reduced_motion: true,
-            ..FixtureAccessibility::default()
-        });
-        state.backend.profile = app::Load::Ready(crate::backend::ProfileSnapshot {
-            configuration_revision: 0,
-            configuration_format: 1,
-            accounts: vec![],
-            tool_credentials: vec![],
-            setup_required: false,
-            portable_schema_version: 4,
-        });
-        let receipt = RegistrationReceipt::new(
-            "synthetic-deployment".into(),
-            "synthetic-node".into(),
-            "synthetic-registration".into(),
-            Some("192.0.2.42".parse().unwrap()),
-            1,
-        );
-        complete_data_checks(&mut state, receipt.clone(), checks);
-        runtime.state = state;
-        (runtime, receipt)
-    }
-
-    #[test]
-    fn fresh_embedded_folder_guides_data_setup_before_offering_workstation() {
-        let (mut runtime, _) = data_setup_runtime([ReadinessState::NotReady; 3]);
-        runtime.state.backend_kind = BackendKind::Local;
-        runtime.state.connection.origin = rune::TextEdit::new("local://embedded");
-        let registration = runtime.state.registration.context.take();
-        runtime.state.registration.receipt = Load::Loading;
-        runtime.state.page = app::Page::Brain;
-        runtime.frame(0.0);
-        assert!(runtime.find("startup-stage-registering").is_some());
-        assert!(runtime.find("startup-open-workstation").is_none());
-
-        runtime.update(|state, _| state.registration.context = registration);
-        runtime.frame(0.02);
-        let ([x, y, width, height], _) = runtime
-            .presented("gateway-setup-done")
-            .expect("registered backend offers guided setup");
-        assert!(x >= 0.0 && y >= 0.0 && x + width <= 640.0 && y + height <= 480.0);
-        assert!(runtime.find("startup-open-workstation").is_none());
-
-        click(&mut runtime, "gateway-setup-done");
-        runtime.frame(0.02);
-        assert_eq!(
-            runtime.state.startup.data_step,
-            Some(startup_data::Step::Seed)
-        );
-        assert!(runtime.find("startup-stage-seed").is_some());
-        assert!(runtime.find("nav-workstation").is_none());
-    }
-
-    #[test]
-    fn startup_github_csv_is_opt_in_and_only_downloads_after_press() {
-        let kind = DatasetKind::ActorCatalog;
-        let (mut runtime, _) = data_setup_runtime([ReadinessState::NotReady; 3]);
-        runtime.frame(0.0);
-        click(&mut runtime, "gateway-setup-done");
-        runtime.frame(0.02);
-        assert!(runtime.find("startup-csv-github-url").is_none());
-        click(&mut runtime, "startup-csv-source/segment1");
-        runtime.frame(0.01);
-        let default = crate::github_dataset::default_url(kind).expect("default CSV URL");
-        let tree = runtime.accessibility_json().to_string();
-        assert!(tree.contains(default));
-        assert!(tree.contains("Local CSV"));
-        assert!(tree.contains("Download & validate"));
-        assert!(runtime.find("startup-csv-ready").is_none());
-        assert!(!runtime
-            .state
-            .intents
-            .contains(&Intent::DownloadGithubDataset { kind }));
-        click(&mut runtime, startup_data::PRIMARY);
-        runtime.frame(0.04);
-        assert!(runtime
-            .state
-            .intents
-            .contains(&Intent::DownloadGithubDataset { kind }));
-        assert!(runtime.state.maintenance.confirmation.is_none());
-    }
-
-    #[test]
-    fn startup_validates_bundled_actor_csv_once_then_waits_for_confirmation() {
-        let kind = DatasetKind::ActorCatalog;
-        let operation = MaintenanceOperation::SeedActors;
-        let ready_label = "Ready to seed";
-        let action_label = "Seed actors";
-        let (mut runtime, _) = data_setup_runtime([ReadinessState::NotReady; 3]);
-        runtime.state.fixture_bundled_csv = true;
-        runtime.state.intents.clear();
-        let profile = std::mem::replace(&mut runtime.state.backend.profile, app::Load::Idle);
-        runtime.frame(0.0);
-        click(&mut runtime, "gateway-setup-done");
-        runtime.frame(0.02);
-        assert!(!runtime
-            .state
-            .intents
-            .contains(&Intent::UploadDataset { kind }));
-        runtime.update(|state, _| {
-            state.backend.profile = profile;
-            assert!(state.drive_startup_dataset());
-        });
-        runtime.frame(0.02);
-        assert!(runtime
-            .state
-            .intents
-            .contains(&Intent::UploadDataset { kind }));
-        let tree = runtime.accessibility_json().to_string();
-        assert!(tree.contains("Bundled CSV"));
-        assert!(tree.contains("Validating"));
-        assert!(!tree.contains(action_label));
-        let complete = move |state: &mut State, result| {
-            state.complete_dataset_upload(
-                state.connection.epoch,
-                state.maintenance.upload_revision,
-                state.origin_revision(),
-                kind,
-                result,
-            );
-        };
-        runtime.update(|state, _| {
-            assert!(!state.drive_startup_dataset());
-            complete(state, Err("Could not validate the bundled CSV".into()));
-            assert!(!state.drive_startup_dataset());
-        });
-        runtime.frame(0.02);
-        assert!(!runtime
-            .accessibility_json()
-            .to_string()
-            .contains(action_label));
-        assert_eq!(
-            runtime
-                .state
-                .intents
-                .iter()
-                .filter(|intent| matches!(intent, Intent::UploadDataset { .. }))
-                .count(),
-            1
-        );
-        runtime.update(|_, tx| tx.scroll_into_view(startup_data::PRIMARY));
-        runtime.frame(0.02);
-        click(&mut runtime, startup_data::PRIMARY);
-        runtime.frame(0.02);
-        let dataset = DatasetRef::new("fixture-bundle".into(), kind, "b".repeat(64), 120)
-            .expect("validated dataset");
-        let mut upload = DatasetUpload::new(dataset.clone(), 60);
-        upload.row_count = Some(94_987);
-        runtime.update(|state, _| complete(state, Ok(upload)));
-        runtime.frame(0.02);
-        let tree = runtime.accessibility_json().to_string();
-        assert!(tree.contains(ready_label));
-        assert!(tree.contains("Bundled CSV · 94,987 rows validated"));
-        assert!(runtime.state.maintenance.confirmation.is_none());
-        runtime.update(|_, tx| tx.scroll_into_view(startup_data::PRIMARY));
-        runtime.frame(0.02);
-        click(&mut runtime, startup_data::PRIMARY);
-        runtime.frame(0.02);
-        assert_eq!(
-            runtime
-                .state
-                .maintenance
-                .confirmation
-                .as_ref()
-                .and_then(|confirmation| confirmation.dataset.as_ref()),
-            Some(&dataset)
-        );
-        assert!(!runtime
-            .state
-            .intents
-            .contains(&Intent::Maintenance { operation }));
-    }
-
-    #[test]
-    fn startup_github_csv_requires_validation_and_discards_stale_edits_and_uploads() {
-        const URL_EDITOR: &str = "startup-csv-github-url/value/input";
-        const LOCAL_SOURCE: &str = "startup-csv-source/segment0";
-
-        let kind = DatasetKind::ActorCatalog;
-        let (mut runtime, _) = data_setup_runtime([ReadinessState::NotReady; 3]);
-        runtime.frame(0.0);
-        click(&mut runtime, "gateway-setup-done");
-        runtime.frame(0.02);
-        click(&mut runtime, "startup-csv-source/segment1");
-        runtime.frame(0.01);
-        click(&mut runtime, startup_data::PRIMARY);
-        runtime.update(|state, _| {
-            state.maintenance.github_downloading = true;
-            state.maintenance.upload = app::Load::Loading;
-        });
-        runtime.frame(0.04);
-        assert!(runtime
-            .accessibility_json()
-            .to_string()
-            .contains("Downloading"));
-        runtime.update(|state, _| state.maintenance.github_downloading = false);
-        runtime.frame(0.06);
-        assert!(runtime
-            .accessibility_json()
-            .to_string()
-            .contains("Validating"));
-        let complete = move |state: &mut State, result| {
-            state.complete_dataset_upload(
-                state.connection.epoch,
-                state.maintenance.upload_revision,
-                state.origin_revision(),
-                kind,
-                result,
-            );
-        };
-        runtime.update(|state, _| {
-            complete(state, Err("CSV row 2 is missing a required field".into()));
-        });
-        runtime.frame(0.08);
-        assert!(runtime
-            .accessibility_json()
-            .to_string()
-            .contains("CSV row 2"));
-        assert!(runtime.find("startup-csv-ready").is_none());
-        assert!(runtime.find("maintenance-confirm").is_none());
-
-        runtime.state.intents.clear();
-        runtime.update(|_, tx| tx.scroll_into_view(startup_data::PRIMARY));
-        runtime.frame(0.09);
-        click(&mut runtime, startup_data::PRIMARY);
-        runtime.frame(0.01);
-        assert!(runtime
-            .state
-            .intents
-            .contains(&Intent::DownloadGithubDataset { kind }));
-        let dataset = DatasetRef::new("fixture-actors".into(), kind, "a".repeat(64), 120)
-            .expect("validated dataset");
-        let mut receipt = DatasetUpload::new(dataset.clone(), 60);
-        receipt.row_count = Some(12);
-        runtime.update(|state, _| complete(state, Ok(receipt.clone())));
-        runtime.frame(0.10);
-        assert!(runtime.find("maintenance-confirm").is_none());
-        assert!(runtime.find("startup-csv-ready").is_some());
-        runtime.update(|_, tx| tx.scroll_into_view("startup-csv-ready"));
-        runtime.frame(0.01);
-        let tree = runtime.accessibility_json().to_string();
-        assert!(tree.contains("Ready to seed"));
-        assert!(tree.contains("GitHub CSV URL · 12 rows validated"));
-
-        runtime.update(|_, tx| tx.scroll_into_view(startup_data::PRIMARY));
-        runtime.frame(0.12);
-        click(&mut runtime, startup_data::PRIMARY);
-        runtime.frame(0.14);
-        assert_eq!(
-            runtime
-                .state
-                .maintenance
-                .confirmation
-                .as_ref()
-                .and_then(|confirmation| confirmation.dataset.as_ref()),
-            Some(&dataset)
-        );
-        assert!(!runtime.state.intents.contains(&Intent::Maintenance {
-            operation: MaintenanceOperation::SeedActors,
-        }));
-
-        runtime.update(|state, tx| state.dismiss_maintenance_confirmation(tx));
-        runtime.frame(0.16);
-        runtime.update(|_, tx| tx.scroll_into_view(URL_EDITOR));
-        runtime.frame(0.17);
-        let editor = runtime
-            .elements()
-            .into_iter()
-            .find(|element| element.path.ends_with(URL_EDITOR) && !element.exiting)
-            .expect("compact GitHub URL editor");
-        let [x, y, width, height] = editor.rect;
-        assert_eq!(editor.visible, editor.rect, "the editor must not clip");
-        assert!(
-            x >= 0.0 && y >= 0.0 && x + width <= 640.5 && y + height <= 480.5,
-            "the editor must fit the compact window"
-        );
-        click(&mut runtime, URL_EDITOR);
-        runtime.frame(0.175);
-        assert!(runtime.elements().iter().any(|element| {
-            element.path.ends_with(URL_EDITOR) && !element.exiting && element.focused
-        }));
-        let revision = runtime.state.maintenance.upload_revision;
-        let select_all = rune::KeyEvent {
-            key: rune::Key::Command('a'),
-            mods: rune::Mods {
-                cmd: true,
-                ..rune::Mods::default()
-            },
-        };
-        runtime.key(select_all.clone());
-        runtime.key_up(select_all);
-        let custom = "https://raw.githubusercontent.com/example/fixture/main/small.csv";
-        key(&mut runtime, rune::Key::Text(custom.into()));
-        runtime.frame(0.18);
-        assert!(runtime.accessibility_json().to_string().contains(custom));
-        assert!(runtime.state.maintenance.selected_dataset.is_none());
-        assert!(runtime.find("startup-csv-ready").is_none());
-        runtime.update(|state, _| {
-            state.complete_dataset_upload(
-                state.connection.epoch,
-                revision,
-                state.origin_revision(),
-                kind,
-                Ok(receipt),
-            );
-        });
-        runtime.frame(0.20);
-        assert!(runtime.state.maintenance.selected_dataset.is_none());
-        runtime.update(|_, tx| tx.scroll_into_view(LOCAL_SOURCE));
-        runtime.frame(0.21);
-        click(&mut runtime, LOCAL_SOURCE);
-        runtime.frame(0.22);
-        assert!(runtime.find("startup-csv-github-url").is_none());
-        assert!(runtime.state.maintenance.confirmation.is_none());
-    }
-
-    #[test]
-    fn data_setup_waits_for_scoped_work_and_only_advances_from_verified_results() {
-        use ReadinessState::{NotReady, Ready};
-        let (mut runtime, receipt) = data_setup_runtime([NotReady, NotReady, Ready]);
-        runtime.frame(0.0);
-        click(&mut runtime, "gateway-setup-done");
-        runtime.frame(0.02);
-        assert_eq!(
-            runtime.state.startup.data_step,
-            Some(startup_data::Step::Seed)
-        );
-        assert!(runtime.find("screen-workstation").is_none());
-        let tree = runtime.accessibility_json().to_string();
-        assert!(tree.contains("Seed job: Pending"));
-        assert!(tree.contains("Verify actor catalog: Pending"));
-        let (mark, opacity) = runtime.presented(SETUP_MARK).unwrap();
-        assert_eq!(opacity, 1.0);
-        let (panel, _) = runtime.presented("startup-data-panel").unwrap();
-        let (dots, _) = runtime.presented("startup-data-dots").unwrap();
-        assert!(panel[1] + panel[3] <= dots[1]);
-        let center = |rect: [f32; 4]| rect[0] + rect[2] / 2.0;
-        assert!((center(mark) - center(panel)).abs() < 0.5);
-        assert!((center(dots) - center(panel)).abs() < 0.5);
-        assert!(dots[0] >= 0.0 && dots[0] + dots[2] <= 640.0);
-
-        click(&mut runtime, "startup-csv-source/segment0");
-        runtime.frame(0.03);
-        click(&mut runtime, startup_data::PRIMARY);
-        runtime.frame(0.04);
-        if cfg!(target_os = "linux") {
-            runtime.update(|state, _| {
-                let prompt = state
-                    .maintenance
-                    .csv_path_prompt
-                    .as_mut()
-                    .expect("CSV prompt");
-                assert_eq!(prompt.kind, DatasetKind::ActorCatalog);
-                prompt.input.text = "/fixture/actors.csv".into();
-            });
-            runtime.frame(0.045);
-            click(&mut runtime, "maintenance-csv-path-submit");
-            runtime.frame(0.05);
-            assert!(runtime.state.intents.contains(&Intent::UploadDataset {
-                kind: DatasetKind::ActorCatalog,
-            }));
-        } else {
-            assert!(runtime.state.intents.contains(&Intent::ChooseDataset {
-                kind: DatasetKind::ActorCatalog,
-            }));
-        }
-        runtime.update(|state, _| {
-            state.maintenance.set_operation_job(
-                MaintenanceOperation::SeedActors,
-                "fixture-actor_seed".into(),
-                false,
-            );
-        });
-        runtime.frame(0.06);
-        assert!(runtime.find("startup-data-continue").is_none());
-        assert!(runtime.find(startup_data::PRIMARY).is_none());
-
-        runtime.update(|state, _| {
-            observe_job(
-                state,
-                MaintenanceOperation::SeedActors,
-                "actor_seed",
-                "retry_scheduled",
-                "",
-                serde_json::Value::Null,
-            );
-        });
-        runtime.frame(0.08);
-        let tree = runtime.accessibility_json().to_string();
-        assert!(tree.contains("Retrying"));
-        assert!(tree.contains("8 / 20 processed"));
-        assert!(tree.contains("Seed job: Checking"));
-        assert!(runtime.find("startup-data-continue").is_none());
-        runtime.update(|state, _| {
-            observe_job(
-                state,
-                MaintenanceOperation::SeedActors,
-                "actor_seed",
-                "completed",
-                "",
-                serde_json::Value::Null,
-            );
-        });
-        runtime.frame(0.1);
-        let tree = runtime.accessibility_json().to_string();
-        assert!(tree.contains("Seed job: Passed"));
-        assert!(tree.contains("Verify actor catalog: Verifying"));
-        assert!(runtime.find("startup-data-continue").is_none());
-
-        runtime.update(|state, _| {
-            complete_data_checks(state, receipt.clone(), [Ready, NotReady, Ready]);
-        });
-        runtime.frame(0.12);
-        assert!(runtime
-            .accessibility_json()
-            .to_string()
-            .contains("Verify actor catalog: Passed"));
-        click(&mut runtime, "startup-data-continue");
-        runtime.frame(0.14);
-        assert_eq!(
-            runtime.state.startup.data_step,
-            Some(startup_data::Step::Index)
-        );
-        let tree = runtime.accessibility_json().to_string();
-        assert!(tree.contains("Actor catalog: Passed"));
-        assert!(tree.contains("Index build: Pending"));
-        click(&mut runtime, startup_data::PRIMARY);
-        runtime.frame(0.16);
-        assert!(runtime.find("maintenance-confirm").is_some());
-        assert!(!runtime.state.confirm_maintenance_dialog);
-        click(&mut runtime, "maintenance-confirm");
-        runtime.frame(0.18);
-        assert!(runtime.state.intents.contains(&Intent::Maintenance {
-            operation: MaintenanceOperation::ReindexActors,
-        }));
-        assert!(runtime.find("startup-data-continue").is_none());
-
-        runtime.update(|state, _| complete_data_checks(state, receipt, [Ready, Ready, Ready]));
-        runtime.frame(0.2);
-        click(&mut runtime, "startup-data-continue");
-        runtime.frame(0.22);
-        assert!(runtime.state.startup.data_step.is_none());
-        assert!(runtime.find("startup-data-step-classifier").is_none());
-        assert!(runtime
-            .find("startup-data-check-classifier_training")
-            .is_none());
-        assert!(!runtime.state.intents.contains(&Intent::UploadDataset {
-            kind: DatasetKind::ClassifierTraining,
-        }));
-        assert!(!runtime.state.intents.contains(&Intent::Maintenance {
-            operation: MaintenanceOperation::TrainClassifier,
-        }));
-        assert!(runtime.state.startup.data_checks);
-        assert!(runtime.find("screen-workstation").is_none());
-        assert!(runtime.find("startup-data-checklist").is_some());
-        click(&mut runtime, "startup-data-continue");
-        runtime.frame(0.28);
-        assert!(runtime.find("screen-workstation").is_some());
-        assert!(runtime.find("startup-data-setup").is_none());
-        assert!(runtime.find("nav-seed").is_none());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn canceling_typed_startup_csv_restores_focus_without_an_error_or_a_job() {
-        use ReadinessState::NotReady;
-
-        for (dismiss_with_escape, dismissal) in [(false, "Cancel"), (true, "Escape")] {
-            let (mut runtime, _) = data_setup_runtime([NotReady; 3]);
-            runtime.on_key = app::spec().on_key;
-            runtime.frame(0.0);
-            click(&mut runtime, "gateway-setup-done");
-            runtime.frame(0.02);
-            runtime.state.intents.clear();
-
-            click(&mut runtime, "startup-csv-source/segment0");
-            runtime.frame(0.03);
-            click(&mut runtime, startup_data::PRIMARY);
-            runtime.frame(0.04);
-            let prompt = runtime
-                .state
-                .maintenance
-                .csv_path_prompt
-                .as_ref()
-                .expect("opening typed entry shows the CSV prompt");
-            assert_eq!(prompt.kind, DatasetKind::ActorCatalog);
-            assert!(prompt.input.focused);
-            assert!(prompt.error.is_none());
-            assert!(
-                runtime.state.intents.is_empty(),
-                "opening typed entry must not browse"
-            );
-
-            if dismiss_with_escape {
-                key(&mut runtime, rune::Key::Escape);
-            } else {
-                click(&mut runtime, "maintenance-csv-path-cancel");
-            }
-            runtime.frame(0.06);
-
-            let maintenance = &runtime.state.maintenance;
-            assert!(
-                maintenance.csv_path_prompt.is_none(),
-                "{dismissal} must dismiss the CSV prompt"
-            );
-            assert!(maintenance.message.is_none());
-            assert!(maintenance.local_dataset.is_none());
-            assert!(maintenance.confirmation.is_none());
-            assert!(matches!(maintenance.receipt, app::Load::Idle));
-            assert!(
-                runtime.state.intents.is_empty(),
-                "{dismissal} must not submit work"
-            );
-            assert!(
-                runtime.elements().iter().any(|element| {
-                    element.key.as_deref() == Some(startup_data::PRIMARY) && element.focused
-                }),
-                "{dismissal} must return focus to the CSV entry"
-            );
-        }
-    }
-
-    #[test]
-    fn embedded_setup_omits_inapplicable_checks_from_workstation_review() {
-        let (mut runtime, _) = data_setup_runtime([
-            ReadinessState::Ready,
-            ReadinessState::Ready,
-            ReadinessState::NotApplicable,
-        ]);
-        runtime.state.backend_kind = BackendKind::Local;
-        runtime.state.connection.origin = rune::TextEdit::new("local://embedded");
-        let app::Load::Ready(readiness) = &mut runtime.state.readiness else {
-            panic!("expected scoped fixture readiness");
-        };
-        for check in &mut readiness.checks {
-            match check.id {
-                ReadinessCheckId::Jobs => check.state = ReadinessState::NotApplicable,
-                ReadinessCheckId::ClassifierInference => {
-                    check.state = ReadinessState::Unknown;
-                    check.reason_code = "owner_not_configured".into();
-                }
-                _ => {}
-            }
-        }
-        runtime.frame(0.0);
-        click(&mut runtime, "gateway-setup-done");
-        runtime.frame(0.02);
-        assert!(runtime.find("startup-data-checklist").is_some());
-        assert!(runtime.find("startup-data-check-jobs").is_none());
-        assert!(runtime
-            .find("startup-data-check-classifier_inference")
-            .is_none());
-        let tree = runtime.accessibility_json().to_string();
-        assert!(tree.contains("Gateway: Passed"));
-        assert!(tree.contains("Datastore: Pending"));
-    }
-
-    #[test]
-    fn ready_steps_can_reset_their_own_drafts_without_changing_backend_data() {
-        use ReadinessState::{NotApplicable, Ready};
-        let (mut runtime, _) = data_setup_runtime([Ready, Ready, NotApplicable]);
-        runtime.frame(0.0);
-        click(&mut runtime, "gateway-setup-done");
-        runtime.frame(0.02);
-        assert!(runtime.state.startup.data_checks);
-        assert!(runtime.find("startup-data-step-checks").is_some());
-        for (key, label) in [
-            ("startup-data-check-gateway", "Gateway: Passed"),
-            ("startup-data-check-jobs", "Jobs: Failed"),
-            (
-                "startup-data-check-classifier_inference",
-                "Atlas BERT inference: Passed",
-            ),
-            ("startup-data-check-datastore", "Datastore: Pending"),
-        ] {
-            let row = runtime
-                .elements()
-                .into_iter()
-                .find(|element| element.key.as_deref() == Some(key))
-                .unwrap_or_else(|| panic!("expected checklist row {key}"));
-            assert_eq!(row.label.as_deref(), Some(label));
-        }
-        for key in [
-            "startup-data-review-seed",
-            "startup-data-review-index",
-            "startup-data-reset-seed",
-            "startup-data-reset-index",
-            "startup-data-checklist",
-            "startup-data-continue",
-            "startup-data-step-seed",
-            "startup-data-step-index",
-            "startup-data-step-checks",
-        ] {
-            let element = runtime
-                .elements()
-                .into_iter()
-                .find(|element| element.key.as_deref() == Some(key) && !element.exiting)
-                .unwrap_or_else(|| panic!("missing registered setup control {key}"));
-            let [x, y, width, height] = element.rect;
-            assert_eq!(element.scrolled, [0.0, 0.0], "{key} required scrolling");
-            assert_eq!(element.visible, element.rect, "{key} is clipped");
-            assert!(
-                x >= 0.0 && y >= 0.0 && x + width <= 640.5 && y + height <= 472.5,
-                "{key} must stay inside the compact window"
-            );
-        }
-
-        runtime.state.maintenance.selected_dataset = Some(
-            fleetworks_contracts::readiness::DatasetRef::new(
-                "saved-training".into(),
-                DatasetKind::ClassifierTraining,
-                "a".repeat(64),
-                100,
-            )
-            .unwrap(),
-        );
-        runtime.state.intents.clear();
-        runtime.update(|_, tx| tx.scroll_into_view("startup-data-reset-seed"));
-        runtime.frame(0.06);
-        click(&mut runtime, "startup-data-reset-seed");
-        runtime.frame(0.08);
-        assert_eq!(
-            runtime.state.startup.data_step,
-            Some(startup_data::Step::Seed)
-        );
-        assert!(!runtime.state.startup.data_checks);
-        assert!(runtime.find(startup_data::PRIMARY).is_some());
-        assert!(runtime.state.intents.is_empty());
-        assert!(runtime
-            .state
-            .maintenance
-            .selected_dataset
-            .as_ref()
-            .is_some_and(|dataset| dataset.kind == DatasetKind::ClassifierTraining));
-        let Some(readiness) = startup_data::scoped_readiness(&runtime.state) else {
-            panic!("reset must preserve the authoritative readiness observation");
-        };
-        assert!(readiness
-            .checks
-            .iter()
-            .any(|check| { check.id == ReadinessCheckId::ActorCatalog && check.state == Ready }));
-
-        runtime.update(|_, tx| tx.scroll_into_view("startup-data-skip"));
-        runtime.frame(0.09);
-        click(&mut runtime, "startup-data-skip");
-        runtime.frame(0.1);
-        assert!(runtime.state.startup.data_checks);
-        assert!(runtime.find("startup-data-checklist").is_some());
-        assert!(runtime.find("screen-workstation").is_none());
-        click(&mut runtime, "startup-data-continue");
-        runtime.frame(0.12);
-        assert!(runtime.find("screen-workstation").is_some());
     }
 
     #[test]

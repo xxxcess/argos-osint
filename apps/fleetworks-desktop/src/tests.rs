@@ -1230,11 +1230,7 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
     assert!(runtime.find("maintenance-seed").is_some());
     assert!(runtime.find("maintenance-train").is_none());
     assert!(runtime.find("maintenance-reindex").is_some());
-    let seed_action = if cfg!(target_os = "linux") {
-        "Enter actor CSV path"
-    } else {
-        "1. Seed Actors"
-    };
+    let seed_action = "Local CSV";
     let seed_explanation =
         "Use a CSV to add or update actors. Existing actors outside this CSV are kept.";
     let seed_tree = runtime.accessibility_json().to_string();

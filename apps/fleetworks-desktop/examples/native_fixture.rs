@@ -11,7 +11,7 @@ mod native {
     mod overhaul_scenes;
     mod readiness_scenes;
     mod redesign_scenes;
-    mod startup_data_scenes;
+    mod startup_scenes;
     mod submission_scenes;
 
     use fleetworks_contracts::capabilities::Capabilities;
@@ -439,8 +439,15 @@ mod native {
                 use fleetworks_contracts::search::ActorBrowsePage;
                 let rows = [
                     ("synthetic-actor-1", "Harbor Union"),
+                    ("synthetic-actor-10", "Outer Harbor Council"),
                     ("synthetic-actor-2", "Harbor Planning Council"),
                     ("synthetic-actor-3", "Harbor Transit Office"),
+                    ("synthetic-actor-4", "Cove Planning Board"),
+                    ("synthetic-actor-5", "Cove Transit Office"),
+                    ("synthetic-actor-6", "Eastshore Council"),
+                    ("synthetic-actor-7", "North Quay Office"),
+                    ("synthetic-actor-8", "Port Works Authority"),
+                    ("synthetic-actor-9", "South Pier Council"),
                 ]
                 .map(|(id, label)| ActorSearchHit::new(id.into(), label.into(), 0, String::new()))
                 .to_vec();
@@ -877,13 +884,13 @@ mod native {
         rune::run(AppSpec {
             init,
             scenes: &[
-                ("backend-choice", startup_data_scenes::folders),
+                ("backend-choice", startup_scenes::folders),
                 ("backend-choice-opening", |state| {
                     // The short docking scripts sample the handoff after the intro settles.
                     state.fixture_show_backend_choice();
                 }),
                 ("backend-choice-matte", |state| {
-                    review_appearance(state, startup_data_scenes::folders, ReviewAppearance::Matte);
+                    review_appearance(state, startup_scenes::folders, ReviewAppearance::Matte);
                 }),
                 ("backend-choice-reduced-motion", |state| {
                     state.fixture_show_backend_choice();
@@ -894,31 +901,30 @@ mod native {
                         });
                 }),
                 ("startup-embedded-registered", |state| {
-                    startup_data_scenes::ready(state, false);
+                    startup_scenes::registered(state, false);
                 }),
                 ("startup-embedded-registered-reduced-motion", |state| {
-                    startup_data_scenes::ready(state, true);
+                    startup_scenes::registered(state, true);
                 }),
+                ("startup-embedded-health", startup_scenes::embedded_health),
+                ("startup-health-checks-mixed", startup_scenes::mixed_checks),
                 (
-                    "startup-embedded-health",
-                    startup_data_scenes::embedded_health,
+                    "startup-embedded-health-unavailable",
+                    startup_scenes::checks_unavailable,
                 ),
-                ("startup-data-seed", startup_data_scenes::seed),
-                ("startup-data-index", startup_data_scenes::index),
-                (
-                    "startup-data-index-queued",
-                    startup_data_scenes::index_queued,
-                ),
-                // Stable scenario key used by the Linux capture workflow.
-                ("startup-data-train", startup_data_scenes::index),
-                (
-                    "startup-health-checks-mixed",
-                    startup_data_scenes::mixed_checks,
-                ),
-                (
-                    "startup-data-checks-unavailable",
-                    startup_data_scenes::checks_unavailable,
-                ),
+                ("workstation-seed-action", |state| {
+                    state.set_backend_kind(BackendKind::Local);
+                    redesign_scenes::seed(state);
+                    state.connection.origin = rune::TextEdit::new("local://embedded");
+                    state.page = Page::Workstation;
+                    state.seed_startup_bundled_dataset_fixture();
+                }),
+                ("workstation-index-action", |state| {
+                    state.set_backend_kind(BackendKind::Local);
+                    redesign_scenes::seed_ready(state);
+                    state.connection.origin = rune::TextEdit::new("local://embedded");
+                    state.page = Page::Workstation;
+                }),
                 ("redesign-status", redesign_scenes::status),
                 ("redesign-seed", redesign_scenes::seed),
                 ("redesign-seed-ready", redesign_scenes::seed_ready),

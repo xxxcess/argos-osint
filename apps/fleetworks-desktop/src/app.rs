@@ -454,7 +454,7 @@ impl State {
         }
     }
 
-    /// Use synthetic packaged resource paths for the startup fixture.
+    /// Use a synthetic bundled actor CSV path in maintenance fixtures.
     pub fn seed_startup_bundled_dataset_fixture(&mut self) {
         if self.fixture {
             self.fixture_bundled_csv = true;
@@ -654,9 +654,6 @@ impl State {
     fn reset_connection_state(&mut self) {
         self.cancel_requests();
         self.activity_tab = ActivityTab::Jobs;
-        self.startup.data_step = None;
-        self.startup.data_checks = false;
-        self.startup.data_reset.fill(false);
         self.workstation_diagnostics_open = false;
         self.workstation_status_checks_open = true;
         self.setup_advanced_open = false;
@@ -984,8 +981,8 @@ impl State {
     }
 
     pub(crate) fn maintenance_checks_due(&self, now: f64) -> bool {
-        if !(matches!(self.page, Page::Seed | Page::Workstation) && !self.setup_gateway
-            || self.startup.data_setup_active())
+        if !matches!(self.page, Page::Seed | Page::Workstation)
+            || self.setup_gateway
             || !self.connected()
             || !self.scoped_logs.window_focused
             || self.readiness_request.is_some()
@@ -993,16 +990,13 @@ impl State {
         {
             return false;
         }
-        if self.startup_data_needs_observation() {
-            return true;
-        }
         match &self.readiness {
             Load::Ready(readiness) => readiness.checks.iter().any(|check| {
                 self.readiness_check_applies(check)
                     && (check.state == ReadinessState::Running
                         || !self.readiness_check_fresh_at(check, now))
             }),
-            Load::Idle | Load::Failed(_) => matches!(self.page, Page::Seed | Page::Workstation),
+            Load::Idle | Load::Failed(_) => true,
             Load::Pending | Load::Loading => false,
         }
     }
@@ -1300,15 +1294,14 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
     }
     changed |= state.startup.poll_flight(now, tx);
     changed |= state.poll_startup_wiring(now, tx);
-    changed |= state.drive_startup_dataset();
     changed |= state.observe_inbox();
     changed |= state.poll_inbox_qa(now, tx);
     changed |= state.poll_resource_settings();
     changed |= state.sync_assistant();
     changed |= state.poll_scoped_logs();
     changed |= state.sync_jobs_binding();
-    if (matches!(state.page, Page::Seed | Page::Workstation) && !state.setup_gateway
-        || state.startup.data_setup_active())
+    if matches!(state.page, Page::Seed | Page::Workstation)
+        && !state.setup_gateway
         && !state.fixture
         && state.connected()
         && state.scoped_logs.window_focused
@@ -1368,17 +1361,7 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
             return true;
         }
         if event.key == Key::Escape && state.setup_gateway {
-            if state.startup.data_setup_active() {
-                if state.maintenance.confirmation.is_some() {
-                    state.dismiss_maintenance_confirmation(tx);
-                } else if state.maintenance.csv_path_prompt.is_some() {
-                    state.cancel_csv_path_prompt(tx);
-                } else {
-                    return false;
-                }
-            } else {
-                state.return_to_startup_choice(tx);
-            }
+            state.return_to_startup_choice(tx);
             return true;
         }
         return false;

@@ -1433,6 +1433,7 @@ mod tests {
         let mut runtime = runtime((640.0, 480.0), true);
         tick(&mut runtime, 1.0);
         click(&mut runtime, LOCAL);
+        runtime.frame(0.02);
         runtime.update(|state, _| {
             state.local_backend.binary_status =
                 BinaryDiscoveryStatus::Ready("/fixture/bundle/argos-api-host".into());
@@ -1445,6 +1446,7 @@ mod tests {
             .to_string()
             .contains("Private backend connection: Failed"));
         click(&mut runtime, "connect-local");
+        runtime.frame(0.02);
         runtime.update(|state, _| {
             state.connection.status = ConnectionStatus::Connected;
             state.registration.receipt = Load::Loading;
@@ -1472,15 +1474,18 @@ mod tests {
             .to_string()
             .contains("Registered workstation access: Failed"));
         click(&mut runtime, "workstation-register");
+        runtime.frame(0.02);
         assert!(runtime.state.intents.contains(&Intent::Register));
 
         let registration = crate::tests::registered_fixture().registration.context;
         runtime.update(|state, _| state.registration.context = registration);
         tick(&mut runtime, 11.2);
         click(&mut runtime, "startup-back");
+        runtime.frame(0.02);
         tick(&mut runtime, 11.3);
         assert!(runtime.find(LOCAL).is_some());
         click(&mut runtime, LOCAL);
+        runtime.frame(0.02);
         tick(&mut runtime, 12.3);
         assert!(runtime.find("startup-wiring-connection-checks").is_some());
         assert!(runtime.find("startup-data-setup").is_none());

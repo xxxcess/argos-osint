@@ -18,6 +18,7 @@ use crate::ui_components;
 pub(crate) enum CheckStatus {
     Pending,
     Checking,
+    Verifying,
     Passed,
     Failed,
     NeedsAttention,
@@ -44,12 +45,13 @@ pub(crate) fn row(
     let (caption, glyph, tone) = match status {
         CheckStatus::Pending => ("Pending", &glyphs::DASH, StatusTone::Neutral),
         CheckStatus::Checking => ("Checking", &glyphs::DASH, StatusTone::Cyan),
+        CheckStatus::Verifying => ("Verifying", &glyphs::DASH, StatusTone::Cyan),
         CheckStatus::Passed => ("Passed", &glyphs::CHECK, StatusTone::Ok),
         CheckStatus::Failed => ("Failed", &glyphs::CLOSE, StatusTone::Err),
         CheckStatus::NeedsAttention => ("Needs attention", &glyphs::DASH, StatusTone::Warn),
         CheckStatus::Unavailable => ("Unavailable", &glyphs::DASH, StatusTone::Neutral),
     };
-    let value = if status == CheckStatus::Checking {
+    let value = if matches!(status, CheckStatus::Checking | CheckStatus::Verifying) {
         rune::row()
             .h(22.0)
             .center_y()

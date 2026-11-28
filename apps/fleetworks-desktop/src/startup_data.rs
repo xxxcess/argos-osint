@@ -24,6 +24,8 @@ use crate::backend;
 use crate::backend_views;
 use crate::material::MetalFinish;
 use crate::startup;
+use crate::startup_checks;
+use crate::startup_checks::CheckStatus;
 use crate::theme::StatusTone;
 use crate::ui_components;
 use crate::ui_components::ActionButton;
@@ -168,13 +170,6 @@ impl Step {
         }
     }
 
-    fn description(self) -> &'static str {
-        match self {
-            Self::Seed => "Validate an actor CSV before seeding the connected backend.",
-            Self::Index => "Build the index that makes actors searchable.",
-        }
-    }
-
     fn operation(self) -> MaintenanceOperation {
         match self {
             Self::Seed => MaintenanceOperation::SeedActors,
@@ -276,6 +271,7 @@ enum Stage<'a> {
     Observing,
     Action,
     Working(Option<&'a backend::JobDetail>),
+    ObservedWork,
     Verifying,
     Failed(&'a backend::JobDetail),
     Complete,
@@ -425,7 +421,7 @@ fn stage(state: &State, step: Step) -> Stage<'_> {
     }
     match observation {
         Some(check) if check.state == ReadinessState::Ready => Stage::Complete,
-        Some(check) if check.state == ReadinessState::Running => Stage::Verifying,
+        Some(check) if check.state == ReadinessState::Running => Stage::ObservedWork,
         Some(_) => Stage::Action,
         None if state.readiness_pending()
             || matches!(state.readiness, Load::Idle | Load::Pending | Load::Loading) =>
@@ -680,9 +676,12 @@ impl State {
     }
 
     pub(crate) fn startup_data_needs_observation(&self) -> bool {
-        self.startup
-            .data_step
-            .is_some_and(|step| matches!(stage(self, step), Stage::Observing | Stage::Verifying))
+        self.startup.data_step.is_some_and(|step| {
+            matches!(
+                stage(self, step),
+                Stage::Observing | Stage::ObservedWork | Stage::Verifying
+            )
+        })
     }
 }
 
@@ -779,6 +778,85 @@ pub(crate) fn checks_view(state: &State, preferences: ViewPreferences, kit: &Kit
     )
 }
 
+fn data_stage_checklist(
+    state: &State,
+    step: Step,
+    stage: &Stage<'_>,
+    csv_validated: bool,
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> El {
+    let (work, mut result) = match stage {
+        Stage::Observing => (CheckStatus::Pending, CheckStatus::Checking),
+        Stage::Action if step == Step::Index && state.maintenance.pending_reindex.is_some() => {
+            (CheckStatus::NeedsAttention, CheckStatus::Pending)
+        }
+        Stage::Action => (CheckStatus::Pending, CheckStatus::Pending),
+        Stage::Working(_)
+            if state
+                .maintenance
+                .operation_job(step.operation())
+                .is_some_and(|record| record.poll_error.is_some()) =>
+        {
+            (CheckStatus::Unavailable, CheckStatus::Pending)
+        }
+        Stage::Working(_) | Stage::ObservedWork => (CheckStatus::Checking, CheckStatus::Pending),
+        Stage::Verifying => (CheckStatus::Passed, CheckStatus::Verifying),
+        Stage::Failed(_) => (CheckStatus::Failed, CheckStatus::Pending),
+        Stage::Complete => (CheckStatus::Passed, CheckStatus::Passed),
+    };
+    if let Some(check) = current_check(state, step) {
+        match check.state {
+            ReadinessState::Unavailable => result = CheckStatus::Unavailable,
+            ReadinessState::Degraded => result = CheckStatus::NeedsAttention,
+            _ => {}
+        }
+    }
+    let rows = match step {
+        Step::Seed => {
+            let csv = if csv_validated
+                || (work == CheckStatus::Passed && saved_dataset(state, step).is_some())
+            {
+                CheckStatus::Passed
+            } else if state.maintenance.github_downloading
+                || matches!(state.maintenance.upload, Load::Loading)
+            {
+                CheckStatus::Checking
+            } else if matches!(state.maintenance.upload, Load::Failed(_)) {
+                CheckStatus::Failed
+            } else if work == CheckStatus::Passed {
+                CheckStatus::Unavailable
+            } else {
+                CheckStatus::Pending
+            };
+            [
+                ("startup-seed-check-csv", "CSV validation", csv),
+                ("startup-seed-check-job", "Seed job", work),
+                ("startup-seed-check-catalog", "Verify actor catalog", result),
+            ]
+        }
+        Step::Index => {
+            let catalog = match current_check(state, Step::Seed).map(|check| check.state) {
+                Some(ReadinessState::Ready) => CheckStatus::Passed,
+                Some(ReadinessState::Running) => CheckStatus::Checking,
+                Some(ReadinessState::Unavailable) => CheckStatus::Unavailable,
+                Some(ReadinessState::Degraded) => CheckStatus::NeedsAttention,
+                None if state.readiness_pending() => CheckStatus::Checking,
+                _ => CheckStatus::Pending,
+            };
+            [
+                ("startup-index-check-catalog", "Actor catalog", catalog),
+                ("startup-index-check-build", "Index build", work),
+                ("startup-index-check-search", "Verify actor search", result),
+            ]
+        }
+    };
+    startup_checks::list("startup-data-stage-checklist", "Setup progress").children(
+        rows.into_iter()
+            .map(|(key, title, status)| startup_checks::row(key, title, status, preferences, kit)),
+    )
+}
+
 pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit: &Kit) -> El {
     let stage = stage(state, step);
     let dots = step_dots(state, step.key(), kit);
@@ -789,9 +867,7 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
     let upload = validated_csv(state, step);
     let mut panel = panel(kit, step.title());
     if csv_input.is_none() {
-        panel = panel
-            .child(views::quiet(step.description(), kit))
-            .children(input_summary(state, step, kit));
+        panel = panel.children(input_summary(state, step, kit));
     }
 
     if let Some(confirmation) = state
@@ -823,6 +899,14 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
             dots,
         );
     }
+    panel = panel.child(data_stage_checklist(
+        state,
+        step,
+        &stage,
+        upload.is_some(),
+        preferences,
+        kit,
+    ));
     if step == Step::Index {
         if let Some(unresolved) =
             backend_views::unresolved_actor_reindex_banner(state, preferences, kit)
@@ -837,33 +921,11 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
 
     let preflight = state.maintenance_preflight(step.operation());
     let progress = match stage {
-        Stage::Observing => Some(status(
-            "Checking readiness",
-            "Waiting for the connected backend to report its current state.",
-            StatusTone::Info,
-            true,
-            preferences,
-            kit,
-        )),
         Stage::Working(detail) => Some(job_progress(
             detail.map(|detail| &detail.job),
             preferences,
             kit,
         )),
-        Stage::Verifying => {
-            let detail = match step {
-                Step::Seed => "Waiting for the backend to verify the seeded catalog.",
-                Step::Index => "Waiting for the index to become searchable.",
-            };
-            Some(status(
-                "Verifying",
-                detail,
-                StatusTone::Info,
-                true,
-                preferences,
-                kit,
-            ))
-        }
         Stage::Failed(detail) => {
             let job = &detail.job;
             let fallback = if job.error_summary.is_empty() {
@@ -885,18 +947,11 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
                 kit,
             ))
         }
-        Stage::Complete => Some(status(
-            "Ready",
-            match step {
-                Step::Seed => "The actor catalog is seeded.",
-                Step::Index => "The search index is ready.",
-            },
-            StatusTone::Ok,
-            false,
-            preferences,
-            kit,
-        )),
-        Stage::Action => None,
+        Stage::Observing
+        | Stage::Action
+        | Stage::ObservedWork
+        | Stage::Verifying
+        | Stage::Complete => None,
     };
     panel = panel.children(progress);
     if step == Step::Seed {
@@ -959,19 +1014,17 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
     let downloading = state.maintenance.github_downloading;
     let validating = matches!(state.maintenance.upload, Load::Loading);
     if csv_input.is_some() && (downloading || validating) {
-        let (title, detail) = if downloading {
-            ("Downloading", "Fetching the CSV from GitHub.")
+        let detail = if downloading {
+            "Downloading the CSV from GitHub…"
         } else if csv_input.is_some_and(|input| input.source == CsvSource::Bundled) {
-            (
-                "Validating",
-                "Checking the bundled CSV with the connected backend.",
-            )
+            "Validating the bundled CSV…"
         } else {
-            ("Validating", "Waiting for the backend to validate the CSV.")
+            "Validating the actor CSV…"
         };
         panel = panel.child(
-            status(title, detail, StatusTone::Info, true, preferences, kit)
-                .key("startup-csv-progress"),
+            views::quiet(detail, kit)
+                .key("startup-csv-progress")
+                .role("status"),
         );
     }
 
@@ -1059,7 +1112,7 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
                 actions = actions.child(refresh(state, preferences, kit));
             }
         }
-        Stage::Observing | Stage::Verifying => {
+        Stage::Observing | Stage::ObservedWork | Stage::Verifying => {
             actions = actions.child(refresh(state, preferences, kit));
         }
         Stage::Working(_) => {

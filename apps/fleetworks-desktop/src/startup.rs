@@ -2086,6 +2086,9 @@ mod tests {
             Some(startup_data::Step::Seed)
         );
         assert!(runtime.find("screen-workstation").is_none());
+        let tree = runtime.accessibility_json().to_string();
+        assert!(tree.contains("Seed job: Pending"));
+        assert!(tree.contains("Verify actor catalog: Pending"));
         let (mark, opacity) = runtime.presented(SETUP_MARK).unwrap();
         assert_eq!(opacity, 1.0);
         let (panel, _) = runtime.presented("startup-data-panel").unwrap();
@@ -2146,6 +2149,7 @@ mod tests {
         let tree = runtime.accessibility_json().to_string();
         assert!(tree.contains("Retrying"));
         assert!(tree.contains("8 / 20 processed"));
+        assert!(tree.contains("Seed job: Checking"));
         assert!(runtime.find("startup-data-continue").is_none());
         runtime.update(|state, _| {
             observe_job(
@@ -2158,22 +2162,28 @@ mod tests {
             );
         });
         runtime.frame(0.1);
-        assert!(runtime
-            .accessibility_json()
-            .to_string()
-            .contains("Verifying"));
+        let tree = runtime.accessibility_json().to_string();
+        assert!(tree.contains("Seed job: Passed"));
+        assert!(tree.contains("Verify actor catalog: Verifying"));
         assert!(runtime.find("startup-data-continue").is_none());
 
         runtime.update(|state, _| {
             complete_data_checks(state, receipt.clone(), [Ready, NotReady, Ready]);
         });
         runtime.frame(0.12);
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("Verify actor catalog: Passed"));
         click(&mut runtime, "startup-data-continue");
         runtime.frame(0.14);
         assert_eq!(
             runtime.state.startup.data_step,
             Some(startup_data::Step::Index)
         );
+        let tree = runtime.accessibility_json().to_string();
+        assert!(tree.contains("Actor catalog: Passed"));
+        assert!(tree.contains("Index build: Pending"));
         click(&mut runtime, startup_data::PRIMARY);
         runtime.frame(0.16);
         assert!(runtime.find("maintenance-confirm").is_some());

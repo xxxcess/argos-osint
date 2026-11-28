@@ -26,6 +26,8 @@ mod state;
 #[cfg(test)]
 mod tests;
 mod trash;
+#[cfg(target_os = "macos")]
+mod volume;
 mod workstation;
 
 pub use connections::canonical_local_origin;
@@ -150,7 +152,10 @@ pub struct NativeContainer {
     home_fd: OwnedFd,
     root_fd: OwnedFd,
     home_object: ObjectIdentity,
+    /// Actual identity used to revalidate open descriptors and live paths.
     root_object: ObjectIdentity,
+    /// Original identity retained by installation settings catalogs.
+    catalog_root_object: ObjectIdentity,
     installation_marker: String,
     legacy_default: bool,
 }
@@ -159,6 +164,13 @@ struct LockedCatalog {
     _lock: File,
     catalog: Catalog,
     object: ObjectIdentity,
+}
+
+#[derive(Clone, Copy)]
+enum OpenMode {
+    Legacy,
+    Settings,
+    RetrySettings,
 }
 
 /// Safe local intent produced after all known backend bindings are retired.
@@ -199,16 +211,24 @@ impl NativeContainer {
     /// Fixtures pass a temporary owned home. Existing legacy roots or unsafe
     /// markers are repair states, never automatically adopted or overwritten.
     pub fn open(home: &Path) -> Result<Self> {
-        Self::open_mode(home, true)
+        Self::open_mode(home, OpenMode::Legacy)
     }
 
     /// Initialize protected settings and installation identity without creating a child folder.
+    /// macOS settings can reopen the same APFS directory after device renumbering.
     /// Existing child identities and unresolved legacy journals remain intact.
     pub fn open_settings(home: &Path) -> Result<Self> {
-        Self::open_mode(home, false)
+        Self::open_mode(home, OpenMode::Settings)
     }
 
-    fn open_mode(home: &Path, legacy_default: bool) -> Result<Self> {
+    /// Retry opening settings after an explicit user action. An older macOS catalog
+    /// with a stale device number can record its first APFS volume binding here.
+    pub fn retry_settings_access(home: &Path) -> Result<Self> {
+        Self::open_mode(home, OpenMode::RetrySettings)
+    }
+
+    fn open_mode(home: &Path, mode: OpenMode) -> Result<Self> {
+        let legacy_default = matches!(mode, OpenMode::Legacy);
         let home_fd = fs::open_absolute_directory(home)?;
         let home_object = fs::directory_identity(&home_fd, false)?;
         let created =
@@ -263,8 +283,11 @@ impl NativeContainer {
                 .context("native root needs explicit ownership/layout repair")?
                 .0
         };
+        let exact_device_required = legacy_default || !cfg!(target_os = "macos");
         anyhow::ensure!(
-            catalog.version == state::FORMAT_VERSION && catalog.root_object == root_object,
+            catalog.root_object.inode == root_object.inode
+                && catalog.root_object.owner == root_object.owner
+                && (!exact_device_required || catalog.root_object.device == root_object.device),
             "native root identity or format requires repair"
         );
         let container = Self {
@@ -274,9 +297,14 @@ impl NativeContainer {
             root_fd,
             home_object,
             root_object,
-            installation_marker: catalog.installation_marker,
+            catalog_root_object: catalog.root_object,
+            installation_marker: catalog.installation_marker.clone(),
             legacy_default,
         };
+        container.revalidate_root()?;
+        container.validate_catalog(&catalog)?;
+        #[cfg(target_os = "macos")]
+        volume::verify_root(&container.root_fd, &catalog, root_object, mode)?;
         drop(lock);
         if legacy_default {
             container.ensure_default()?;
@@ -981,6 +1009,14 @@ impl NativeContainer {
     }
 
     fn locked(&self) -> Result<LockedCatalog> {
+        anyhow::ensure!(
+            self.root_object == self.catalog_root_object,
+            "legacy workspace device identity requires explicit repair"
+        );
+        self.locked_settings()
+    }
+
+    fn locked_settings(&self) -> Result<LockedCatalog> {
         self.revalidate_root()?;
         let lock = fs::open_private_file(&self.root_fd, state::LOCK_FILE, false)?;
         rustix::fs::flock(&lock, FlockOperation::NonBlockingLockExclusive)
@@ -1034,7 +1070,7 @@ impl NativeContainer {
         anyhow::ensure!(
             catalog.version == state::FORMAT_VERSION
                 && catalog.installation_marker == self.installation_marker
-                && catalog.root_object == self.root_object,
+                && catalog.root_object == self.catalog_root_object,
             "native catalog ownership/version conflicts"
         );
         anyhow::ensure!(
@@ -1075,9 +1111,9 @@ impl NativeContainer {
             }
             if let Some(object) = record.object {
                 anyhow::ensure!(
-                    object != self.root_object
-                        && object.device == self.root_object.device
-                        && object.owner == self.root_object.owner,
+                    object != self.catalog_root_object
+                        && object.device == self.catalog_root_object.device
+                        && object.owner == self.catalog_root_object.owner,
                     "workspace object overlaps protected root or another mount/owner"
                 );
             } else {

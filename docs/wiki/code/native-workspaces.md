@@ -12,9 +12,12 @@ Normal startup opens settings without creating a `default` child. The manager ve
 
 | Location | Owns |
 | --- | --- |
+| `.native-volume.json` | On macOS, the APFS volume UUID bound to the protected settings directory and installation marker |
 | `.native-pairing.json` | Installation/origin/deployment/credential references, selected origin and exact pending/issuance recovery; no polling/access secrets |
 | macOS Keychain | Installation- and origin-bound polling/access secrets through the blocking `KeychainStore` adapter; denied access never falls back |
 | Retained file catalog | Explicit operator/headless credential references; no automatic adoption, migration or deletion |
+
+On macOS, a local APFS volume can receive a new device number. When an older catalog has no volume binding, **Retry folder access** records the UUID if the protected root still has the recorded inode and owner. The app retains the installation marker and the root identity used by its saved catalogs. Later launches can use the recorded volume UUID to reopen the same directory. Legacy folder operations and explicit token-file references still require their exact filesystem object identities.
 
 [Pairing](native-connections.md#pairing-and-keychain-agreed-target) records exact intent before HTTP and issuance before Keychain promotion. Restart/retry recovers only that reference. An approved credential becomes connected only after authenticated compatibility checks and successful storage. Server revocation is independent of local cancellation/deletion.
 

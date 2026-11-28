@@ -84,7 +84,7 @@ impl NativeContainer {
             request.installation_marker == self.installation_marker,
             "registration does not match this protected installation"
         );
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         let (mut journal, object) = self.read_workstation()?;
         let index = match journal
             .bindings
@@ -124,7 +124,7 @@ impl NativeContainer {
             receipt.is_consistent() && receipt.status == RegistrationStatus::Active,
             "inconsistent or inactive workstation receipt"
         );
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         let (mut journal, object) = self.read_workstation()?;
         let binding = journal
             .bindings
@@ -164,7 +164,7 @@ impl NativeContainer {
             "cycle deletion context mismatch"
         );
         super::require_operation_id(&request.request_id)?;
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         let (mut journal, object) = self.read_workstation()?;
         if let Some(previous) = journal.pending_cycle_deletions.iter().find(|pending| {
             pending.context.deployment_id == context.deployment_id
@@ -190,13 +190,13 @@ impl NativeContainer {
 
     /// Read-only recovery inputs, never an implicit replay under new registration.
     pub fn pending_cycle_deletions(&self) -> Result<Vec<PendingCycleDeletion>> {
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         Ok(self.read_workstation()?.0.pending_cycle_deletions)
     }
 
     /// Clear only the exact command after an authoritative receipt/read-only lookup.
     pub fn complete_cycle_deletion(&self, request: &DeleteCycleRequest) -> Result<()> {
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         let (mut journal, object) = self.read_workstation()?;
         journal
             .pending_cycle_deletions
@@ -225,7 +225,7 @@ impl NativeContainer {
             "actor reindex context mismatch"
         );
         super::require_operation_id(&request.request_id)?;
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         let (mut journal, object) = self.read_workstation()?;
         if let Some(previous) = journal
             .pending_actor_reindexes
@@ -265,7 +265,7 @@ impl NativeContainer {
         let origin = super::canonical_target_origin(origin).context("invalid gateway origin")?;
         super::require_operation_id(&request.request_id)?;
         super::require_operation_id(job_id)?;
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         let (mut journal, object) = self.read_workstation()?;
         let entry = journal
             .pending_actor_reindexes
@@ -291,7 +291,7 @@ impl NativeContainer {
     /// Read-only lookup of any unresolved actor reindex attempt for one gateway origin.
     pub fn pending_actor_reindex(&self, origin: &str) -> Result<Option<PendingActorReindex>> {
         let origin = super::canonical_target_origin(origin).context("invalid gateway origin")?;
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         Ok(self
             .read_workstation()?
             .0
@@ -330,7 +330,7 @@ impl NativeContainer {
                 && association.origin.workspace_id.is_none(),
             "accepted actor reindex association identity mismatch"
         );
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         let (mut journal, object) = self.read_workstation()?;
         if let Some(existing) = journal
             .pending_actor_reindexes
@@ -367,7 +367,7 @@ impl NativeContainer {
     /// Read-only lookup of the retained accepted request-to-job association for one gateway origin.
     pub fn accepted_actor_reindex(&self, origin: &str) -> Result<Option<AcceptedActorReindex>> {
         let origin = super::canonical_target_origin(origin).context("invalid gateway origin")?;
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         Ok(self
             .read_workstation()?
             .0
@@ -380,7 +380,7 @@ impl NativeContainer {
     pub fn clear_accepted_actor_reindex(&self, origin: &str, job_id: &str) -> Result<()> {
         let origin = super::canonical_target_origin(origin).context("invalid gateway origin")?;
         super::require_operation_id(job_id)?;
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         let (mut journal, object) = self.read_workstation()?;
         journal.accepted_actor_reindexes.retain(|accepted| {
             !(accepted.origin == origin && accepted.association.job_id == job_id)
@@ -392,7 +392,7 @@ impl NativeContainer {
     /// Clear only the exact reindex attempt after authoritative acceptance or reconciliation.
     pub fn complete_actor_reindex(&self, origin: &str, request: &MaintenanceRequest) -> Result<()> {
         let origin = super::canonical_target_origin(origin).context("invalid gateway origin")?;
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         let (mut journal, object) = self.read_workstation()?;
         journal
             .pending_actor_reindexes
@@ -405,7 +405,7 @@ impl NativeContainer {
     pub fn clear_stale_actor_reindex(&self, origin: &str, request_id: &str) -> Result<()> {
         let origin = super::canonical_target_origin(origin).context("invalid gateway origin")?;
         super::require_operation_id(request_id)?;
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         let (mut journal, object) = self.read_workstation()?;
         journal.pending_actor_reindexes.retain(|pending| {
             !(pending.origin == origin && pending.request.request_id == request_id)

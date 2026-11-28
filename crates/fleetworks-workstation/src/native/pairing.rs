@@ -183,7 +183,7 @@ struct Catalog {
 impl NativeContainer {
     /// Read metadata without creating a pairing file or consulting Keychain.
     pub fn pairing_catalog(&self) -> Result<PairingCatalogSnapshot, PairingError> {
-        let _guard = self.locked().map_err(catalog_error)?;
+        let _guard = self.locked_settings().map_err(catalog_error)?;
         Ok(self.read_pairing()?.0.snapshot)
     }
 
@@ -204,7 +204,7 @@ impl NativeContainer {
         origin: &str,
     ) -> Result<PairingCatalogSnapshot, PairingError> {
         let origin = canonical_origin(origin)?;
-        let _guard = self.locked().map_err(catalog_error)?;
+        let _guard = self.locked_settings().map_err(catalog_error)?;
         let (mut catalog, object) = self.read_pairing()?;
         check_revision(&catalog, expected_revision)?;
         if !catalog
@@ -227,7 +227,7 @@ impl NativeContainer {
         store: &dyn KeychainStore,
     ) -> Result<SecretToken, PairingError> {
         let origin = canonical_origin(origin)?;
-        let _guard = self.locked().map_err(catalog_error)?;
+        let _guard = self.locked_settings().map_err(catalog_error)?;
         let (catalog, _) = self.read_pairing()?;
         let pair = catalog
             .snapshot
@@ -254,7 +254,7 @@ impl NativeContainer {
         {
             return Err(PairingError::InvalidInput);
         }
-        let _guard = self.locked().map_err(catalog_error)?;
+        let _guard = self.locked_settings().map_err(catalog_error)?;
         let (mut catalog, object) = self.read_pairing()?;
         check_revision(&catalog, expected_revision)?;
         if let Some(existing) = catalog
@@ -288,7 +288,7 @@ impl NativeContainer {
     ) -> Result<PairingCatalogSnapshot, PairingError> {
         let origin = canonical_origin(origin)?;
         validate_id(&pairing_id)?;
-        let _guard = self.locked().map_err(catalog_error)?;
+        let _guard = self.locked_settings().map_err(catalog_error)?;
         let (mut catalog, object) = self.read_pairing()?;
         check_revision(&catalog, expected_revision)?;
         let pending = pending_mut(&mut catalog, &origin, request_id)?;
@@ -307,7 +307,7 @@ impl NativeContainer {
         store: &dyn KeychainStore,
     ) -> Result<SecretToken, PairingError> {
         let origin = canonical_origin(origin)?;
-        let _guard = self.locked().map_err(catalog_error)?;
+        let _guard = self.locked_settings().map_err(catalog_error)?;
         let (catalog, _) = self.read_pairing()?;
         let pending = catalog
             .snapshot
@@ -330,7 +330,7 @@ impl NativeContainer {
         store: &dyn KeychainStore,
     ) -> Result<PairingCatalogSnapshot, PairingError> {
         validate_pair(&pair)?;
-        let _guard = self.locked().map_err(catalog_error)?;
+        let _guard = self.locked_settings().map_err(catalog_error)?;
         let (mut catalog, mut object) = self.read_pairing()?;
         check_revision(&catalog, expected_revision)?;
         let pending = pending_mut(&mut catalog, &pair.origin, request_id)?;
@@ -355,7 +355,7 @@ impl NativeContainer {
         store: &dyn KeychainStore,
     ) -> Result<Option<PairedGateway>, PairingError> {
         let origin = canonical_origin(origin)?;
-        let _guard = self.locked().map_err(catalog_error)?;
+        let _guard = self.locked_settings().map_err(catalog_error)?;
         let (catalog, object) = self.read_pairing()?;
         let Some(pair) = catalog
             .snapshot
@@ -385,7 +385,7 @@ impl NativeContainer {
         store: &dyn KeychainStore,
     ) -> Result<PairingCatalogSnapshot, PairingError> {
         let origin = canonical_origin(origin)?;
-        let _guard = self.locked().map_err(catalog_error)?;
+        let _guard = self.locked_settings().map_err(catalog_error)?;
         let (mut catalog, object) = self.read_pairing()?;
         check_revision(&catalog, expected_revision)?;
         let pending = pending_mut(&mut catalog, &origin, request_id)?.clone();
@@ -412,7 +412,7 @@ impl NativeContainer {
         store: &dyn KeychainStore,
     ) -> Result<PairingCatalogSnapshot, PairingError> {
         let origin = canonical_origin(origin)?;
-        let _guard = self.locked().map_err(catalog_error)?;
+        let _guard = self.locked_settings().map_err(catalog_error)?;
         let (mut catalog, object) = self.read_pairing()?;
         check_revision(&catalog, expected_revision)?;
         let pair = catalog
@@ -524,7 +524,7 @@ impl NativeContainer {
                 Catalog {
                     version: 1,
                     installation_marker: self.installation_marker.clone(),
-                    root_object: self.root_object,
+                    root_object: self.catalog_root_object,
                     snapshot: PairingCatalogSnapshot::default(),
                 },
                 None,
@@ -565,7 +565,7 @@ impl NativeContainer {
     fn validate_pairing(&self, catalog: &Catalog) -> Result<(), PairingError> {
         if catalog.version != 1
             || catalog.installation_marker != self.installation_marker
-            || catalog.root_object != self.root_object
+            || catalog.root_object != self.catalog_root_object
             || catalog.snapshot.paired_gateways.len() > MAX_ENTRIES
             || catalog.snapshot.pending_pairings.len() > MAX_ENTRIES
         {

@@ -340,7 +340,7 @@ impl NativeContainer {
     /// Read-only, including an absent catalog. Existing unmarked/unknown or
     /// unsafe documents require repair and are never overwritten or imported.
     pub fn connection_profiles(&self) -> Result<ConnectionProfilesSnapshot> {
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         Ok(self.read_connections()?.0.snapshot)
     }
 
@@ -350,7 +350,7 @@ impl NativeContainer {
         let origin = Client::canonical_origin(origin)?;
         let credential = CredentialReference::capture(path, &origin)?;
         drop(credential.open_verified(&origin)?);
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         let (mut catalog, object) = self.read_connections()?;
         let matches: Vec<_> = catalog
             .snapshot
@@ -503,7 +503,7 @@ impl NativeContainer {
         select: bool,
         prepare_input: impl FnOnce(&ConnectionProfilesSnapshot) -> Result<GatewayProfileInput>,
     ) -> Result<ConnectionProfilesSnapshot> {
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         let (mut catalog, object) = self.read_connections()?;
         anyhow::ensure!(
             catalog.snapshot.revision == expected_revision,
@@ -614,7 +614,7 @@ impl NativeContainer {
         expected_revision: u64,
         id: &str,
     ) -> Result<ConnectionProfilesSnapshot> {
-        let _guard = self.locked()?;
+        let _guard = self.locked_settings()?;
         let (mut catalog, object) = self.read_connections()?;
         anyhow::ensure!(
             catalog.snapshot.revision == expected_revision,
@@ -646,7 +646,7 @@ impl NativeContainer {
                 ConnectionCatalog {
                     format_version: FORMAT,
                     installation_marker: self.installation_marker.clone(),
-                    root_object: self.root_object,
+                    root_object: self.catalog_root_object,
                     snapshot: ConnectionProfilesSnapshot::empty(),
                 },
                 None,
@@ -680,7 +680,7 @@ impl NativeContainer {
         anyhow::ensure!(
             catalog.format_version == FORMAT
                 && catalog.installation_marker == self.installation_marker
-                && catalog.root_object == self.root_object
+                && catalog.root_object == self.catalog_root_object
                 && catalog.snapshot.profiles.len() <= MAX_PROFILES,
             "saved connection ownership or format needs repair"
         );

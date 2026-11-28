@@ -1,5 +1,8 @@
 //! Selected native workstation destinations. Topology presentation belongs to Intel Web.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use fleetworks_contracts::capabilities::Capabilities;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use fleetworks_contracts::readiness::ReadinessCheck;
@@ -1376,7 +1379,20 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
                     .child(heading(search_category_title(category), kit).role("heading")),
             )
             .child(records);
-        return scroll(body, "search-category-results");
+        let viewport = scroll(body, "search-category-results");
+        if category == SearchCategory::Actors {
+            let scrolled = Rc::new(Cell::new(false));
+            let offset = Rc::clone(&scrolled);
+            return viewport
+                .on_scroll_offset(move |position| offset.set(position.offset[1] > 0.0))
+                .on_at_bottom(move |state: &mut State, at_bottom| {
+                    // A page that fits may start at the bottom. It still offers Load more.
+                    if at_bottom && scrolled.get() && state.actor_catalog.continue_automatically() {
+                        state.load_actor_catalog();
+                    }
+                });
+        }
+        return viewport;
     }
 
     let search = TextInput::new(&state.brain.query)
@@ -1669,19 +1685,6 @@ fn actor_catalog_records(state: &State, preferences: ViewPreferences, kit: &Kit)
             .disabled(catalog.busy)
             .on_press(State::load_actor_catalog)
             .build(kit, preferences, None),
-        );
-    }
-    if catalog.continue_automatically() {
-        list = list.child(
-            rune::el()
-                .key(format!("actor-catalog-tail-{}", catalog.rows.len()))
-                .size(1.0, 1.0)
-                .a11y_hidden()
-                .on_visible(|state: &mut State, visible, _| {
-                    if visible && state.actor_catalog.continue_automatically() {
-                        state.load_actor_catalog();
-                    }
-                }),
         );
     }
     list

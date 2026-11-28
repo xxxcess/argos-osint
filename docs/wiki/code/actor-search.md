@@ -12,7 +12,9 @@ no index origin, write token, filesystem path or engine document address.
 
 [![Source intent, private projection and canonical discovery](../../diagrams/actor-search.svg)](../../diagrams/actor-search.html)
 
-Native Search checks actor names, aliases and article text from one field. The **Actors** avatar opens a browse view that reads shared, active canonical actors in ID order through `GET /api/v1/actors/browse`. Both HTTP and Embedded IPC use the backend read permission. Browse results do not require a serving search index. Each page contains up to 25 projections and includes a continuation when more eligible records exist. The native list loads as the reader approaches its end and retains up to 480 actors. Return to the search field to narrow a larger catalog.
+Native Search checks actor names, aliases and article text from one field. The **Actors** avatar opens a browse view that reads shared, active canonical actors in ID order through `GET /api/v1/actors/browse`. Both HTTP and Embedded IPC use the backend read permission. Browse results are available before the search index is built. The API accepts up to 25 projections per page. The forward scan starts after the supplied cursor and applies eligibility before the page limit. One additional eligible row establishes whether to return a continuation.
+
+Native requests ten records on opening the list and uses the returned cursor to load ten more when the reader scrolls to the end. **Load more** offers the same continuation when the whole page fits on screen. The list retains up to 480 actors. Return to the search field to narrow a larger catalog.
 
 ## Ownership and entry points
 

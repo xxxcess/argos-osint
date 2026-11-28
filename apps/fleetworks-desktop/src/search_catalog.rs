@@ -11,7 +11,7 @@ use crate::app::Page;
 use crate::app::State;
 use crate::connection::RequestTask;
 
-const PAGE_SIZE: u16 = 24;
+const PAGE_SIZE: u16 = 10;
 const MAX_ROWS: usize = 480;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -149,6 +149,9 @@ mod tests {
     use rune::Env;
     use rune::Runtime;
 
+    const RESULTS: &str = "search-category-results";
+    const MORE: &str = "actor-catalog-more";
+
     fn page(ids: &[&str], next: Option<&str>) -> ActorBrowsePage {
         let rows = ids
             .iter()
@@ -157,19 +160,19 @@ mod tests {
         ActorBrowsePage::new(rows, next.map(str::to_owned))
     }
 
-    #[test]
-    fn actor_category_switches_view_and_fences_browse_completions() {
+    fn open_catalog(viewport: (f32, f32)) -> Runtime<State> {
         let mut state = crate::tests::registered_fixture();
         state.page = Page::Brain;
         let mut runtime = Runtime::new(
             state,
             crate::app::view,
-            (1180.0, 780.0),
+            viewport,
             Env {
                 system_dark: true,
                 scale: 1.0,
             },
         );
+        runtime.reduced_motion = true;
         runtime.frame(0.0);
         assert!(runtime.find("search-landing-bar").is_some());
         let (x, y) = runtime
@@ -181,7 +184,34 @@ mod tests {
         assert_eq!(runtime.state.search_category, Some(SearchCategory::Actors));
         assert!(runtime.find("search-landing-bar").is_none());
         assert!(runtime.state.actor_catalog.busy);
+        runtime
+    }
 
+    fn actors(first: usize, count: usize, next: Option<&str>) -> ActorBrowsePage {
+        let rows = (first..first + count)
+            .map(|number| {
+                ActorSearchHit::new(
+                    format!("actor-{number}"),
+                    format!("Actor {number}"),
+                    0,
+                    String::new(),
+                )
+            })
+            .collect();
+        ActorBrowsePage::new(rows, next.map(str::to_owned))
+    }
+
+    fn browse_requests(state: &State) -> usize {
+        state
+            .intents
+            .iter()
+            .filter(|intent| matches!(intent, Intent::BrowseActors))
+            .count()
+    }
+
+    #[test]
+    fn actor_category_switches_view_and_fences_browse_completions() {
+        let mut runtime = open_catalog((1180.0, 780.0));
         runtime.update(|state, _| {
             state.fixture_actor_catalog(page(&["actor-1"], Some("actor-1")));
             state.load_actor_catalog();
@@ -202,5 +232,89 @@ mod tests {
         runtime.frame(1.0 / 60.0);
         assert!(runtime.find("search-landing-bar").is_some());
         assert!(runtime.state.actor_catalog.rows.is_empty());
+    }
+
+    #[test]
+    fn catalog_that_fits_waits_for_load_more_and_allows_retry() {
+        let mut runtime = open_catalog((1180.0, 1280.0));
+        assert_eq!(browse_requests(&runtime.state), 1);
+        runtime.update(|state, _| state.fixture_actor_catalog(actors(0, 10, Some("actor-9"))));
+        runtime.frame(0.02);
+        runtime.frame(0.04);
+        assert_eq!(runtime.scroll_at_bottom(RESULTS), Some(true));
+        assert_eq!(runtime.state.actor_catalog.rows.len(), 10);
+        assert_eq!(browse_requests(&runtime.state), 1);
+        assert!(!runtime.state.actor_catalog.busy);
+
+        let (x, y) = runtime.find(MORE).expect("manual continuation");
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(0.06);
+        assert_eq!(browse_requests(&runtime.state), 2);
+        runtime.update(|state, _| state.fixture_actor_catalog(actors(10, 11, Some("actor-20"))));
+        runtime.frame(0.08);
+        assert_eq!(runtime.state.actor_catalog.rows.len(), 10);
+        assert_eq!(runtime.state.actor_catalog.next.as_deref(), Some("actor-9"));
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("The actor catalog returned too many records."));
+
+        let (x, y) = runtime
+            .find(MORE)
+            .expect("retry after an oversized response");
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(0.10);
+        assert_eq!(browse_requests(&runtime.state), 3);
+        runtime.update(|state, _| state.fixture_actor_catalog(actors(10, 10, None)));
+        runtime.frame(0.12);
+        assert_eq!(runtime.state.actor_catalog.rows.len(), 20);
+        assert!(runtime.find(MORE).is_none());
+    }
+
+    #[test]
+    fn scrolling_to_the_catalog_end_loads_one_batch_and_keeps_row_focus() {
+        let mut runtime = open_catalog((640.0, 480.0));
+        runtime.update(|state, _| state.fixture_actor_catalog(actors(0, 10, Some("actor-9"))));
+        runtime.frame(0.02);
+        runtime.frame(0.04);
+        assert_eq!(runtime.scroll_at_bottom(RESULTS), Some(false));
+        assert_eq!(browse_requests(&runtime.state), 1);
+
+        let (x, y) = runtime.find(RESULTS).expect("catalog scroll viewport");
+        runtime.wheel(x, y, -1000.0);
+        runtime.frame(0.06);
+        runtime.frame(0.08);
+        assert_eq!(runtime.scroll_at_bottom(RESULTS), Some(true));
+        assert_eq!(browse_requests(&runtime.state), 2);
+        assert!(runtime.state.actor_catalog.busy);
+        assert_eq!(runtime.state.actor_catalog.next.as_deref(), Some("actor-9"));
+
+        let last_seen = "actor-hit-actor-9";
+        runtime.update(|_, tx| tx.focus(last_seen, true));
+        runtime.frame(0.10);
+        runtime.update(|state, _| state.fixture_actor_catalog(actors(10, 10, Some("actor-19"))));
+        runtime.frame(0.12);
+        runtime.frame(0.14);
+        assert_eq!(runtime.state.actor_catalog.rows.len(), 20);
+        assert_eq!(browse_requests(&runtime.state), 2);
+        assert!(runtime
+            .elements()
+            .into_iter()
+            .any(|element| { element.key.as_deref() == Some(last_seen) && element.focused }));
+
+        runtime.wheel(x, y, -1000.0);
+        runtime.frame(0.16);
+        runtime.frame(0.18);
+        assert_eq!(browse_requests(&runtime.state), 3);
+        assert_eq!(
+            runtime.state.actor_catalog.next.as_deref(),
+            Some("actor-19")
+        );
+        runtime.update(|state, _| state.fixture_actor_catalog(actors(20, 5, None)));
+        runtime.frame(0.20);
+        assert_eq!(runtime.state.actor_catalog.rows.len(), 25);
+        assert!(runtime.find(MORE).is_none());
     }
 }

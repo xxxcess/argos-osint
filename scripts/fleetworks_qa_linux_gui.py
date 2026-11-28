@@ -310,6 +310,15 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
             return node
         return None
 
+    wait_for(lambda: screen_bounds(find("startup-local", button=True), atspi),
+             app, "visible Embedded folder chooser")
+    # Bare Xvfb has no window manager to grant focus. Workstation Status refreshes
+    # its checks only while the window is focused.
+    windows = subprocess.check_output(
+        ["xdotool", "search", "--onlyvisible", "--name", "^Fleetworks$"], text=True, timeout=5,
+    ).split()
+    require(len(windows) == 1, "expected one visible Fleetworks window on the fixture display")
+    subprocess.run(["xdotool", "windowfocus", "--sync", windows[0]], check=True, timeout=5)
     button("startup-local")
 
     enter_key = "startup-enter-workstation"
@@ -409,13 +418,6 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
     wait_for(shown_drawer, app, "Inbox drawer reopened from toolbar", timeout=4)
 
     def submit(question, *, timeout=20):
-        # A bare Xvfb display has no window manager to grant keyboard focus.
-        windows = subprocess.check_output(
-            ["xdotool", "search", "--onlyvisible", "--name", "^Fleetworks$"], text=True, timeout=5,
-        ).split()
-        require(len(windows) == 1, "expected one visible Fleetworks window on the fixture display")
-        subprocess.run(["xdotool", "windowfocus", "--sync", windows[0]], check=True, timeout=5)
-
         def focus_composer():
             field = shown_composer()
             if field is None:
@@ -704,7 +706,7 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         "finding_count": len(final["findings"]), "duplicate_findings": 0,
         "first_finding_ms": first_ms, "gate_release_ms": released_ms, "completion_ms": completion_ms,
         "grounded_memory": memory,
-        "startup_advanced_without_controls": True,
+        "startup_waited_for_entry": True,
         "manual_actor_validated_rows": BUNDLED_ACTOR_ROWS, "actor_seed_accepted": False,
     }
     (output / "streaming.json").write_text(json.dumps(result, indent=2) + "\n")

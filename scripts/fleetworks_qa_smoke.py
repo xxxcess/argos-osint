@@ -2,7 +2,7 @@
 """Exercise the real Inbox QA pack through a packaged Embedded companion."""
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 import hashlib
 from itertools import islice
@@ -316,6 +316,94 @@ def cancel_running_embedded_turn(request, registration, model, *, draft=False):
         return {"first_draft_while_running": True, "cancelled_draft_terminal_events": len(terminal),
                 "cancelled_draft_terminal_state": canceled["state"], "cancelled_draft_scrubbed": True}
     return {"cancelled_terminal_events": len(terminal), "cancelled_terminal_state": canceled["state"]}
+
+
+@contextmanager
+def release_isolated_gate(model, worker):
+    # Linux pins the original process across both turns. The fixture callback also
+    # checks executable path and companion ancestry before signaling on either OS.
+    pidfd = os.pidfd_open(worker) if sys.platform == "linux" else None
+
+    def release():
+        require(model() == [worker], "The original isolated gated worker is no longer resident")
+        if pidfd is not None:
+            signal.pidfd_send_signal(pidfd, signal.SIGUSR1)
+        else:
+            os.kill(worker, signal.SIGUSR1)
+
+    try:
+        yield release
+    except Exception:
+        # Unblock the verified fixture before companion teardown, preserving the test failure.
+        with suppress(OSError, ValueError, subprocess.SubprocessError):
+            release()
+        raise
+    finally:
+        if pidfd is not None:
+            os.close(pidfd)
+
+
+def expired_operational_turn_keeps_generator(request, registration, model):
+    context = authorize(registration)
+    before = request("settings")
+    require(not before["enabled"] and before["phase"] == "off", "Expiry fixture must start with QA off")
+    updated = request("settings", {"context": context, "expected_revision": before["revision"], "enabled": True})
+    ready = ready_model(request, "gpt2-small", updated=updated)
+    workers = model()
+    require(len(workers) == 1, "Expected one isolated gated worker for evidence expiry")
+    worker, = workers
+
+    def submit(case, question):
+        turn = request("turns", {"request_id": f"inbox-qa-smoke-{case}", "context": context,
+                                 "question": question}, expected=(200, 201, 202))
+        return {"turn_id": turn["turn_id"], "after": 0, "wait_seconds": 0}
+
+    with release_isolated_gate(model, worker) as release:
+        started = time.monotonic()
+        query = submit("expired-operational-turn", SUMMARY_QUESTION)
+        held = until(lambda: request("events", query=query),
+                     lambda page: page["turn"]["findings"] or page["turn"]["state"] in TERMINAL,
+                     "Expiry gate did not produce a Running finding", timeout=8, interval=0.1)
+        require(not held["gap"] and held["turn"]["state"] == "running" and len(held["turn"]["findings"]) == 1,
+                "The operational turn did not reach the fixture gate before expiring")
+        expired = until(lambda: request("events", query=query), lambda page: page["turn"]["state"] in TERMINAL,
+                        "Held operational evidence did not expire", timeout=7, interval=0.1)
+        expired_at = time.monotonic()
+        turn = expired["turn"]
+        terminal = [event for event in expired["events"] if event["state"] in TERMINAL]
+        require(not expired["gap"] and turn["state"] == "insufficient_context" and not turn.get("reply")
+                and not turn.get("provisional_reply") and len(terminal) == 1
+                and not any(event.get("provisional_delta") for event in expired["events"])
+                and all(finding in held["turn"]["findings"] for finding in turn["findings"]),
+                "Expired evidence retained a stale reply or published a new finding")
+
+        # Hold through a full 12-second permit and beyond the former two-second drain,
+        # leaving headroom before the worker's existing 25-second Ask bound.
+        hold_seconds = 13
+        require(expired_at - started + hold_seconds < 21, "The expiry fixture exhausted its Ask deadline headroom")
+        time.sleep(hold_seconds)
+        release()
+        held_ms = round((time.monotonic() - expired_at) * 1000)
+
+        next_query = submit("greeting-after-expiry", "hi")
+        draft = until(lambda: request("events", query=next_query),
+                      lambda page: page["turn"].get("provisional_reply") or page["turn"]["state"] in TERMINAL,
+                      "The original worker did not produce a greeting draft after expiry", timeout=20, interval=0.1)
+        require(not draft["gap"] and draft["turn"]["state"] == "running" and draft["turn"].get("provisional_reply"),
+                "The follow-up greeting did not reach the same worker's draft gate")
+        release()
+        follow_up = until(lambda: request("events", query=next_query)["turn"],
+                          lambda value: value["state"] in TERMINAL,
+                          "The greeting worker did not complete after release", timeout=15, interval=0.1)
+        require(follow_up["state"] == "answered" and follow_up.get("reply") and not follow_up["findings"]
+                and follow_up.get("model_generation") == ready["generation"] and model() == [worker],
+                "The greeting did not finish on the original warm generator after evidence expired")
+        require_context(follow_up)
+        require(request("events", query=query) == expired, "Late worker frames changed the expired terminal replay")
+
+    return {"expired_operational_terminal_state": turn["state"], "expired_operational_replay_stable": True,
+            "expired_operational_worker_reused": True, "expired_operational_held_after_terminal_ms": held_ms,
+            "post_expiry_greeting_state": follow_up["state"]}
 
 
 def ready_model(request, target, *, updated=None, stages=None):
@@ -1599,9 +1687,12 @@ def run_embedded(args):
             stop_model(request, registration, gated_model, request("settings"))
             cancellation.update(cancel_running_embedded_turn(request, registration, gated_model, draft=True))
             stop_model(request, registration, gated_model, request("settings"))
+            expiry = expired_operational_turn_keeps_generator(request, registration, gated_model)
+            stop_model(request, registration, gated_model, request("settings"))
 
     return {"runtime": attestation["transport"], "transport_attestation": attestation, "target": digests["target"],
-            "source_sha": digests["source_sha"], "manual_model_target_rejected": True, **result, **cancellation}
+            "source_sha": digests["source_sha"], "manual_model_target_rejected": True,
+            **result, **cancellation, **expiry}
 
 
 def main():

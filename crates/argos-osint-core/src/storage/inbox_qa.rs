@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::time::Duration;
 
 use chrono::DateTime;
 use chrono::Utc;
@@ -69,7 +70,9 @@ use super::tx::TxError;
 
 /// Shared Jobs dispatch pool, dedicated to QA.
 pub const POOL: &str = "assistant_qa";
-const REPLICA_LEASE_MS: i64 = 12_000;
+/// Duration of a replica permit from the datastore's authorized claim or renewal.
+pub const REPLICA_LEASE: Duration = Duration::from_secs(12);
+const REPLICA_LEASE_MS: i64 = REPLICA_LEASE.as_millis() as i64;
 const EXCHANGE_TTL_MS: i64 = 15 * 60_000;
 const MAX_ACTIVE_AGE_MS: i64 = 90_000;
 const MAX_ACTIVE: i64 = 16;

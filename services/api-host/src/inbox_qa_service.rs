@@ -31,9 +31,9 @@ use fleetworks_contracts::qa_worker::{
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
-use tokio::time::{sleep, timeout, Instant};
+use tokio::time::{timeout, timeout_at, Instant};
 
-use crate::qa_worker::QaWorkerSupervisor;
+use crate::qa_worker::{QaWorkerSupervisor, TURN_LIMIT as WORKER_TURN_LIMIT};
 use crate::queue_client::{Client, Disposition, Received};
 
 const DELIVERY_SECS: i64 = 12;
@@ -44,7 +44,6 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(2);
 const WARM_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const STOP_TIMEOUT: Duration = Duration::from_secs(8);
 const TURN_TIMEOUT: Duration = Duration::from_secs(30);
-const SETTLED_TURN_DRAIN: Duration = Duration::from_secs(2);
 const OPERATIONAL_COMMIT_RESERVE_MS: i64 = 500;
 const WARM_RETRY: Duration = Duration::from_secs(10);
 
@@ -66,6 +65,63 @@ enum ReplicaLease {
     Unclaimed,
     Claimed,
     Reaped,
+}
+
+enum ReplicaRenewal {
+    Confirmed(Instant),
+    Denied,
+    Unconfirmed,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum IdleHeartbeat {
+    Ready,
+    Retry,
+    Reap,
+}
+
+struct ResidentPermit {
+    generation: i64,
+    confirmed_until: Instant,
+    next_check: Instant,
+}
+
+impl ResidentPermit {
+    fn new(generation: i64, confirmed_until: Instant) -> Self {
+        Self {
+            generation,
+            confirmed_until,
+            next_check: Instant::now(),
+        }
+    }
+
+    fn require_renewal(&mut self) {
+        self.next_check = Instant::now();
+    }
+
+    fn idle_renewal(&mut self, renewal: ReplicaRenewal) -> IdleHeartbeat {
+        let now = Instant::now();
+        if now >= self.confirmed_until {
+            return IdleHeartbeat::Reap;
+        }
+        match renewal {
+            ReplicaRenewal::Confirmed(until) => {
+                self.confirmed_until = until;
+                self.next_check = now + CHECK;
+                IdleHeartbeat::Ready
+            }
+            ReplicaRenewal::Unconfirmed => {
+                self.require_renewal();
+                IdleHeartbeat::Retry
+            }
+            ReplicaRenewal::Denied => IdleHeartbeat::Reap,
+        }
+    }
+}
+
+fn operation_deadline(permit: Option<&ResidentPermit>, limit: Duration) -> Instant {
+    let until = Instant::now() + limit;
+    permit.map_or(until, |permit| until.min(permit.confirmed_until))
 }
 
 impl ReplicaLease {
@@ -135,25 +191,38 @@ pub(crate) async fn run(
 
 impl Executor {
     async fn serve(&mut self, stop: &CancellationToken) -> Result<()> {
-        let mut loaded = None;
+        let mut loaded: Option<ResidentPermit> = None;
         let mut observed_generation = None;
         let mut next_warm = Instant::now();
-        let mut next_check = Instant::now();
         let mut next_dispatch = Instant::now();
         let mut next_cleanup = Instant::now();
         let mut initialized = false;
         let mut next_store_notice = Instant::now();
         let mut next_queue_notice = Instant::now();
         while !stop.is_cancelled() {
+            if loaded
+                .as_ref()
+                .is_some_and(|permit| Instant::now() >= permit.confirmed_until)
+            {
+                tracing::info!(
+                    qa_replica_stage = "heartbeat_lease_expired",
+                    "Inbox QA replica's last confirmed permit expired"
+                );
+                self.unload().await;
+                loaded = None;
+                next_warm = Instant::now() + WARM_RETRY;
+                continue;
+            }
             if loaded.is_none() && !matches!(self.replica_lease, ReplicaLease::Unclaimed) {
                 // Retry unfinished shutdown or record removal before warming another worker.
                 self.unload().await;
                 if !matches!(self.replica_lease, ReplicaLease::Unclaimed) {
-                    self.pause(stop).await;
+                    self.pause(stop, None).await;
                     continue;
                 }
             }
-            let setting = match timeout(AUTH_TIMEOUT, store::setting(&self.repo)).await {
+            let setting_deadline = operation_deadline(loaded.as_ref(), AUTH_TIMEOUT);
+            let setting = match timeout_at(setting_deadline, store::setting(&self.repo)).await {
                 Ok(Ok(setting)) => setting,
                 _ => {
                     if Instant::now() >= next_store_notice {
@@ -163,10 +232,11 @@ impl Executor {
                             "Inbox QA settings unavailable"
                         );
                     }
-                    if loaded.take().is_some() {
-                        self.unload().await;
+                    if let Some(permit) = &mut loaded {
+                        // Park the resident model. Dispatch resumes only after settings and a beat.
+                        permit.require_renewal();
                     }
-                    self.pause(stop).await;
+                    self.pause(stop, loaded.as_ref()).await;
                     continue;
                 }
             };
@@ -174,7 +244,9 @@ impl Executor {
                 observed_generation = Some(setting.generation);
                 next_warm = Instant::now();
             }
-            if loaded.is_some_and(|generation| !setting.enabled || setting.generation != generation)
+            if loaded
+                .as_ref()
+                .is_some_and(|permit| !setting.enabled || setting.generation != permit.generation)
             {
                 self.unload().await;
                 loaded = None;
@@ -182,7 +254,8 @@ impl Executor {
             }
             if Instant::now() >= next_cleanup {
                 next_cleanup = Instant::now() + Duration::from_secs(15);
-                let _ = timeout(AUTH_TIMEOUT, store::cleanup(&self.repo)).await;
+                let deadline = operation_deadline(loaded.as_ref(), AUTH_TIMEOUT);
+                let _ = timeout_at(deadline, store::cleanup(&self.repo)).await;
             }
             if setting.enabled && !initialized {
                 let initialize = async {
@@ -206,7 +279,7 @@ impl Executor {
                             "Inbox QA queue initialization failed"
                         );
                     }
-                    self.pause(stop).await;
+                    self.pause(stop, None).await;
                     continue;
                 }
                 initialized = true;
@@ -230,12 +303,12 @@ impl Executor {
                 match claim {
                     Ok(Ok(store::ReplicaClaim::Warm)) => {
                         self.replica_lease = ReplicaLease::Claimed;
-                        if self
+                        if let Some(confirmed_until) = self
                             .warm(setting.generation, setting.generator_preference, stop)
                             .await
                         {
-                            loaded = Some(setting.generation);
-                            self.resident_generation = loaded;
+                            loaded = Some(ResidentPermit::new(setting.generation, confirmed_until));
+                            self.resident_generation = Some(setting.generation);
                             self.record_availability(setting.generation, None);
                             if let Some(availability) = &self.availability {
                                 availability.record_resident(setting.generation);
@@ -264,40 +337,62 @@ impl Executor {
                     }
                 }
             }
-            let Some(generation) = loaded else {
-                self.pause(stop).await;
+            let Some(permit) = &mut loaded else {
+                self.pause(stop, None).await;
                 continue;
             };
-            if Instant::now() >= next_check {
-                next_check = Instant::now() + CHECK;
-                if !self.heartbeat(generation).await {
-                    self.unload().await;
-                    loaded = None;
-                    next_warm = Instant::now() + WARM_RETRY;
-                    continue;
+            if stop.is_cancelled() || Instant::now() >= permit.confirmed_until {
+                continue;
+            }
+            if Instant::now() >= permit.next_check {
+                match self.heartbeat(permit).await {
+                    IdleHeartbeat::Ready => {}
+                    IdleHeartbeat::Retry => {
+                        self.pause(stop, Some(permit)).await;
+                        continue;
+                    }
+                    IdleHeartbeat::Reap => {
+                        self.unload().await;
+                        loaded = None;
+                        next_warm = Instant::now() + WARM_RETRY;
+                        continue;
+                    }
                 }
+            }
+            if stop.is_cancelled() {
+                continue;
             }
             if Instant::now() >= next_dispatch {
                 next_dispatch = Instant::now() + CHECK;
-                if !matches!(timeout(AUTH_TIMEOUT, self.relay()).await, Ok(Ok(()))) {
+                let deadline = operation_deadline(Some(permit), AUTH_TIMEOUT);
+                if !matches!(timeout_at(deadline, self.relay()).await, Ok(Ok(()))) {
                     tracing::warn!(
                         qa_queue_stage = "relay",
                         "Inbox QA wake-up relay unavailable"
                     );
                 }
             }
-            match timeout(AUTH_TIMEOUT, self.broker.claim(&self.owner)).await {
+            if Instant::now() >= permit.confirmed_until || stop.is_cancelled() {
+                continue;
+            }
+            let deadline = operation_deadline(Some(permit), AUTH_TIMEOUT);
+            match timeout_at(deadline, self.broker.claim(&self.owner)).await {
                 Ok(Ok(Some(delivery))) => {
-                    let result = self.handle(delivery, generation, stop).await;
-                    if result.is_err() {
-                        tracing::warn!(
-                            qa_queue_stage = "delivery",
-                            "Inbox QA delivery did not settle"
-                        );
-                    }
-                    if !matches!(result, Ok(true)) {
+                    let keep_warm = match self.handle(delivery, permit, stop).await {
+                        Ok(keep_warm) => keep_warm,
+                        Err(_) => {
+                            // Claim and start errors happened before the generator was used.
+                            permit.require_renewal();
+                            tracing::warn!(
+                                qa_queue_stage = "delivery_start",
+                                "Inbox QA could not start the delivery"
+                            );
+                            true
+                        }
+                    };
+                    if !keep_warm {
                         self.record_availability(
-                            generation,
+                            permit.generation,
                             Some(QaAvailabilityReason::WorkerStartFailed),
                         );
                         self.unload().await;
@@ -317,15 +412,15 @@ impl Executor {
                     }
                 }
             }
-            self.pause(stop).await;
+            self.pause(stop, loaded.as_ref()).await;
         }
         Ok(())
     }
 
-    async fn pause(&self, stop: &CancellationToken) {
+    async fn pause(&self, stop: &CancellationToken, permit: Option<&ResidentPermit>) {
         tokio::select! {
             () = stop.cancelled() => {}
-            () = sleep(POLL) => {}
+            () = tokio::time::sleep_until(operation_deadline(permit, POLL)) => {}
         }
     }
 
@@ -334,9 +429,13 @@ impl Executor {
         generation: i64,
         preference: QaGeneratorPreference,
         stop: &CancellationToken,
-    ) -> bool {
-        if !self.renew_replica(generation, false, "warm_lease").await {
-            return false;
+    ) -> Option<Instant> {
+        if !matches!(
+            self.renew_replica(generation, false, "warm_lease", None)
+                .await,
+            ReplicaRenewal::Confirmed(_)
+        ) {
+            return None;
         }
         let selected_model = |model| {
             if let Some(availability) = &self.availability {
@@ -357,12 +456,15 @@ impl Executor {
         let mut next = Instant::now() + CHECK;
         loop {
             tokio::select! {
-                () = stop.cancelled() => return false,
+                () = stop.cancelled() => return None,
                 result = &mut warm => {
                     match result {
                         Ok(Ok(())) => {
                             progress(QaStartupStage::Activating);
-                            return self.renew_replica(generation, true, "ready_lease").await;
+                            return match self.renew_replica(generation, true, "ready_lease", None).await {
+                                ReplicaRenewal::Confirmed(until) => Some(until),
+                                _ => None,
+                            };
                         }
                         Ok(Err(error)) => {
                             self.record_availability(generation, Some(crate::qa_worker::availability_reason(&error)));
@@ -373,11 +475,14 @@ impl Executor {
                             tracing::warn!(qa_replica_stage = "warm_timeout", "Inbox QA model did not warm within its budget");
                         }
                     }
-                    return false;
+                    return None;
                 }
                 () = tokio::time::sleep_until(next) => {
-                    if !self.renew_replica(generation, false, "warm_lease").await {
-                        return false;
+                    if !matches!(
+                        self.renew_replica(generation, false, "warm_lease", None).await,
+                        ReplicaRenewal::Confirmed(_)
+                    ) {
+                        return None;
                     }
                     next = Instant::now() + CHECK;
                 }
@@ -391,47 +496,61 @@ impl Executor {
         }
     }
 
-    async fn renew_replica(&self, generation: i64, ready: bool, stage: &'static str) -> bool {
-        let result = timeout(
-            AUTH_TIMEOUT,
+    async fn renew_replica(
+        &self,
+        generation: i64,
+        ready: bool,
+        stage: &'static str,
+        permit: Option<&ResidentPermit>,
+    ) -> ReplicaRenewal {
+        // The datastore starts its 12 seconds after this attempt begins. Count
+        // from the local start to keep a conservative deadline if its next reply is lost.
+        let started = Instant::now();
+        let deadline = operation_deadline(permit, AUTH_TIMEOUT);
+        if started >= deadline {
+            return ReplicaRenewal::Unconfirmed;
+        }
+        let result = timeout_at(
+            deadline,
             store::beat(&self.repo, &self.placement, &self.owner, generation, ready),
         )
         .await;
         match result {
-            Ok(Ok(true)) => true,
+            Ok(Ok(true)) => ReplicaRenewal::Confirmed(started + store::REPLICA_LEASE),
             Ok(Ok(false)) => {
                 tracing::info!(qa_replica_stage = stage, "Inbox QA replica permit ended");
-                false
+                ReplicaRenewal::Denied
             }
             _ => {
                 tracing::warn!(
                     qa_replica_stage = stage,
                     "Inbox QA replica permit could not be renewed"
                 );
-                false
+                ReplicaRenewal::Unconfirmed
             }
         }
     }
 
-    async fn heartbeat(&self, generation: i64) -> bool {
+    async fn heartbeat(&self, permit: &mut ResidentPermit) -> IdleHeartbeat {
         // Refresh the datastore permit before touching the independently supervised model.
-        if !self
-            .renew_replica(generation, true, "heartbeat_lease")
-            .await
-        {
-            return false;
+        let renewal = self
+            .renew_replica(permit.generation, true, "heartbeat_lease", Some(permit))
+            .await;
+        let authority = permit.idle_renewal(renewal);
+        if authority != IdleHeartbeat::Ready {
+            return authority;
         }
         let reason = match timeout(AUTH_TIMEOUT, self.model.check_ready()).await {
-            Ok(Ok(())) => return true,
+            Ok(Ok(())) => return IdleHeartbeat::Ready,
             Ok(Err(error)) => crate::qa_worker::availability_reason(&error),
             Err(_) => QaAvailabilityReason::WorkerStartFailed,
         };
-        self.record_availability(generation, Some(reason));
+        self.record_availability(permit.generation, Some(reason));
         tracing::warn!(
             qa_replica_stage = "heartbeat_model",
             "Inbox QA model heartbeat failed"
         );
-        false
+        IdleHeartbeat::Reap
     }
 
     async fn unload(&mut self) {
@@ -477,7 +596,7 @@ impl Executor {
     async fn handle(
         &self,
         delivery: Received,
-        generation: i64,
+        permit: &mut ResidentPermit,
         stop: &CancellationToken,
     ) -> Result<bool> {
         let envelope = match Envelope::decode(delivery.payload()) {
@@ -543,12 +662,17 @@ impl Executor {
                 return Err(error.into());
             }
         };
-        let result = match self.prepare(&mut evidence, &lease, stop).await {
-            RunResult::More => {
-                self.infer(&evidence, &lease, &delivery, generation, stop)
-                    .await
+        let (result, worker_unused) = match self.prepare(&mut evidence, &lease, stop).await {
+            RunResult::More => (
+                self.infer(&evidence, &lease, &delivery, permit, stop).await,
+                false,
+            ),
+            result => {
+                if matches!(result, RunResult::Error | RunResult::Fenced) {
+                    permit.require_renewal();
+                }
+                (result, true)
             }
-            result => result,
         };
         let (outcome, keep_warm) = match result {
             RunResult::Completed => (
@@ -579,7 +703,7 @@ impl Executor {
                 DeliveryOutcome::Failed {
                     reason: "qa_fenced",
                 },
-                false,
+                worker_unused,
             ),
             RunResult::More | RunResult::Error => {
                 let terminal = timeout(
@@ -603,11 +727,17 @@ impl Executor {
                     DeliveryOutcome::Failed {
                         reason: "qa_inference_failed",
                     },
-                    false,
+                    worker_unused,
                 )
             }
         };
-        self.finish(delivery, &lease, outcome).await?;
+        if self.finish(delivery, &lease, outcome).await.is_err() {
+            permit.require_renewal();
+            tracing::warn!(
+                qa_queue_stage = "delivery_finish",
+                "Inbox QA delivery did not settle"
+            );
+        }
         Ok(keep_warm)
     }
 
@@ -638,7 +768,7 @@ impl Executor {
         evidence: &FrozenEvidence,
         lease: &DeliveryLease,
         delivery: &Received,
-        generation: i64,
+        permit: &mut ResidentPermit,
         stop: &CancellationToken,
     ) -> RunResult {
         // Only this executor can replace the generator while it owns the delivery lease.
@@ -656,7 +786,8 @@ impl Executor {
             return RunResult::Error;
         }
         let mut publication = Publication::new(model_target);
-        let deadline = Instant::now() + budget;
+        let started = Instant::now();
+        let deadline = started + budget;
         let (sender, mut receiver) = mpsc::channel(4);
         let cancel = CancellationToken::new();
         let inference = self
@@ -680,7 +811,7 @@ impl Executor {
                 }
                 () = tokio::time::sleep_until(next_check) => {
                     next_check = Instant::now() + CHECK;
-                    let stage = match timeout(AUTH_TIMEOUT, self.renew(lease, delivery, generation)).await {
+                    let stage = match timeout(AUTH_TIMEOUT, self.renew(lease, delivery, permit)).await {
                         Ok(Ok(true)) => None,
                         Ok(Ok(false)) => Some("lease_fenced"),
                         Ok(Err(_)) => Some("lease_error"),
@@ -734,8 +865,14 @@ impl Executor {
                 RunResult::EvidenceExpired { keep_warm }
                 | RunResult::FailedTerminal { keep_warm } => {
                     // The turn has settled. Keep the model only after its validated terminal frame.
-                    *keep_warm =
-                        drain_worker_terminal(inference.as_mut(), &mut receiver, stop).await;
+                    *keep_warm = drain_worker_terminal(
+                        inference.as_mut(),
+                        &mut receiver,
+                        stop,
+                        started + WORKER_TURN_LIMIT,
+                        self.wait_for_drain_fence(lease, delivery, permit),
+                    )
+                    .await;
                     if !*keep_warm {
                         tracing::warn!(
                             qa_turn_stage = "worker_terminal_drain",
@@ -869,15 +1006,60 @@ impl Executor {
         &self,
         lease: &DeliveryLease,
         delivery: &Received,
-        generation: i64,
+        permit: &mut ResidentPermit,
     ) -> Result<bool> {
-        let (permitted, live, dispatch, queue) = tokio::join!(
-            store::beat(&self.repo, &self.placement, &self.owner, generation, true),
+        let started = Instant::now();
+        let (permitted, live, delivery_live) = tokio::join!(
+            store::beat(
+                &self.repo,
+                &self.placement,
+                &self.owner,
+                permit.generation,
+                true
+            ),
             store::is_live(&self.repo, lease),
+            self.renew_delivery(lease, delivery),
+        );
+        let authorized = permitted? && live? && delivery_live?;
+        if authorized {
+            // Active turns can outlast an idle heartbeat interval.
+            permit.confirmed_until = started + store::REPLICA_LEASE;
+        }
+        Ok(authorized)
+    }
+
+    async fn renew_delivery(&self, lease: &DeliveryLease, delivery: &Received) -> Result<bool> {
+        let (dispatch, queue) = tokio::join!(
             job_dispatch::renew_delivery(self.repo.db(), lease, DELIVERY_SECS, Utc::now()),
             delivery.renew(),
         );
-        Ok(permitted? && live? && dispatch? && queue?)
+        Ok(dispatch? && queue?)
+    }
+
+    async fn wait_for_drain_fence(
+        &self,
+        lease: &DeliveryLease,
+        delivery: &Received,
+        permit: &mut ResidentPermit,
+    ) {
+        permit.require_renewal();
+        loop {
+            tokio::time::sleep_until(permit.next_check.min(permit.confirmed_until)).await;
+            if Instant::now() >= permit.confirmed_until {
+                return;
+            }
+            let deadline = operation_deadline(Some(permit), AUTH_TIMEOUT);
+            // The exchange is terminal. Only replica ownership and the delivery still need renewal.
+            let (replica, _) = tokio::join!(
+                self.renew_replica(permit.generation, true, "drain_lease", Some(permit)),
+                timeout_at(deadline, self.renew_delivery(lease, delivery)),
+            );
+            match permit.idle_renewal(replica) {
+                IdleHeartbeat::Ready => {}
+                IdleHeartbeat::Retry => permit.next_check = Instant::now() + POLL,
+                IdleHeartbeat::Reap => return,
+            }
+        }
     }
 }
 
@@ -895,6 +1077,8 @@ async fn drain_worker_terminal(
     inference: impl Future<Output = Result<()>>,
     receiver: &mut mpsc::Receiver<QaWorkerEvent>,
     stop: &CancellationToken,
+    deadline: Instant,
+    authority_lost: impl Future<Output = ()>,
 ) -> bool {
     let drain = async {
         tokio::pin!(inference);
@@ -909,7 +1093,9 @@ async fn drain_worker_terminal(
     tokio::select! {
         biased;
         () = stop.cancelled() => false,
-        result = timeout(SETTLED_TURN_DRAIN, drain) => matches!(result, Ok(true)),
+        () = tokio::time::sleep_until(deadline) => false,
+        () = authority_lost => false,
+        result = drain => result,
     }
 }
 
@@ -1205,15 +1391,76 @@ mod tests {
     use fleetworks_contracts::qa_worker::QaWorkerDialogue;
     use fleetworks_contracts::qa_worker::QaWorkerPlan;
     use fleetworks_contracts::qa_worker::QaWorkerRequest;
+    use tokio::time::{advance, sleep};
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn transient_idle_authority_requires_a_new_beat_before_dispatch() {
+        let mut permit = ResidentPermit::new(7, Instant::now() + store::REPLICA_LEASE);
+        let first_deadline = permit.confirmed_until;
+        assert_eq!(
+            permit.idle_renewal(ReplicaRenewal::Confirmed(first_deadline)),
+            IdleHeartbeat::Ready
+        );
+        assert!(permit.next_check > Instant::now());
+
+        // A settings failure makes the next successful settings read check the lease immediately.
+        permit.require_renewal();
+        assert_eq!(permit.next_check, Instant::now());
+        advance(CHECK).await;
+        assert_eq!(
+            permit.idle_renewal(ReplicaRenewal::Unconfirmed),
+            IdleHeartbeat::Retry
+        );
+        assert_eq!(permit.next_check, Instant::now());
+        assert_eq!(permit.confirmed_until, first_deadline);
+
+        let new_deadline = Instant::now() + store::REPLICA_LEASE;
+        assert_eq!(
+            permit.idle_renewal(ReplicaRenewal::Confirmed(new_deadline)),
+            IdleHeartbeat::Ready
+        );
+        assert_eq!(permit.confirmed_until, new_deadline);
+        assert_eq!(permit.next_check, Instant::now() + CHECK);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_authority_does_not_survive_denial_or_its_last_confirmed_deadline() {
+        let initial_deadline = Instant::now() + store::REPLICA_LEASE;
+        let mut permit = ResidentPermit::new(7, initial_deadline);
+        assert_eq!(
+            permit.idle_renewal(ReplicaRenewal::Denied),
+            IdleHeartbeat::Reap
+        );
+
+        advance(store::REPLICA_LEASE - POLL).await;
+        assert_eq!(
+            permit.idle_renewal(ReplicaRenewal::Unconfirmed),
+            IdleHeartbeat::Retry
+        );
+        assert_eq!(
+            operation_deadline(Some(&permit), AUTH_TIMEOUT),
+            initial_deadline
+        );
+        advance(POLL).await;
+        assert_eq!(
+            permit.idle_renewal(ReplicaRenewal::Unconfirmed),
+            IdleHeartbeat::Reap
+        );
+        let late_deadline = Instant::now() + store::REPLICA_LEASE;
+        assert_eq!(
+            permit.idle_renewal(ReplicaRenewal::Confirmed(late_deadline)),
+            IdleHeartbeat::Reap
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn expired_turn_drain_consumes_late_frames_to_keep_the_worker() {
         let (sender, mut receiver) = mpsc::channel(1);
         let stop = CancellationToken::new();
         let inference = async move {
-            sleep(Duration::from_millis(100)).await;
+            sleep(store::REPLICA_LEASE + CHECK).await;
             sender
                 .send(QaWorkerEvent::Delta {
                     turn_id: "expired-turn".into(),
@@ -1235,7 +1482,16 @@ mod tests {
             Ok(())
         };
 
-        assert!(drain_worker_terminal(inference, &mut receiver, &stop).await);
+        assert!(
+            drain_worker_terminal(
+                inference,
+                &mut receiver,
+                &stop,
+                Instant::now() + WORKER_TURN_LIMIT,
+                std::future::pending(),
+            )
+            .await
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1247,13 +1503,37 @@ mod tests {
                 std::future::ready(Err(anyhow!("invalid worker terminal"))),
                 &mut receiver,
                 &stop,
+                Instant::now() + WORKER_TURN_LIMIT,
+                std::future::pending(),
             )
             .await
         );
 
         let started = Instant::now();
-        assert!(!drain_worker_terminal(std::future::pending(), &mut receiver, &stop).await);
-        assert!(started.elapsed() >= SETTLED_TURN_DRAIN);
+        let deadline = started + CHECK;
+        assert!(
+            !drain_worker_terminal(
+                std::future::pending(),
+                &mut receiver,
+                &stop,
+                deadline,
+                std::future::pending(),
+            )
+            .await
+        );
+        assert_eq!(Instant::now(), deadline);
+
+        assert!(
+            !drain_worker_terminal(
+                std::future::pending(),
+                &mut receiver,
+                &stop,
+                Instant::now() + WORKER_TURN_LIMIT,
+                sleep(CHECK),
+            )
+            .await
+        );
+        assert_eq!(Instant::now(), deadline + CHECK);
 
         stop.cancel();
         assert!(
@@ -1261,6 +1541,8 @@ mod tests {
                 async { panic!("a stopped service must not resume the worker") },
                 &mut receiver,
                 &stop,
+                Instant::now() + WORKER_TURN_LIMIT,
+                std::future::pending(),
             )
             .await
         );

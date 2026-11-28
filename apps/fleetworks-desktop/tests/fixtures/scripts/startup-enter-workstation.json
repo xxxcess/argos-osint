@@ -1,0 +1,5 @@
+{
+  "events": [
+    { "t": 4.6, "type": "click", "key": "startup-enter-workstation" }
+  ]
+}

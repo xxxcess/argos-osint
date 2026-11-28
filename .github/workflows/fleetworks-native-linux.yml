@@ -291,6 +291,7 @@ jobs:
           capture=(python3 scripts/fleetworks_verify.py native-ui --agent --require-clean
             --target "$LINUX_TARGET" --revision "$EXPECTED_HEAD" --size 640x480 --size 1280x800 --scale 1)
           chooser=(--scene backend-choice-opening --scene backend-choice-reduced-motion)
+          registered=(--scene startup-embedded-registered --scene startup-embedded-registered-reduced-motion)
 
           "${capture[@]}" "${chooser[@]}" --output "$evidence/startup-dock" --script-at 0.20 \
             --script "backend-choice-opening=$scripts/startup-dock.json" \
@@ -304,10 +305,15 @@ jobs:
             --script-expect-key backend-choice-opening=startup-choose \
             --script-expect-key backend-choice-reduced-motion=startup-choose
 
-          "${capture[@]}" --output "$evidence/startup-finish" --script-at 4.5 \
-            --scene startup-embedded-registered --scene startup-embedded-registered-reduced-motion \
+          "${capture[@]}" "${registered[@]}" --output "$evidence/startup-await-workstation" --script-at 4.5 \
             --script "startup-embedded-registered=$scripts/startup-await-workstation.json" \
             --script "startup-embedded-registered-reduced-motion=$scripts/startup-await-workstation.json" \
+            --script-expect-key startup-embedded-registered=startup-enter-workstation \
+            --script-expect-key startup-embedded-registered-reduced-motion=startup-enter-workstation
+
+          "${capture[@]}" "${registered[@]}" --output "$evidence/startup-finish" --script-at 5.1 \
+            --script "startup-embedded-registered=$scripts/startup-enter-workstation.json" \
+            --script "startup-embedded-registered-reduced-motion=$scripts/startup-enter-workstation.json" \
             --script-expect-key startup-embedded-registered=screen-workstation \
             --script-expect-key startup-embedded-registered-reduced-motion=screen-workstation
 

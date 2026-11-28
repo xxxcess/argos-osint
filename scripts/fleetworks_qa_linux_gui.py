@@ -312,12 +312,24 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
 
     button("startup-local")
 
-    def embedded_checks_observed():
-        stage = find("startup-stage-embedded-health")
-        gateway = find("startup-wiring-health-check-gateway")
-        if (screen_bounds(stage, atspi) is not None and screen_bounds(gateway, atspi) is not None
-                and gateway.name in ("Gateway: Passed", "Gateway: Unavailable")):
-            return stage
+    enter_key = "startup-enter-workstation"
+
+    def workstation_status():
+        screen = find("screen-workstation")
+        return screen if screen_bounds(screen, atspi) is not None else None
+
+    def embedded_checks_ready():
+        stage_key = "startup-stage-embedded-health"
+        checklist_key = "startup-wiring-health-checklist"
+        gateway_key = "startup-wiring-health-check-gateway"
+        keys = {stage_key, checklist_key, gateway_key, enter_key}
+        require(workstation_status() is None, "Workstation opened before Enter Workstation was pressed")
+        nodes = find_many(keys, {enter_key})
+        if any(screen_bounds(nodes.get(key), atspi) is None for key in keys):
+            return None
+        if (nodes[gateway_key].name in ("Gateway: Passed", "Gateway: Unavailable")
+                and nodes[enter_key].name == "Enter Workstation"):
+            return nodes[stage_key]
         return None
 
     def bundled_actor_ready():
@@ -332,16 +344,18 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         require(not any(row.get("op") == "seed_actors" for row in read_journal(journal)),
                 "the app accepted an actor seed without operator confirmation")
 
-    wait_for(embedded_checks_observed, app, "initial Embedded health checks")
-    # The new checklist is accessible while the outgoing registration slide is still fading.
-    time.sleep(0.5)
-    health_stage = embedded_checks_observed()
-    require(health_stage is not None, "Embedded health slide did not stay visible")
-    require(not any(node.getRole() == atspi.ROLE_PUSH_BUTTON and screen_bounds(node, atspi) is not None
-                    for node in descendants(health_stage)), "Embedded health slide exposed a button")
+    wait_for(embedded_checks_ready, app, "Embedded health checks ready to enter")
+    # Observe the checklist beyond the former two-second automatic handoff.
+    time.sleep(2.25)
+    health_stage = wait_for(embedded_checks_ready, app, "retained Embedded health checklist", timeout=3)
+    buttons = [node.get_accessible_id() for node in descendants(health_stage)
+               if node.getRole() == atspi.ROLE_PUSH_BUTTON and screen_bounds(node, atspi) is not None]
+    require(buttons == [enter_key], f"Unexpected Embedded health controls: {buttons}")
+    require_no_seed()
     subprocess.run(["scrot", "--overwrite", str(output / "startup-embedded-health.png")],
                    check=True, timeout=5)
-    wait_for(lambda: find("screen-workstation"), app, "automatic Workstation Status handoff", timeout=8)
+    button(enter_key, "Enter Workstation", timeout=4)
+    wait_for(workstation_status, app, "Workstation Status after Enter Workstation", timeout=8)
     require_no_seed()
     require(find("workstation-build-actor-index", button=True) is None,
             "the index build was available before a catalog was seeded")

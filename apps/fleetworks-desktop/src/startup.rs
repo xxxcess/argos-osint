@@ -44,6 +44,7 @@ const RAIL_SECONDS: f64 = 0.21;
 const WIRING_HOLD_SECONDS: f64 = 2.0;
 const HEALTH_CHECK_WAIT_SECONDS: f64 = 10.0;
 const EMBEDDED_STAGE: &str = "startup-embedded-stage";
+const ENTER_WORKSTATION: &str = "startup-enter-workstation";
 const CONNECTION_DOT: &str = "startup-wiring-step-connection";
 const REGISTRATION_DOT: &str = "startup-wiring-step-registration";
 const HEALTH_CHECKS_DOT: &str = "startup-wiring-step-health-checks";
@@ -96,6 +97,7 @@ enum WiringStage {
     HealthChecks {
         wait_until: f64,
     },
+    ReadyToEnter,
 }
 
 #[derive(Default)]
@@ -754,12 +756,13 @@ fn embedded_stage(state: &State, preferences: ViewPreferences, kit: &Kit) -> (&'
                 next,
             )
         }
-        WiringStage::HealthChecks { .. } => {
-            let pending = state
-                .startup
-                .wiring
-                .as_ref()
-                .is_some_and(|wiring| wiring.hold_until.is_none())
+        WiringStage::HealthChecks { .. } | WiringStage::ReadyToEnter => {
+            let pending = matches!(stage, WiringStage::HealthChecks { .. })
+                && state
+                    .startup
+                    .wiring
+                    .as_ref()
+                    .is_some_and(|wiring| wiring.hold_until.is_none())
                 && state.startup_health_checks_pending();
             (
                 "startup-stage-embedded-health",
@@ -771,7 +774,31 @@ fn embedded_stage(state: &State, preferences: ViewPreferences, kit: &Kit) -> (&'
             )
         }
     };
-    let has_controls = !matches!(stage, WiringStage::HealthChecks { .. });
+    let heading = views::heading(title, kit)
+        .key(EMBEDDED_STAGE)
+        .role("heading")
+        .focusable(true)
+        .tab_index(-1);
+    let header = if stage == WiringStage::ReadyToEnter {
+        rune::row()
+            .w_full()
+            .center_y()
+            .gap(8.0)
+            .child(heading.grow(1.0).min_w(0.0))
+            .child(
+                ActionButton::new("Enter Workstation")
+                    .key(ENTER_WORKSTATION)
+                    .finish(MetalFinish::GoldCta)
+                    .on_press_tx(State::finish_startup)
+                    .build(kit, preferences, None)
+                    .on_key(|state: &mut State, event, tx| {
+                        activate_on_return(state, event, tx, State::finish_startup)
+                    }),
+            )
+    } else {
+        heading
+    };
+    let has_controls = matches!(stage, WiringStage::Connection | WiringStage::Registration);
     let footer = has_controls.then(|| {
         rune::row()
             .key("startup-embedded-actions")
@@ -789,13 +816,7 @@ fn embedded_stage(state: &State, preferences: ViewPreferences, kit: &Kit) -> (&'
             .padding(16.0)
             .gap(10.0)
             .radius(12.0)
-            .child(
-                views::heading(title, kit)
-                    .key(EMBEDDED_STAGE)
-                    .role("heading")
-                    .focusable(true)
-                    .tab_index(-1),
-            )
+            .child(header)
             .child(checks)
             .children(
                 has_controls
@@ -1078,7 +1099,11 @@ impl State {
                     self.refresh_readiness();
                 }
             }
-            WiringStage::HealthChecks { .. } => self.finish_startup(tx),
+            WiringStage::HealthChecks { .. } => {
+                wiring.stage = WiringStage::ReadyToEnter;
+                tx.focus(ENTER_WORKSTATION, tx.focus_visible());
+            }
+            WiringStage::ReadyToEnter => return false,
         }
         true
     }
@@ -1192,6 +1217,15 @@ impl State {
 
     pub(crate) fn finish_startup(&mut self, tx: &mut Tx) {
         if !self.startup.active() || !self.connected() || self.registration.context.is_none() {
+            return;
+        }
+        if self.is_local_backend()
+            && !self
+                .startup
+                .wiring
+                .as_ref()
+                .is_some_and(|wiring| wiring.stage == WiringStage::ReadyToEnter)
+        {
             return;
         }
         self.startup.start_flight(Dock::Rail, self.clock);
@@ -1390,7 +1424,7 @@ mod tests {
     }
 
     #[test]
-    fn early_folder_selection_finishes_the_intro_and_checklists_before_opening_workstation() {
+    fn early_folder_selection_finishes_the_checklists_and_waits_for_enter() {
         for (size, reduced) in [
             ((640.0, 480.0), false),
             ((640.0, 480.0), true),
@@ -1486,13 +1520,24 @@ mod tests {
             assert!(tree.contains("Step 3 of 3"));
             assert!(runtime.find("startup-embedded-actions").is_none());
             assert!(runtime.find("startup-back").is_none());
-            assert!(runtime.find("startup-open-workstation").is_none());
+            assert!(runtime.find(ENTER_WORKSTATION).is_none());
             tick(&mut runtime, health_at + 1.99);
             assert!(runtime.find("startup-wiring-health-checklist").is_some());
             assert!(runtime.find("screen-workstation").is_none());
+            assert!(runtime.find(ENTER_WORKSTATION).is_none());
 
-            let workstation_at = health_at + 2.01;
+            tick(&mut runtime, health_at + 2.01);
+            assert!(runtime.find(ENTER_WORKSTATION).is_some());
+            let workstation_at = health_at + 25.0;
             tick(&mut runtime, workstation_at);
+            assert!(runtime.find("startup-wiring-health-checklist").is_some());
+            assert!(runtime.find("screen-workstation").is_none());
+            if reduced {
+                click(&mut runtime, ENTER_WORKSTATION);
+            } else {
+                key(&mut runtime, rune::Key::Enter);
+            }
+            runtime.frame(0.02);
             assert!(!runtime.state.startup.active());
             assert_eq!(runtime.state.page, app::Page::Workstation);
             assert!(runtime.find("screen-workstation").is_some());
@@ -1528,7 +1573,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_workstation_opens_after_the_catalog_and_search_checks() {
+    fn a_new_workstation_can_enter_with_catalog_and_search_setup_pending() {
         let mut runtime = runtime((640.0, 480.0), true);
         reach_embedded_health_checks(&mut runtime, Load::Idle);
         let tree = runtime.accessibility_json().to_string();
@@ -1559,7 +1604,11 @@ mod tests {
         assert!(tree.contains("Actor search: Needs setup"));
         tick(&mut runtime, 8.99);
         assert!(runtime.find("screen-workstation").is_none());
+        assert!(runtime.find(ENTER_WORKSTATION).is_none());
         tick(&mut runtime, 9.01);
+        assert!(runtime.find("screen-workstation").is_none());
+        click(&mut runtime, ENTER_WORKSTATION);
+        runtime.frame(0.02);
         assert!(runtime.find("screen-workstation").is_some());
         assert!(!runtime.state.intents.iter().any(|intent| matches!(
             intent,
@@ -1593,7 +1642,11 @@ mod tests {
                 .contains("Gateway: Unavailable"));
             tick(&mut runtime, unavailable_at + 1.99);
             assert!(runtime.find("startup-wiring-health-checklist").is_some());
+            assert!(runtime.find(ENTER_WORKSTATION).is_none());
             tick(&mut runtime, unavailable_at + 2.01);
+            assert!(runtime.find("screen-workstation").is_none());
+            click(&mut runtime, ENTER_WORKSTATION);
+            runtime.frame(0.02);
             assert!(runtime.find("screen-workstation").is_some());
         }
     }

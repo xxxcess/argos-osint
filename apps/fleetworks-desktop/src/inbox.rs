@@ -1,7 +1,8 @@
 //! Native Inbox: a drawer for backend answers and allowlisted workstation notifications.
 //!
 //! Notification items come from fixed text, job titles and readiness check names. The list
-//! resets when the connection authority changes.
+//! resets when the connection authority changes. Started and failed job notices use protected
+//! local retention tied to the current registration and access authority.
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
@@ -18,6 +19,7 @@ use fleetworks_contracts::chat::QA_MAX_INBOX_NOTIFICATION_ITEMS;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
+use fleetworks_workstation::native::JobNoticeKey;
 use rune::Cx;
 use rune::El;
 use rune::Icon;
@@ -35,6 +37,10 @@ use crate::material::GlassSurface;
 use crate::theme;
 use crate::theme::StatusTone;
 use crate::State;
+
+mod job_history;
+
+use job_history::History;
 
 /// Retained items. The oldest is dropped first.
 pub(crate) const MAX_ITEMS: usize = QA_MAX_INBOX_NOTIFICATION_ITEMS as usize;
@@ -98,6 +104,8 @@ pub(crate) struct Item {
     pub read: bool,
     tone: StatusTone,
     private_job: bool,
+    job_notice: Option<JobNoticeKey>,
+    current_job_visibility: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -118,6 +126,8 @@ pub(crate) struct Observation {
     /// (job id, title, state) for the registered workstation's visible jobs.
     pub jobs: Vec<(String, String, String)>,
     pub private_jobs: BTreeSet<String>,
+    job_notice_keys: BTreeMap<String, JobNoticeKey>,
+    observed_at_ms: i64,
     /// (check identity, state) from the latest readiness read.
     pub checks: Vec<(ReadinessCheckId, ReadinessState)>,
     pub tracked_actor_reindex: bool,
@@ -134,7 +144,7 @@ pub(crate) struct JobStatusUpdate {
     pub transition_id: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Inbox {
     items: VecDeque<Item>,
     next_id: u64,
@@ -150,6 +160,8 @@ pub struct Inbox {
     query: TextEdit,
     expanded: BTreeSet<Topic>,
     selected: Option<u64>,
+    history: History,
+    known_notice_keys: BTreeMap<String, JobNoticeKey>,
 }
 
 impl Inbox {
@@ -167,7 +179,9 @@ impl Inbox {
         use QaInboxNotificationTopic::{Connection, Jobs, Readiness};
 
         let mut groups = BTreeMap::new();
-        for item in self.items.iter().filter(|item| !item.private_job) {
+        for item in self.items.iter().filter(|item| {
+            !item.private_job && (item.job_notice.is_none() || item.current_job_visibility)
+        }) {
             let topic = match &item.topic {
                 Topic::Connection => Connection,
                 Topic::Job(_) => Jobs,
@@ -255,12 +269,12 @@ impl Inbox {
         let Some(id) = self.selected else {
             return;
         };
-        if let Some(item) = self
+        if self
             .items
-            .iter_mut()
-            .find(|item| item.id == id && &item.topic == topic)
+            .iter()
+            .any(|item| item.id == id && &item.topic == topic)
         {
-            item.read = true;
+            self.mark_read(id);
             self.selected = None;
         }
     }
@@ -275,7 +289,7 @@ impl Inbox {
 
     fn mark_read(&mut self, id: u64) {
         if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
-            item.read = true;
+            self.history.mark_read(item);
         }
     }
 
@@ -289,7 +303,7 @@ impl Inbox {
     fn mark_group_read(&mut self, topic: &Topic) {
         for item in &mut self.items {
             if &item.topic == topic {
-                item.read = true;
+                self.history.mark_read(item);
             }
         }
     }
@@ -300,6 +314,7 @@ impl Inbox {
         self.link = Link::Unknown;
         self.known_jobs.clear();
         self.known_job_order.clear();
+        self.known_notice_keys.clear();
         self.checks.clear();
         self.seen_job_events.clear();
         self.expanded.clear();
@@ -323,6 +338,7 @@ impl Inbox {
                 .unwrap_or(0);
             if let Some(evicted) = self.known_job_order.remove(evict_index) {
                 self.known_jobs.remove(&evicted);
+                self.known_notice_keys.remove(&evicted);
             } else {
                 break;
             }
@@ -429,6 +445,8 @@ impl Inbox {
             read: false,
             tone,
             private_job: false,
+            job_notice: None,
+            current_job_visibility: false,
         });
         while self.items.len() > MAX_ITEMS {
             if let Some(dropped) = self.items.pop_front() {
@@ -455,6 +473,9 @@ impl Inbox {
             self.link = observation.link;
             for (id, _, state) in observation.jobs {
                 self.record_known_job(id, state);
+            }
+            for (_, key) in observation.job_notice_keys {
+                self.observe_retained_job(key, observation.observed_at_ms, false);
             }
             self.checks = observation.checks;
             return changed;
@@ -490,8 +511,14 @@ impl Inbox {
             self.link = observation.link;
         }
 
+        let mut job_notice_keys = observation.job_notice_keys;
         for (id, title, state) in observation.jobs {
             let private = observation.private_jobs.contains(&id);
+            if let Some(key) = job_notice_keys.remove(&id) {
+                self.observe_retained_job(key, observation.observed_at_ms, true);
+                self.record_known_job(id, state);
+                continue;
+            }
             if self.observe_job_update(now, id, &title, state, None, private) {
                 changed = true;
             }
@@ -698,7 +725,6 @@ impl State {
         }
     }
 
-    /// Fold what this app currently shows into the Inbox. Cheap, bounded, and read-only.
     /// Open one synthetic retained notice in the production drawer.
     #[doc(hidden)]
     pub fn fixture_show_triage_notice(&mut self) {
@@ -766,6 +792,7 @@ impl State {
         ChatSourceReference::new(kind, id).ok()
     }
 
+    /// Fold the current authorized activity and readiness snapshots into the Inbox.
     pub(crate) fn observe_inbox(&mut self) -> bool {
         use crate::app::Load;
         use crate::connection::ConnectionStatus;
@@ -780,12 +807,22 @@ impl State {
         };
         let mut jobs = Vec::new();
         let mut private_jobs = BTreeSet::new();
-        if self.registration.context.is_some() {
+        let mut changed = self.bind_job_notice_history();
+        let retain_jobs = self.inbox.history.bound();
+        let mut job_notice_keys = BTreeMap::new();
+        if self.registration.context.is_some()
+            && self.permission(Permission::ReadWorkstationActivity)
+        {
             let mut seen_ids = BTreeSet::new();
             if let Some(page) = &self.scoped_jobs.page {
                 for row in page.rows.iter().take(MAX_TRACKED_JOBS) {
                     if seen_ids.insert(row.id.clone()) {
                         jobs.push((row.id.clone(), row.title.clone(), row.state.clone()));
+                        if retain_jobs {
+                            job_notice_keys.extend(
+                                job_history::event_key(row).map(|key| (row.id.clone(), key)),
+                            );
+                        }
                         if row.private_details_available && !row.status_only {
                             private_jobs.insert(row.id.clone());
                         }
@@ -807,6 +844,12 @@ impl State {
                         detail.job.title.clone(),
                         detail.job.state.clone(),
                     ));
+                    if retain_jobs {
+                        job_notice_keys.extend(
+                            job_history::event_key(&detail.job)
+                                .map(|key| (detail.job.id.clone(), key)),
+                        );
+                    }
                 }
             }
         }
@@ -822,17 +865,22 @@ impl State {
         let now = self.clock;
         let tracked_actor_reindex = crate::views::active_actor_reindex(self).is_some()
             || crate::views::queued_actor_reindex_id(self).is_some();
-        self.inbox.observe(
+        changed |= self.inbox.refresh_retained_labels(&jobs, &private_jobs);
+        changed |= self.inbox.observe(
             now,
             Observation {
                 scope: self.origin_revision,
                 link,
                 jobs,
                 private_jobs,
+                job_notice_keys,
+                observed_at_ms: chrono::Utc::now().timestamp_millis(),
                 checks,
                 tracked_actor_reindex,
             },
-        )
+        );
+        self.drive_job_notice_history();
+        changed
     }
 }
 
@@ -995,6 +1043,16 @@ fn body(
         .key("inbox-filter")
         .w_full();
     let mut rows = rune::col().key("inbox-list").gap(8.0);
+    if let Some(error) = inbox.history.error {
+        rows = rows.child(
+            rune::text(error)
+                .key("inbox-notification-error")
+                .role("alert")
+                .font(kit.ty.small)
+                .color(StatusTone::Err.fg())
+                .wrap(),
+        );
+    }
     let groups = inbox.filtered_groups();
     if groups.is_empty() {
         rows = rows.child(
@@ -1149,6 +1207,7 @@ fn group_view(group: &Group<'_>, state: &State, kit: &Kit, preferences: ViewPref
         .hover(theme::hex(theme::SURFACE_ELEVATED))
         .on_press_tx(move |state: &mut State, tx| {
             state.inbox.toggle_group(&topic);
+            state.drive_job_notice_history();
             tx.keep_on_screen(group_toggle_key.clone());
         })
         .child(status_dot(latest.tone))
@@ -1200,6 +1259,7 @@ fn group_view(group: &Group<'_>, state: &State, kit: &Kit, preferences: ViewPref
         .disabled(group.unread == 0)
         .on_press_tx(move |state: &mut State, tx| {
             state.inbox.mark_group_read(&mark_topic);
+            state.drive_job_notice_history();
             tx.focus(mark_focus.clone(), tx.focus_visible());
             tx.keep_on_screen(mark_focus.clone());
         })
@@ -1307,6 +1367,18 @@ fn open_job_logs_button(notice_id: u64, job: String, kit: &Kit) -> El {
         .key(format!("inbox-item-{notice_id}-action"))
 }
 
+fn delete_job_notice_button(notice_id: u64, busy: bool, kit: &Kit) -> El {
+    IconButton::new(kit.glyph.close)
+        .variant(IconButtonVariant::Ghost)
+        .control_size(ControlSize::Large)
+        .label("Delete job notification")
+        .help("Delete this notification permanently")
+        .disabled(busy)
+        .on_press_tx(move |state: &mut State, tx| state.delete_job_notice(notice_id, tx))
+        .build(kit)
+        .key(format!("inbox-item-{notice_id}-delete"))
+}
+
 fn row(item: &Item, state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
     let id = item.id;
     let expanded = state.inbox.selected == Some(id);
@@ -1350,6 +1422,7 @@ fn row(item: &Item, state: &State, kit: &Kit, preferences: ViewPreferences) -> E
         .hover(theme::hex(theme::SURFACE_ELEVATED))
         .on_press_tx(move |state: &mut State, tx| {
             state.inbox.select(id);
+            state.drive_job_notice_history();
             tx.keep_on_screen(toggle_key.clone());
         })
         .child(
@@ -1394,7 +1467,10 @@ fn row(item: &Item, state: &State, kit: &Kit, preferences: ViewPreferences) -> E
                     id,
                     &item.title,
                     kit,
-                )),
+                ))
+                .children(item.job_notice.as_ref().map(|_| {
+                    delete_job_notice_button(id, state.inbox.history.deleting.is_some(), kit)
+                })),
         );
     if !expanded {
         return enter_from_below(entry.child(content), preferences);
@@ -2341,6 +2417,27 @@ mod tests {
             .contains(&Topic::Job("fixture-index-job".into())));
         click_notification(&mut runtime, mark_connection, 1.9);
         assert_eq!(label(&runtime, "inbox-toggle-close"), "Inbox");
+        assert_eq!(runtime.state.inbox.unread(), 0);
+    }
+
+    #[test]
+    fn retained_job_action_deletes_one_notice_and_preserves_its_group() {
+        let mut state = crate::tests::registered_fixture();
+        state.seed_inbox_retained_job_fixture();
+        let mut runtime = runtime(state, (1060.0, 960.0));
+        let failed_action = "inbox-item-2-delete";
+        let started_action = "inbox-item-1-delete";
+        let group = "inbox-group-job-fixture-retained-work-toggle";
+        assert!(runtime.find(started_action).is_some());
+        assert!(runtime.find(failed_action).is_some());
+        assert_eq!(runtime.state.inbox.unread(), 2);
+        click_notification(&mut runtime, failed_action, 0.75);
+        assert!(runtime.find(failed_action).is_none());
+        assert!(runtime.find(started_action).is_some());
+        assert!(runtime.find(group).is_some());
+        assert_eq!(runtime.state.inbox.unread(), 1);
+        click_notification(&mut runtime, started_action, 1.0);
+        assert!(runtime.find(group).is_none());
         assert_eq!(runtime.state.inbox.unread(), 0);
     }
 }

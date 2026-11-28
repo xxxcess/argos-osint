@@ -101,6 +101,8 @@ fn detail(id: &str, kind: SubmissionKind, private: bool) -> JobDetail {
             operation: kind.operation().into(),
             state: "queued".into(),
             phase: "queued".into(),
+            active_since: String::new(),
+            finished_at: String::new(),
             progress_done: None,
             progress_total: None,
             error_summary: String::new(),

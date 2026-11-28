@@ -88,6 +88,8 @@ Focus, pending choices and accepted plans follow the turn store's 15-minute expi
 
 In Inbox, **View status** on a readiness notification opens the current check. **Open Job Logs** on a job notification opens the selected job and its log view in **Jobs & Logs**. Navigation uses the ordinary destination authorization.
 
+The native Inbox retains notifications for jobs it observes running or failing. They return when the same registered workstation reconnects to that backend. Select the **X** in a notification’s action area to delete that saved notification permanently.
+
 The **Explain in Assistant** icon on a job notification attaches its subject to the composer. Questions about a job attached manually or from a notification use its current scoped status and up to two short excerpts from the newest authorized log entries for that job. This reads at most one page of 16 entries with a one-second deadline. The worker fits the excerpts and their prompt overhead within half its negotiated input window. Job status remains available when a tail read times out, authorized records are absent, or the worker cannot use the excerpts. For supported failed maintenance jobs, the status includes allowlisted reasons such as the worker lease recovery limit. Standalone greetings skip the job lookup. A readiness notice uses a fresh observation, with registration status supplied by the caller’s verified registration.
 
 ### Models and lifecycle

@@ -242,6 +242,8 @@ mod tests {
             operation: "actor_reindex".into(),
             state: "running".into(),
             phase: "indexing".into(),
+            active_since: String::new(),
+            finished_at: String::new(),
             progress_done: None,
             progress_total: None,
             error_summary: String::new(),

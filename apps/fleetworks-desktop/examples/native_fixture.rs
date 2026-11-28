@@ -290,6 +290,8 @@ mod native {
             operation: "actor_seed".into(),
             state: "running".into(),
             phase: "seeding".into(),
+            active_since: String::new(),
+            finished_at: String::new(),
             progress_done: Some(250),
             progress_total: Some(1000),
             error_summary: String::new(),
@@ -603,6 +605,7 @@ mod native {
     fn inbox(state: &mut State) {
         registered(state);
         state.seed_inbox_drawer_fixture();
+        state.seed_inbox_retained_job_fixture();
     }
 
     fn inbox_qa_off(state: &mut State, kind: BackendKind) {

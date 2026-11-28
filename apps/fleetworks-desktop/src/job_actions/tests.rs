@@ -56,6 +56,8 @@ fn fixture() -> State {
         operation: "atlas_cycle".into(),
         state: "queued".into(),
         phase: "queued".into(),
+        active_since: String::new(),
+        finished_at: String::new(),
         progress_done: None,
         progress_total: None,
         error_summary: String::new(),

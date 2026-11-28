@@ -53,6 +53,7 @@ impl State {
 
     pub(crate) fn invalidate_origin(&mut self) {
         self.origin_revision = self.origin_revision.wrapping_add(1);
+        self.reset_inbox_for_authority();
         self.search_category = None;
         self.actor_catalog.reset();
         self.search_articles.reset();
@@ -149,7 +150,16 @@ impl State {
         self.registration.request_id = request_id;
         match result {
             Ok(registered) => {
+                if self
+                    .registration
+                    .context
+                    .as_ref()
+                    .is_some_and(|previous| !previous.same_request_context(&registered.context))
+                {
+                    self.reset_inbox_for_authority();
+                }
                 self.registration.context = Some(registered.context);
+                self.sync_jobs_binding();
                 self.registration.receipt = Load::Ready(registered.receipt);
                 self.registration.message = Some("Workstation registration verified".into());
                 self.restore_actor_reindex();
@@ -157,7 +167,11 @@ impl State {
                 self.refresh_page();
             }
             Err(error) => {
+                if self.registration.context.is_some() {
+                    self.reset_inbox_for_authority();
+                }
                 self.registration.context = None;
+                self.sync_jobs_binding();
                 self.registration.receipt = Load::Failed(error);
             }
         }

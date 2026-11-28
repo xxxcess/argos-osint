@@ -13,6 +13,7 @@
 
 mod connections;
 mod fs;
+mod inbox_jobs;
 pub mod keychain;
 pub mod legacy_connect;
 mod lifecycle_catalog;
@@ -38,6 +39,11 @@ pub use connections::GatewayProfileInput;
 pub use connections::CONNECTIONS_FILE;
 pub use connections::DEFAULT_LOCAL_ORIGIN;
 pub use connections::LOCAL_BACKEND_DIR;
+pub use inbox_jobs::JobNotice;
+pub use inbox_jobs::JobNoticeChange;
+pub use inbox_jobs::JobNoticeHistory;
+pub use inbox_jobs::JobNoticeKey;
+pub use inbox_jobs::JobNoticeKind;
 pub use pairing::CredentialStorage;
 pub use pairing::PairedGateway;
 pub use pairing::PairingCatalogSnapshot;

@@ -36,6 +36,8 @@ fn row(id: &str, app: &str, operation: &str, state: &str) -> ActivityJob {
         operation: operation.into(),
         state: state.into(),
         phase: state.into(),
+        active_since: String::new(),
+        finished_at: String::new(),
         progress_done: None,
         progress_total: None,
         error_summary: String::new(),

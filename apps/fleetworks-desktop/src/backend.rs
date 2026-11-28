@@ -139,6 +139,10 @@ pub struct ActivityJob {
     pub operation: String,
     pub state: String,
     pub phase: String,
+    #[serde(default)]
+    pub active_since: String,
+    #[serde(default)]
+    pub finished_at: String,
     pub progress_done: Option<i64>,
     pub progress_total: Option<i64>,
     pub error_summary: String,

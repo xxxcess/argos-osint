@@ -1304,6 +1304,7 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
         return true;
     }
     changed |= state.startup.poll_flight(now, tx);
+    changed |= state.poll_startup_wiring(now, tx);
     changed |= state.drive_startup_dataset();
     changed |= state.observe_inbox();
     changed |= state.poll_inbox_qa(now, tx);

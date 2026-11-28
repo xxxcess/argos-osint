@@ -312,11 +312,6 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         return None
 
     button("startup-local")
-    button("gateway-setup-done")
-    state = home / ".fleetworks/local-backend/embedded"
-    fd = os.open(state / "qa-pack.json", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    with os.fdopen(fd, "w") as file:
-        json.dump(pointer, file)
 
     def bundled_actor_ready():
         ready = find(None, label="Ready to seed")
@@ -335,6 +330,10 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
     wait_for(bundled_actor_ready, app, "automatic validation of the bundled actor CSV", timeout=180)
     require_no_seed()
     subprocess.run(["scrot", "--overwrite", str(output / "startup-actor-default.png")], check=True, timeout=5)
+    state = home / ".fleetworks/local-backend/embedded"
+    fd = os.open(state / "qa-pack.json", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w") as file:
+        json.dump(pointer, file)
     button("startup-data-skip", "Finish later")
     button("inbox-qa-toggle", "Turn On")
     button("startup-inbox-qa-continue")

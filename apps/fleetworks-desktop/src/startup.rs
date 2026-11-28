@@ -1,6 +1,7 @@
 //! Cold-launch Embedded folder selection and the Quiet Orbit handoff into the workstation.
 
 use std::cell::Cell;
+use std::time::Duration;
 
 use fleetworks_workstation::native::BackendKind;
 use rune::El;
@@ -22,6 +23,8 @@ use crate::local_backend::BinaryDiscoveryStatus;
 use crate::material;
 use crate::material::MetalFinish;
 use crate::orbit;
+use crate::startup_checks;
+use crate::startup_checks::CheckStatus;
 use crate::startup_data;
 use crate::theme;
 use crate::theme::StatusTone;
@@ -39,6 +42,10 @@ const SETUP_MARK: &str = "startup-setup-mark";
 const RAIL_SLOT: &str = "startup-rail-mark-slot";
 const SETUP_SECONDS: f64 = 0.22;
 const RAIL_SECONDS: f64 = 0.21;
+const WIRING_HOLD_SECONDS: f64 = 1.0;
+const EMBEDDED_STAGE: &str = "startup-embedded-stage";
+pub(crate) const CONNECTION_DOT: &str = "startup-wiring-step-connection";
+pub(crate) const REGISTRATION_DOT: &str = "startup-wiring-step-registration";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Dock {
@@ -80,10 +87,35 @@ impl Flight {
     }
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum WiringStage {
+    #[default]
+    Connection,
+    Registration,
+}
+
+#[derive(Default)]
+struct Wiring {
+    stage: WiringStage,
+    hold_until: Option<f64>,
+}
+
+impl Wiring {
+    fn hold(&mut self, now: f64, tx: &mut Tx) -> bool {
+        let remaining = *self.hold_until.get_or_insert(now + WIRING_HOLD_SECONDS) - now;
+        if remaining > 0.0 {
+            tx.wake_after(Duration::from_secs_f64(remaining));
+            return true;
+        }
+        false
+    }
+}
+
 /// Cold-launch presentation state. Scripted launches and ordinary fixtures skip it by default.
 #[derive(Default)]
 pub struct Startup {
     active: bool,
+    wiring: Option<Wiring>,
     pub(crate) data_step: Option<startup_data::Step>,
     pub(crate) data_reset: [bool; 2],
     pub(crate) data_checks: bool,
@@ -115,8 +147,17 @@ impl Startup {
         self.data_step.is_some() || self.data_checks
     }
 
+    pub(crate) fn has_wiring_steps(&self) -> bool {
+        self.wiring.is_some()
+    }
+
     pub(crate) fn finish(&mut self) {
         self.active = false;
+        self.reset_setup();
+    }
+
+    fn reset_setup(&mut self) {
+        self.wiring = None;
         self.data_step = None;
         self.data_reset = [false; 2];
         self.data_checks = false;
@@ -167,7 +208,7 @@ impl Startup {
                 // any presence tracks from that change as the floating mark is replaced.
                 tx.settle();
             } else {
-                tx.focus("startup-embedded-stage", tx.focus_visible());
+                tx.focus(EMBEDDED_STAGE, tx.focus_visible());
             }
         } else {
             tx.wake_after(std::time::Duration::from_secs_f64(
@@ -716,80 +757,47 @@ fn continue_setup(preferences: ViewPreferences, kit: &Kit) -> El {
 }
 
 fn embedded_stage(state: &State, preferences: ViewPreferences, kit: &Kit) -> (&'static str, El) {
-    let start = |title| {
-        ActionButton::new(title)
-            .key("connect-local")
-            .disabled(state.local_backend.stopping || state.resource_save_pending())
-            .finish(MetalFinish::GoldCta)
-            .on_press(State::connect_local)
-            .build(kit, preferences, None)
+    let guided = state.startup.has_wiring_steps();
+    let stage = if state.connected() {
+        state
+            .startup
+            .wiring
+            .as_ref()
+            .map_or(WiringStage::Registration, |wiring| wiring.stage)
+    } else {
+        WiringStage::Connection
     };
-    let (key, title, detail, next) = match &state.connection.status {
-        ConnectionStatus::Disconnected => (
-            "startup-stage-start",
-            "Embedded backend",
-            match &state.local_backend.binary_status {
-                BinaryDiscoveryStatus::Missing(error) => Some(
-                    rune::col()
-                        .key("local-binary-status")
-                        .role("alert")
-                        .child(startup_error(error, kit).key("local-binary-status-detail")),
-                ),
-                _ => None,
-            },
-            Some(start("Start Embedded")),
-        ),
-        ConnectionStatus::Connecting => (
-            "startup-stage-starting",
-            "Starting Embedded",
-            Some(ui_components::skeleton_text_value(
-                "Opening the Embedded companion",
-                180.0,
-                StatusTone::Cyan,
-                preferences,
-            )),
-            None,
-        ),
-        ConnectionStatus::Failed(error) => (
-            "startup-stage-start-failed",
-            "Embedded connection failed",
-            Some(startup_error(error, kit)),
-            Some(start("Retry start")),
-        ),
-        ConnectionStatus::Connected if state.registration.context.is_some() => (
-            "startup-stage-registered",
-            "Workstation registered",
-            None,
-            Some(continue_setup(preferences, kit)),
-        ),
-        ConnectionStatus::Connected => match &state.registration.receipt {
-            Load::Pending | Load::Loading => (
-                "startup-stage-registering",
-                "Registering this workstation",
-                Some(ui_components::skeleton_text_value(
-                    "Verifying the workstation registration",
-                    180.0,
-                    StatusTone::Info,
-                    preferences,
-                )),
-                None,
-            ),
-            receipt => (
-                "startup-stage-registration-retry",
-                "Workstation registration needs attention",
-                match receipt {
-                    Load::Failed(error) => Some(startup_error(error, kit)),
-                    _ => None,
+    let (key, title, dot, checks, detail, next) = match stage {
+        WiringStage::Connection => {
+            let (key, detail, next) = connection_actions(state, preferences, kit);
+            (
+                if guided {
+                    "startup-stage-starting"
+                } else {
+                    key
                 },
-                state.can_register().then(|| {
-                    ActionButton::new("Retry registration")
-                        .key("workstation-register")
-                        .finish(MetalFinish::GoldCta)
-                        .on_press(State::ensure_registration)
-                        .build(kit, preferences, None)
-                }),
-            ),
-        },
+                "Embedded connection",
+                CONNECTION_DOT,
+                connection_checks(state, preferences, kit),
+                detail,
+                next,
+            )
+        }
+        WiringStage::Registration => {
+            let (key, detail, next) = registration_actions(state, preferences, kit);
+            (
+                if guided {
+                    "startup-stage-registering"
+                } else {
+                    key
+                },
+                "Workstation registration",
+                REGISTRATION_DOT,
+                registration_checks(state, preferences, kit),
+                detail,
+                next,
+            )
+        }
     };
     let footer = rune::row()
         .key("startup-embedded-actions")
@@ -808,23 +816,155 @@ fn embedded_stage(state: &State, preferences: ViewPreferences, kit: &Kit) -> (&'
             .radius(12.0)
             .child(
                 views::heading(title, kit)
-                    .key("startup-embedded-stage")
+                    .key(EMBEDDED_STAGE)
                     .role("heading")
                     .focusable(true)
                     .tab_index(-1),
             )
+            .child(checks)
             .child(views::quiet(state.local_state_dir_label(), kit).wrap_anywhere())
-            .child(footer)
-            .children(detail),
+            .children(detail)
+            .child(footer),
         preferences,
     );
-    (
-        key,
-        views::scroll(
-            rune::col().items_center().child(body),
-            "startup-stage-scroll",
-        ),
+    let slide = rune::col()
+        .items_center()
+        .child(body)
+        .child(startup_data::step_dots(state, dot, kit));
+    (key, views::scroll(slide, "startup-stage-scroll"))
+}
+
+fn connection_checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    let companion = match &state.local_backend.binary_status {
+        _ if state.connected() => CheckStatus::Passed,
+        BinaryDiscoveryStatus::Ready(_) => CheckStatus::Passed,
+        BinaryDiscoveryStatus::Missing(_) => CheckStatus::Failed,
+        BinaryDiscoveryStatus::Unknown
+            if state.connection.status == ConnectionStatus::Connecting =>
+        {
+            CheckStatus::Checking
+        }
+        BinaryDiscoveryStatus::Unknown => CheckStatus::Pending,
+    };
+    let connection = match &state.connection.status {
+        ConnectionStatus::Connected => CheckStatus::Passed,
+        _ if companion == CheckStatus::Failed => CheckStatus::Pending,
+        ConnectionStatus::Connecting => CheckStatus::Checking,
+        ConnectionStatus::Failed(_) => CheckStatus::Failed,
+        ConnectionStatus::Disconnected => CheckStatus::Pending,
+    };
+    startup_checks::list(
+        "startup-wiring-connection-checks",
+        "Embedded connection checks",
     )
+    .child(startup_checks::row(
+        "startup-wiring-check-companion",
+        "Companion executable",
+        companion,
+        preferences,
+        kit,
+    ))
+    .child(startup_checks::row(
+        "startup-wiring-check-connection",
+        "Private backend connection",
+        connection,
+        preferences,
+        kit,
+    ))
+}
+
+fn registration_checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    let registration = match &state.registration.receipt {
+        _ if state.registration.context.is_some() => CheckStatus::Passed,
+        Load::Pending | Load::Loading => CheckStatus::Checking,
+        Load::Failed(_) => CheckStatus::Failed,
+        _ => CheckStatus::NeedsAttention,
+    };
+    startup_checks::list(
+        "startup-wiring-registration-checks",
+        "Workstation registration checks",
+    )
+    .child(startup_checks::row(
+        "startup-wiring-check-connected",
+        "Embedded backend connection",
+        CheckStatus::Passed,
+        preferences,
+        kit,
+    ))
+    .child(startup_checks::row(
+        "startup-wiring-check-registration",
+        "Registered workstation access",
+        registration,
+        preferences,
+        kit,
+    ))
+}
+
+fn connection_actions(
+    state: &State,
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> (&'static str, Option<El>, Option<El>) {
+    let start = |title| {
+        ActionButton::new(title)
+            .key("connect-local")
+            .disabled(state.local_backend.stopping || state.resource_save_pending())
+            .finish(MetalFinish::GoldCta)
+            .on_press(State::connect_local)
+            .build(kit, preferences, None)
+    };
+    match &state.connection.status {
+        ConnectionStatus::Disconnected => (
+            "startup-stage-start",
+            match &state.local_backend.binary_status {
+                BinaryDiscoveryStatus::Missing(error) => Some(
+                    rune::col()
+                        .key("local-binary-status")
+                        .role("alert")
+                        .child(startup_error(error, kit).key("local-binary-status-detail")),
+                ),
+                _ => None,
+            },
+            Some(start("Start Embedded")),
+        ),
+        ConnectionStatus::Connecting | ConnectionStatus::Connected => {
+            ("startup-stage-starting", None, None)
+        }
+        ConnectionStatus::Failed(error) => (
+            "startup-stage-start-failed",
+            Some(startup_error(error, kit)),
+            Some(start("Retry start")),
+        ),
+    }
+}
+
+fn registration_actions(
+    state: &State,
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> (&'static str, Option<El>, Option<El>) {
+    match &state.registration.receipt {
+        _ if state.registration.context.is_some() => (
+            "startup-stage-registered",
+            None,
+            (!state.startup.has_wiring_steps()).then(|| continue_setup(preferences, kit)),
+        ),
+        Load::Pending | Load::Loading => ("startup-stage-registering", None, None),
+        receipt => (
+            "startup-stage-registration-retry",
+            match receipt {
+                Load::Failed(error) => Some(startup_error(error, kit)),
+                _ => None,
+            },
+            state.can_register().then(|| {
+                ActionButton::new("Retry registration")
+                    .key("workstation-register")
+                    .finish(MetalFinish::GoldCta)
+                    .on_press(State::ensure_registration)
+                    .build(kit, preferences, None)
+            }),
+        ),
+    }
 }
 
 fn activate_on_return(
@@ -849,15 +989,57 @@ impl State {
         }
         self.startup.target_id = id.map(str::to_owned);
         self.choose_startup_destination(BackendKind::Local);
+        self.startup.wiring = Some(Wiring::default());
         self.connect_local();
         if self.startup.reduced_motion.get() {
             tx.settle();
         }
         if self.startup.flight.is_some() {
-            tx.wake_after(std::time::Duration::from_secs_f64(1.0 / 60.0));
+            tx.wake_after(Duration::from_secs_f64(1.0 / 60.0));
         } else {
-            tx.focus("startup-embedded-stage", tx.by_keys());
+            tx.focus(EMBEDDED_STAGE, tx.by_keys());
         }
+    }
+
+    pub(crate) fn poll_startup_wiring(&mut self, now: f64, tx: &mut Tx) -> bool {
+        if !self.setup_gateway
+            || !self.is_local_backend()
+            || self.startup.flight.is_some()
+            || self.startup.data_setup_active()
+        {
+            return false;
+        }
+        let connected = self.connected();
+        let registered = self.registration.context.is_some();
+        let Some(wiring) = self.startup.wiring.as_mut() else {
+            return false;
+        };
+        if !connected {
+            let changed = wiring.stage != WiringStage::Connection;
+            *wiring = Wiring::default();
+            return changed;
+        }
+        if wiring.stage == WiringStage::Registration && !registered {
+            wiring.hold_until = None;
+            return false;
+        }
+        if wiring.hold(now, tx) {
+            return false;
+        }
+        match wiring.stage {
+            WiringStage::Connection => {
+                wiring.stage = WiringStage::Registration;
+                wiring.hold_until = None;
+                if registered {
+                    // Registration can finish while the connection checks are still visible.
+                    // Schedule its own hold even when Reduced Motion produces no transition frames.
+                    wiring.hold(now, tx);
+                }
+                tx.focus(EMBEDDED_STAGE, tx.focus_visible());
+            }
+            WiringStage::Registration => self.finish_gateway_setup(tx),
+        }
+        true
     }
 
     /// Render the settled Embedded folder chooser with synthetic effects.
@@ -908,6 +1090,7 @@ impl State {
         }
         self.setup_gateway = false;
         self.startup.flight = None;
+        self.startup.reset_setup();
         if self.startup.reduced_motion.get() {
             tx.settle();
         }
@@ -936,7 +1119,7 @@ impl State {
         if self.startup.reduced_motion.get() {
             tx.settle();
         }
-        tx.focus("startup-data-stage", tx.by_keys());
+        tx.focus("startup-data-stage", tx.by_keys() || tx.focus_visible());
     }
 
     pub(crate) fn finish_startup(&mut self, tx: &mut Tx) {
@@ -1131,12 +1314,13 @@ mod tests {
             state.clock = clock;
             state.startup.begin(0.0);
             state.startup.poll_flight(clock, tx);
+            state.poll_startup_wiring(clock, tx);
         });
         runtime.frame(0.02);
     }
 
     #[test]
-    fn selected_pose_docks_and_finishing_setup_mounts_status_without_waiting_for_the_mark() {
+    fn ready_wiring_stages_hold_beneath_the_docked_logo_before_opening_data_setup() {
         for (size, reduced) in [
             ((640.0, 480.0), false),
             ((640.0, 480.0), true),
@@ -1169,7 +1353,12 @@ mod tests {
             tick(&mut runtime, 1.24);
             assert_eq!(runtime.presented(SETUP_MARK).unwrap().1, 1.0);
             assert!(runtime.find("startup-stage-starting").is_some());
+            assert!(runtime
+                .accessibility_json()
+                .to_string()
+                .contains("Private backend connection: Checking"));
 
+            // Both responses can arrive before the first checklist has been held.
             runtime.update(|state, _| {
                 state.page = app::Page::Brain;
                 state.connection.status = ConnectionStatus::Connected;
@@ -1200,22 +1389,99 @@ mod tests {
                     ],
                 );
             });
-            runtime.frame(0.02);
-            click(&mut runtime, "gateway-setup-done");
-            runtime.frame(0.02);
+            tick(&mut runtime, 1.25);
+            assert!(runtime
+                .accessibility_json()
+                .to_string()
+                .contains("Private backend connection: Passed"));
+            tick(&mut runtime, 2.24);
+            assert!(runtime.find("startup-wiring-connection-checks").is_some());
+            assert!(runtime.find("startup-wiring-registration-checks").is_none());
+
+            tick(&mut runtime, 2.26);
+            let tree = runtime.accessibility_json().to_string();
+            assert!(tree.contains("Registered workstation access: Passed"));
+            assert!(tree.contains("Step 2 of 5"));
+            tick(&mut runtime, 3.25);
+            assert!(runtime.find("startup-wiring-registration-checks").is_some());
+            assert!(runtime.find("startup-data-setup").is_none());
+
+            tick(&mut runtime, 3.27);
             assert!(runtime.find("startup-data-setup").is_some());
             assert!(runtime.find("startup-open-workstation").is_none());
+            assert!(!runtime
+                .state
+                .intents
+                .iter()
+                .any(|intent| matches!(intent, Intent::Maintenance { .. })));
+            runtime.frame(0.24);
             click(&mut runtime, "startup-data-continue");
             runtime.frame(0.02);
             assert_eq!(runtime.state.page, app::Page::Workstation);
             assert!(runtime.find("screen-workstation").is_some());
             assert_eq!(runtime.find("startup-orbit-flight").is_some(), !reduced);
-            tick(&mut runtime, 1.48);
+            tick(&mut runtime, 3.51);
             assert!(runtime.find("startup-orbit-flight").is_none());
             let (rail, opacity) = runtime.presented("brand-mark").expect("landed rail mark");
             assert_eq!(opacity, 1.0);
             assert!(rail[0] >= 0.0 && rail[1] >= 0.0);
         }
+    }
+
+    #[test]
+    fn embedded_wiring_stays_on_pending_and_failed_checks_until_the_user_can_retry() {
+        let mut runtime = runtime((640.0, 480.0), true);
+        tick(&mut runtime, 1.0);
+        click(&mut runtime, LOCAL);
+        runtime.update(|state, _| {
+            state.connection.status =
+                ConnectionStatus::Failed("The private backend timed out.".into());
+        });
+        tick(&mut runtime, 3.0);
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("Private backend connection: Failed"));
+        click(&mut runtime, "connect-local");
+        runtime.update(|state, _| {
+            state.connection.status = ConnectionStatus::Connected;
+            state.registration.receipt = Load::Loading;
+        });
+        tick(&mut runtime, 4.0);
+        tick(&mut runtime, 5.1);
+        tick(&mut runtime, 10.0);
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("Registered workstation access: Checking"));
+        assert!(runtime.find("startup-data-setup").is_none());
+
+        runtime.update(|state, _| {
+            let mut capabilities = fleetworks_contracts::capabilities::Capabilities::default();
+            capabilities
+                .permissions
+                .push(fleetworks_contracts::context::Permission::RegisterWorkstation);
+            state.connection.capabilities = Some(capabilities);
+            state.registration.receipt = Load::Failed("The workstation could not register.".into());
+        });
+        tick(&mut runtime, 11.0);
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("Registered workstation access: Failed"));
+        click(&mut runtime, "workstation-register");
+        assert!(runtime.state.intents.contains(&Intent::Register));
+
+        let registration = crate::tests::registered_fixture().registration.context;
+        runtime.update(|state, _| state.registration.context = registration);
+        tick(&mut runtime, 11.2);
+        click(&mut runtime, "startup-back");
+        tick(&mut runtime, 11.3);
+        assert!(runtime.find(LOCAL).is_some());
+        click(&mut runtime, LOCAL);
+        tick(&mut runtime, 12.3);
+        assert!(runtime.find("startup-wiring-connection-checks").is_some());
+        assert!(runtime.find("startup-data-setup").is_none());
     }
 
     fn complete_data_checks(

@@ -23,6 +23,7 @@ use crate::app::Load;
 use crate::backend;
 use crate::backend_views;
 use crate::material::MetalFinish;
+use crate::startup;
 use crate::theme::StatusTone;
 use crate::ui_components;
 use crate::ui_components::ActionButton;
@@ -30,6 +31,8 @@ use crate::views;
 use crate::State;
 
 pub(crate) const PRIMARY: &str = "startup-data-primary";
+const INFERENCE_DOT: &str = "startup-data-step-inference";
+const CHECKS_DOT: &str = "startup-data-step-checks";
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum CsvSource {
@@ -683,27 +686,29 @@ impl State {
     }
 }
 
-fn step_dots(state: &State, step: Option<Step>, kit: &Kit) -> El {
-    let has_inference = state.supports_inbox_qa();
-    let total = Step::ALL.len() + 1 + usize::from(has_inference);
-    let current = step.map_or(
-        total - usize::from(crate::inbox_qa::setup_choice(state)),
-        Step::number,
-    );
+pub(crate) fn step_dots(state: &State, active: &str, kit: &Kit) -> El {
+    let wiring = state.is_local_backend();
+    let keys = [
+        wiring.then_some(startup::CONNECTION_DOT),
+        wiring.then_some(startup::REGISTRATION_DOT),
+        Some(Step::Seed.key()),
+        Some(Step::Index.key()),
+        state.supports_inbox_qa().then_some(INFERENCE_DOT),
+        Some(CHECKS_DOT),
+    ];
+    let total = keys.iter().flatten().count();
+    let mut current = 1;
     let mut dots = rune::row().key("startup-data-dots").center_y().gap(7.0);
-    for (index, key) in Step::ALL
-        .into_iter()
-        .map(Step::key)
-        .chain(has_inference.then_some("startup-data-step-inference"))
-        .chain(std::iter::once("startup-data-step-checks"))
-        .enumerate()
-    {
+    for (index, key) in keys.into_iter().flatten().enumerate() {
+        if key == active {
+            current = index + 1;
+        }
         dots = dots.child(
             rune::el()
                 .key(key)
                 .size(7.0, 7.0)
                 .radius(8.0)
-                .fill(if index + 1 == current {
+                .fill(if key == active {
                     kit.c.icon_accent
                 } else {
                     kit.c.border_strong
@@ -753,13 +758,13 @@ pub(crate) fn checks_view(state: &State, preferences: ViewPreferences, kit: &Kit
         return layout(
             panel,
             setup_sequence(state, None, preferences, kit),
-            step_dots(state, None, kit),
+            step_dots(state, INFERENCE_DOT, kit),
         );
     }
     let panel = panel(kit, "Workstation checks")
         .py(8.0)
         .gap(6.0)
-        .child(crate::startup_checks::content(state, kit))
+        .child(crate::startup_checks::content(state, preferences, kit))
         .child(
             ActionButton::new("Open Workstation")
                 .key("startup-data-continue")
@@ -770,13 +775,13 @@ pub(crate) fn checks_view(state: &State, preferences: ViewPreferences, kit: &Kit
     layout(
         panel,
         setup_sequence(state, None, preferences, kit),
-        step_dots(state, None, kit),
+        step_dots(state, CHECKS_DOT, kit),
     )
 }
 
 pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit: &Kit) -> El {
     let stage = stage(state, step);
-    let dots = step_dots(state, Some(step), kit);
+    let dots = step_dots(state, step.key(), kit);
     let sequence = setup_sequence(state, Some(step), preferences, kit);
     let csv_input = step
         .csv_input(&state.startup.csv_inputs)

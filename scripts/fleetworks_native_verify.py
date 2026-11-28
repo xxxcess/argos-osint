@@ -113,7 +113,7 @@ def mapping(values, *, label):
 def selections(args, root):
     # Existing hosted workflow revisions still use the previous scene selectors.
     aliases = {
-        "jobs-related-activity": "jobs-assistant-explain",
+        "jobs-related-activity": "job-retry-preview",
         "inbox-related-activity-limited": "inbox-notice-actions-starting",
     }
     scenes = list(dict.fromkeys(aliases.get(scene, scene) for scene in args.scene))

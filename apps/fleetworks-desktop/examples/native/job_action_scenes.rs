@@ -55,6 +55,13 @@ pub fn cancel_preview(state: &mut State) {
 }
 pub fn retry_preview(state: &mut State) {
     setup(state, JobAction::Retry);
+    if let Load::Ready(detail) = &mut state.backend.detail {
+        detail.job.operation = "actor_seed".into();
+        detail.job.title = "Actor seed".into();
+        detail.job.progress_done = Some(12);
+        detail.job.progress_total = Some(20);
+    }
+    align_selected_row(state);
     state.preview_job_action(JobAction::Retry);
 }
 pub fn cancel_receipt(state: &mut State) {

@@ -8,7 +8,11 @@ use rune::El;
 use rune::Key;
 use rune::ScrollSpec;
 use rune::TextEdit;
+use rune::Tx;
 use rune_kit::Cell;
+use rune_kit::ControlSize;
+use rune_kit::IconButton;
+use rune_kit::IconButtonVariant;
 use rune_kit::Kit;
 use rune_kit::Progress;
 use rune_kit::RollingText;
@@ -25,6 +29,7 @@ use crate::app::SeedStage;
 use crate::app::State;
 use crate::icons;
 use crate::job_actions::JobAction;
+use crate::job_actions::JobActionConfirmation;
 use crate::logs::LogStatus;
 use crate::maintenance;
 use crate::material;
@@ -1096,6 +1101,82 @@ fn job_row(
     })
 }
 
+const JOB_RETRY_KEY: &str = "job-retry-preview";
+const JOB_RETRY_CONFIRM_KEY: &str = "job-action-confirm";
+
+fn dismiss_actor_seed_retry(state: &mut State, tx: &mut Tx) {
+    if matches!(state.job_actions.response, Load::Loading) {
+        return;
+    }
+    state.job_actions.confirmation = None;
+    tx.focus(JOB_RETRY_KEY, tx.focus_visible());
+}
+
+fn actor_seed_retry_confirmation(
+    state: &State,
+    confirmation: &JobActionConfirmation,
+    kit: &Kit,
+) -> El {
+    let pending = matches!(state.job_actions.response, Load::Loading);
+    let disabled_reason = (!pending)
+        .then(|| state.job_action_disabled_reason(JobAction::Retry))
+        .flatten();
+    let title = if confirmation.title.is_empty() {
+        "Actor seed"
+    } else {
+        &confirmation.title
+    };
+    let description = if pending {
+        "Preparing the retry…"
+    } else {
+        disabled_reason
+            .as_deref()
+            .unwrap_or("The failed task resumes from its saved checkpoint.")
+    };
+    let confirm = IconButton::new(kit.glyph.check)
+        .variant(IconButtonVariant::Submit)
+        .control_size(ControlSize::ExtraLarge)
+        .label("Confirm retry")
+        .help("Confirm retry")
+        .disabled(pending || disabled_reason.is_some())
+        .on_press(State::confirm_job_action)
+        .build(kit)
+        .key(JOB_RETRY_CONFIRM_KEY);
+    let cancel = IconButton::new(kit.glyph.close)
+        .variant(IconButtonVariant::Ghost)
+        .control_size(ControlSize::ExtraLarge)
+        .label("Cancel retry")
+        .help("Cancel retry")
+        .disabled(pending)
+        .on_press_tx(dismiss_actor_seed_retry)
+        .build(kit)
+        .key("job-action-cancel");
+    rune::row()
+        .key("job-action-confirmation")
+        .w_full()
+        .center_y()
+        .gap(12.0)
+        .child(
+            rune::col()
+                .key("actor-seed-retry-copy")
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(heading(format!("Confirm retry for {title}"), kit))
+                .child(quiet(description, kit)),
+        )
+        .child(rune::row().w(80.0).gap(8.0).child(confirm).child(cancel))
+        .on_key(|state: &mut State, event, tx| {
+            if event.key != Key::Escape {
+                return false;
+            }
+            if !tx.key_repeat() {
+                dismiss_actor_seed_retry(state, tx);
+            }
+            true
+        })
+}
+
 fn job_logs(state: &State, preferences: ViewPreferences, kit: &Kit, detail_width: f32) -> El {
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
     let back = ActionButton::new("Back to jobs")
@@ -1196,13 +1277,22 @@ fn job_logs(state: &State, preferences: ViewPreferences, kit: &Kit, detail_width
             if !error_summary.is_empty() {
                 details = details.child(line(error_summary, kit).role("alert"));
             }
-            if detail.job.state == "failed" || detail.job.can_retry {
+            let retry_confirmation = state
+                .job_actions
+                .confirmation
+                .as_ref()
+                .filter(|item| item.action == JobAction::Retry && item.job_id == detail.job.id);
+            let is_actor_seed =
+                matches!(detail.job.operation.as_str(), "actor_seed" | "seed_actors");
+            if let Some(confirmation) = retry_confirmation.filter(|_| is_actor_seed) {
+                details = details.child(actor_seed_retry_confirmation(state, confirmation, kit));
+            } else if detail.job.state == "failed" || detail.job.can_retry {
                 let retry_reason = state.job_action_disabled_reason(JobAction::Retry);
                 let retry_busy = matches!(state.job_actions.response, Load::Loading);
                 details = details.child(
                     rune::row().w_full().center_y().gap(8.0).child(
                         ActionButton::new("Retry job")
-                            .key("job-retry-preview")
+                            .key(JOB_RETRY_KEY)
                             .icon(&icons::REFRESH)
                             .finish(MetalFinish::GoldCta)
                             .status(
@@ -1223,8 +1313,11 @@ fn job_logs(state: &State, preferences: ViewPreferences, kit: &Kit, detail_width
                             )
                             .busy(retry_busy)
                             .disabled(retry_reason.is_some())
-                            .on_press(|state: &mut State| {
+                            .on_press_tx(move |state: &mut State, tx| {
                                 state.preview_job_action(JobAction::Retry);
+                                if is_actor_seed && state.job_actions.confirmation.is_some() {
+                                    tx.focus(JOB_RETRY_CONFIRM_KEY, tx.focus_visible());
+                                }
                             })
                             .build(kit, preferences, pointer_ref),
                     ),
@@ -1233,15 +1326,10 @@ fn job_logs(state: &State, preferences: ViewPreferences, kit: &Kit, detail_width
                     details = details.child(quiet(reason, kit));
                 }
             }
-            if let Some(confirmation) = state
-                .job_actions
-                .confirmation
-                .as_ref()
-                .filter(|item| item.action == JobAction::Retry && item.job_id == detail.job.id)
-            {
+            if let Some(confirmation) = retry_confirmation.filter(|_| !is_actor_seed) {
                 let confirming = matches!(state.job_actions.response, Load::Loading);
                 let confirm_button = ActionButton::new("Confirm retry")
-                    .key("job-action-confirm")
+                    .key(JOB_RETRY_CONFIRM_KEY)
                     .icon(&icons::SHIELD_CHECK)
                     .finish(MetalFinish::FracturedConfirm)
                     .status(

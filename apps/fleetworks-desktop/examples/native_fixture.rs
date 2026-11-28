@@ -899,6 +899,10 @@ mod native {
                 ("startup-embedded-registered-reduced-motion", |state| {
                     startup_data_scenes::ready(state, true);
                 }),
+                (
+                    "startup-embedded-health",
+                    startup_data_scenes::embedded_health,
+                ),
                 ("startup-data-seed", startup_data_scenes::seed),
                 ("startup-data-index", startup_data_scenes::index),
                 (

@@ -43,9 +43,11 @@ const RAIL_SLOT: &str = "startup-rail-mark-slot";
 const SETUP_SECONDS: f64 = 0.22;
 const RAIL_SECONDS: f64 = 0.21;
 const WIRING_HOLD_SECONDS: f64 = 2.0;
+const HEALTH_CHECK_WAIT_SECONDS: f64 = 10.0;
 const EMBEDDED_STAGE: &str = "startup-embedded-stage";
 pub(crate) const CONNECTION_DOT: &str = "startup-wiring-step-connection";
 pub(crate) const REGISTRATION_DOT: &str = "startup-wiring-step-registration";
+pub(crate) const HEALTH_CHECKS_DOT: &str = "startup-wiring-step-health-checks";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Dock {
@@ -87,11 +89,14 @@ impl Flight {
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq)]
 enum WiringStage {
     #[default]
     Connection,
     Registration,
+    HealthChecks {
+        wait_until: f64,
+    },
 }
 
 #[derive(Default)]
@@ -117,6 +122,7 @@ pub struct Startup {
     active: bool,
     wiring: Option<Wiring>,
     pub(crate) data_step: Option<startup_data::Step>,
+    pub(crate) data_slides: startup_data::DataSlides,
     pub(crate) data_reset: [bool; 2],
     pub(crate) data_checks: bool,
     pub(crate) csv_inputs: startup_data::CsvInputs,
@@ -161,6 +167,7 @@ impl Startup {
         self.awaiting_intro = false;
         self.wiring = None;
         self.data_step = None;
+        self.data_slides = startup_data::DataSlides::default();
         self.data_reset = [false; 2];
         self.data_checks = false;
         self.csv_inputs = startup_data::CsvInputs::default();
@@ -814,6 +821,22 @@ fn embedded_stage(state: &State, preferences: ViewPreferences, kit: &Kit) -> (&'
                 next,
             )
         }
+        WiringStage::HealthChecks { .. } => {
+            let pending = state
+                .startup
+                .wiring
+                .as_ref()
+                .is_some_and(|wiring| wiring.hold_until.is_none())
+                && state.startup_health_checks_pending();
+            (
+                "startup-stage-embedded-health",
+                "Embedded health checks",
+                HEALTH_CHECKS_DOT,
+                startup_checks::embedded_content(state, pending, preferences, kit),
+                None,
+                None,
+            )
+        }
     };
     let footer = rune::row()
         .key("startup-embedded-actions")
@@ -1049,6 +1072,12 @@ impl State {
         }
         let connected = self.connected();
         let registered = self.registration.context.is_some();
+        let current_observation = self.startup_health_observed_at(now + WIRING_HOLD_SECONDS);
+        let checks_pending = !current_observation && self.startup_health_checks_pending();
+        let refresh_checks = !self.readiness_pending()
+            && self.readiness_error.is_none()
+            && !current_observation
+            && matches!(self.readiness, Load::Idle | Load::Ready(_));
         let Some(wiring) = self.startup.wiring.as_mut() else {
             return false;
         };
@@ -1057,12 +1086,21 @@ impl State {
             *wiring = Wiring::default();
             return changed;
         }
-        if wiring.stage == WiringStage::Registration && !registered {
+        if !registered && wiring.stage != WiringStage::Connection {
+            let changed = wiring.stage != WiringStage::Registration;
+            wiring.stage = WiringStage::Registration;
             wiring.hold_until = None;
-            return false;
+            return changed;
         }
+        if let WiringStage::HealthChecks { wait_until } = wiring.stage {
+            if checks_pending && wiring.hold_until.is_none() && now < wait_until {
+                tx.wake_after(Duration::from_secs_f64(wait_until - now));
+                return false;
+            }
+        }
+        let began_hold = wiring.hold_until.is_none();
         if wiring.hold(now, tx) {
-            return false;
+            return began_hold && matches!(wiring.stage, WiringStage::HealthChecks { .. });
         }
         match wiring.stage {
             WiringStage::Connection => {
@@ -1075,9 +1113,40 @@ impl State {
                 }
                 tx.focus(EMBEDDED_STAGE, tx.focus_visible());
             }
-            WiringStage::Registration => self.finish_gateway_setup(tx),
+            WiringStage::Registration => {
+                wiring.stage = WiringStage::HealthChecks {
+                    wait_until: now + HEALTH_CHECK_WAIT_SECONDS,
+                };
+                wiring.hold_until = None;
+                if checks_pending || refresh_checks {
+                    tx.wake_after(Duration::from_secs_f64(HEALTH_CHECK_WAIT_SECONDS));
+                } else {
+                    wiring.hold(now, tx);
+                }
+                tx.focus(EMBEDDED_STAGE, tx.focus_visible());
+                if refresh_checks {
+                    self.refresh_readiness();
+                }
+            }
+            WiringStage::HealthChecks { .. } => self.finish_gateway_setup(tx),
         }
         true
+    }
+
+    fn startup_health_checks_pending(&self) -> bool {
+        self.readiness_pending()
+            || matches!(self.readiness, Load::Idle | Load::Pending | Load::Loading)
+    }
+
+    fn startup_health_observed_at(&self, now: f64) -> bool {
+        self.readiness_received_at.is_some()
+            && startup_data::scoped_readiness(self).is_some_and(|readiness| {
+                readiness.checks.is_empty()
+                    || readiness.checks.iter().any(|check| {
+                        self.readiness_check_applies(check)
+                            && self.readiness_check_fresh_at(check, now)
+                    })
+            })
     }
 
     /// Render the settled Embedded folder chooser with synthetic effects.
@@ -1093,6 +1162,18 @@ impl State {
         if self.fixture {
             self.fixture_show_backend_choice();
             self.choose_startup_destination(kind);
+        }
+    }
+
+    /// Begin a connected Embedded setup fixture on the initial health slide.
+    pub fn fixture_show_embedded_health_checks(&mut self) {
+        if self.fixture {
+            self.startup.wiring = Some(Wiring {
+                stage: WiringStage::HealthChecks {
+                    wait_until: self.clock + HEALTH_CHECK_WAIT_SECONDS,
+                },
+                hold_until: None,
+            });
         }
     }
 
@@ -1149,8 +1230,7 @@ impl State {
         if !self.connected() || self.registration.context.is_none() {
             return;
         }
-        self.startup.data_step = startup_data::first_unfinished(self);
-        self.startup.data_checks = self.startup.data_step.is_none();
+        self.enter_startup_data();
         self.backend_read(crate::backend::ReadRequest::Profile);
         if !self.readiness_pending() {
             self.refresh_readiness();
@@ -1453,14 +1533,26 @@ mod tests {
             tick(&mut runtime, registering_at);
             let tree = runtime.accessibility_json().to_string();
             assert!(tree.contains("Registered workstation access: Passed"));
-            assert!(tree.contains("Step 2 of 5"));
+            assert!(tree.contains("Step 2 of 6"));
             tick(&mut runtime, registering_at + 1.99);
             assert!(runtime.find("startup-wiring-registration-checks").is_some());
             assert!(runtime.find("startup-data-setup").is_none());
 
-            let data_setup_at = registering_at + 2.01;
+            let health_at = registering_at + 2.01;
+            tick(&mut runtime, health_at);
+            let tree = runtime.accessibility_json().to_string();
+            assert!(tree.contains("Embedded health checks"));
+            assert!(tree.contains("Gateway: Passed"));
+            assert!(tree.contains("Actor catalog: Passed"));
+            assert!(tree.contains("Step 3 of 6"));
+            tick(&mut runtime, health_at + 1.99);
+            assert!(runtime.find("startup-wiring-health-checklist").is_some());
+            assert!(runtime.find("startup-data-setup").is_none());
+
+            let data_setup_at = health_at + 2.01;
             tick(&mut runtime, data_setup_at);
             assert!(runtime.find("startup-data-setup").is_some());
+            assert!(runtime.find("startup-data-checklist").is_some());
             assert!(runtime.find("startup-open-workstation").is_none());
             assert!(!runtime
                 .state
@@ -1478,6 +1570,111 @@ mod tests {
             let (rail, opacity) = runtime.presented("brand-mark").expect("landed rail mark");
             assert_eq!(opacity, 1.0);
             assert!(rail[0] >= 0.0 && rail[1] >= 0.0);
+        }
+    }
+
+    fn reach_embedded_health_checks(
+        runtime: &mut rune::Runtime<State>,
+        readiness: Load<WorkstationReadiness>,
+    ) {
+        tick(runtime, 1.0);
+        click(runtime, LOCAL);
+        runtime.frame(0.02);
+        let registered = crate::tests::registered_fixture();
+        runtime.update(|state, _| {
+            state.connection.status = registered.connection.status;
+            state.connection.capabilities = registered.connection.capabilities;
+            state.registration.context = registered.registration.context;
+            state.readiness = readiness;
+        });
+        tick(runtime, 2.0);
+        tick(runtime, 4.01);
+        tick(runtime, 6.02);
+        assert!(runtime.find("startup-wiring-health-checklist").is_some());
+        assert!(runtime.find("startup-stage-seed").is_none());
+    }
+
+    #[test]
+    fn embedded_health_checks_show_catalog_and_search_status_before_seed_setup() {
+        let mut runtime = runtime((640.0, 480.0), true);
+        reach_embedded_health_checks(&mut runtime, Load::Idle);
+        let tree = runtime.accessibility_json().to_string();
+        assert!(runtime.state.intents.contains(&Intent::Readiness));
+        assert!(tree.contains("Gateway: Checking"));
+        assert!(tree.contains("Actor catalog: Checking"));
+        assert!(tree.contains("Actor search: Checking"));
+        assert!(runtime.find("startup-wiring-health-check-jobs").is_none());
+
+        runtime.update(|state, _| {
+            let context = state
+                .registration
+                .context
+                .as_ref()
+                .expect("registered fixture");
+            let receipt = RegistrationReceipt::new(
+                context.deployment_id.clone(),
+                context.workstation_id.clone(),
+                context.registration_id.clone(),
+                context.workstation_ip,
+                context.registration_revision,
+            );
+            complete_data_checks(state, receipt, [ReadinessState::NotReady; 3]);
+            let Load::Ready(readiness) = &mut state.readiness else {
+                panic!("expected scoped fixture readiness");
+            };
+            for check in &mut readiness.checks {
+                match check.id {
+                    ReadinessCheckId::ActorCatalog => {
+                        check.reason_code = "database_seed_incomplete".into();
+                    }
+                    ReadinessCheckId::ActorSearch => {
+                        check.reason_code = "index_not_built".into();
+                    }
+                    _ => {}
+                }
+            }
+        });
+        tick(&mut runtime, 7.0);
+        let tree = runtime.accessibility_json().to_string();
+        assert!(tree.contains("Actor catalog: Needs setup"));
+        assert!(tree.contains("Actor search: Needs setup"));
+        tick(&mut runtime, 8.99);
+        assert!(runtime.find("startup-stage-seed").is_none());
+        tick(&mut runtime, 9.01);
+        assert!(runtime.find("startup-stage-seed").is_some());
+        assert!(!runtime
+            .state
+            .intents
+            .iter()
+            .any(|intent| matches!(intent, Intent::Maintenance { .. })));
+    }
+
+    #[test]
+    fn unavailable_embedded_health_checks_allow_data_setup_after_the_hold() {
+        for readiness in [Load::Failed("Checks unreachable".into()), Load::Loading] {
+            let mut runtime = runtime((640.0, 480.0), true);
+            let pending = matches!(readiness, Load::Loading);
+            reach_embedded_health_checks(&mut runtime, readiness);
+
+            let unavailable_at = if pending {
+                tick(&mut runtime, 16.01);
+                assert!(runtime
+                    .accessibility_json()
+                    .to_string()
+                    .contains("Gateway: Checking"));
+                tick(&mut runtime, 16.03);
+                16.03
+            } else {
+                6.02
+            };
+            assert!(runtime
+                .accessibility_json()
+                .to_string()
+                .contains("Gateway: Unavailable"));
+            tick(&mut runtime, unavailable_at + 1.99);
+            assert!(runtime.find("startup-wiring-health-checklist").is_some());
+            tick(&mut runtime, unavailable_at + 2.01);
+            assert!(runtime.find("startup-stage-seed").is_some());
         }
     }
 

@@ -15,8 +15,8 @@ All materials are visible in the first frame. The [static SVG](../../../assets/b
 | Item | Contract |
 | --- | --- |
 | Native folder picker | Start with the complete orbital mark and fade the folder tiles into view in staggered 440 ms entrances. Play the core motion for 3 seconds, then hold the final pose. |
-| Setup | Selecting a folder starts Embedded while the opening finishes. Move the completed orbit pose into the setup header over about 220 ms and keep the mark there through connection, registration, failure and retry. Hold each passing connection and registration checklist for two seconds. Back restores focus to the selected tile and returns the settled mark without replay. |
-| Data setup | Center the active stage and controls below the settled mark. Progress dots mark connection, registration, actor catalog, actor index, optional inference, and workstation checks. Keep the same content envelope through confirmation, progress, and outcome. |
+| Setup | Selecting a folder starts Embedded while the opening finishes. Move the completed orbit pose into the setup header over about 220 ms and keep the mark there through connection, registration, health checks, failure and retry. Hold each resolved checklist for two seconds. Back restores focus to the selected tile and returns the settled mark without replay. |
+| Data setup | Center the active stage and controls below the settled mark. Progress dots mark connection, registration, Embedded health checks, actor catalog, actor index, optional inference, and final workstation checks. Keep the same content envelope through confirmation, progress, and outcome. |
 | Enter workstation | Mount Workstation Status after setup. Move the mark into the wide or compact sidebar rail over about 200 ms and settle into the static crescent and core. |
 | Scope | One startup presentation; no replay on navigation, dialog close, refresh or in-app reconnect |
 | Reduced motion / asset failure | Show the complete static mark directly at each destination. Reduced Motion skips the opening delay and keeps the two-second checklist hold. |

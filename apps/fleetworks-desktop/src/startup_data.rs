@@ -22,6 +22,7 @@ use crate::accessibility::ViewPreferences;
 use crate::app::Load;
 use crate::backend;
 use crate::backend_views;
+use crate::maintenance::OperationJobRecord;
 use crate::material::MetalFinish;
 use crate::startup;
 use crate::startup_checks;
@@ -91,6 +92,28 @@ impl Default for CsvInputs {
 pub(crate) enum Step {
     Seed,
     Index,
+}
+
+/// Keep a skipped setup slide out of this visit's sequence after active work settles.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum DataSlides {
+    #[default]
+    All,
+    IndexOnly,
+}
+
+impl DataSlides {
+    fn for_observed_work(state: &State) -> Self {
+        if operation_active(state, Step::Index) || operation_active(state, Step::Seed) {
+            Self::IndexOnly
+        } else {
+            Self::All
+        }
+    }
+
+    fn includes(self, step: Step) -> bool {
+        self == Self::All || step == Step::Index
+    }
 }
 
 impl Step {
@@ -270,6 +293,7 @@ impl Step {
 enum Stage<'a> {
     Observing,
     Action,
+    AwaitingCatalog,
     Working(Option<&'a backend::JobDetail>),
     ObservedWork,
     Verifying,
@@ -295,6 +319,29 @@ fn current_check(state: &State, step: Step) -> Option<&ReadinessCheck> {
         .checks
         .iter()
         .find(|check| check.id == step.check() && state.readiness_check_fresh(check))
+}
+
+fn tracked_job_detail(record: &OperationJobRecord, step: Step) -> Option<&backend::JobDetail> {
+    record.detail.as_ref().filter(|detail| {
+        detail.job.id == record.job_id && detail.job.operation == step.job_operation()
+    })
+}
+
+fn active_tracked_job(state: &State, step: Step) -> Option<&backend::JobDetail> {
+    if !state.connected() || state.registration.context.is_none() {
+        return None;
+    }
+    state
+        .maintenance
+        .operation_job(step.operation())
+        .filter(|record| record.poll_error.is_none())
+        .and_then(|record| tracked_job_detail(record, step))
+        .filter(|detail| backend::job_is_active(&detail.job.state))
+}
+
+fn operation_active(state: &State, step: Step) -> bool {
+    current_check(state, step).is_some_and(|check| check.state == ReadinessState::Running)
+        || active_tracked_job(state, step).is_some()
 }
 
 fn saved_dataset(state: &State, step: Step) -> Option<&DatasetRef> {
@@ -390,6 +437,17 @@ fn stage(state: &State, step: Step) -> Stage<'_> {
     {
         return Stage::Working(None);
     }
+    if step == Step::Index && state.startup.data_slides == DataSlides::IndexOnly {
+        if let Some(detail) = active_tracked_job(state, step) {
+            return Stage::Working(Some(detail));
+        }
+        if observation.is_some_and(|check| check.state == ReadinessState::Running) {
+            return Stage::ObservedWork;
+        }
+        if operation_active(state, Step::Seed) {
+            return Stage::AwaitingCatalog;
+        }
+    }
     if step.reset(state) {
         return Stage::Action;
     }
@@ -403,9 +461,7 @@ fn stage(state: &State, step: Step) -> Stage<'_> {
     }
     let record = state.maintenance.operation_job(step.operation());
     if let Some(record) = record {
-        let Some(detail) = record.detail.as_ref().filter(|detail| {
-            detail.job.id == record.job_id && detail.job.operation == step.job_operation()
-        }) else {
+        let Some(detail) = tracked_job_detail(record, step) else {
             return Stage::Working(None);
         };
         let job = &detail.job;
@@ -432,24 +488,30 @@ fn stage(state: &State, step: Step) -> Stage<'_> {
     }
 }
 
-pub(crate) fn first_unfinished(state: &State) -> Option<Step> {
+fn first_unfinished(state: &State) -> Option<Step> {
     Step::ALL
         .into_iter()
+        .filter(|&step| state.startup.data_slides.includes(step))
         .find(|&step| !matches!(stage(state, step), Stage::Complete))
 }
 
 fn can_review(state: &State, step: Step) -> bool {
-    matches!(stage(state, step), Stage::Complete)
-        || Step::ALL
-            .into_iter()
-            .take(step.number() - 1)
-            .all(|earlier| matches!(stage(state, earlier), Stage::Complete))
+    state.startup.data_slides.includes(step)
+        && (matches!(stage(state, step), Stage::Complete)
+            || Step::ALL
+                .into_iter()
+                .take(step.number() - 1)
+                .all(|earlier| matches!(stage(state, earlier), Stage::Complete)))
 }
 
 fn can_reset(state: &State, step: Step) -> bool {
     can_review(state, step)
         && !state.maintenance.busy()
-        && !matches!(stage(state, step), Stage::Working(_))
+        && !matches!(
+            stage(state, step),
+            Stage::Working(_) | Stage::AwaitingCatalog
+        )
+        && !operation_active(state, step)
         && (step != Step::Index || state.maintenance.pending_reindex.is_none())
 }
 
@@ -459,6 +521,16 @@ fn focus_stage(tx: &mut Tx) {
 }
 
 impl State {
+    pub(crate) fn enter_startup_data(&mut self) {
+        self.startup.data_slides = DataSlides::for_observed_work(self);
+        self.select_unfinished_startup_step();
+    }
+
+    fn select_unfinished_startup_step(&mut self) {
+        self.startup.data_step = first_unfinished(self);
+        self.startup.data_checks = self.startup.data_step.is_none();
+    }
+
     pub(crate) fn drive_startup_dataset(&mut self) -> bool {
         let Some(step) = self.startup.data_step else {
             return false;
@@ -468,6 +540,19 @@ impl State {
         };
         if !self.connected() || self.registration.context.is_none() {
             return false;
+        }
+        if self.startup.has_wiring_steps()
+            && self.maintenance.active_operation != Some(step.operation())
+            && self.maintenance.operation_job(step.operation()).is_none()
+        {
+            // The first registered snapshot may arrive after the startup health-check timeout.
+            let slides = DataSlides::for_observed_work(self);
+            if !slides.includes(step) {
+                self.clear_startup_csv(step);
+                self.startup.data_slides = slides;
+                self.select_unfinished_startup_step();
+                return true;
+            }
         }
         let mut changed = false;
         if step
@@ -600,8 +685,7 @@ impl State {
             return;
         }
         self.maintenance.message = None;
-        self.startup.data_step = first_unfinished(self);
-        self.startup.data_checks = self.startup.data_step.is_none();
+        self.select_unfinished_startup_step();
         self.drive_startup_dataset();
         focus_stage(tx);
     }
@@ -679,7 +763,7 @@ impl State {
         self.startup.data_step.is_some_and(|step| {
             matches!(
                 stage(self, step),
-                Stage::Observing | Stage::ObservedWork | Stage::Verifying
+                Stage::Observing | Stage::AwaitingCatalog | Stage::ObservedWork | Stage::Verifying
             )
         })
     }
@@ -687,11 +771,17 @@ impl State {
 
 pub(crate) fn step_dots(state: &State, active: &str, kit: &Kit) -> El {
     let wiring = state.is_local_backend();
+    let slides = if state.startup.has_wiring_steps() && !state.startup.data_setup_active() {
+        DataSlides::for_observed_work(state)
+    } else {
+        state.startup.data_slides
+    };
     let keys = [
         wiring.then_some(startup::CONNECTION_DOT),
         wiring.then_some(startup::REGISTRATION_DOT),
-        Some(Step::Seed.key()),
-        Some(Step::Index.key()),
+        wiring.then_some(startup::HEALTH_CHECKS_DOT),
+        slides.includes(Step::Seed).then_some(Step::Seed.key()),
+        slides.includes(Step::Index).then_some(Step::Index.key()),
         state.supports_inbox_qa().then_some(INFERENCE_DOT),
         Some(CHECKS_DOT),
     ];
@@ -791,7 +881,7 @@ fn data_stage_checklist(
         Stage::Action if step == Step::Index && state.maintenance.pending_reindex.is_some() => {
             (CheckStatus::NeedsAttention, CheckStatus::Pending)
         }
-        Stage::Action => (CheckStatus::Pending, CheckStatus::Pending),
+        Stage::Action | Stage::AwaitingCatalog => (CheckStatus::Pending, CheckStatus::Pending),
         Stage::Working(_)
             if state
                 .maintenance
@@ -837,8 +927,8 @@ fn data_stage_checklist(
         }
         Step::Index => {
             let catalog = match current_check(state, Step::Seed).map(|check| check.state) {
+                _ if operation_active(state, Step::Seed) => CheckStatus::Checking,
                 Some(ReadinessState::Ready) => CheckStatus::Passed,
-                Some(ReadinessState::Running) => CheckStatus::Checking,
                 Some(ReadinessState::Unavailable) => CheckStatus::Unavailable,
                 Some(ReadinessState::Degraded) => CheckStatus::NeedsAttention,
                 None if state.readiness_pending() => CheckStatus::Checking,
@@ -949,6 +1039,7 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
         }
         Stage::Observing
         | Stage::Action
+        | Stage::AwaitingCatalog
         | Stage::ObservedWork
         | Stage::Verifying
         | Stage::Complete => None,
@@ -1112,6 +1203,13 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
                 actions = actions.child(refresh(state, preferences, kit));
             }
         }
+        Stage::AwaitingCatalog => {
+            panel = panel.child(views::quiet(
+                "The index can start after the actor catalog is ready.",
+                kit,
+            ));
+            actions = actions.child(refresh(state, preferences, kit));
+        }
         Stage::Observing | Stage::ObservedWork | Stage::Verifying => {
             actions = actions.child(refresh(state, preferences, kit));
         }
@@ -1267,7 +1365,10 @@ fn setup_sequence(
         .pt(10.0)
         .flex_wrap()
         .gap(5.0);
-    for step in Step::ALL {
+    for step in Step::ALL
+        .into_iter()
+        .filter(|&step| state.startup.data_slides.includes(step))
+    {
         let complete = matches!(stage(state, step), Stage::Complete);
         let label = format!(
             "{} · {}",
@@ -1392,4 +1493,169 @@ fn job_progress(job: Option<&backend::ActivityJob>, preferences: ViewPreferences
         }
     }
     status(title, detail, StatusTone::Info, true, preferences, kit)
+}
+
+#[cfg(test)]
+mod tests {
+    use fleetworks_contracts::connect::RegistrationReceipt;
+    use fleetworks_workstation::native::BackendKind;
+    use rune::Env;
+    use rune::Runtime;
+
+    use super::*;
+
+    fn registered_data(seed: ReadinessState, index: ReadinessState) -> State {
+        let mut state = crate::tests::registered_fixture();
+        let context = state
+            .registration
+            .context
+            .as_ref()
+            .expect("registered fixture");
+        let checks = [
+            (ReadinessCheckId::ActorCatalog, seed),
+            (ReadinessCheckId::ActorSearch, index),
+        ]
+        .into_iter()
+        .map(|(id, state)| {
+            let mut check = ReadinessCheck::new(
+                id,
+                state,
+                "fixture_observation".into(),
+                String::new(),
+                "2026-11-27T00:00:00Z".into(),
+            );
+            check.fresh_for_ms = 60_000;
+            check
+        })
+        .collect();
+        let mut readiness = WorkstationReadiness::new(
+            context.deployment_id.clone(),
+            "2026-11-27T00:00:00Z".into(),
+            checks,
+        );
+        readiness.registration = Some(RegistrationReceipt::new(
+            context.deployment_id.clone(),
+            context.workstation_id.clone(),
+            context.registration_id.clone(),
+            context.workstation_ip,
+            context.registration_revision,
+        ));
+        state.readiness = Load::Ready(readiness);
+        state.readiness_received_at = Some(0.0);
+        state.startup = startup::Startup::cold_launch();
+        state.setup_gateway = true;
+        state.backend_kind = BackendKind::Local;
+        state.connection.origin = TextEdit::new("local://embedded");
+        state
+    }
+
+    #[test]
+    fn startup_hides_seed_when_registered_seed_or_index_work_is_active() {
+        use ReadinessState::{NotReady, Ready, Running};
+
+        for (seed, index) in [
+            (Running, NotReady),
+            (Running, Ready),
+            (NotReady, Running),
+            (Running, Running),
+        ] {
+            let mut state = registered_data(seed, index);
+            state.fixture_show_embedded_health_checks();
+            let mut runtime = Runtime::new(
+                state,
+                crate::app::view,
+                (640.0, 480.0),
+                Env {
+                    system_dark: true,
+                    scale: 1.0,
+                },
+            );
+            runtime.reduced_motion = true;
+            runtime.frame(0.0);
+            assert!(runtime.find("startup-stage-embedded-health").is_some());
+            assert!(runtime.find(Step::Seed.key()).is_none());
+            runtime.update(|state, _| state.enter_startup_data());
+            runtime.frame(0.02);
+            assert_eq!(runtime.state.startup.data_step, Some(Step::Index));
+            assert!(runtime.find("startup-stage-seed").is_none());
+            assert!(runtime.find(Step::Seed.key()).is_none());
+            assert!(runtime.find(Step::Seed.review_key()).is_none());
+            assert!(runtime.find(Step::Seed.reset_key()).is_none());
+            assert!(runtime.find(PRIMARY).is_none());
+            assert!(runtime.find("startup-stage-index").is_some());
+            let tree = runtime.accessibility_json().to_string();
+            if index == Running {
+                assert!(tree.contains("Index build: Checking"));
+            } else {
+                assert!(tree.contains("Actor catalog: Checking"));
+                assert!(tree.contains("Index build: Pending"));
+            }
+            runtime.update(|state, tx| {
+                let Load::Ready(readiness) = &mut state.readiness else {
+                    panic!("registered fixture readiness");
+                };
+                readiness.checks[0].state = Ready;
+                readiness.checks[1].state = Ready;
+                state.next_startup_data_step(tx);
+            });
+            runtime.frame(0.04);
+            assert!(runtime.find(Step::Seed.key()).is_none());
+            assert!(runtime.find("startup-stage-checks").is_some());
+        }
+    }
+
+    #[test]
+    fn startup_needs_scoped_current_evidence_to_skip_seed() {
+        use ReadinessState::{NotReady, Running};
+
+        let mut state = registered_data(Running, Running);
+        state.readiness_received_at = None;
+        state.enter_startup_data();
+        assert_eq!(state.startup.data_step, Some(Step::Seed));
+        state.readiness_received_at = Some(0.0);
+        let Load::Ready(readiness) = &mut state.readiness else {
+            panic!("registered fixture readiness");
+        };
+        readiness
+            .registration
+            .as_mut()
+            .expect("fixture registration")
+            .revision += 1;
+        state.enter_startup_data();
+        assert_eq!(state.startup.data_step, Some(Step::Seed));
+
+        let mut state = registered_data(NotReady, NotReady);
+        let operation = Step::Index.operation();
+        let id = "fixture-index";
+        state
+            .maintenance
+            .set_operation_job(operation, id.into(), false);
+        state.enter_startup_data();
+        assert_eq!(state.startup.data_step, Some(Step::Seed));
+        let detail = serde_json::from_value(serde_json::json!({
+            "job": {
+                "id": id,
+                "app": "brain",
+                "title": "Actor search index",
+                "operation": Step::Index.job_operation(),
+                "state": "running",
+                "phase": "indexing",
+                "error_summary": "",
+                "private_details_available": true,
+                "activity_actions_available": false,
+                "status_only": false
+            },
+            "stages": [],
+            "private_details_available": true,
+            "activity_actions_available": false
+        }))
+        .expect("tracked index detail");
+        state
+            .maintenance
+            .update_operation_job_detail(operation, id, detail);
+        state.enter_startup_data();
+        assert_eq!(state.startup.data_step, Some(Step::Index));
+        state.invalidate_origin();
+        assert_eq!(DataSlides::for_observed_work(&state), DataSlides::All);
+    }
 }

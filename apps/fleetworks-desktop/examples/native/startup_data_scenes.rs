@@ -69,6 +69,32 @@ pub(super) fn seed(state: &mut State) {
     embedded_setup(state, super::redesign_scenes::seed);
 }
 
+pub(super) fn embedded_health(state: &mut State) {
+    seed(state);
+    set_check(
+        state,
+        ReadinessCheckId::ActorCatalog,
+        ReadinessState::NotReady,
+        "database_seed_incomplete",
+        "The synthetic actor catalog needs its first seed.",
+    );
+    set_check(
+        state,
+        ReadinessCheckId::ActorSearch,
+        ReadinessState::NotReady,
+        "index_not_built",
+        "The synthetic actor index has not been built.",
+    );
+    set_check(
+        state,
+        ReadinessCheckId::Jobs,
+        ReadinessState::NotApplicable,
+        "embedded_backend",
+        "This standalone service check does not apply to Embedded.",
+    );
+    state.fixture_show_embedded_health_checks();
+}
+
 pub(super) fn index(state: &mut State) {
     embedded_setup(state, super::redesign_scenes::seed_ready);
 }

@@ -21,6 +21,7 @@ pub(crate) enum CheckStatus {
     Verifying,
     Passed,
     Failed,
+    NeedsSetup,
     NeedsAttention,
     Unavailable,
 }
@@ -48,6 +49,7 @@ pub(crate) fn row(
         CheckStatus::Verifying => ("Verifying", &glyphs::DASH, StatusTone::Cyan),
         CheckStatus::Passed => ("Passed", &glyphs::CHECK, StatusTone::Ok),
         CheckStatus::Failed => ("Failed", &glyphs::CLOSE, StatusTone::Err),
+        CheckStatus::NeedsSetup => ("Needs setup", &glyphs::DASH, StatusTone::Warn),
         CheckStatus::NeedsAttention => ("Needs attention", &glyphs::DASH, StatusTone::Warn),
         CheckStatus::Unavailable => ("Unavailable", &glyphs::DASH, StatusTone::Neutral),
     };
@@ -87,8 +89,44 @@ pub(crate) fn row(
 }
 
 pub(crate) fn content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    readiness_list(
+        state,
+        "startup-data-check",
+        CheckStatus::Pending,
+        preferences,
+        kit,
+    )
+}
+
+pub(crate) fn embedded_content(
+    state: &State,
+    pending: bool,
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> El {
+    let missing = if pending {
+        CheckStatus::Checking
+    } else {
+        CheckStatus::Unavailable
+    };
+    readiness_list(
+        state,
+        "startup-wiring-health-check",
+        missing,
+        preferences,
+        kit,
+    )
+}
+
+fn readiness_list(
+    state: &State,
+    key: &str,
+    missing: CheckStatus,
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> El {
     let checks = startup_data::scoped_readiness(state).map(|readiness| &readiness.checks);
-    let mut list = list("startup-data-checklist", "Workstation health checks");
+    let mut list = list(&format!("{key}list"), "Workstation health checks");
     for (id, title) in [
         (ReadinessCheckId::Gateway, "Gateway"),
         (ReadinessCheckId::Datastore, "Datastore"),
@@ -110,9 +148,9 @@ pub(crate) fn content(state: &State, preferences: ViewPreferences, kit: &Kit) ->
         }
         let current = check.filter(|check| state.readiness_check_fresh(check));
         list = list.child(row(
-            &format!("startup-data-check-{}", id.as_str()),
+            &format!("{key}-{}", id.as_str()),
             title,
-            status(current),
+            current.map_or(missing, status),
             preferences,
             kit,
         ));
@@ -120,13 +158,21 @@ pub(crate) fn content(state: &State, preferences: ViewPreferences, kit: &Kit) ->
     list
 }
 
-fn status(check: Option<&ReadinessCheck>) -> CheckStatus {
-    let Some(check) = check else {
-        return CheckStatus::Pending;
-    };
+fn status(check: &ReadinessCheck) -> CheckStatus {
     match check.state {
         ReadinessState::Ready => CheckStatus::Passed,
         ReadinessState::NotReady if check.reason_code == "process_not_ready" => CheckStatus::Failed,
+        ReadinessState::NotReady
+            if matches!(
+                check.reason_code.as_str(),
+                "database_catalog_empty"
+                    | "database_seed_incomplete"
+                    | "index_not_built"
+                    | "index_source_not_started"
+            ) =>
+        {
+            CheckStatus::NeedsSetup
+        }
         ReadinessState::NotReady | ReadinessState::Degraded => CheckStatus::NeedsAttention,
         ReadinessState::Running => CheckStatus::Checking,
         ReadinessState::Unavailable => CheckStatus::Unavailable,

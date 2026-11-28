@@ -313,6 +313,14 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
 
     button("startup-local")
 
+    def embedded_checks_observed():
+        gateway = find("startup-wiring-health-check-gateway")
+        if screen_bounds(gateway, atspi) is not None and gateway.name in (
+            "Gateway: Passed", "Gateway: Unavailable"
+        ):
+            return gateway
+        return None
+
     def bundled_actor_ready():
         ready = find(None, label="Ready to seed")
         rows = find(None, label=f"Bundled CSV · {BUNDLED_ACTOR_ROWS:,} rows validated")
@@ -327,6 +335,9 @@ def test_window(app, registry, atspi, home, worker, pointer, digests, journal, o
         require(not any(row.get("op") == "seed_actors" for row in read_journal(journal)),
                 "startup accepted an actor seed without operator confirmation")
 
+    wait_for(embedded_checks_observed, app, "initial Embedded health checks")
+    subprocess.run(["scrot", "--overwrite", str(output / "startup-embedded-health.png")],
+                   check=True, timeout=5)
     wait_for(bundled_actor_ready, app, "automatic validation of the bundled actor CSV", timeout=180)
     require_no_seed()
     subprocess.run(["scrot", "--overwrite", str(output / "startup-actor-default.png")], check=True, timeout=5)

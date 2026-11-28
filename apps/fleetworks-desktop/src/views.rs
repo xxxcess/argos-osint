@@ -2541,6 +2541,10 @@ mod tests {
     #[test]
     fn compact_workstation_keeps_first_action_visible_and_focused_on_refresh() {
         use crate::accessibility::FixtureAccessibility;
+        use fleetworks_contracts::connect::RegistrationReceipt;
+        use fleetworks_contracts::context::Permission;
+        use fleetworks_contracts::readiness::ReadinessAction;
+        use fleetworks_contracts::readiness::ReadinessActionId;
         use fleetworks_contracts::readiness::ReadinessCheck;
         use fleetworks_contracts::readiness::WorkstationReadiness;
 
@@ -2550,6 +2554,14 @@ mod tests {
                 reduced_motion,
                 ..FixtureAccessibility::default()
             });
+            initial.backend.profile = Load::Ready(crate::backend::ProfileSnapshot {
+                configuration_revision: 0,
+                configuration_format: 1,
+                accounts: Vec::new(),
+                tool_credentials: Vec::new(),
+                setup_required: false,
+                portable_schema_version: 4,
+            });
             let mut catalog = ReadinessCheck::new(
                 ReadinessCheckId::ActorCatalog,
                 ReadinessState::NotReady,
@@ -2558,11 +2570,29 @@ mod tests {
                 "2026-11-14T22:00:00Z".into(),
             );
             catalog.fresh_for_ms = 30_000;
-            initial.readiness = Load::Ready(WorkstationReadiness::new(
+            catalog.actions.push(ReadinessAction::new(
+                ReadinessActionId::SeedActors,
+                Permission::MaintainBackend,
+                true,
+            ));
+            let context = initial
+                .registration
+                .context
+                .as_ref()
+                .expect("registered fixture");
+            let mut readiness = WorkstationReadiness::new(
                 "synthetic-deployment".into(),
                 "2026-11-14T22:00:00Z".into(),
                 vec![catalog],
+            );
+            readiness.registration = Some(RegistrationReceipt::new(
+                context.deployment_id.clone(),
+                context.workstation_id.clone(),
+                context.registration_id.clone(),
+                context.workstation_ip,
+                context.registration_revision,
             ));
+            initial.readiness = Load::Ready(readiness);
             initial.readiness_received_at = Some(0.0);
             let mut runtime = Runtime::new(
                 initial,

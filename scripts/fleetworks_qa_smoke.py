@@ -382,6 +382,7 @@ def expired_operational_turn_keeps_generator(request, registration, model):
         hold_seconds = 13
         require(expired_at - started + hold_seconds < 21, "The expiry fixture exhausted its Ask deadline headroom")
         time.sleep(hold_seconds)
+        require(request("events", query=query) == expired, "The expired current turn changed while the worker was held")
         release()
         held_ms = round((time.monotonic() - expired_at) * 1000)
 
@@ -399,7 +400,8 @@ def expired_operational_turn_keeps_generator(request, registration, model):
                 and follow_up.get("model_generation") == ready["generation"] and model() == [worker],
                 "The greeting did not finish on the original warm generator after evidence expired")
         require_context(follow_up)
-        require(request("events", query=query) == expired, "Late worker frames changed the expired terminal replay")
+        retained = next((saved for saved in request("history") if saved["turn_id"] == turn["turn_id"]), None)
+        require(retained == turn, "Late worker frames changed the expired turn in history")
 
     return {"expired_operational_terminal_state": turn["state"], "expired_operational_replay_stable": True,
             "expired_operational_worker_reused": True, "expired_operational_held_after_terminal_ms": held_ms,
